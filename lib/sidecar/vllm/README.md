@@ -209,11 +209,7 @@ The RL endpoint, engine routes, and raw HTTP compatibility surface are administr
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-The sidecar supports a frontend hosting the complete data-parallel group and hybrid load balancing with one frontend and sidecar per node. Each frontend reports the global `data_parallel_size`, the first locally hosted `data_parallel_rank`, and `data_parallel_size_local` through Control. For example, global size 8, starting rank 4, and local size 4 register ranks 4–7 and normalize the frontend's aggregate KV capacity by four. The local range must be nonempty and contained in the global group; model world size remains global.
-
-Dynamo forwards the selected absolute rank unchanged as `x-data-parallel-rank` gRPC metadata. When KV routing is enabled, Control must return one unique ZMQ event source for every locally hosted rank, using those same absolute ranks. Older servers that omit the local-size field decode it as zero and retain complete-group behavior only at starting rank 0; a nonzero starting rank without a local count is rejected.
-
-The sidecar uses the published `vllm-proto 0.3.0` bindings. Hybrid deployments also need a vLLM server containing [vLLM #57116](https://github.com/vllm-project/vllm/pull/57116). Launch vLLM on each node with the global DP size, its local size and starting rank, and `--data-parallel-hybrid-lb`. Every node must expose its own native Rust gRPC frontend; do not use `--headless` for these endpoints. Point each colocated sidecar's `--grpc-endpoint` at that node's frontend.
+For hybrid data parallelism, run one vLLM gRPC frontend and sidecar per node with `--data-parallel-hybrid-lb` and the node's local DP size and starting rank. Point each sidecar's `--grpc-endpoint` at its local frontend. This requires a vLLM build that reports local DP size.
 
 Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
 
