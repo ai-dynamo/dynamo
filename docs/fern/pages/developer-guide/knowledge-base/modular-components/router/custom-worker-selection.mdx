@@ -482,6 +482,16 @@ Standalone EPP supplies `WorkerType::Aggregated` because it selects from one ful
 </Tab>
 </Tabs>
 
+## Request Classifier Signals and Placement
+
+Rust request classifiers can defer admission while retaining independently pollable futures. `KvRouter::request_classifier_context()` supplies the router's cached worker view when constructing a classifier:
+
+- `block_size()` is the number of tokens per KV block. Each entry in `workers()` identifies a registered worker/rank and its advertised `total_kv_blocks()`, or `None` if capacity was not advertised. Their product is total capacity, not currently free space. The view follows existing discovery updates and does not probe worker health.
+- `ClassifyRequest::progress()` returns a read-only context high-water mark, initialized from `input_tokens()` and raised by host observations of prompt plus generated tokens. Clones share a monotonic counter across migration retries. A new request lifecycle gets a fresh counter, even if it reuses a request ID. This measures logical tokens, not physical KV occupancy.
+- `set_worker_selection_target(worker)` replaces the request's soft affinity preference; `clear_worker_selection_target()` removes that preference. Hard pins and caller eligibility constraints remain authoritative. A custom picker can fall back when the preferred worker is ineligible. The classifier's `Sent` event reports the worker actually used.
+
+Holding a classification future pauses admission before dispatch; it does not interrupt an already running generation. Worker filters, scorers, and pickers continue to own placement decisions within Dynamo's eligibility rules.
+
 ## Policy Contract
 
 - Return `true` from a filter to keep a worker and `false` to reject it.

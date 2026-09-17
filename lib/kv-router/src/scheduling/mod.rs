@@ -45,6 +45,6 @@ pub use prefill_load::{
 pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
 pub use request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestLifecycle,
+    RequestClassifierContext, RequestClassifierWorker, RequestLifecycle,
 };
 pub use types::*;

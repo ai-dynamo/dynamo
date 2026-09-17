@@ -23,7 +23,7 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
-use super::request_classifier::ClassifyRequest;
+use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
 use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
@@ -741,7 +741,7 @@ impl<
         }
 
         let queue_metadata = match classified_request {
-            Some(classified) => self.validate_classification(&request, classified, ingress_at),
+            Some(classified) => self.validate_classification(&mut request, classified, ingress_at),
             None => Ok(self.default_queue_metadata(&request, ingress_at)),
         };
         let queue_metadata = match queue_metadata {
@@ -879,11 +879,16 @@ impl<
 
     fn validate_classification(
         &self,
-        request: &SchedulingRequest,
+        request: &mut SchedulingRequest,
         classified_request: ClassifyRequest,
         ingress_at: Instant,
     ) -> Result<QueueMetadata, KvSchedulerError> {
-        let (policy_class, due_at, scheduling_cost_tokens) = classified_request.into_queue_inputs();
+        let ClassificationOverrides {
+            policy_class,
+            due_at,
+            scheduling_cost_tokens,
+            worker_selection_target,
+        } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
             return Err(KvSchedulerError::InvalidClassificationMetadata(
@@ -892,6 +897,14 @@ impl<
         }
         // An already-expired `due_at` is not validated here: the actor is the
         // single deadline authority and rejects it at enqueue on its own clock.
+
+        // Hard pins must not acquire a conflicting soft target. Apply a permitted
+        // override before recomputing cache eligibility for the resulting target.
+        if request.pinned_worker.is_none()
+            && let Some(target) = worker_selection_target
+        {
+            request.affinity_target = target;
+        }
 
         // Queue inputs are recomputed from the current workers, exactly as the
         // default path computes them: worker state may have changed while the
@@ -2653,7 +2666,7 @@ policy_classes:
         classified.set_scheduling_cost_tokens(7);
 
         let metadata = queue
-            .validate_classification(&request, classified, ingress_at)
+            .validate_classification(&mut request, classified, ingress_at)
             .unwrap();
         assert_eq!(
             queue.profile.class(metadata.class_index).name,
@@ -2665,23 +2678,66 @@ policy_classes:
         let mut invalid = queue.build_classify_request(&request, ingress_at);
         invalid.set_policy_class("missing");
         assert!(matches!(
-            queue.validate_classification(&request, invalid, ingress_at),
+            queue.validate_classification(&mut request, invalid, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
         let mut physical = queue.build_classify_request(&request, ingress_at);
         physical.set_policy_class("latency_cached");
         assert!(matches!(
-            queue.validate_classification(&request, physical, ingress_at),
+            queue.validate_classification(&mut request, physical, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
         let mut zero_cost = queue.build_classify_request(&request, ingress_at);
         zero_cost.set_scheduling_cost_tokens(0);
         assert!(matches!(
-            queue.validate_classification(&request, zero_cost, ingress_at),
+            queue.validate_classification(&mut request, zero_cost, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn classifier_targets_preserve_pins_and_caller_eligibility() {
+        let (queue, _slots) = make_queue(2, 16, 64, None);
+        let (mut request, _rx) = make_request("targeted", 48);
+        let worker = WorkerWithDpRank::new(1, 0);
+        let pin = WorkerWithDpRank::new(0, 0);
+        let now = Instant::now();
+
+        let mut classified = queue.build_classify_request(&request, now);
+        classified.set_worker_selection_target(worker);
+        queue
+            .validate_classification(&mut request, classified, now)
+            .unwrap();
+        assert_eq!(request.affinity_target, Some(worker.into()));
+
+        let mut classified = queue.build_classify_request(&request, now);
+        classified.clear_worker_selection_target();
+        queue
+            .validate_classification(&mut request, classified, now)
+            .unwrap();
+        assert!(request.affinity_target.is_none());
+
+        request.pinned_worker = Some(pin);
+        let mut classified = queue.build_classify_request(&request, now);
+        classified.set_worker_selection_target(worker);
+        queue
+            .validate_classification(&mut request, classified, now)
+            .unwrap();
+        assert_eq!(request.pinned_worker, Some(pin));
+        assert!(request.affinity_target.is_none());
+        request.pinned_worker = None;
+        request.allowed_worker_ids = Some(HashSet::from([0]));
+        let mut classified = queue.build_classify_request(&request, now);
+        classified.set_worker_selection_target(worker);
+        queue
+            .validate_classification(&mut request, classified, now)
+            .unwrap();
+        assert_eq!(request.allowed_worker_ids, Some(HashSet::from([0])));
+        // The selector still applies the allowlist after a classifier supplies a target.
+        let result = queue.select_without_admission(request).await.unwrap();
+        assert_eq!(result.response.best_worker, pin);
     }
 
     #[tokio::test]
@@ -2720,7 +2776,7 @@ policy_classes:
         // uncached — exactly as an unclassified request admitted now would.
         cfg_tx.send(HashMap::new()).unwrap();
         let metadata = queue
-            .validate_classification(&request, classified, ingress_at)
+            .validate_classification(&mut request, classified, ingress_at)
             .unwrap();
         assert_eq!(
             queue.profile.class(metadata.class_index).name,
