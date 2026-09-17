@@ -5,7 +5,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import aiohttp
 import httpx
@@ -13,6 +13,7 @@ import kr8s
 import pytest
 import requests
 import yaml
+from kubernetes_asyncio.client import exceptions
 
 from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
@@ -292,3 +293,95 @@ async def test_discovery_capture_and_cleanup(
             pass
 
     assert events == expected_events
+
+
+async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
+    tmp_path, monkeypatch
+) -> None:
+    """Capture a source pod without DGD labels before cascading deletion."""
+    deployment = ManagedDeployment(
+        log_dir=str(tmp_path),
+        deployment_spec=SimpleNamespace(name="test-dgd", services=[]),
+        namespace="default",
+    )
+    deployment._custom_api = SimpleNamespace(
+        list_namespaced_custom_object=AsyncMock(
+            return_value={
+                "items": [{"metadata": {"name": "checkpoint-test", "uid": "job-uid"}}]
+            }
+        ),
+    )
+    pod = Mock()
+    pod.name = "checkpoint-test-source"
+    pod.raw = {
+        "metadata": {
+            "name": pod.name,
+            "labels": {
+                "nvidia.com/snapshot-job": "checkpoint-test",
+                "nvidia.com/snapshot-job-uid": "job-uid",
+            },
+        },
+        "spec": {"containers": [{"name": "main"}]},
+    }
+    pod.to_yaml.return_value = yaml.safe_dump(pod.raw)
+    pod.logs.side_effect = lambda **kwargs: [
+        "previous instance" if kwargs.get("previous") else "source startup error"
+    ]
+
+    def get_pods(kind, *, namespace, label_selector):
+        assert kind == "pods"
+        assert namespace == "default"
+        if label_selector == (
+            "nvidia.com/snapshot-job=checkpoint-test,"
+            "nvidia.com/snapshot-job-uid=job-uid"
+        ):
+            return [pod]
+        return []
+
+    monkeypatch.setattr("tests.deploy.dgd_utils.kr8s.get", get_pods)
+    metrics = Mock(side_effect=AssertionError("source pods must not scrape metrics"))
+    monkeypatch.setattr(deployment, "_get_pod_metrics", metrics)
+    directory = tmp_path / "CheckpointSource"
+
+    async def delete_deployment():
+        assert (
+            directory / f"{pod.name}.main.log"
+        ).read_text() == "source startup error"
+        assert (
+            directory / f"{pod.name}.main.previous.log"
+        ).read_text() == "previous instance"
+        assert yaml.safe_load((directory / f"{pod.name}.yaml").read_text()) == pod.raw
+
+    delete = AsyncMock(side_effect=delete_deployment)
+    monkeypatch.setattr(deployment, "_delete_deployment", delete)
+    await deployment._cleanup()
+    deployment._custom_api.list_namespaced_custom_object.assert_awaited_once_with(
+        group="nvidia.com",
+        version="v1alpha1",
+        namespace="default",
+        plural="snapshotjobs",
+        label_selector="nvidia.com/dynamo-graph-deployment-name=test-dgd",
+        _request_timeout=30,
+    )
+    delete.assert_awaited_once()
+    metrics.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [404, 403, 500])
+async def test_checkpoint_log_api_failure_does_not_prevent_cleanup(
+    tmp_path, monkeypatch, status
+) -> None:
+    deployment = ManagedDeployment(
+        log_dir=str(tmp_path),
+        deployment_spec=SimpleNamespace(name="test-dgd", services=[]),
+        namespace="default",
+    )
+    deployment._custom_api = SimpleNamespace(
+        list_namespaced_custom_object=AsyncMock(
+            side_effect=exceptions.ApiException(status=status)
+        ),
+    )
+    delete = AsyncMock()
+    monkeypatch.setattr(deployment, "_delete_deployment", delete)
+    await deployment._cleanup()
+    delete.assert_awaited_once()

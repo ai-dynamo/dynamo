@@ -1534,7 +1534,14 @@ class ManagedDeployment:
             self._logger,
         )
 
-    def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
+    def get_pod_manifest_logs_metrics(
+        self,
+        service_name: str,
+        pod: Pod,
+        suffix="",
+        *,
+        collect_metrics: bool = True,
+    ):
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
 
@@ -1600,7 +1607,76 @@ class ManagedDeployment:
                     f"No previous logs for {pod.name} container={container or '<default>'}: {e}"
                 )
 
-        self._get_pod_metrics(pod, service_name, suffix)
+        if collect_metrics:
+            self._get_pod_metrics(pod, service_name, suffix)
+
+    async def _get_checkpoint_pod_logs(self) -> None:
+        """Preserve source pod diagnostics before DGD cleanup deletes their Jobs."""
+        if self._custom_api is None:
+            return
+
+        try:
+            jobs = await self._custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.namespace,
+                plural="snapshotjobs",
+                label_selector=(
+                    "nvidia.com/dynamo-graph-deployment-name="
+                    f"{self._deployment_name}"
+                ),
+                _request_timeout=30,
+            )
+        except exceptions.ApiException as exc:
+            # Non-checkpoint deployments may run without the SnapshotJob CRD.
+            if exc.status != 404:
+                self._logger.warning("Failed to list checkpoint jobs: %s", exc)
+            return
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            self._logger.warning("Failed to list checkpoint jobs: %s", exc)
+            return
+
+        for job in jobs.get("items", []):
+            metadata = job.get("metadata", {})
+            name, uid = metadata.get("name"), metadata.get("uid")
+            if not name or not uid:
+                continue
+            try:
+                # Source pods need not carry the DGD label used by get_pods().
+                # Match the SnapshotJob incarnation, not just its reusable name.
+                pods = list(
+                    kr8s.get(
+                        "pods",
+                        namespace=self.namespace,
+                        label_selector=(
+                            f"nvidia.com/snapshot-job={name},"
+                            f"nvidia.com/snapshot-job-uid={uid}"
+                        ),
+                    )
+                )
+            except (
+                kr8s.ServerError,
+                kr8s.APITimeoutError,
+                kr8s.ConnectionClosedError,
+                httpx.HTTPError,
+            ) as exc:
+                self._logger.warning(
+                    "Failed to find pods for checkpoint job %s: %s", name, exc
+                )
+                continue
+            if not pods:
+                self._logger.info("No source pods remain for checkpoint job %s", name)
+            for pod in pods:
+                try:
+                    self.get_pod_manifest_logs_metrics(
+                        "CheckpointSource", pod, collect_metrics=False
+                    )
+                except OSError as exc:
+                    self._logger.warning(
+                        "Failed to save checkpoint pod %s diagnostics: %s",
+                        pod.name,
+                        exc,
+                    )
 
     def _get_service_logs(self, service_name=None, suffix=""):
         service_names = None
@@ -1875,6 +1951,7 @@ class ManagedDeployment:
                     self._logger.warning(
                         "Discovery snapshot failed; continuing cleanup: %s", error
                     )
+            await self._get_checkpoint_pod_logs()
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
             self._logger.info(
