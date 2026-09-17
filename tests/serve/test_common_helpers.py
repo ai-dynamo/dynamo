@@ -170,7 +170,8 @@ def test_pip_failure_redacts_index_credentials(monkeypatch, tmp_path):
 
     message = str(excinfo.value)
     assert "s3cr3t-token" not in message
-    assert "ciuser:****@example.com" in message  # host and user still diagnostic
+    assert "ciuser" not in message  # the user half can itself be the secret
+    assert "****@example.com" in message  # the host stays diagnostic
 
 
 def test_pip_failure_output_is_bounded(monkeypatch, tmp_path):
@@ -191,3 +192,53 @@ def test_pip_failure_output_is_bounded(monkeypatch, tmp_path):
     assert len(message) < common._PIP_OUTPUT_LIMIT + 500
     # Bounded head-and-tail, so the trailing ERROR line survives.
     assert "ERROR: the actual reason" in message
+
+
+def test_pip_failure_redacts_a_token_only_index_url(monkeypatch, tmp_path):
+    """A token-only index URL carries the whole secret before the ``@``.
+
+    ``https://<token>@host/simple`` is valid and has no colon, so a pattern that
+    matches only ``user:password@`` copies the token into the exception and from
+    there into the CI log.
+    """
+    monkeypatch.setattr(
+        common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs")
+    )
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        _failing_pip(
+            stdout="Looking in indexes: https://ghp-s3cr3t-token@example.com/simple\n",
+            stderr="ERROR: nope",
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        common._install_test_only_packages(_config(spec="decord2>=3.4.0,<4"))
+
+    message = str(excinfo.value)
+    assert "ghp-s3cr3t-token" not in message
+    assert "****@example.com" in message
+
+
+def test_plain_urls_are_left_alone(monkeypatch, tmp_path):
+    """Control: a URL with no userinfo must survive untouched."""
+    monkeypatch.setattr(
+        common.tempfile, "mkdtemp", lambda **_kw: str(tmp_path / "pkgs")
+    )
+    monkeypatch.setattr(
+        common.subprocess,
+        "run",
+        _failing_pip(
+            stdout="Looking in indexes: https://example.com/simple\n",
+            stderr="ERROR: see https://docs.example.com/help",
+        ),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        common._install_test_only_packages(_config(spec="decord2>=3.4.0,<4"))
+
+    message = str(excinfo.value)
+    assert "https://example.com/simple" in message
+    assert "https://docs.example.com/help" in message
+    assert "****" not in message
