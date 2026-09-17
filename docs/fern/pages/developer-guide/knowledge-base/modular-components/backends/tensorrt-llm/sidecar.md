@@ -38,8 +38,10 @@ for other protocol limitations.
 
 From a Dynamo source checkout, build or install Dynamo so
 `dynamo-trtllm-sidecar` is on `PATH`. You need a TensorRT-LLM build that
-serves `--grpc --grpc-protocol openengine`; no published release ships it yet.
-The launcher installs the pinned OpenEngine Python bindings itself.
+serves `--grpc --grpc-protocol openengine` —
+`nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer, the
+first releases carrying the OpenEngine servicer. The launcher installs the
+pinned OpenEngine Python bindings itself, which those releases do not ship.
 
 Start Dynamo's local discovery services, then run the aggregated launcher:
 
@@ -71,7 +73,8 @@ No published sidecar image is available yet. Follow the
 to build `dynamo-sidecar`, which contains all three engine-specific sidecar
 executables. The TensorRT-LLM manifest runs `dynamo-trtllm-sidecar` as the
 container command and pairs it with a TensorRT-LLM image that serves
-OpenEngine gRPC. No published TensorRT-LLM release ships that yet, so the engine
-image has to be built; the manifest's comments list what it must provide. The
-source tree includes an
+OpenEngine gRPC. Layer the pinned OpenEngine Python bindings onto
+`nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer and
+push the result: the release ships the servicer but not the bindings it and the
+manifest's health probes import. The source tree includes an
 [aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml).

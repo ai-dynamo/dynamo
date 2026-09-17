@@ -95,6 +95,13 @@ spec:
           - 127.0.0.1
           - --port
           - "50051"
+          # Keep this equal to the sidecar's --context-length below. Without it
+          # the engine leaves `max_context_length` unset, and the sidecar then
+          # polls GetModelInfo for its whole startup deadline (30 minutes by
+          # default) before registering a worker that rejects every request
+          # omitting max_tokens.
+          - --max_seq_len
+          - "4096"
           # Engine tuning from the ConfigMap above.
           - --extra_llm_api_options
           - /config/config.yaml
@@ -115,6 +122,9 @@ spec:
           - 127.0.0.1:50051
           - --model-path
           - Qwen/Qwen3-0.6B
+          # Matches the engine's --max_seq_len above.
+          - --context-length
+          - "4096"
           envFrom:
           - secretRef:
               name: hf-token-secret
