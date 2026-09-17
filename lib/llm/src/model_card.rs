@@ -1183,11 +1183,7 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(h.as_bytes());
                 }
 
-                // hf_commit_sha: hash sorted (repo, sha) pairs, same rationale as
-                // `extras` above — HashMap iteration order isn't stable, and two
-                // workers that independently resolved different commits for the same
-                // repo must produce different mdcsums so WorkerSet compatibility
-                // correctly rejects mixing them instead of treating them as identical.
+                // sort for stable hash; same rationale as extras above.
                 if let Some(hf_commit_sha) = self.hf_commit_sha.as_ref() {
                     let mut shas: Vec<(&str, &str)> = hf_commit_sha
                         .iter()
@@ -1689,9 +1685,6 @@ impl ModelDeploymentCard {
             })
             .collect::<anyhow::Result<_>>()?;
 
-        // Group required filenames per repo first, so from_hf_at_revision can
-        // fetch (and verify a cache-hit against) exactly the files this MDC
-        // needs, instead of guessing from a hardcoded list.
         let mut repo_files: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         for (uri, _) in &entries {
@@ -1701,8 +1694,6 @@ impl ModelDeploymentCard {
             }
         }
 
-        // Pre-resolve hf:// repos once per unique repo; otherwise the
-        // resolve loop would call hub::from_hf N times for one model.
         let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
             std::collections::HashMap::new();
         for (repo_name, filenames) in &repo_files {
@@ -2481,6 +2472,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{HFConfig, ModelDeploymentCard};
+    use crate::hub::tests::build_hf_cache;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -2583,10 +2575,8 @@ mod tests {
     #[test]
     fn test_set_hf_commit_sha_extracts_from_snapshot_path() {
         let mut card = ModelDeploymentCard::default();
-        let snapshot = PathBuf::from(
-            "/cache/huggingface/hub/models--Qwen
-  --Qwen3-0.6B/snapshots/abc123def456",
-        );
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = build_hf_cache(temp.path(), "Qwen/Qwen3-0.6B", &["config.json"]);
         card.set_hf_commit_sha("Qwen/Qwen3-0.6B", &snapshot);
         assert_eq!(
             card.hf_commit_sha
@@ -2594,7 +2584,7 @@ mod tests {
                 .unwrap()
                 .get("Qwen/Qwen3-0.6B")
                 .map(String::as_str),
-            Some("abc123def456")
+            Some("0000000000000000000000000000000000000000")
         );
     }
 
@@ -3541,14 +3531,8 @@ mod worker_type_tests {
         );
     }
 
-    /// mdcsum must cover `hf_commit_sha` so that two workers which independently
-    /// resolved different commits for the same repo produce different checksums
-    /// — otherwise WorkerSet compatibility would wrongly treat them as identical
-    /// and mix workers serving different pinned revisions.
-    ///
-    /// Note: `mdcsum()` caches its result on first call via `OnceLock`, so
-    /// each case builds a fresh card rather than mutating one and re-hashing
-    /// (same reasoning as `mdcsum_covers_worker_type_and_needs` above).
+    /// Verify `mdcsum` distinguishes HF revisions; each case needs a
+    /// fresh card because the checksum is cached.
     #[test]
     fn mdcsum_covers_hf_commit_sha() {
         fn hash(hf_commit_sha: Option<std::collections::HashMap<String, String>>) -> String {

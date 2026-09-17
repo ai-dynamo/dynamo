@@ -36,46 +36,50 @@ fn get_cached_model_path_in(
 ) -> Option<PathBuf> {
     let cache = Cache::new(cache_dir);
     let repo = cache.model(model_name.to_string());
-
-    // Check for required config file
     let config_path = repo.get("config.json")?;
+    let snapshot_path = config_path.parent()?;
 
-    // Check for tokenizer files (at least one must exist). Only count
-    // artifacts that ``ModelDeploymentCard::TokenizerKind::from_disk`` can
-    // actually load -- ``tokenizer_config.json`` is metadata describing the
-    // tokenizer and cannot be used on its own, so a snapshot with only
-    // ``config.json`` + ``tokenizer_config.json`` would fall through to a
-    // download even though the cache appears "populated".
-    let has_tokenizer = repo.get("tokenizer.json").is_some()
-        || repo.get("tiktoken.model").is_some()
-        || has_tiktoken_file(config_path.parent()?);
-
-    if !has_tokenizer {
+    if !is_snapshot_complete(snapshot_path, ignore_weights, None) {
         return None;
     }
 
-    // For full downloads, check for weight files. When an index file is present,
-    // verify the shard files it references are also cached — an index without its
-    // shards is an incomplete cache that should fall through to download.
-    if !ignore_weights {
-        let has_weights = repo.get("model.safetensors").is_some()
-            || repo.get("pytorch_model.bin").is_some()
-            || repo
-                .get("model.safetensors.index.json")
-                .is_some_and(|p| shard_files_present(&p))
-            || repo
-                .get("pytorch_model.bin.index.json")
-                .is_some_and(|p| shard_files_present(&p));
+    let snapshot_path = snapshot_path.to_path_buf();
+    tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
+    Some(snapshot_path)
+}
 
-        if !has_weights {
-            return None;
+fn is_snapshot_complete(
+    dir: &Path,
+    ignore_weights: bool,
+    required_files: Option<&[String]>,
+) -> bool {
+    if let Some(files) = required_files {
+        if !files.iter().all(|file| dir.join(file).exists()) {
+            return false;
+        }
+    } else {
+        if !dir.join("config.json").exists() {
+            return false;
+        }
+
+        let has_tokenizer = dir.join("tokenizer.json").exists()
+            || dir.join("tiktoken.model").exists()
+            || has_tiktoken_file(dir);
+        if !has_tokenizer {
+            return false;
         }
     }
 
-    // Return the parent directory (snapshot dir) containing the model files
-    let snapshot_path = config_path.parent()?.to_path_buf();
-    tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
-    Some(snapshot_path)
+    if ignore_weights {
+        return true;
+    }
+
+    let safetensors_index = dir.join("model.safetensors.index.json");
+    let pytorch_index = dir.join("pytorch_model.bin.index.json");
+    dir.join("model.safetensors").exists()
+        || dir.join("pytorch_model.bin").exists()
+        || (safetensors_index.exists() && shard_files_present(&safetensors_index))
+        || (pytorch_index.exists() && shard_files_present(&pytorch_index))
 }
 
 /// Returns the snapshot path if that exact revision is already on disk.
@@ -93,44 +97,10 @@ fn get_cached_model_path_at_revision(
         .join("snapshots")
         .join(revision);
 
-    if !snapshot_dir.exists() {
+    if !snapshot_dir.exists()
+        || !is_snapshot_complete(&snapshot_dir, ignore_weights, required_files)
+    {
         return None;
-    }
-
-    if let Some(files) = required_files {
-        // Caller knows the exact MDC file set (frontend resolving an
-        // already-published card) — require every one of them, so a
-        // sparse/interrupted snapshot is correctly treated as incomplete
-        // instead of passing a config.json+tokenizer-only heuristic.
-        if !files.iter().all(|f| snapshot_dir.join(f).exists()) {
-            return None;
-        }
-    } else {
-        // No MDC yet (worker discovering its own file set for the first
-        // time) — fall back to the config.json + tokenizer heuristic.
-        if !snapshot_dir.join("config.json").exists() {
-            return None;
-        }
-
-        let has_tokenizer = snapshot_dir.join("tokenizer.json").exists()
-            || snapshot_dir.join("tiktoken.model").exists()
-            || has_tiktoken_file(&snapshot_dir);
-
-        if !has_tokenizer {
-            return None;
-        }
-    }
-
-    if !ignore_weights {
-        let index = snapshot_dir.join("model.safetensors.index.json");
-        let pt_index = snapshot_dir.join("pytorch_model.bin.index.json");
-        let has_weights = snapshot_dir.join("model.safetensors").exists()
-            || snapshot_dir.join("pytorch_model.bin").exists()
-            || (index.exists() && shard_files_present(&index))
-            || (pt_index.exists() && shard_files_present(&pt_index));
-        if !has_weights {
-            return None;
-        }
     }
 
     tracing::info!(
@@ -240,65 +210,7 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         );
     }
 
-    let config = mx_client_config();
-
-    let result = match MxClient::new(config).await {
-        Ok(mut client) => {
-            tracing::info!("Successfully connected to ModelExpress server");
-            match client
-                .request_model_revision(
-                    &model_name,
-                    MxModelProvider::HuggingFace,
-                    ignore_weights,
-                    None,
-                )
-                .await
-            {
-                Ok(result) => {
-                    tracing::info!("Server download succeeded for model: {model_name}");
-                    let resolved = match result.path {
-                        Some(path) => Ok(path),
-                        None => {
-                            client
-                                .get_model_path(&model_name, MxModelProvider::HuggingFace)
-                                .await
-                        }
-                    };
-                    match resolved {
-                        Ok(path) => Ok(path),
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to resolve local model path after server download for '{model_name}': {e}. \
-                                Falling back to direct download."
-                            );
-                            mx_download_direct(&model_name, ignore_weights).await
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Server download failed for model '{model_name}': {e}. Falling back to direct download."
-                    );
-                    mx_download_direct(&model_name, ignore_weights).await
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Cannot connect to ModelExpress server: {e}. Using direct download.");
-            mx_download_direct(&model_name, ignore_weights).await
-        }
-    };
-
-    match result {
-        Ok(path) => {
-            tracing::info!("ModelExpress download completed successfully for model: {model_name}");
-            Ok(path)
-        }
-        Err(e) => {
-            tracing::warn!("ModelExpress download failed for model '{model_name}': {e}");
-            Err(e)
-        }
-    }
+    download_from_model_express(&model_name, None, ignore_weights).await
 }
 
 /// Like `from_hf`, but resolves a specific commit SHA instead of latest.
@@ -326,51 +238,85 @@ pub async fn from_hf_at_revision(
         return Ok(cached);
     }
 
-    let result = MxClient::request_model_with_smart_fallback_revision(
-        &model_name,
-        MxModelProvider::HuggingFace,
-        mx_client_config(),
-        ignore_weights,
-        Some(revision),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}"))
-    .with_context(|| format!("downloading {model_name}@{revision} via ModelExpress"))?;
-
-    if let Some(path) = result.path {
-        return Ok(path);
-    }
-
-    // The client-reported path is best-effort (e.g. a streaming install with no
-    // locally discoverable cache config) — fall back to the same on-disk lookup
-    // the cache-first check above uses, keyed on the SHA the server actually
-    // resolved the request to.
-    let resolved_revision = result.resolved_revision.as_deref().unwrap_or(revision);
-    get_cached_model_path_at_revision(
-        &model_name,
-        resolved_revision,
-        ignore_weights,
-        required_files,
-        get_model_express_cache_dir(),
-    )
-    .with_context(|| {
-        format!(
-            "ModelExpress download for {model_name}@{revision} (resolved to \
-            {resolved_revision}) succeeded but the snapshot could not be located on disk"
-        )
-    })
+    download_from_model_express(&model_name, Some(revision), ignore_weights)
+        .await
+        .with_context(|| {
+            format!("downloading {model_name} at revision {revision} via ModelExpress")
+        })
 }
 
-// Direct download using the ModelExpress client.
-async fn mx_download_direct(model_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
-    let cache_dir = get_model_express_cache_dir();
-    mx::download_model(
+async fn download_from_model_express(
+    model_name: &str,
+    revision: Option<&str>,
+    ignore_weights: bool,
+) -> anyhow::Result<PathBuf> {
+    let model_ref = revision
+        .map(|revision| format!("{model_name} at revision {revision}"))
+        .unwrap_or_else(|| model_name.to_string());
+
+    match MxClient::new(mx_client_config()).await {
+        Ok(mut client) => {
+            tracing::info!("Successfully connected to ModelExpress server");
+            match client
+                .request_model_revision(
+                    model_name,
+                    MxModelProvider::HuggingFace,
+                    ignore_weights,
+                    revision,
+                )
+                .await
+            {
+                Ok(result) => {
+                    tracing::info!("Server download succeeded for model: {model_ref}");
+                    let resolved = match result.path {
+                        Some(path) => Ok(path),
+                        None => {
+                            client
+                                .get_model_path(model_name, MxModelProvider::HuggingFace)
+                                .await
+                        }
+                    };
+                    match resolved {
+                        Ok(path) => Ok(path),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to resolve local model path after server download for '{model_ref}': {e}. \
+                                Falling back to direct download."
+                            );
+                            mx_download_direct(model_name, revision, ignore_weights).await
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Server download failed for model '{model_ref}': {e}. \
+                        Falling back to direct download."
+                    );
+                    mx_download_direct(model_name, revision, ignore_weights).await
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Cannot connect to ModelExpress server: {e}. Using direct download.");
+            mx_download_direct(model_name, revision, ignore_weights).await
+        }
+    }
+}
+
+async fn mx_download_direct(
+    model_name: &str,
+    revision: Option<&str>,
+    ignore_weights: bool,
+) -> anyhow::Result<PathBuf> {
+    mx::download_model_revision(
         model_name,
         MxModelProvider::HuggingFace,
-        Some(cache_dir),
+        Some(get_model_express_cache_dir()),
         ignore_weights,
+        revision,
     )
     .await
+    .map(|result| result.path)
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common
@@ -407,7 +353,7 @@ fn cache_dir_from_values(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -463,7 +409,7 @@ mod tests {
     /// Build an hf-hub-format cache layout for `model_name` in `cache_root`,
     /// populated with the given filenames at a fake snapshot revision. Returns
     /// the snapshot directory path that `Cache::model().get()` should resolve to.
-    fn build_hf_cache(cache_root: &Path, model_name: &str, files: &[&str]) -> PathBuf {
+    pub(crate) fn build_hf_cache(cache_root: &Path, model_name: &str, files: &[&str]) -> PathBuf {
         let repo_dir = cache_root.join(format!("models--{}", model_name.replace('/', "--")));
         let snapshot_hash = "0000000000000000000000000000000000000000";
         let snapshot_dir = repo_dir.join("snapshots").join(snapshot_hash);

@@ -401,19 +401,11 @@ impl LocalModelBuilder {
             card.set_source_path(source_path);
         }
 
-        // If model_path resolved into an HF-cache-style snapshot dir, record the
-        // commit SHA so the frontend can pin to the same revision when resolving
-        // hf:// URIs — regardless of whether --model-path was a bare repo id, an
-        // absolute snapshot path, or a relative path.
+        // Record the commit SHA from an HF snapshot path so the frontend
+        // can resolve hf:// URIs at the same revision.
         if let Some(repo) = super::hub::hf_repo_from_snapshot_path(&model_path) {
             card.set_hf_commit_sha(&repo, &model_path);
-            // Normalize source_path to the HF repo id, not the resolved snapshot's
-            // filesystem path. checked_file_uri's cross-host fallback
-            // (hf://{source_path}/{filename}) and hf_commit_sha's map must agree on
-            // the same repo identity string, or a different frontend host parses a
-            // garbage "repo" out of the filesystem path and hub::from_hf() is called
-            // with it — this only matters for absolute/relative snapshot-path
-            // `--model-path` inputs; bare repo ids already had this identity.
+            // align source_path with hf_commit_sha's key so hf:// fallback URIs resolve correctly.
             card.set_source_path(PathBuf::from(&repo));
         }
 
