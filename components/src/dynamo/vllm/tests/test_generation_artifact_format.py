@@ -17,6 +17,7 @@ from dynamo.vllm.generation_artifact_format import (
     GenerationArtifactView,
     decode_generation_artifact,
     encode_generation_artifact,
+    generation_artifact_encoded_size_bound,
 )
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
@@ -505,3 +506,26 @@ def test_decoder_rejects_noncanonical_component_dtypes(
 
     with pytest.raises(GenerationArtifactFormatError, match=message):
         decode_generation_artifact(encoded)
+
+
+def test_encoded_size_bound_contains_zstd_output() -> None:
+    encoded = encode_generation_artifact(_artifact_view()).data
+    _, _, _, _, manifest_bytes, payload_bytes = _PRELUDE.unpack_from(encoded)
+
+    assert len(encoded) <= generation_artifact_encoded_size_bound(
+        payload_bytes, manifest_bytes
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload_bytes", "manifest_bytes", "message"),
+    [
+        ((64 << 20) + 1, 1, "payload"),
+        (1, (1 << 20) + 1, "manifest"),
+    ],
+)
+def test_encoded_size_bound_rejects_values_above_format_limits(
+    payload_bytes: int, manifest_bytes: int, message: str
+) -> None:
+    with pytest.raises(GenerationArtifactFormatError, match=message):
+        generation_artifact_encoded_size_bound(payload_bytes, manifest_bytes)

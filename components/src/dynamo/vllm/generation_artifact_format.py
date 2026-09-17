@@ -24,7 +24,16 @@ _PRELUDE = struct.Struct("<8sHHHIQ")
 _ALIGNMENT = 64
 _MAX_MANIFEST_BYTES = 1 << 20
 _MAX_PAYLOAD_BYTES = 64 << 20
-_MAX_OBJECT_BYTES = _PRELUDE.size + _MAX_MANIFEST_BYTES + _MAX_PAYLOAD_BYTES + 65536
+
+
+def _zstd_compress_bound(size: int) -> int:
+    margin = (128 << 10) - size
+    return size + (size >> 8) + ((margin >> 11) if margin > 0 else 0)
+
+
+_MAX_OBJECT_BYTES = _PRELUDE.size + _zstd_compress_bound(
+    _MAX_MANIFEST_BYTES + _MAX_PAYLOAD_BYTES
+)
 
 _NUMPY_TO_WIRE: dict[np.dtype[Any], str] = {
     np.dtype("uint8"): "u8",
@@ -101,6 +110,20 @@ class DecodedGenerationArtifact:
 
 def _align_up(value: int) -> int:
     return (value + _ALIGNMENT - 1) & ~(_ALIGNMENT - 1)
+
+
+def generation_artifact_encoded_size_bound(
+    payload_bytes: int, manifest_bytes: int
+) -> int:
+    """Return a conservative zstd object-size bound for valid format-v1 input."""
+    if not 0 <= payload_bytes <= _MAX_PAYLOAD_BYTES:
+        raise GenerationArtifactFormatError("artifact payload exceeds configured limit")
+    if not 0 <= manifest_bytes <= _MAX_MANIFEST_BYTES:
+        raise GenerationArtifactFormatError(
+            "artifact manifest exceeds configured limit"
+        )
+    decoded_body_bytes = _align_up(manifest_bytes) + payload_bytes
+    return _PRELUDE.size + _zstd_compress_bound(decoded_body_bytes)
 
 
 def _encode_manifest(value: Any) -> bytes:
