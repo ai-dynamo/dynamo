@@ -49,8 +49,8 @@ python3 -m dynamo.frontend --help
 python3 -m dynamo.vllm --help
 ```
 
-`dynamo.common` is the exception: it is a library of shared code, not a service,
-and has no `__main__.py`.
+`dynamo.common` and `dynamo.replay` are libraries rather than runnable services;
+neither has a `__main__.py`.
 
 ## Package map
 
@@ -81,7 +81,7 @@ and has no `__main__.py`.
 | `global_planner/` | Centralized scaling execution for multi-DGD planner deployments. |
 | `profiler/` | Profiling entrypoints; the documentation lives under `docs/fern/`. |
 | `mocker/` | Python entrypoint for the mock engine implemented in `lib/mocker`, which simulates scheduling and token timing without a GPU. |
-| `replay/` | Replay entrypoints for single runs and for the router, planner, and online adapters. The shared offline implementation is owned by AISimulate. |
+| `replay/` | Replay API for single runs and for the router, planner, and online adapters. The shared offline implementation is owned by AISimulate. |
 | `squeeze_evolve/` | Experimental; not a released component. |
 
 ## Testing

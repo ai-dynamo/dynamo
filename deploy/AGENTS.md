@@ -20,11 +20,11 @@ conventions.
 |------|----------|
 | `operator/` | The Dynamo operator: a Kubebuilder project owning the CRDs, controllers, and admission webhooks. Has its own agent files — see below. |
 | `helm/charts/platform/` | The platform chart that installs the operator and its dependencies. |
-| `helm/charts/power-agent/`, `helm/charts/snapshot/` | Charts for the two DaemonSets. |
-| `inference-gateway/` | Gateway API Inference Extension integration: `epp/` (Go endpoint picker) and `ext-proc/` (Rust external processor). |
+| `helm/charts/power-agent/` | Chart for the power-agent DaemonSet. |
+| `inference-gateway/` | Gateway API Inference Extension integration: `ext-proc/` (Rust external processor), `sidecar/` (EPP decode sidecar), and `scripts/` (CRD installation). |
 | `observability/` | Grafana dashboards and setup for Kubernetes deployments. |
 | `power-agent/` | Privileged DaemonSet for GPU power-cap enforcement. |
-| `snapshot/` | CRIU-based checkpoint/restore DaemonSet. |
+| `checkpoint-placeholder/` | Dockerfile for a runtime-compatible restore target; checkpoint/restore tooling is supplied by the snapshot agent. |
 | `pre-deployment/` | Scripts that check a cluster meets Dynamo's requirements before you deploy. |
 | `utils/` | Utilities and manifests for benchmarking and profiling workflows. |
 
@@ -36,8 +36,7 @@ The CRD sources are the Go types under
 
 `DynamoGraphDeployment` and `DynamoGraphDeploymentRequest`,
 `DynamoComponentDeployment`, `DynamoGraphDeploymentScalingAdapter`,
-`DynamoModel`, `DynamoWorkerMetadata`, `DynamoCheckpoint`, and
-`PodSnapshot`/`PodSnapshotContent`.
+`DynamoModel`, and `DynamoWorkerMetadata`.
 
 > [!NOTE]
 > The generated artifacts are not editable by hand. Change the Go types or the
