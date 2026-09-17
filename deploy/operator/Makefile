@@ -213,6 +213,7 @@ docker-push-all: docker-push-planner docker-push-frontend docker-push-vllm docke
 
 .PHONY: check
 check: generate manifests generate-api-docs generate-helm-docs
+	python3 ../../docs/fern/scripts/gen_kubernetes_api.py
 	@echo "> Checking for uncommitted changes"
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "ERROR: Git tree is dirty after running validation steps."; \
