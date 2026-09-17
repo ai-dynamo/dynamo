@@ -223,6 +223,8 @@ struct VllmTitoEnvelope<'a> {
     priority: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     kv_transfer_params: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nvext: Option<&'a crate::protocols::openai::generate::GenerateNvExt>,
     #[serde(flatten)]
     passthrough: &'a serde_json::Map<String, serde_json::Value>,
 }
@@ -239,6 +241,7 @@ impl<'a> VllmTitoEnvelope<'a> {
             cache_salt,
             priority,
             kv_transfer_params,
+            nvext,
             passthrough,
         } = request;
         Self {
@@ -250,6 +253,7 @@ impl<'a> VllmTitoEnvelope<'a> {
             cache_salt: cache_salt.as_deref(),
             priority: *priority,
             kv_transfer_params: kv_transfer_params.as_ref(),
+            nvext: nvext.as_ref(),
             passthrough,
         }
     }
@@ -620,6 +624,9 @@ fn preprocessed_from_generate_with_tracker(
             "skip_reading_prefix_cache".to_string(),
             serde_json::Value::Bool(skip_reading_prefix_cache),
         );
+    }
+    if let Some(nvext) = request.nvext.as_ref() {
+        extra_args.insert("nvext".to_string(), serde_json::to_value(nvext)?);
     }
     if let Some(projection) = &mm_routing {
         extra_args.insert(
@@ -1787,6 +1794,25 @@ pub(crate) mod tests {
             "features": {"future_feature": [1, 2, 3]},
             "priority": 7,
             "kv_transfer_params": {"remote": "worker-a"},
+            "nvext": {
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "codec": "zstd",
+                    "contents": ["selected_logprobs"],
+                    "delivery": {
+                        "mode": "object_store",
+                        "target": {
+                            "kind": "presigned_http_put",
+                            "url": "https://storage.example/object?signature=sentinel",
+                            "expires_at": "2030-01-01T00:00:00Z",
+                            "max_bytes": 1024,
+                            "required_headers": {"if-none-match": "*"},
+                            "object_id": "opaque"
+                        }
+                    }
+                },
+                "future_extension": {"opaque": [1, 2, 3]}
+            },
             "future_top_level_field": {"anything": "works"}
         });
         let request: GenerateRequest =
@@ -1854,6 +1880,13 @@ pub(crate) mod tests {
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("nvext")),
+            envelope.get("nvext")
+        );
     }
 
     #[test]

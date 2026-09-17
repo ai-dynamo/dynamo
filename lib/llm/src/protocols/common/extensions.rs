@@ -48,6 +48,217 @@ pub struct MetadataUpload {
     pub url: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(transparent)]
+pub struct RedactedString(String);
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+fn deserialize_non_empty_redacted_string<'de, D>(
+    deserializer: D,
+) -> Result<RedactedString, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom("value must not be empty"));
+    }
+    Ok(RedactedString(value))
+}
+
+fn deserialize_non_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(serde::de::Error::custom("value must not be empty"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom("value must be positive"));
+    }
+    Ok(value)
+}
+
+fn deserialize_artifact_contents<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    let mut unique = HashSet::new();
+    if values
+        .iter()
+        .any(|value| value.trim().is_empty() || !unique.insert(value))
+    {
+        return Err(serde::de::Error::custom(
+            "generation_artifact.contents must contain unique non-empty strings",
+        ));
+    }
+    Ok(values)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationArtifactDeliveryMode {
+    ObjectStore,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PresignedHttpPutTarget {
+    #[serde(deserialize_with = "deserialize_non_empty_redacted_string")]
+    pub url: RedactedString,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub expires_at: String,
+    #[serde(deserialize_with = "deserialize_positive_u64")]
+    pub max_bytes: u64,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub required_headers: HashMap<String, RedactedString>,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub object_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedFsspecTarget {
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub profile: String,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub object_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GenerationArtifactTarget {
+    PresignedHttpPut(PresignedHttpPutTarget),
+    ManagedFsspec(ManagedFsspecTarget),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationArtifactDelivery {
+    pub mode: GenerationArtifactDeliveryMode,
+    pub target: GenerationArtifactTarget,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationArtifactCodec {
+    #[default]
+    Zstd,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationArtifactRequest {
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub format: String,
+    #[serde(deserialize_with = "deserialize_artifact_contents")]
+    pub contents: Vec<String>,
+    #[serde(default)]
+    pub codec: GenerationArtifactCodec,
+    pub delivery: GenerationArtifactDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationArtifactResponseExpectation {
+    pub format: String,
+    pub contents: Vec<String>,
+}
+
+impl From<&GenerationArtifactRequest> for GenerationArtifactResponseExpectation {
+    fn from(request: &GenerationArtifactRequest) -> Self {
+        Self {
+            format: request.format.clone(),
+            contents: request.contents.clone(),
+        }
+    }
+}
+
+const REDACTED_ARTIFACT_SECRET: &str = "[REDACTED]";
+
+impl NvExt {
+    pub(crate) fn redact_generation_artifact_secrets(&mut self) {
+        let Some(GenerationArtifactRequest {
+            delivery:
+                GenerationArtifactDelivery {
+                    target: GenerationArtifactTarget::PresignedHttpPut(target),
+                    ..
+                },
+            ..
+        }) = self.generation_artifact.as_mut()
+        else {
+            return;
+        };
+        target.url = RedactedString(REDACTED_ARTIFACT_SECRET.to_string());
+        for value in target.required_headers.values_mut() {
+            *value = RedactedString(REDACTED_ARTIFACT_SECRET.to_string());
+        }
+    }
+}
+
+pub(crate) fn redact_generation_artifact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_generation_artifact_json(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            match object
+                .get_mut("generation_artifact")
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|artifact| {
+                    artifact
+                        .get_mut("delivery")
+                        .and_then(serde_json::Value::as_object_mut)
+                        .and_then(|delivery| delivery.get_mut("target"))
+                        .and_then(serde_json::Value::as_object_mut)
+                }) {
+                Some(target)
+                    if target.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("presigned_http_put") =>
+                {
+                    if target.contains_key("url") {
+                        target.insert(
+                            "url".to_string(),
+                            serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string()),
+                        );
+                    }
+                    if let Some(headers) = target
+                        .get_mut("required_headers")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        for value in headers.values_mut() {
+                            *value =
+                                serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            for value in object.values_mut() {
+                redact_generation_artifact_json(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -208,6 +419,10 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub metadata_upload: Option<MetadataUpload>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub generation_artifact: Option<GenerationArtifactRequest>,
+
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,
@@ -272,6 +487,7 @@ impl NvExt {
             cache_salt: _,
             extra_fields,
             metadata_upload,
+            generation_artifact,
             prefill_worker_id,
             decode_worker_id,
             dp_rank,
@@ -290,6 +506,7 @@ impl NvExt {
             || max_thinking_tokens.is_some()
             || extra_fields.is_some()
             || metadata_upload.is_some()
+            || generation_artifact.is_some()
             || prefill_worker_id.is_some()
             || decode_worker_id.is_some()
             || dp_rank.is_some()
@@ -650,6 +867,9 @@ pub struct NvExtResponse {
     pub engine_data: Option<serde_json::Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_artifact: Option<serde_json::Value>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<serde_json::Value>,
 
     /// Dynamo's internal finish reason before OpenAI conversion.
@@ -707,13 +927,14 @@ pub(crate) fn merge_response_nvext(
 }
 
 /// Response nvext fields requested for a given request.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NvExtResponseFieldSelection {
     pub worker_id: bool,
     pub timing: bool,
     pub token_ids: bool,
     pub routed_experts: bool,
     pub engine_data: bool,
+    pub generation_artifact: Option<GenerationArtifactResponseExpectation>,
     pub stop_reason: bool,
     pub detailed_finish_reason: bool,
     pub completion_token_ids: bool,
@@ -759,6 +980,9 @@ impl NvExtResponseFieldSelection {
             selection.worker_id = true;
             selection.token_ids = true;
         }
+        if let Some(artifact) = ext.generation_artifact.as_ref() {
+            selection.generation_artifact = Some(artifact.into());
+        }
         selection
     }
 
@@ -785,6 +1009,27 @@ impl NvExtResponseFieldSelection {
                 .as_ref()
                 .and_then(|data| data.get("routed_experts"))
                 .cloned()
+        } else {
+            None
+        };
+
+        let generation_artifact = if let Some(artifact) = self.generation_artifact.as_ref() {
+            let receipt = input
+                .engine_data
+                .as_ref()
+                .and_then(|data| data.get("generation_artifact"))
+                .cloned();
+            if receipt.is_none() && finish_reason_present {
+                Some(serde_json::json!({
+                    "format": artifact.format,
+                    "contents": artifact.contents,
+                    "state": "failed",
+                    "error_code": "artifact_receipt_missing",
+                    "error": "generation worker did not return the requested artifact receipt"
+                }))
+            } else {
+                receipt
+            }
         } else {
             None
         };
@@ -842,6 +1087,7 @@ impl NvExtResponseFieldSelection {
             && routed_experts.is_none()
             && timing.is_none()
             && engine_data.is_none()
+            && generation_artifact.is_none()
             && stop_reason.is_none()
             && detailed_finish_reason.is_none()
             && completion_token_ids.is_none()
@@ -857,6 +1103,7 @@ impl NvExtResponseFieldSelection {
             token_ids,
             routed_experts,
             engine_data,
+            generation_artifact,
             stop_reason,
             detailed_finish_reason,
             completion_token_ids,
@@ -1026,6 +1273,136 @@ mod tests {
                 }
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn generation_artifact_parses_exact_presigned_target_and_redacts_debug() {
+        let url = "https://storage.example/object%2Fpart?signature=sentinel&part=1&part=2";
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "generation_artifact": {
+                "format": "generation_artifact_v1",
+                "codec": "zstd",
+                "contents": ["moe_routes", "selected_logprobs"],
+                "delivery": {
+                    "mode": "object_store",
+                    "target": {
+                        "kind": "presigned_http_put",
+                        "url": url,
+                        "expires_at": "2030-01-01T00:00:00Z",
+                        "max_bytes": 67108864,
+                        "required_headers": {
+                            "content-type": "application/octet-stream",
+                            "if-none-match": "*",
+                            "x-amz-checksum-sha256": "header-sentinel"
+                        },
+                        "object_id": "opaque-object"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(&nvext).unwrap();
+        assert_eq!(
+            serialized["generation_artifact"]["delivery"]["target"]["url"],
+            url
+        );
+        let debug = format!("{nvext:?}");
+        assert!(!debug.contains("sentinel"));
+        assert!(!debug.contains("header-sentinel"));
+        assert!(nvext.has_non_cache_salt_fields());
+
+        let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
+        assert_eq!(
+            selection
+                .generation_artifact
+                .as_ref()
+                .expect("artifact selection")
+                .contents,
+            vec!["moe_routes", "selected_logprobs"]
+        );
+        assert!(!selection.engine_data);
+
+        let mut observable = serde_json::json!({"extra_args": {"nvext": serialized}});
+        redact_generation_artifact_json(&mut observable);
+        let observable = observable.to_string();
+        assert!(!observable.contains("sentinel"));
+        assert!(!observable.contains("header-sentinel"));
+    }
+
+    #[test]
+    fn generation_artifact_parses_managed_target_and_rejects_invalid_contracts() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "generation_artifact": {
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes"],
+                "delivery": {
+                    "mode": "object_store",
+                    "target": {
+                        "kind": "managed_fsspec",
+                        "profile": "training-artifacts",
+                        "object_key": "run-42/request-1/artifact.dynexp"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(nvext).unwrap()["generation_artifact"]["contents"],
+            serde_json::json!(["moe_routes"])
+        );
+
+        for invalid in [
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "codec": "none",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
+            serde_json::json!({
+                "format": "",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes", "moe_routes"],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "presigned_http_put", "url": "", "max_bytes": 1, "object_id": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "presigned_http_put", "url": "https://example/x", "max_bytes": 0, "object_id": "x"}}
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<NvExt>(serde_json::json!({
+                    "generation_artifact": invalid
+                }))
+                .is_err()
+            );
+        }
+
+        let opaque: NvExt = serde_json::from_value(serde_json::json!({
+            "generation_artifact": {
+                "format": "external_artifact_v2",
+                "contents": ["opaque_component"],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            opaque
+                .generation_artifact
+                .expect("artifact request")
+                .contents,
+            vec!["opaque_component"]
         );
     }
 
@@ -1848,6 +2225,68 @@ mod tests {
         assert_eq!(
             out.routed_experts,
             Some(serde_json::json!({"layer_0": [1, 3]}))
+        );
+    }
+
+    #[test]
+    fn build_response_nvext_projects_generation_artifact_without_engine_data() {
+        let selection = NvExtResponseFieldSelection {
+            generation_artifact: Some(GenerationArtifactResponseExpectation {
+                format: "generation_artifact_v1".to_string(),
+                contents: vec!["moe_routes".to_string()],
+            }),
+            ..Default::default()
+        };
+        let receipt = serde_json::json!({
+            "format": "generation_artifact_v1",
+            "state": "ready",
+            "object_id": "opaque-object",
+            "actual_bytes": 42,
+            "sha256": "abcd"
+        });
+        let engine_data = serde_json::json!({
+            "generation_artifact": receipt,
+            "internal": "must-not-leak"
+        });
+        let finish_reason = FinishReason::Stop;
+
+        let out = selection
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                engine_data: Some(engine_data),
+                ..Default::default()
+            })
+            .expect("generation artifact receipt should be projected");
+
+        assert_eq!(out.generation_artifact, Some(receipt));
+        assert!(out.engine_data.is_none());
+    }
+
+    #[test]
+    fn build_response_nvext_fails_closed_when_artifact_receipt_is_missing() {
+        let selection = NvExtResponseFieldSelection {
+            generation_artifact: Some(GenerationArtifactResponseExpectation {
+                format: "external_artifact_v2".to_string(),
+                contents: vec!["opaque_component".to_string()],
+            }),
+            ..Default::default()
+        };
+        let finish_reason = FinishReason::Stop;
+
+        let out = selection
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
+            .expect("missing terminal receipt must be explicit");
+        let artifact = out.generation_artifact.expect("failed artifact receipt");
+
+        assert_eq!(artifact["state"], "failed");
+        assert_eq!(artifact["error_code"], "artifact_receipt_missing");
+        assert_eq!(artifact["format"], "external_artifact_v2");
+        assert_eq!(
+            artifact["contents"],
+            serde_json::json!(["opaque_component"])
         );
     }
 
