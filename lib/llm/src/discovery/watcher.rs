@@ -2128,14 +2128,17 @@ mod tests {
             endpoint_id,
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            video_contract: qwen_video_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
         let spec = GroupSpec {
             key,
             mdc_checksum: desired.mdc_checksum.clone(),
+            fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
             representative: desired,
+            video_contract: None,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
