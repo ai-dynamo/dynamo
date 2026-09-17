@@ -17,6 +17,7 @@
 
 import asyncio
 import base64
+import logging
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
@@ -33,7 +34,11 @@ from dynamo.common.multimodal.image_loader import (
     ImageLoader,
     image_cache_scope_from_request,
 )
-from dynamo.common.multimodal.shared_image_cache import _size_bucket
+from dynamo.common.multimodal.shared_image_cache import (
+    SharedImageCache,
+    _RateLimitedErrorWarnings,
+    _size_bucket,
+)
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -672,6 +677,47 @@ async def test_shared_cache_errors_fall_back_to_origin(
     assert image.size == (2, 2)
     origin_fetch.assert_awaited_once()
     client.set.assert_awaited_once()
+
+
+async def test_shared_cache_outage_warnings_are_rate_limited(caplog) -> None:
+    client = AsyncMock()
+    client.get.side_effect = RedisError("read unavailable")
+    client.set.side_effect = RedisError("write unavailable")
+    client.delete.side_effect = RedisError("delete unavailable")
+    cache = SharedImageCache(client, ttl_seconds=3600)
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="dynamo.common.multimodal.shared_image_cache",
+    ):
+        assert await cache.get("image") is None
+        await cache.put("image", PNG_BYTES)
+        await cache.delete("image")
+
+    warning_records = [
+        record for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    debug_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+    ]
+    assert len(warning_records) == 1
+    assert (
+        "Requests continue without the shared cache" in warning_records[0].getMessage()
+    )
+    assert any("read failed" in message for message in debug_messages)
+    assert any("write failed" in message for message in debug_messages)
+    assert any("delete failed" in message for message in debug_messages)
+
+
+async def test_shared_cache_outage_warning_repeats_periodically() -> None:
+    warnings = _RateLimitedErrorWarnings(interval_seconds=60.0)
+
+    assert warnings.record(100.0) == 1
+    assert warnings.record(101.0) is None
+    assert warnings.record(159.9) is None
+    assert warnings.record(160.0) == 3
 
 
 async def test_shared_cache_delete_cluster_error_falls_back_to_origin(

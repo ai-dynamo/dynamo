@@ -19,6 +19,8 @@ pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id"
 pub const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_PARENT_SESSION_ID: &str = "x-dynamo-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
+// Affinity-only identity for non-agent clients. Unlike x-dynamo-session-id,
+// this header must not create AgentContext or imply agent lifecycle semantics.
 pub(crate) const HEADER_SESSION_AFFINITY: &str = "x-session-affinity";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

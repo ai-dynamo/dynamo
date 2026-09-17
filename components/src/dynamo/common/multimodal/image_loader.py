@@ -40,6 +40,7 @@ URL_VARIANT_KEY: Final = "Url"
 DECODED_VARIANT_KEY: Final = "Decoded"
 UUID_ONLY_VARIANT_KEY: Final = "UuidOnly"
 IMAGE_CACHE_SCOPE_KEY: Final = "image_cache_scope"
+IMAGE_CACHE_SESSION_SCOPED_ENV: Final = "DYN_MM_IMAGE_CACHE_SESSION_SCOPED"
 
 
 def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
@@ -49,6 +50,36 @@ def image_cache_scope_from_request(request: Mapping[str, Any]) -> str | None:
         return None
     scope = scope.strip()
     return scope or None
+
+
+def image_cache_session_scoped_from_env() -> bool:
+    """Return whether multimodal caches must be partitioned by request scope."""
+    value = os.environ.get(IMAGE_CACHE_SESSION_SCOPED_ENV, "0")
+    if value not in ("0", "1"):
+        raise ValueError(
+            f"{IMAGE_CACHE_SESSION_SCOPED_ENV} must be '0' or '1', got {value!r}"
+        )
+    return value == "1"
+
+
+def scope_image_cache_key(
+    cache_key: str,
+    cache_scope: str | None,
+    *,
+    session_scoped_cache: bool,
+) -> str | None:
+    """Apply the common session-scope policy to a multimodal cache key.
+
+    When session scoping is disabled, the original key remains stable. When it
+    is enabled, a valid scope partitions the key and a missing scope returns
+    ``None`` so the caller bypasses its cache.
+    """
+    if not session_scoped_cache:
+        return cache_key
+    if cache_scope is None or not cache_scope.strip():
+        return None
+    scope_digest = hashlib.sha256(cache_scope.strip().encode("utf-8")).hexdigest()
+    return f"{scope_digest}:{cache_key}"
 
 
 def _create_nixl_connector() -> Any:
@@ -112,15 +143,7 @@ class ImageLoader:
         self._cache_size = cache_size
         self._configured_max_bytes = max_bytes
         if session_scoped_cache is None:
-            session_scoped_value = os.environ.get(
-                "DYN_MM_IMAGE_CACHE_SESSION_SCOPED", "0"
-            )
-            if session_scoped_value not in ("0", "1"):
-                raise ValueError(
-                    "DYN_MM_IMAGE_CACHE_SESSION_SCOPED must be '0' or '1', "
-                    f"got {session_scoped_value!r}"
-                )
-            session_scoped_cache = session_scoped_value == "1"
+            session_scoped_cache = image_cache_session_scoped_from_env()
         self._session_scoped_cache = session_scoped_cache
         self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
@@ -146,6 +169,11 @@ class ImageLoader:
         return len(self._image_cache)
 
     @property
+    def session_scoped_cache(self) -> bool:
+        """Whether all multimodal cache keys require a request scope."""
+        return self._session_scoped_cache
+
+    @property
     def shared_image_cache_stats(self) -> SharedImageCacheStats | None:
         """Latency samples for the optional shared encoded-image cache."""
         if self._shared_image_cache is None:
@@ -164,12 +192,11 @@ class ImageLoader:
         # case-sensitive and therefore identify different origin objects.
         url_key = normalized_url
 
-        if not self._session_scoped_cache:
-            return url_key
-        if cache_scope is None or not cache_scope.strip():
-            return None
-        scope_digest = hashlib.sha256(cache_scope.strip().encode("utf-8")).hexdigest()
-        return f"{scope_digest}:{url_key}"
+        return scope_image_cache_key(
+            url_key,
+            cache_scope,
+            session_scoped_cache=self._session_scoped_cache,
+        )
 
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
@@ -233,6 +260,10 @@ class ImageLoader:
 
             image = await self._open_image(image_data)
             if self._shared_image_cache is not None and key is not None:
+                # Cache fills are awaited deliberately so Redis acknowledges a
+                # successful write before this request returns. A cache outage
+                # remains fail-open, but can add up to the configured Redis I/O
+                # timeout to a miss; a bounded async queue could avoid that later.
                 await self._shared_image_cache.put(key, content)
             return image
 
