@@ -99,6 +99,13 @@ pub(crate) fn configured_family(
     }
 }
 
+pub(crate) fn is_v2_configured_family(
+    tool_call_parser: Option<&str>,
+    reasoning_parser: Option<&str>,
+) -> bool {
+    configured_family(tool_call_parser, reasoning_parser).is_some()
+}
+
 /// The unified family to actually use for this parser pair, or `None` to keep the
 /// existing split reasoning-parser + tool-call-jail path.
 pub(crate) fn selected_family(

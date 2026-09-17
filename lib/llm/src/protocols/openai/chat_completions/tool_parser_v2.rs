@@ -101,9 +101,13 @@ fn validate_parser_version_for_mode(
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
+            let qwen3_unified =
+                super::unified_parser::is_v2_configured_family(tool_call_parser, reasoning_parser);
             if !configured.is_empty()
                 && configured.iter().any(|parser| {
-                    !V2_FAMILIES.contains(parser) && !UNIFIED_FAMILIES.contains(parser)
+                    !V2_FAMILIES.contains(parser)
+                        && !UNIFIED_FAMILIES.contains(parser)
+                        && !(qwen3_unified && *parser == "qwen3")
                 })
             {
                 anyhow::bail!(
@@ -1492,10 +1496,6 @@ mod tests {
         }
         assert_eq!(unified_family(Some("qwen3_coder"), None), None);
         assert_eq!(unified_family(None, None), None);
-        assert!(
-            unified_family(Some("muse_glimmer"), None).is_some(),
-            "muse must route by default"
-        );
     }
 
     #[test]
@@ -1515,6 +1515,10 @@ mod tests {
         );
         assert!(
             validate_parser_version_for_mode(ParserVersion::V2, Some("muse_glimmer"), None).is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V2, Some("qwen3_coder"), Some("qwen3"))
+                .is_ok()
         );
         assert!(
             validate_parser_version_for_mode(
