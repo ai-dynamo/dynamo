@@ -58,7 +58,7 @@ neither has a `__main__.py`.
 
 | Package | Role |
 |---------|------|
-| `frontend/` | The API gateway: OpenAI-compatible HTTP and KServe gRPC endpoints. Carries a configuration-boundary rule in [`frontend/CLAUDE.md`](frontend/CLAUDE.md). |
+| `frontend/` | The API gateway: OpenAI-compatible HTTP and KServe gRPC endpoints. Carries a configuration-boundary rule in [`frontend/AGENTS.md`](frontend/AGENTS.md). |
 | `vllm/`, `sglang/`, `trtllm/` | The three engine backends. Each `README.md` points at the backend documentation; `sglang/` carries its own agent file. |
 | `tokenspeed/` | A further backend built on the same `LLMEngine` contract. |
 | `common/` | Shared library code for everything above: the backend framework, protocols, configuration, HTTP helpers, LoRA, multimodal, snapshot, and storage. `common/backend/` has its own agent file describing the `Worker`/`BaseEngine` lifecycle every engine implements. |
