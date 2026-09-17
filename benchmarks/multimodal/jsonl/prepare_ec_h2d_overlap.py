@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -67,6 +67,17 @@ def _sha256(path: Path) -> str:
 
 def count_tokens(tokenizer: Tokenizer, text: str) -> int:
     return len(tokenizer.encode(text, add_special_tokens=False))
+
+
+def tokenized_length(tokenized: Any) -> int:
+    """Count input IDs returned as a sequence or tokenizer batch encoding."""
+    if isinstance(tokenized, Mapping):
+        tokenized = tokenized["input_ids"]
+    if tokenized and isinstance(tokenized[0], Sequence):
+        if len(tokenized) != 1:
+            raise ValueError("expected exactly one rendered conversation")
+        tokenized = tokenized[0]
+    return len(tokenized)
 
 
 def make_exact_text(tokenizer: Tokenizer, target_tokens: int) -> str:
@@ -246,7 +257,7 @@ def main() -> None:
         },
         "user_text": USER_TEXT,
         "user_text_tokens": count_tokens(tokenizer, USER_TEXT),
-        "rendered_text_prompt_tokens": len(rendered_ids),
+        "rendered_text_prompt_tokens": tokenized_length(rendered_ids),
         "images": {
             "directory": str(args.image_dir),
             "count": len(image_pool),

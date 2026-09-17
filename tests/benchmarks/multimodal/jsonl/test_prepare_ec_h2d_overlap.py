@@ -11,6 +11,7 @@ import pytest
 from benchmarks.multimodal.jsonl.prepare_ec_h2d_overlap import (
     build_chat_template,
     make_exact_text,
+    tokenized_length,
     write_sliding_dataset,
 )
 
@@ -37,6 +38,16 @@ def test_exact_text_hits_requested_token_count() -> None:
     value = make_exact_text(tokenizer, 257)
 
     assert len(tokenizer.encode(value)) == 257
+
+
+@pytest.mark.parametrize(
+    ("tokenized", "expected"),
+    [([1, 2, 3], 3), ({"input_ids": [1, 2, 3]}, 3), ({"input_ids": [[1, 2, 3]]}, 3)],
+)
+def test_tokenized_length_accepts_sequence_and_batch_encoding_shapes(
+    tokenized: object, expected: int
+) -> None:
+    assert tokenized_length(tokenized) == expected
 
 
 def test_chat_template_prepends_system_message_only_when_missing() -> None:
