@@ -1041,7 +1041,9 @@ class TestReasoningParserOutputCapability:
             def extract_reasoning_streaming(self, *args):
                 return None
 
-        _ensure_reasoning_parser_output_capable("fake", WorkingParser, object(), {}, None)
+        _ensure_reasoning_parser_output_capable(
+            "fake", WorkingParser, object(), {}, None
+        )
 
     def test_probe_tolerates_other_empty_input_failures(self):
         from dynamo.frontend.vllm_processor import (
