@@ -494,7 +494,16 @@ impl SchedulingRequest {
     }
 
     pub fn worker_load_for(&self, worker: WorkerWithDpRank) -> WorkerLoadProjection {
-        self.worker_loads.get(&worker).copied().unwrap_or_default()
+        self.worker_loads
+            .get(&worker)
+            .copied()
+            .unwrap_or_else(|| WorkerLoadProjection {
+                // A configured worker can precede its load projection. With no
+                // active-prefix evidence, count the full tracked request rather
+                // than treating its blocks as already present on that worker.
+                additional_active_blocks: self.token_seq.as_ref().map_or(0, Vec::len),
+                ..Default::default()
+            })
     }
 
     pub(crate) fn request_blocks(&self, block_size: u32) -> u64 {
@@ -607,6 +616,19 @@ mod tests {
                 request.potential_decode_blocks_after_admission(worker, 16),
                 expected,
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_worker_projection_counts_the_full_request() {
+        let projected_worker = WorkerWithDpRank::new(0, 0);
+        let new_worker = WorkerWithDpRank::new(1, 0);
+        for (isl, tracked_blocks, expected) in [(32, None, 2), (32, Some(2), 2), (33, Some(2), 3)] {
+            let request = request_with_decode_load(isl, tracked_blocks, 100, 0, projected_worker);
+            assert_eq!(
+                request.potential_decode_blocks_after_admission(new_worker, 16),
+                expected
             );
         }
     }

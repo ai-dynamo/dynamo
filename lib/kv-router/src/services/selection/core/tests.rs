@@ -2093,6 +2093,67 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
     );
 }
 
+#[rstest::rstest]
+#[case::before_monitor(false)]
+#[case::after_monitor(true)]
+#[tokio::test]
+async fn ready_indexer_preserves_decode_projection_before_worker_monitor(
+    #[case] allow_monitor: bool,
+) {
+    use crate::services::indexer::backend::RemotePrimary;
+    struct ReadyIndexer;
+    #[async_trait::async_trait]
+    impl RemotePrimary for ReadyIndexer {
+        async fn find_matches_by_tier(
+            &self,
+            _: Vec<LocalBlockHash>,
+            _: bool,
+        ) -> anyhow::Result<TieredMatchDetails> {
+            Ok(TieredMatchDetails::default())
+        }
+        async fn record_routing_decision(
+            &self,
+            _: WorkerWithDpRank,
+            _: RoutingDecisionHashes,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn use_kv_events(&self) -> bool {
+            true
+        }
+    }
+    struct ReadyIngress;
+    #[async_trait::async_trait]
+    impl KvEventIngress for ReadyIngress {
+        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+            Indexer::Remote {
+                primary: Arc::new(ReadyIndexer),
+                approx: None,
+                primary_records_routing_decisions: false,
+            }
+        }
+    }
+    let core = core_with(
+        test_config(true),
+        SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(Arc::new(ReadyIngress)),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        },
+        None,
+        WorkerType::Aggregated,
+        None,
+    );
+    core.upsert_worker(worker(1)).await.unwrap();
+    if allow_monitor {
+        tokio::task::yield_now().await;
+    }
+    let response = core.select(select_request()).await.unwrap();
+    assert_eq!(response.potential_decode_blocks, 1);
+}
+
 #[tokio::test]
 async fn busy_evaluation_is_absent_without_thresholds_or_capacity() {
     let core = local_core(test_config(false));
