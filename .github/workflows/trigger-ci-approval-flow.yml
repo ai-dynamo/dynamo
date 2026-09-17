@@ -56,7 +56,6 @@ permissions:
 
 jobs:
   ok-to-test:
-    # GitHub account ID 282374502 belongs to glamr-agent.
     if: >-
       (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.fork) ||
       (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
@@ -319,8 +318,6 @@ jobs:
             echo "CI approval already posted for $PR_SHA."
             exit 0
           fi
-          # Reject requests if the base or head has changed. A later push is still possible,
-          # so the approval command must use the SHA checked by this workflow.
           pr=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER")
           jq -e --arg sha "$PR_SHA" --arg base "$PR_BASE" \
             '.state == "open" and .head.sha == $sha and .base.sha == $base' <<< "$pr" > /dev/null || exit 0
