@@ -60,9 +60,14 @@ type dgdElasticEPAutoscaleReconciler struct {
 	state map[string]*epAutoscaleState
 }
 
-// epAutoscaleState is the per-leader settle-window and fire-once memory. In-memory is enough
-// for a draft (it resets on operator restart, which only re-opens a settle window); the design
-// calls for recording the last-applied topology in status, which is the durable home.
+// epAutoscaleState is the per-leader settle-window and fire-once memory.
+//
+// In-memory on purpose, and sufficient: neither field is load-bearing for correctness. The
+// decision is level-triggered against the engine's own reported size (see reconcileComponent),
+// so losing this on an operator restart costs a re-opened settle window and at most one
+// redundant no-op call -- never a wrong scale. Recording the last-applied topology in status
+// would make it observable, which is worth doing for Phase 7b visibility, but it must remain a
+// de-duplication hint rather than a substitute for reading the engine.
 type epAutoscaleState struct {
 	lastObserved int
 	observedAt   time.Time
@@ -123,6 +128,28 @@ func (r *dgdElasticEPAutoscaleReconciler) reconcileComponent(
 	}
 	observed := dynamo.OwnedRayNodeCount(cap, ownedIPs)
 	desired := 1 + r.desiredFollowers(ctx, dgd, componentName)
+
+	// This loop is LEVEL-TRIGGERED, and that is what makes it safe to retry. Every pass
+	// re-reads the engine's own size and decides from state, never from a record of what it
+	// previously sent. A duplicate reconcile, a requeue, or an operator restart mid-call all
+	// converge: if the engine already moved, `current` reflects it and the decision is None.
+	// The endpoint helps here by taking a TARGET ("be N"), not a delta ("add one").
+	//
+	// The whole design therefore rests on ONE assumption, which is an engine contract and not
+	// something this operator can enforce: cap.DataParallelSize is an authoritative read of
+	// COMMITTED topology. Two ways that can be false, both of which break this loop:
+	//
+	//   - it reports the REQUESTED size rather than the effective one. The loop then sees
+	//     current == target while the engine has not committed, stops, and leaves joined
+	//     capacity unused with nothing to re-trigger it.
+	//   - it becomes readable before the commit completes. Mid-transition the loop reads a
+	//     size that is about to change and may issue a redundant rebuild against it.
+	//
+	// vllm-project/vllm#43202 plus its companion (fangyuchu/vllm#292) are what make this
+	// assumption true upstream: authoritative requested/effective topology status, and a fix
+	// to completion-publication ordering so a controller cannot observe "completed" before the
+	// committed topology is readable. Until those land, treat this reconciler's failure
+	// semantics as provisional -- which is part of why it is gated off by default.
 	decision := dynamo.DecideEPScale(cap.DataParallelSize, observed, desired)
 
 	// Phase 7b visibility: the three numbers that make the deployment's state legible from
@@ -153,6 +180,17 @@ func (r *dgdElasticEPAutoscaleReconciler) reconcileComponent(
 
 	// Fire once per change: reconcilers run continuously, and the endpoint takes a target, so a
 	// repeated call to the same size is at best wasteful and at worst a needless rebuild.
+	//
+	// This is an OPTIMIZATION, not the correctness mechanism -- the level-triggered decision
+	// above already suppresses a redundant call, because an engine that moved reports the new
+	// size as `current`. Losing this memory (an operator restart) costs at most one extra
+	// no-op call, never a wrong one.
+	//
+	// Do not "fix" that by persisting this to status and trusting it INSTEAD of the engine
+	// read. A stored last-applied value is a record of what we asked for, not of what the
+	// engine committed; preferring it would make the loop edge-triggered and blind to a scale
+	// that silently failed. If it is persisted later, it must stay a de-duplication hint that
+	// the engine read can always override.
 	if r.alreadyApplied(key, decision.Target) {
 		return nil
 	}
