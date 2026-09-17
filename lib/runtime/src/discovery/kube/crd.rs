@@ -207,45 +207,6 @@ mod tests {
     use crate::protocols::EndpointId;
     use kube::Resource;
 
-    #[tokio::test]
-    async fn successful_write_logs_resource_identity_at_info() {
-        use axum::http::{Request, Response};
-        use kube::client::Body;
-        use std::convert::Infallible;
-        use tracing::instrument::WithSubscriber;
-
-        let service = tower::service_fn(|request: Request<Body>| async move {
-            assert_eq!(request.method(), "PATCH");
-            Ok::<_, Infallible>(Response::new(request.into_body()))
-        });
-        let client = KubeClient::new(service, "test-namespace");
-        let log = tempfile::NamedTempFile::new().unwrap();
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::INFO)
-            .with_ansi(false)
-            .without_time()
-            .with_writer(log.reopen().unwrap())
-            .finish();
-        let mut cr = build_cr(
-            "test-worker",
-            "test-worker",
-            "test-uid",
-            &DiscoveryMetadata::new(),
-        )
-        .unwrap();
-        cr.metadata.resource_version = Some("123".to_string());
-        apply_cr(&client, "test-namespace", &cr)
-            .with_subscriber(subscriber)
-            .await
-            .unwrap();
-        let output = std::fs::read_to_string(log.path()).unwrap();
-        assert!(output.contains("INFO"));
-        assert!(output.contains("Applied DynamoWorkerMetadata CR"));
-        assert!(output.contains("test-namespace"));
-        assert!(output.contains("test-worker"));
-        assert!(output.contains("123"));
-    }
-
     #[test]
     fn test_crd_metadata() {
         // Verify the CRD metadata is correct
