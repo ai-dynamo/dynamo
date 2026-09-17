@@ -19,14 +19,16 @@ mod filter;
 mod publisher;
 mod tap;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::{Context, Result};
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::environment_names::llm::shadow::DYN_SHADOW_TAP_CONFIG;
 use dynamo_runtime::metrics::MetricsHierarchy;
 use dynamo_runtime::transports::event_plane::EventPublisher;
+use tokio_util::sync::CancellationToken;
 
 pub use config::{Capture, ResponseOptions, ShadowConfig, TapSpec};
 pub use envelope::{
@@ -35,7 +37,33 @@ pub use envelope::{
 pub(crate) use tap::ShadowTap;
 use tap::{TapCounters, TapQueue};
 
-static TAPS: OnceLock<Vec<Arc<TapQueue>>> = OnceLock::new();
+/// The tap queues of one runtime, shared by every pipeline it builds.
+pub(crate) type ShadowTaps = Arc<[Arc<TapQueue>]>;
+
+/// Taps belong to the `DistributedRuntime` that created them: their
+/// publishers use its transport and stop on its shutdown token. One process
+/// can hold several runtimes, at once or one after another, so a process-wide
+/// tap set would hand a second runtime queues that nothing drains.
+#[derive(Default)]
+struct Registry(Mutex<HashMap<u64, (ShadowTaps, CancellationToken)>>);
+
+impl Registry {
+    fn live(&self, runtime_id: u64) -> Option<ShadowTaps> {
+        let runtimes = self.0.lock().expect("shadow tap registry poisoned");
+        runtimes
+            .get(&runtime_id)
+            .filter(|(_, shutdown)| !shutdown.is_cancelled())
+            .map(|(taps, _)| Arc::clone(taps))
+    }
+
+    fn insert(&self, runtime_id: u64, taps: ShadowTaps, shutdown: CancellationToken) {
+        let mut runtimes = self.0.lock().expect("shadow tap registry poisoned");
+        runtimes.retain(|_, (_, shutdown)| !shutdown.is_cancelled());
+        runtimes.insert(runtime_id, (taps, shutdown));
+    }
+}
+
+static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default);
 
 /// Read the tap config and start one publisher task per tap. A frontend whose
 /// config is wrong must not start: a typo in a filter name would otherwise
@@ -44,8 +72,9 @@ pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
     let Some(path) = std::env::var_os(DYN_SHADOW_TAP_CONFIG).filter(|path| !path.is_empty()) else {
         return Ok(());
     };
-    // Several inputs can share one process; the taps belong to the process.
-    if TAPS.get().is_some() {
+    // Several inputs can share one runtime.
+    let runtime_id = drt.connection_id();
+    if REGISTRY.live(runtime_id).is_some() {
         return Ok(());
     }
     let config = ShadowConfig::from_path(&PathBuf::from(path))?;
@@ -72,9 +101,18 @@ pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
     let mut taps = Vec::with_capacity(config.taps.len());
     for spec in config.taps {
         let name = spec.name.to_string();
-        let publisher = EventPublisher::for_namespace(&namespace, spec.topic.clone())
-            .await
-            .with_context(|| format!("shadow tap `{name}`: creating publisher"))?;
+        // `capacity` bounds what the frontend holds for a shadow that has
+        // stopped reading. The ZMQ socket queues behind the tap queue, and its
+        // default mark of 100,000 messages would let long prompts reach
+        // gigabytes, so it gets the same bound.
+        let send_hwm = i32::try_from(spec.capacity).unwrap_or(i32::MAX);
+        let publisher = EventPublisher::for_namespace_with_zmq_send_hwm(
+            &namespace,
+            spec.topic.clone(),
+            send_hwm,
+        )
+        .await
+        .with_context(|| format!("shadow tap `{name}`: creating publisher"))?;
         tracing::info!(
             tap = name,
             namespace = config.namespace,
@@ -99,14 +137,59 @@ pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
         taps.push(queue);
     }
 
-    TAPS.set(taps)
-        .map_err(|_| anyhow::anyhow!("shadow taps are already initialized"))
+    REGISTRY.insert(runtime_id, taps.into(), drt.child_token());
+    Ok(())
 }
 
-/// The tap operator for a pipeline being built, or `None` when no taps are
-/// configured and nothing is linked.
-pub(crate) fn tap_for(origin: ShadowOrigin) -> Option<Arc<ShadowTap>> {
-    TAPS.get()
-        .filter(|taps| !taps.is_empty())
-        .map(|taps| ShadowTap::new(taps.clone(), origin))
+/// The taps of a runtime, or `None` when it has none and nothing is linked.
+pub(crate) fn taps_for(drt: &DistributedRuntime) -> Option<ShadowTaps> {
+    REGISTRY.live(drt.connection_id())
+}
+
+pub(crate) fn tap_for(taps: &ShadowTaps, origin: ShadowOrigin) -> Arc<ShadowTap> {
+    ShadowTap::new(taps.to_vec(), origin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn taps() -> ShadowTaps {
+        let config =
+            ShadowConfig::from_yaml("schema_version: 1\ntaps:\n  - {name: t, capture: request}\n")
+                .unwrap();
+        config
+            .taps
+            .into_iter()
+            .map(|spec| TapQueue::new(spec, tap::tests::counters()).0)
+            .collect()
+    }
+
+    #[test]
+    fn taps_belong_to_one_runtime_and_end_with_it() {
+        let registry = Registry::default();
+        let first = CancellationToken::new();
+        registry.insert(1, taps(), first.clone());
+
+        assert!(registry.live(1).is_some());
+        assert!(
+            registry.live(2).is_none(),
+            "another runtime has no taps yet"
+        );
+
+        first.cancel();
+        assert!(
+            registry.live(1).is_none(),
+            "a stopped runtime has no live taps"
+        );
+
+        let second = taps();
+        registry.insert(2, Arc::clone(&second), CancellationToken::new());
+        assert!(Arc::ptr_eq(&registry.live(2).unwrap(), &second));
+        assert_eq!(
+            registry.0.lock().unwrap().len(),
+            1,
+            "stopped runtimes are pruned"
+        );
+    }
 }

@@ -334,6 +334,7 @@ impl EventPublisher {
             },
             topic.into(),
             transport_kind,
+            None,
         )
         .await
     }
@@ -362,6 +363,7 @@ impl EventPublisher {
             },
             topic.into(),
             transport_kind,
+            None,
         )
         .await
     }
@@ -389,7 +391,7 @@ impl EventPublisher {
             namespace: comp.namespace().name(),
             component: comp.name().to_string(),
         };
-        Self::new_internal(drt, scope, topic.into(), transport_kind).await
+        Self::new_internal(drt, scope, topic.into(), transport_kind, None).await
     }
 
     /// Create a publisher for a namespace-scoped topic.
@@ -412,7 +414,26 @@ impl EventPublisher {
     ) -> Result<Self> {
         let drt = ns.drt();
         let scope = EventScope::Namespace { name: ns.name() };
-        Self::new_internal(drt, scope, topic.into(), transport_kind).await
+        Self::new_internal(drt, scope, topic.into(), transport_kind, None).await
+    }
+
+    /// Create a namespace publisher whose ZMQ socket queues at most
+    /// `zmq_send_hwm` messages for each subscriber that has stopped reading.
+    ///
+    /// The default mark suits small events. A publisher of large messages
+    /// lowers it, because the queue lives in the publishing process: one
+    /// stalled subscriber otherwise holds the default 100,000 messages of
+    /// memory there. The mark has no effect on the NATS transport, where the
+    /// server owns the subscriber queues.
+    pub async fn for_namespace_with_zmq_send_hwm(
+        ns: &Namespace,
+        topic: impl Into<String>,
+        zmq_send_hwm: i32,
+    ) -> Result<Self> {
+        let drt = ns.drt();
+        let scope = EventScope::Namespace { name: ns.name() };
+        let transport_kind = drt.default_event_transport_kind();
+        Self::new_internal(drt, scope, topic.into(), transport_kind, Some(zmq_send_hwm)).await
     }
 
     async fn new_internal(
@@ -420,7 +441,9 @@ impl EventPublisher {
         scope: EventScope,
         topic: String,
         transport_kind: EventTransportKind,
+        zmq_send_hwm: Option<i32>,
     ) -> Result<Self> {
+        let zmq_send_hwm = zmq_send_hwm.unwrap_or(zmq_transport::DEFAULT_SNDHWM);
         // Publishers are discovery objects in their own right. A single process
         // can host multiple publishers for the same scope/topic, each with its
         // own ZMQ endpoint and sequence space, so the process ID is not unique
@@ -455,16 +478,13 @@ impl EventPublisher {
                 // Check for broker mode
                 if let Some(broker) = resolve_zmq_broker(drt, &scope).await? {
                     // BROKER MODE: Connect to broker (single or multiple endpoints)
-                    let pub_transport = if broker.xsub_endpoints.len() == 1 {
-                        zmq_transport::ZmqPubTransport::connect(&broker.xsub_endpoints[0], &subject)
-                            .await?
-                    } else {
-                        zmq_transport::ZmqPubTransport::connect_multiple(
+                    let pub_transport =
+                        zmq_transport::ZmqPubTransport::connect_multiple_with_sndhwm(
                             &broker.xsub_endpoints,
                             &subject,
+                            zmq_send_hwm,
                         )
-                        .await?
-                    };
+                        .await?;
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
                     TransportSetup::ZmqBroker(
@@ -482,7 +502,11 @@ impl EventPublisher {
                                 .build()
                                 .context("Failed to create Tokio runtime for ZMQ")?;
 
-                            rt.block_on(ZmqPubTransport::bind("tcp://0.0.0.0:0", &topic))
+                            rt.block_on(ZmqPubTransport::bind_with_sndhwm(
+                                "tcp://0.0.0.0:0",
+                                &topic,
+                                zmq_send_hwm,
+                            ))
                         }
                     })
                     .join()

@@ -55,6 +55,7 @@ pub struct PreprocessedRouting {
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
+    shadow_taps: Option<crate::shadow::ShadowTaps>,
 }
 
 pub struct PreparedEngine {
@@ -315,6 +316,10 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         backend_engine,
         prefill_router,
         encoder_router,
+        shadow_taps: {
+            use dynamo_runtime::traits::DistributedRuntimeProvider;
+            crate::shadow::taps_for(client.endpoint.component().drt())
+        },
     })
 }
 
@@ -515,8 +520,10 @@ impl PreprocessedRouting {
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-        let shadow_tap = crate::shadow::tap_for(shadow_origin::<Req>())
-            .map(|tap| tap.into_operator_for::<BackendOutput>());
+        let shadow_tap = self.shadow_taps.as_ref().map(|taps| {
+            crate::shadow::tap_for(taps, shadow_origin::<Req>())
+                .into_operator_for::<BackendOutput>()
+        });
         let migration_in = migration.forward_edge();
         let preprocessed = frontend.link(preprocessor_op.forward_edge())?;
         match &shadow_tap {
@@ -567,8 +574,10 @@ impl PreprocessedRouting {
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-        let shadow_tap = crate::shadow::tap_for(ShadowOrigin::Preprocessed)
-            .map(|tap| tap.into_operator_for::<LLMEngineOutput>());
+        let shadow_tap = self.shadow_taps.as_ref().map(|taps| {
+            crate::shadow::tap_for(taps, ShadowOrigin::Preprocessed)
+                .into_operator_for::<LLMEngineOutput>()
+        });
         let migration_in = migration.forward_edge();
         match &shadow_tap {
             Some(tap) => frontend

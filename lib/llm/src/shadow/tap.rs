@@ -107,7 +107,6 @@ impl TapQueue {
     }
 }
 
-/// A projected request that has not been queued yet.
 struct Pending {
     request_id: String,
     origin: ShadowOrigin,
@@ -158,7 +157,8 @@ impl ShadowTap {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos() as u64);
 
-        // Taps with the same filter set share one copy.
+        // Each distinct filter set is copied at most once per request, however
+        // many taps use it.
         let mut copies: Vec<(Projection, Arc<PreprocessedRequest>)> = Vec::new();
         let mut recorders = Vec::new();
 
@@ -370,7 +370,7 @@ impl Drop for Recorder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::BTreeMap;
 
     use dynamo_runtime::pipeline::{AsyncEngine, Context};
@@ -378,7 +378,7 @@ mod tests {
     use super::*;
     use crate::shadow::config::ShadowConfig;
 
-    fn counters() -> TapCounters {
+    pub(in crate::shadow) fn counters() -> TapCounters {
         let counter = |name: &str| IntCounter::new(name, name).unwrap();
         TapCounters {
             queued: counter("queued"),

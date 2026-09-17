@@ -88,7 +88,6 @@ fn default_true() -> bool {
     true
 }
 
-/// One validated tap.
 #[derive(Debug, Clone)]
 pub struct TapSpec {
     pub name: Arc<str>,
