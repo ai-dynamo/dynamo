@@ -747,6 +747,7 @@ impl Indexer {
             Indexer::Single {
                 primary,
                 lower_tier,
+                ..
             } => {
                 primary.flush_and_wait().await?;
                 lower_tier
@@ -754,6 +755,7 @@ impl Indexer {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => {
                 primary.flush_and_wait().await?;
                 lower_tier
