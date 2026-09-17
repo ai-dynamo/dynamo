@@ -47,7 +47,7 @@ To run separate prefill and decode engines on two GPUs:
 ./lib/sidecar/vllm/launch/disagg.sh --model Qwen/Qwen3-0.6B
 ```
 
-For image requests, run a separate encoder with an aggregated prefill/decode engine on two GPUs:
+For image and video requests, run a separate encoder with an aggregated prefill/decode engine on two GPUs:
 
 ```bash
 ./lib/sidecar/vllm/launch/disagg_multimodal_e_pd.sh
@@ -59,7 +59,25 @@ To separate encoder, prefill, and decode across three GPUs:
 ./lib/sidecar/vllm/launch/disagg_multimodal_epd.sh
 ```
 
-The encoder-disaggregated launchers currently support images only. They use `Qwen/Qwen2.5-VL-3B-Instruct` and vLLM's `ECExampleConnector`, and require the producer and consumer to share the same EC storage path. E+P+D requires vLLM Rust frontend support for metadata-only remote-prefill decode from [vLLM #54814](https://github.com/vllm-project/vllm/pull/54814) or a later release containing it. Decode uses NIXL without an EC connector because the gRPC frontend removes EC parameters before submitting the request to EngineCore.
+The encoder-disaggregated launchers support images, videos, and mixed image/video requests. They use `Qwen/Qwen2.5-VL-3B-Instruct` and vLLM's `ECExampleConnector`, and require the producer and consumer to share the same EC storage path. E+P+D requires vLLM Rust frontend support for metadata-only remote-prefill decode from [vLLM #54814](https://github.com/vllm-project/vllm/pull/54814) or a later release containing it. Decode uses NIXL without an EC connector because the gRPC frontend removes EC parameters before submitting the request to EngineCore.
+
+Send videos as `video_url` content parts with HTTP(S) URLs or `data:video/...;base64,...` URIs. Set the engine's `--limit-mm-per-prompt` to allow the number of videos in each request. The native vLLM Rust frontend must support the model's video processor; audio Encode requests remain unsupported.
+
+```json
+{
+  "model": "Qwen/Qwen2.5-VL-3B-Instruct",
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+      {"type": "text", "text": "Describe what happens in this video."}
+    ]
+  }],
+  "max_tokens": 128
+}
+```
+
+The sidecar forwards the original video and optional media UUID to each stage. The encoder publishes embeddings through the EC connector; P or PD retrieves those embeddings after native video preprocessing reconstructs the prompt metadata. This path does not use the Python EPD proxy's `video_embeds` metadata-only rewrite. Use matching model and media-processing settings on all stages.
 
 Each launcher starts the Dynamo frontend, the vLLM engine process or processes,
 and the matching sidecar workers. It binds the native gRPC endpoints to

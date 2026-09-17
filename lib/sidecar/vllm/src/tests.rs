@@ -2011,7 +2011,7 @@ fn unsafe_media_uuids_are_rejected() {
 }
 
 #[test]
-fn encode_requests_reject_non_image_media() {
+fn encode_requests_reject_audio_media() {
     let mut request = epd_image_request();
     request.multi_modal_data.as_mut().unwrap().insert(
         "audio_url".to_string(),
@@ -2025,8 +2025,90 @@ fn encode_requests_reject_non_image_media() {
         "encode-audio".to_string(),
         DisaggregationMode::Encode,
     )
-    .expect_err("Encode must remain image-only");
-    assert!(error.to_string().contains("image media only"));
+    .expect_err("Encode must reject audio");
+    assert!(error.to_string().contains("image and video media only"));
+}
+
+#[test]
+fn video_media_and_cache_identity_survive_epd_roles() {
+    for has_image in [false, true] {
+        let mut request = epd_image_request();
+        if !has_image {
+            request.multi_modal_data.as_mut().unwrap().clear();
+            request.multi_modal_uuids.as_mut().unwrap().clear();
+        }
+        request.multi_modal_data.as_mut().unwrap().insert(
+            "video_url".to_string(),
+            vec![
+                MultimodalData::RawUrl("https://example.com/clip.mp4".to_string()),
+                MultimodalData::RawUrl("data:video/mp4;base64,dmlkZW8=".to_string()),
+            ],
+        );
+        request.multi_modal_uuids.as_mut().unwrap().insert(
+            "video_url".to_string(),
+            vec![Some("video-a".to_string()), None],
+        );
+        for mode in [
+            DisaggregationMode::Encode,
+            DisaggregationMode::Aggregated,
+            DisaggregationMode::Prefill,
+            DisaggregationMode::Decode,
+        ] {
+            let mut request = request.clone();
+            if !mode.is_encode() {
+                request.encoder_result = Some(encoder_handoff());
+            }
+            if mode.is_decode() {
+                request.prefill_result = Some(PrefillResult {
+                    disaggregated_params: json!({"remote_host": "127.0.0.1"}),
+                    prompt_tokens_details: None,
+                });
+            }
+            let wire = build_generate_request(request, "video-epd".to_string(), mode)
+                .expect("video EPD request");
+            let videos: Vec<_> = wire
+                .media
+                .iter()
+                .filter(|media| media.modality == pb::Modality::Video as i32)
+                .collect();
+            assert_eq!(videos.len(), 2);
+            assert_eq!(videos[0].uuid, "video-a");
+            assert!(videos[1].uuid.is_empty());
+            assert!(matches!(
+                videos[0].source,
+                Some(pb::media_item::Source::Url(_))
+            ));
+            assert!(matches!(
+                videos[1].source,
+                Some(pb::media_item::Source::DataUri(_))
+            ));
+            if !mode.is_encode() {
+                assert_eq!(
+                    struct_to_json(wire.kv.unwrap().ec_transfer_params.unwrap()).unwrap(),
+                    encoder_handoff()
+                );
+            }
+        }
+    }
+    let mut request = epd_image_request();
+    request.multi_modal_data.as_mut().unwrap().insert(
+        "video_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/clip.mp4".to_string(),
+        )],
+    );
+    request
+        .multi_modal_uuids
+        .as_mut()
+        .unwrap()
+        .insert("video_url".to_string(), vec![Some("../escape".to_string())]);
+    let error = build_generate_request(
+        request,
+        "unsafe-video".to_string(),
+        DisaggregationMode::Encode,
+    )
+    .expect_err("unsafe video UUID");
+    assert!(error.to_string().contains("safe identifier"));
 }
 
 #[tokio::test]

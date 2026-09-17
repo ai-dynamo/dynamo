@@ -381,13 +381,13 @@ fn validate_multimodal_cache_uuids(request: &PreprocessedRequest) -> Result<(), 
         return Ok(());
     };
     for (modality, uuids) in uuids_by_modality {
-        if modality != IMAGE_URL_KEY
+        if !matches!(modality.as_str(), IMAGE_URL_KEY | VIDEO_URL_KEY)
             && uuids
                 .iter()
                 .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
         {
             return Err(client::invalid_argument(format!(
-                "multimodal cache UUIDs are supported only for {IMAGE_URL_KEY}; got non-empty multi_modal_uuids.{modality}"
+                "multimodal cache UUIDs are supported only for {IMAGE_URL_KEY} and {VIDEO_URL_KEY}; got non-empty multi_modal_uuids.{modality}"
             )));
         }
     }
@@ -530,11 +530,17 @@ fn build_media(
                     ));
                 }
             };
-            let uuid = if modality == pb::Modality::Image {
+            let uuid = if matches!(modality, pb::Modality::Image | pb::Modality::Video) {
                 uuids
                     .and_then(|uuids| uuids.get(index))
                     .and_then(Clone::clone)
-                    .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
+                    .or_else(|| {
+                        if modality == pb::Modality::Image {
+                            forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned()
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_default()
             } else {
                 String::new()
@@ -793,13 +799,13 @@ fn validate_request(
     }
     if mode.is_encode()
         && request.multi_modal_data.as_ref().is_some_and(|media| {
-            media
-                .iter()
-                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
+            media.iter().any(|(modality, items)| {
+                !matches!(modality.as_str(), IMAGE_URL_KEY | VIDEO_URL_KEY) && !items.is_empty()
+            })
         })
     {
         return Err(client::invalid_argument(
-            "encode requests support image media only",
+            "encode requests support image and video media only",
         ));
     }
     if mode.is_encode() && request.encoder_result.is_some() {

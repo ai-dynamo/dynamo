@@ -41,7 +41,7 @@ It is a standalone Rust executable and is also compiled into
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The sidecar does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The sidecar does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio cache UUIDs. Encoder disaggregation supports images and videos, including mixed image/video requests. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -150,6 +150,8 @@ Aggregated serving is the default. The sidecar role is configured explicitly bec
 - E+P+D decode: `--disaggregation-mode decode`
 
 ### Encoder disaggregation
+
+Video requests use `video_url` content parts with HTTP(S) or base64 data URIs. Optional image and video UUIDs retain the same identity through E, P/PD, and D. Each native frontend preprocesses the original media; the sidecar does not use the Python EPD proxy's metadata-only `video_embeds` rewrite. Match the model and media-processing settings across stages.
 
 Encoder disaggregation uses Dynamo's Encode worker discovery and routing contract. All media items in one request are sent together to one Encode worker; per-item fan-out is not supported. Text-only requests bypass Encode workers. If the encoder hop fails, the downstream request retains its original media and vLLM encodes it inline.
 
