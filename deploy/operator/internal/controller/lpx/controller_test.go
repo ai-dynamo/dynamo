@@ -41,13 +41,15 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		replicas    *int32
+		seed        int32
 		err         error
 		wantUpdates int
 	}{
 		{name: "scale out", replicas: ptr.To(int32(12)), wantUpdates: 1},
 		{name: "scale in", replicas: ptr.To(int32(2)), wantUpdates: 1},
 		{name: "unchanged", replicas: ptr.To(int32(9))},
-		{name: "omitted"},
+		{name: "omitted scale out", seed: 3},
+		{name: "omitted scale in", seed: 12},
 		{name: "conflict", replicas: ptr.To(int32(12)), err: conflict, wantUpdates: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -56,10 +58,26 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 			lpx.ServingComponent(source).Replicas = tc.replicas
 			r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, source)
 			objects := lpxMaterializedObjects(t, r, child, source, selected)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			if tc.replicas == nil {
+				pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas = ptr.To(tc.seed)
+			}
+			hash, err := commoncontroller.GetSpecHash(pcs, commoncontroller.WithPreservedListOrder())
+			require.NoError(t, err)
+			metav1.SetMetaDataAnnotation(&pcs.ObjectMeta, commoncontroller.NvidiaAnnotationHashKey, hash)
+			metav1.SetMetaDataAnnotation(&pcs.ObjectMeta, commoncontroller.NvidiaAnnotationGenerationKey, "1")
 			group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
 			group.Spec.Replicas = 9
 			createLPXTestObjects(t, t.Context(), r.Client, objects...)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+			beforePCS := pcs.DeepCopy()
+
+			t.Log("Rebuild scheduler intent from explicit replicas or the current native scale")
+			selected, rejected := requirePreparedLPX(t, r, t.Context(), child, source)
+			require.Nil(t, rejected)
+			require.Equal(t, ptr.Deref(tc.replicas, int32(9)), selected.plan.Replicas)
+			require.Len(t, selected.requests, int(selected.plan.Replicas))
 			updates := 0
 			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 				SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
@@ -78,7 +96,7 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 			})
 
 			t.Log("Only explicit changes write scale, preserving the observed resource-version precondition")
-			_, _, err := r.reconcileWorkload(t.Context(), child, source, selected)
+			_, _, err = r.reconcileWorkload(t.Context(), child, source, selected)
 			require.ErrorIs(t, err, tc.err)
 			require.Equal(t, tc.wantUpdates, updates)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
@@ -87,6 +105,10 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 				want = *tc.replicas
 			}
 			require.Equal(t, want, group.Spec.Replicas)
+
+			t.Log("Native scale never rewrites the parent PCS seed or its bookkeeping")
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+			require.Equal(t, beforePCS, pcs)
 		})
 	}
 }
@@ -973,7 +995,7 @@ func TestLPXPublicationFencesLiveSourceAndChildMetadata(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(source), liveSource))
 	liveSource.Annotations[consts.KubeAnnotationEnableMetrics] = "false"
 	require.NoError(t, r.Update(t.Context(), liveSource))
-	_, _, retiring, err := r.reconcileGrovePodCliqueSetForLPX(t.Context(), child, nil, pcs)
+	_, _, retiring, err := r.reconcileGrovePodCliqueSetForLPX(t.Context(), child, lpx.ServingComponent(source).Replicas, nil, pcs)
 	require.ErrorContains(t, err, "input revision")
 	require.Nil(t, retiring)
 	allPCS := &grovev1alpha1.PodCliqueSetList{}

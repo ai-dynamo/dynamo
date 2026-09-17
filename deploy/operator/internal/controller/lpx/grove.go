@@ -26,11 +26,12 @@ import (
 )
 
 // reconcileGrovePodCliqueSetForLPX converges the already-rendered PodCliqueSet
-// through native Grove rollout. Only existingPodCliqueSet may be nil, when
-// the controller observed no PCS; all decisions and writes use that observation.
+// through native Grove rollout. existingPodCliqueSet may be nil when absent;
+// nil replicas leaves scale to Grove. deployment and desired are non-nil.
 func (r *graphReconciler) reconcileGrovePodCliqueSetForLPX(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	replicas *int32,
 	existingPodCliqueSet *grovev1alpha1.PodCliqueSet,
 	desired *grovev1alpha1.PodCliqueSet,
 ) (*grovev1alpha1.PodCliqueSet, bool, *lpxRetiring, error) {
@@ -42,6 +43,17 @@ func (r *graphReconciler) reconcileGrovePodCliqueSetForLPX(
 		retiring, err := r.retireFirstOwnedLPXRequest(ctx, deployment, desired.Name, "LPX publication was retired before synchronizing a Grove PodCliqueSet spec change")
 		if err != nil || retiring != nil {
 			return nil, false, retiring, err
+		}
+	}
+
+	// Grove seeds native scale only at creation; preserve that seed when replicas are omitted.
+	if existingPodCliqueSet != nil && replicas == nil {
+		group := &desired.Spec.Template.PodCliqueScalingGroupConfigs[0]
+		for _, existing := range existingPodCliqueSet.Spec.Template.PodCliqueScalingGroupConfigs {
+			if existing.Name == group.Name {
+				group.Replicas = existing.Replicas
+				break
+			}
 		}
 	}
 

@@ -278,7 +278,7 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 			return state, ctrl.Result{}, err
 		}
 	}
-	synced, changed, retiring, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, pcs, desired)
+	synced, changed, retiring, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, lpx.ServingComponent(source).Replicas, pcs, desired)
 	if err != nil {
 		return state, ctrl.Result{}, err
 	}

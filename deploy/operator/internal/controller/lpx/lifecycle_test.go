@@ -693,7 +693,7 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	})
 
 	t.Log("Only bookkeeping changes; root metadata additions, edits and removals are ignored")
-	synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, cached, desired)
+	synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, cached, desired)
 	require.NoError(t, err)
 	require.Nil(t, retiring)
 	require.True(t, modified)
@@ -706,7 +706,7 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 
 	t.Log("Root metadata differences alone are a no-op once bookkeeping is current")
 	updates = 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, synced, desired)
+	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, synced, desired)
 	require.NoError(t, err)
 	require.Nil(t, retiring)
 	require.False(t, modified)
@@ -715,7 +715,7 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 
 	t.Log("Template metadata still updates through Spec without changing root metadata or native controls")
 	desired.Spec.Template.Cliques[0].Annotations = map[string]string{"test.example/template": "next"}
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, synced, desired)
+	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, synced, desired)
 	require.NoError(t, err)
 	require.Nil(t, retiring)
 	require.True(t, modified)
@@ -735,7 +735,7 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	require.NoError(t, base.Update(ctx, concurrent))
 	desired.Spec.Replicas += 2
 	updates = 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, cached, desired)
+	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, cached, desired)
 	require.True(t, apierrors.IsConflict(err), "concurrent spec change must trigger a fresh reconciliation: %v", err)
 	require.Nil(t, retiring)
 	require.Nil(t, synced)
@@ -757,7 +757,7 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 			desired.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers = []corev1.Container{
 				{Name: "setup", Image: "busybox"}, {Name: "migrate", Image: "busybox"},
 			}
-			observed, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, nil, desired.DeepCopy())
+			observed, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
 			require.NoError(t, err)
 			require.Nil(t, retiring)
 			require.True(t, modified)
@@ -773,7 +773,7 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 			}
 
 			t.Log("Apply authored ordering changes but ignore unchanged desired specs")
-			synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, observed, desired)
+			synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, observed, desired)
 			require.NoError(t, err)
 			require.Nil(t, retiring)
 			require.Equal(t, reorder, modified)
@@ -784,7 +784,7 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 			}
 
 			t.Log("The next reconciliation is a no-op")
-			_, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, synced, desired)
+			_, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, synced, desired)
 			require.NoError(t, err)
 			require.Nil(t, retiring)
 			require.False(t, modified)
@@ -826,7 +826,7 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	})
 
 	t.Log("A failed publication observation prevents initial creation")
-	synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, nil, desired.DeepCopy())
+	synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
 	require.ErrorIs(t, err, fenceErr)
 	require.Nil(t, retiring)
 	require.False(t, modified)
@@ -842,7 +842,7 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	request.Finalizers = []string{"test.example/scheduler"}
 	require.NoError(t, base.Create(ctx, request))
 	writes, lists = 0, 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, nil, desired.DeepCopy())
+	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
 	require.NoError(t, err)
 	require.NotNil(t, retiring)
 	require.False(t, modified)
@@ -856,7 +856,7 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	request.Finalizers = nil
 	require.NoError(t, base.Update(ctx, request))
 	writes, lists = 0, 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, nil, desired.DeepCopy())
+	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
 	require.NoError(t, err)
 	require.Nil(t, retiring)
 	require.True(t, modified)
@@ -875,7 +875,7 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	require.Equal(t, stored.ResourceVersion, synced.ResourceVersion)
 
 	t.Log("A stale missing observation does not adopt an already-created PCS")
-	_, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, nil, desired.DeepCopy())
+	_, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
 	require.True(t, apierrors.IsAlreadyExists(err), "create race must trigger a fresh reconciliation: %v", err)
 	require.Nil(t, retiring)
 	require.False(t, modified)
@@ -888,7 +888,7 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	desired.Annotations[lpx.WorkloadDigestAnnotation] = "next"
 	failFence = true
 	writes, lists = 0, 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, live, desired)
+	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, live, desired)
 	require.NoError(t, err)
 	require.Nil(t, retiring)
 	require.True(t, modified)
@@ -924,6 +924,7 @@ func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 	_, _, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(
 		ctx,
 		dgd,
+		lpx.ServingComponent(source).Replicas,
 		drifted,
 		rendered,
 	)
@@ -975,6 +976,7 @@ func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 	_, _, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(
 		ctx,
 		dgd,
+		lpx.ServingComponent(source).Replicas,
 		drifted,
 		rendered,
 	)
@@ -1046,6 +1048,7 @@ func TestGroveSpecSyncPreservesWorkloadAfterTopologyRejection(t *testing.T) {
 	synced, changed, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(
 		ctx,
 		successorDGD,
+		lpx.ServingComponent(successorSource).Replicas,
 		pcs,
 		successorRendered,
 	)
