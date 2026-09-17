@@ -664,6 +664,7 @@ mod tests {
             live_socket,
             Some(replay_socket.clone()),
             watermark.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
         let replayed = tokio::time::timeout(Duration::from_secs(5), listener.replay_gap(0, 2))
             .await
