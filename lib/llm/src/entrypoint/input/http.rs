@@ -91,7 +91,10 @@ impl HttpFrontend {
         // this runtime's token.
         let active_input = crate::request_trace::ActiveInput::register();
 
-        super::initialize_input(&distributed_runtime, &engine_config).await;
+        if let Err(error) = super::initialize_input(&distributed_runtime, &engine_config).await {
+            active_input.release_and_drain().await;
+            return Err(error);
+        }
 
         let result = match self.worker_selection_policy_factory {
             Some(factory) => {

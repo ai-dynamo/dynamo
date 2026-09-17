@@ -122,8 +122,11 @@ pub async fn run_input_with_frontend_route_extensions(
     // caller's token, and this input owns their teardown.
     let active_input = crate::request_trace::ActiveInput::register();
 
-    if !matches!(&in_opt, Input::Http) {
-        initialize_input(&drt, &engine_config).await;
+    if !matches!(&in_opt, Input::Http)
+        && let Err(error) = initialize_input(&drt, &engine_config).await
+    {
+        active_input.release_and_drain().await;
+        return Err(error);
     }
 
     let result = match in_opt {
@@ -153,7 +156,11 @@ pub async fn run_input_with_frontend_route_extensions(
 pub(crate) async fn initialize_input(
     drt: &dynamo_runtime::DistributedRuntime,
     engine_config: &super::EngineConfig,
-) {
+) -> anyhow::Result<()> {
+    // Unlike the trace sinks below, a bad shadow tap config stops the
+    // frontend: a mistyped filter must not mirror more than was intended.
+    crate::shadow::init_from_env(drt).await?;
+
     if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
         tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");
     }
@@ -165,4 +172,5 @@ pub(crate) async fn initialize_input(
     {
         tracing::warn!(error = %e, "Request trace tool event ingest initialization failed; continuing without request trace tool events");
     }
+    Ok(())
 }

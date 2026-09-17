@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example shadow tap config. Point DYN_SHADOW_TAP_CONFIG at this file.
+schema_version: 1
+# Namespace the taps publish in. Consumers subscribe in the same one.
+namespace: dynamo
+
+taps:
+  # Request only, published as soon as the request passes the tap.
+  - name: kv-history-tracker
+    topic: kv-history-tracker
+    capture: request
+    filters: [tokens-only]
+    capacity: 4096
+
+  # Request, the response the primary produced, and the arrival time, in one
+  # record published when the response stream ends.
+  - name: shadow-replay
+    topic: shadow-replay
+    capture: request_response
+    emit: joined
+    filters: [strip-multimodal, strip-embeds]
+    response:
+      tokens: true
+      chunk_timing: false
+    capacity: 1024

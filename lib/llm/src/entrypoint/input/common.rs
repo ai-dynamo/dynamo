@@ -25,6 +25,7 @@ use crate::{
     protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
+    shadow::ShadowOrigin,
     types::{
         Annotated,
         openai::chat_completions::{
@@ -483,6 +484,23 @@ where
         .link_terminal(frontend)?)
 }
 
+/// The shadow tap sits below the point where the public APIs become one type.
+/// The request type the pipeline was built for is all it can know of the
+/// origin.
+fn shadow_origin<Req: 'static>() -> ShadowOrigin {
+    use std::any::TypeId;
+    let request = TypeId::of::<Req>();
+    if request == TypeId::of::<NvCreateChatCompletionRequest>() {
+        ShadowOrigin::Chat
+    } else if request
+        == TypeId::of::<crate::types::openai::completions::NvCreateCompletionRequest>()
+    {
+        ShadowOrigin::Completions
+    } else {
+        ShadowOrigin::Other
+    }
+}
+
 impl<Sel> PreprocessedRouting<Sel>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -516,9 +534,17 @@ where
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-        let engine = frontend
-            .link(preprocessor_op.forward_edge())?
-            .link(migration.forward_edge())?
+        let shadow_tap = crate::shadow::tap_for(shadow_origin::<Req>())
+            .map(|tap| tap.into_operator_for::<BackendOutput>());
+        let migration_in = migration.forward_edge();
+        let preprocessed = frontend.link(preprocessor_op.forward_edge())?;
+        match &shadow_tap {
+            Some(tap) => preprocessed
+                .link(tap.forward_edge())?
+                .link(migration_in.clone())?,
+            None => preprocessed.link(migration_in.clone())?,
+        };
+        let migrated = migration_in
             .link(token_backend.forward_edge())?
             .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
@@ -526,9 +552,15 @@ where
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
             .link(token_backend.backward_edge())?
-            .link(migration.backward_edge())?
-            .link(preprocessor_op.backward_edge())?
-            .link_terminal(frontend)?;
+            .link(migration.backward_edge())?;
+        let postprocess = preprocessor_op.backward_edge();
+        match &shadow_tap {
+            Some(tap) => migrated
+                .link(tap.backward_edge())?
+                .link(postprocess.clone())?,
+            None => migrated.link(postprocess.clone())?,
+        };
+        let engine = postprocess.link_terminal(frontend)?;
 
         Ok(engine)
     }
@@ -554,15 +586,28 @@ where
         let encoder_op = self.encoder_router.into_operator();
         let backend = ServiceBackend::from_engine(self.backend_engine.clone());
 
-        let engine = frontend
-            .link(migration.forward_edge())?
+        let shadow_tap = crate::shadow::tap_for(ShadowOrigin::Preprocessed)
+            .map(|tap| tap.into_operator_for::<LLMEngineOutput>());
+        let migration_in = migration.forward_edge();
+        match &shadow_tap {
+            Some(tap) => frontend
+                .link(tap.forward_edge())?
+                .link(migration_in.clone())?,
+            None => frontend.link(migration_in.clone())?,
+        };
+        let migrated = migration_in
             .link(encoder_op.forward_edge())?
             .link(prefill_op.forward_edge())?
             .link(backend)?
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
-            .link(migration.backward_edge())?
-            .link_terminal(frontend)?;
+            .link(migration.backward_edge())?;
+        let engine = match &shadow_tap {
+            Some(tap) => migrated
+                .link(tap.backward_edge())?
+                .link_terminal(frontend)?,
+            None => migrated.link_terminal(frontend)?,
+        };
 
         Ok(engine)
     }

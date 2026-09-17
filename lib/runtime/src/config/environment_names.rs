@@ -611,6 +611,13 @@ pub mod llm {
         pub const DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES: &str = "DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES";
     }
 
+    /// Shadow tap configuration.
+    pub mod shadow {
+        /// Path to the shadow tap config file (YAML). Unset means no taps are
+        /// linked into the frontend pipeline.
+        pub const DYN_SHADOW_TAP_CONFIG: &str = "DYN_SHADOW_TAP_CONFIG";
+    }
+
     /// Request trace and request payload logging configuration.
     pub mod request_trace {
         /// Master switch. Truthy enables request trace emission.
@@ -1119,6 +1126,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+            llm::shadow::DYN_SHADOW_TAP_CONFIG,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,

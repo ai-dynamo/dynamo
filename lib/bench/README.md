@@ -23,6 +23,7 @@ Build each entrypoint with `--no-default-features` and its matching feature:
 | `claude_trace_export` | `claude-trace-export` |
 | `request_trace_to_mooncake` | `request-trace-to-mooncake` |
 | `request_trace_to_satf` | `satf` |
+| `shadow_consumer` | `shadow-consumer` |
 | `multiturn_bench` | `multiturn` |
 | `offline_replay_bench` | `offline-replay` |
 | `mooncake_bench` | `mooncake` |
@@ -158,6 +159,33 @@ cargo bench --package dynamo-bench --bench offline_replay_bench \
   --kv-transfer-bandwidth 64 \
   --kv-bytes-per-token 131072
 ```
+
+## Shadow tap consumer
+
+A shadow tap mirrors the live request stream of a frontend, and optionally the
+responses, to event-plane topics. A shadow deployment reads those topics to
+serve production traffic on separate workers, where a wrong or slow result
+costs users nothing. The tap is configured by the file that
+`DYN_SHADOW_TAP_CONFIG` names; see [`shadow/taps.yaml`](shadow/taps.yaml) for
+the format and `lib/llm/src/shadow/` for the tap itself.
+
+`shadow_consumer` stands in for a shadow deployment. It reads one topic and
+keeps running totals: records, prompt tokens, and for a `request_response` tap
+output tokens and outcomes. It also counts the records the tap dropped
+(`tap_gaps`) and the records the event plane lost (`transport_gaps`).
+
+```bash
+cargo run -p dynamo-bench --no-default-features --features shadow-consumer \
+  --bin shadow_consumer -- --topic kv-history-tracker
+```
+
+It reads the same `DYN_DISCOVERY_BACKEND`, `DYN_FILE_KV`, and
+`DYN_EVENT_PLANE` settings as the frontend, and must run with the same values.
+
+[`shadow/demo.sh`](shadow/demo.sh) runs the whole loop on one machine with no
+etcd and no NATS: a frontend with both example taps, two mocker workers, AIPerf
+load, and one consumer per tap. It then prints the frontend token metrics next
+to the consumer totals so the two can be compared.
 
 ## KV router / sharded indexer benchmarks
 
