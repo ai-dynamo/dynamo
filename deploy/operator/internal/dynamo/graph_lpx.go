@@ -312,9 +312,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		role.Replicas = ptr.To(replicas)
 		role.MinAvailable = nil
-		var defaults ComponentDefaults = &podTemplateRuntimeDefaults{
-			ComponentDefaults: ComponentDefaultsFactory(string(v1beta1.ComponentTypeDecode)),
-		}
+		var defaults ComponentDefaults = &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
 			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, plan, lpuTemplate.Spec)
 			if err != nil {
@@ -381,6 +379,14 @@ func (d *podTemplateRuntimeDefaults) GetBaseContainer(context ComponentContext) 
 	container.StartupProbe = nil
 	container.LivenessProbe = nil
 	container.ReadinessProbe = nil
+
+	// Bind the pod address for LPX runtimes before authored environment overrides.
+	container.Env = append(container.Env, corev1.EnvVar{
+		Name: commonconsts.PodIPEnvVar,
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+		},
+	})
 	return container, nil
 }
 
@@ -412,6 +418,7 @@ func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentCont
 }
 
 // renderSelectedLPXRole consumes a private component copy; other inputs are read-only.
+// component and its PodTemplate must be non-nil.
 // alphaComponent may be nil.
 func renderSelectedLPXRole(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
@@ -445,10 +452,8 @@ func renderSelectedLPXRole(
 		return nil, err
 	}
 
-	// Keep the LPX volume-permission default without changing authored security contexts.
-	if component.PodTemplate == nil || component.PodTemplate.Spec.SecurityContext == nil {
-		basePodSpec.SecurityContext.FSGroupChangePolicy = ptr.To(corev1.FSGroupChangeOnRootMismatch)
-	}
+	// The shared renderer's filesystem-group fallback is not part of the LPX template contract.
+	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext.DeepCopy()
 
 	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
 	explicitVolumes := component.PodTemplate.Spec.Volumes

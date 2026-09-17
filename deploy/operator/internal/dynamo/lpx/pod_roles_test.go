@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/utils/ptr"
 )
 
 func TestSelectedRolePodSpecsMaterializeFamilyResourceOnlyOnAgentMainContainer(t *testing.T) {
@@ -111,35 +110,6 @@ func TestSelectedRolePodSpecsMaterializeFamilyResourceOnlyOnAgentMainContainer(t
 	}
 }
 
-func TestApplyLPUWorkerContainerBaseClampsCPURequestToLimit(t *testing.T) {
-	for _, test := range []struct {
-		name  string
-		limit string
-		want  string
-	}{
-		{name: "lower limit", limit: "16", want: "16"},
-		{name: "higher limit", limit: "64", want: "62"},
-		{name: "no limit", want: "62"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Configure the worker CPU limit")
-			container := corev1.Container{Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{},
-				Limits:   corev1.ResourceList{},
-			}}
-			if test.limit != "" {
-				container.Resources.Limits = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(test.limit)}
-			}
-
-			t.Log("Apply the LPX worker runtime defaults")
-			applyLPUWorkerContainerBase(&container)
-
-			t.Log("Clamp the default request to the configured limit")
-			require.True(t, container.Resources.Requests.Cpu().Equal(resource.MustParse(test.want)))
-		})
-	}
-}
-
 func lpuResourceLists(spec *corev1.PodSpec) []corev1.ResourceList {
 	lists := []corev1.ResourceList{
 		spec.InitContainers[0].Resources.Limits,
@@ -156,9 +126,8 @@ func lpuResourceLists(spec *corev1.PodSpec) []corev1.ResourceList {
 func TestConfigureNodeLocalRuntimeBindings(t *testing.T) {
 	for _, role := range []string{"conductor", "agent"} {
 		t.Run(role, func(t *testing.T) {
-			t.Log("Author main-container references and HX resource requirements")
+			t.Log("Author main-container references and resource requirements")
 			pod := corev1.PodSpec{
-				HostUsers: ptr.To(false),
 				Containers: []corev1.Container{{
 					Name: commonconsts.MainContainerName,
 					Env: []corev1.EnvVar{
@@ -184,69 +153,21 @@ func TestConfigureNodeLocalRuntimeBindings(t *testing.T) {
 
 			t.Log("Bind the selected role and retarget every authored main-container reference")
 			if role == "conductor" {
-				configureNodeLocalConductorRuntime(&pod, BuildFamilyHX, "agt")
+				configureNodeLocalConductorRuntime(&pod, "agt")
 			} else {
-				configureNodeLocalAgentRuntime(&pod, BuildFamilyHX)
+				configureAgentIdentity(&pod)
 			}
 			container := pod.Containers[0]
 			require.Equal(t, role, container.Name)
 			require.Equal(t, role, testContainerEnvValue(container.Env, "CONTAINER_NAME"))
 			require.Equal(t, role, testContainerEnvSource(container.Env, "MAIN_CPU").ResourceFieldRef.ContainerName)
 			require.Equal(t, role, pod.Volumes[0].DownwardAPI.Items[0].ResourceFieldRef.ContainerName)
-			require.Equal(t, "status.podIP", testContainerEnvSource(container.Env, "POD_IP").FieldRef.FieldPath)
 			require.Equal(t, before.Containers[0].Resources, container.Resources)
 
-			t.Log("Apply worker networking only to the Agent and placement only to the conductor")
+			t.Log("Bind placement only to the conductor")
 			if role == "conductor" {
 				require.Equal(t, "agt", testContainerEnvValue(container.Env, "LPX_ALLOCATION"))
-				require.Equal(t, before.HostUsers, pod.HostUsers)
-				require.False(t, pod.HostIPC)
-				require.False(t, pod.HostNetwork)
-			} else {
-				require.Nil(t, pod.HostUsers)
-				require.True(t, pod.HostIPC)
-				require.True(t, pod.HostNetwork)
-				require.Equal(t, corev1.DNSClusterFirstWithHostNet, pod.DNSPolicy)
 			}
-		})
-	}
-}
-
-func TestConfigureDirectHybridAgentRuntimePreservesPodSecurity(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		security *corev1.PodSecurityContext
-	}{
-		{name: "omitted"},
-		{name: "authored", security: &corev1.PodSecurityContext{
-			RunAsUser:           ptr.To(int64(1000)),
-			RunAsGroup:          ptr.To(int64(1000)),
-			RunAsNonRoot:        ptr.To(true),
-			FSGroup:             ptr.To(int64(1000)),
-			FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
-			SupplementalGroups:  []int64{2000},
-			Sysctls:             []corev1.Sysctl{{Name: "net.ipv4.tcp_keepalive_time", Value: "600"}},
-			SeccompProfile:      &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
-		}},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Configure a direct worker with the authored Pod security context")
-			pod := corev1.PodSpec{
-				Containers:      []corev1.Container{{Name: commonconsts.MainContainerName}},
-				SecurityContext: test.security.DeepCopy(),
-			}
-			configureAgentScheduling(&pod, BuildFamilyXT)
-			configureDirectHybridAgentRuntime(&pod, "graph-lpu")
-
-			t.Log("Change the worker identity to root while preserving every other security field")
-			want := test.security.DeepCopy()
-			if want == nil {
-				want = &corev1.PodSecurityContext{}
-			}
-			want.RunAsUser = ptr.To(int64(0))
-			want.RunAsGroup = ptr.To(int64(0))
-			want.RunAsNonRoot = ptr.To(false)
-			require.Equal(t, want, pod.SecurityContext)
 		})
 	}
 }

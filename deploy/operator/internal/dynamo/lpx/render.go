@@ -160,15 +160,6 @@ func RenderSelectedNodeLocal(
 			podSpec = *podSpec.DeepCopy()
 		}
 
-		// Resolve per-model placeholders only after separating siblings' backing data.
-		for containerIndex := range podSpec.Containers {
-			env := podSpec.Containers[containerIndex].Env
-			for envIndex := range env {
-				if env[envIndex].Name == lpuModelNameEnvVar {
-					env[envIndex] = corev1.EnvVar{Name: lpuModelNameEnvVar, Value: projection.Model()}
-				}
-			}
-		}
 		annotations := roleAnnotations(template.Annotations, lpxv1alpha1.PodRoleAgent, projection.Digest().String())
 		annotations[commonconsts.AnnotationExtraResourcesHash] = configHash
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
@@ -260,21 +251,15 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 			return err
 		}
 	}
-	if workload.Pipeline() == PipelineSpecDecode || workload.Pipeline() == PipelineLPX {
-		agent := common.FindContainerByName(agentPodSpec.Containers, commonconsts.MainContainerName)
-		setContainerEnv(agent, corev1.EnvVar{Name: lpuModelNameEnvVar})
-	}
-
 	if workload.Pipeline() == PipelineLPX {
 		configureDirectHybridAgentRuntime(agentPodSpec, configMapName)
 	} else {
 		if conductorPodSpec != nil {
-			configureNodeLocalConductorRuntime(conductorPodSpec, workload.BuildFamily(), allocation)
+			configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
 		}
-		configureNodeLocalAgentRuntime(agentPodSpec, workload.BuildFamily())
+		configureAgentIdentity(agentPodSpec)
 	}
 
-	ensureLPUNodeTolerations(agentPodSpec)
 	return nil
 }
 

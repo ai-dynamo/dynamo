@@ -16,12 +16,11 @@ import (
 
 const (
 	// CyborgBatchSizeEnv configures the batch handled by each Cyborg replica.
-	CyborgBatchSizeEnv           = "CYBORG_BATCH_SIZE"
-	cyborgFpgaGpiIOFPGACountEnv  = "CYBORG_FPGA_GPI_IO_FPGA_COUNT"
-	cyborgFpgaGpiReplicaIndexEnv = "CYBORG_FPGA_GPI_REPLICA_INDEX"
-	cyborgSwaCacheIDsEnv         = "CYBORG_SWA_CACHE_IDS"
-	gbuildManifestPathEnv        = "GBUILD_MANIFEST_PATH"
-	grovePodCliquePodIndexPath   = "metadata.labels['grove.io/podclique-pod-index']"
+	CyborgBatchSizeEnv          = "CYBORG_BATCH_SIZE"
+	cyborgFpgaGpiIOFPGACountEnv = "CYBORG_FPGA_GPI_IO_FPGA_COUNT"
+	cyborgSwaCacheIDsEnv        = "CYBORG_SWA_CACHE_IDS"
+	gbuildManifestPathEnv       = "GBUILD_MANIFEST_PATH"
+	grovePodCliquePodIndexPath  = "metadata.labels['grove.io/podclique-pod-index']"
 )
 
 // applyCyborgManifestPath projects an authoritative manifest location into one Cyborg container.
@@ -41,12 +40,6 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 func applyCyborgRuntimeIO(container *corev1.Container, cyborgBatchSize int, ioFPGACount int32) {
 	setContainerEnv(container,
 		corev1.EnvVar{Name: cyborgFpgaGpiIOFPGACountEnv, Value: strconv.FormatInt(int64(ioFPGACount), 10)},
-		corev1.EnvVar{
-			Name: cyborgFpgaGpiReplicaIndexEnv,
-			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
-				FieldPath: grovePodCliquePodIndexPath,
-			}},
-		},
 		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: strconv.Itoa(cyborgBatchSize)},
 	)
 }

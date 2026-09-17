@@ -121,7 +121,6 @@ spec:
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -155,9 +154,6 @@ spec:
                 lpu.nvidia.com/lpu: "8"
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
@@ -185,10 +181,6 @@ spec:
           terminationGracePeriodSeconds: 60
           tolerations:
           - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
             operator: Exists
           volumes:
           - name: model-storage
@@ -307,7 +299,6 @@ spec:
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -334,10 +325,6 @@ spec:
               successThreshold: 1
               timeoutSeconds: 1
             resources: {}
-            securityContext:
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
@@ -358,10 +345,6 @@ spec:
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}
-            securityContext:
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /tmp/dynamo-lpu-ssh
               name: single-v2-ssh-key

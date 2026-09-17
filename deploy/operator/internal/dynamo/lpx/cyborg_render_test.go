@@ -134,12 +134,6 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 		Name: "CYBORG_BATCH_SIZE", Value: "3",
 	})
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name: "CYBORG_FPGA_GPI_REPLICA_INDEX",
-		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
-			FieldPath: "metadata.labels['grove.io/podclique-pod-index']",
-		}},
-	})
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
 		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
 	})
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{

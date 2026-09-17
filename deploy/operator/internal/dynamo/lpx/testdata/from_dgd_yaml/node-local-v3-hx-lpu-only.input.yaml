@@ -120,14 +120,13 @@ spec:
                 periodSeconds: 5
                 successThreshold: 1
                 timeoutSeconds: 1
-              securityContext:
-                runAsUser: 0
-                runAsGroup: 0
-                runAsNonRoot: false
               volumeMounts:
-              - {name: model-storage, mountPath: /nfs}
-              - {name: config, mountPath: /configs}
-              - {name: single-v2-ssh-key, mountPath: /tmp/dynamo-lpu-ssh}
+              - name: model-storage
+                mountPath: /nfs
+              - name: config
+                mountPath: /configs
+              - name: single-v2-ssh-key
+                mountPath: /tmp/dynamo-lpu-ssh
             initContainers:
             - args:
               - -m
@@ -138,10 +137,6 @@ spec:
               - /bin/install
               image: example.invalid/lpu-runtime:test
               name: prepare-ssh-key
-              securityContext:
-                runAsGroup: 0
-                runAsNonRoot: false
-                runAsUser: 0
               volumeMounts:
               - mountPath: /tmp/dynamo-lpu-ssh
                 name: single-v2-ssh-key
@@ -149,9 +144,18 @@ spec:
                 name: ssh-secret
                 readOnly: true
             volumes:
-            - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
-            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 384}}
-            - {name: single-v2-ssh-key, emptyDir: {}}
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 384
+            - name: single-v2-ssh-key
+              emptyDir: {}
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
       - name: agent
         podTemplate:
           spec:
@@ -199,17 +203,18 @@ spec:
                 value: 'false'
               securityContext:
                 privileged: true
-                runAsUser: 0
-                runAsGroup: 0
-                runAsNonRoot: false
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
               - name: config
                 mountPath: /configs
-              - {name: host-dev, mountPath: /dev}
-              - {name: host-sys, mountPath: /sys}
-              - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
+              - name: host-dev
+                mountPath: /dev
+              - name: host-sys
+                mountPath: /sys
+              - name: ssh-secret
+                mountPath: /ssh-pk
+                readOnly: true
             initContainers:
             - command:
               - /bin/lp30-agent-v2-init
@@ -222,9 +227,6 @@ spec:
               name: prepare-lp30
               securityContext:
                 privileged: true
-                runAsGroup: 0
-                runAsNonRoot: false
-                runAsUser: 0
               volumeMounts:
               - mountPath: /sys
                 name: host-sys
@@ -234,6 +236,24 @@ spec:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
-            - {name: host-dev, hostPath: {path: /dev, type: Directory}}
-            - {name: host-sys, hostPath: {path: /sys, type: Directory}}
-            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}
+            - name: host-dev
+              hostPath:
+                path: /dev
+                type: Directory
+            - name: host-sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 420
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            tolerations:
+            - key: lpu.nvidia.com/node
+              operator: Exists

@@ -6,6 +6,7 @@ package lpx
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,7 @@ import (
 	"gotest.tools/v3/golden"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -1162,7 +1164,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, "1024", runtimeEnv["GLUE_RDMA_PATH_MTU"])
 	require.Equal(t, "mlx5_0", runtimeEnv["NIC_NAME"])
 	require.Equal(t, "19878", runtimeEnv["READINESS_PORT"])
-	require.Equal(t, "default", runtimeEnv["LPU_MODEL_NAME"])
+	require.Equal(t, "metadata.annotations['"+lpxv1alpha1.PodModelAnnotation+"']", envValueSource(main.Env, "LPU_MODEL_NAME").FieldRef.FieldPath)
 	gasDirSource := envValueSource(main.Env, "GAS_DIR")
 	require.NotNil(t, gasDirSource)
 	require.NotNil(t, gasDirSource.ConfigMapKeyRef)
@@ -1177,16 +1179,11 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.NotContains(t, runtimeEnv, "PARTITION_ID")
 	require.NotContains(t, runtimeEnv, "RANK_IN_PARTITION")
 
-	t.Log("Preserve custom tolerations and mounts alongside the required Agent networking and storage")
+	t.Log("Preserve authored Agent tolerations, networking and storage")
 	require.True(t, agent.Spec.PodSpec.HostIPC)
 	require.True(t, agent.Spec.PodSpec.HostNetwork)
 	require.Equal(t, corev1.DNSClusterFirstWithHostNet, agent.Spec.PodSpec.DNSPolicy)
-	require.Equal(t, []corev1.Toleration{
-		{Key: "cluster.example/custom", Operator: corev1.TolerationOpExists},
-		{Key: "lpu.nvidia.com/node", Operator: corev1.TolerationOpExists},
-		{Key: "lpu.nvidia.com/lpu", Operator: corev1.TolerationOpExists},
-		{Key: "lpu.nvidia.com/node-v2", Operator: corev1.TolerationOpExists},
-	}, agent.Spec.PodSpec.Tolerations)
+	require.Equal(t, agentTemplate.Spec.Tolerations, agent.Spec.PodSpec.Tolerations)
 	for _, name := range []string{"config", "hugepages", "host-dev", "host-sys", "ssh-secret"} {
 		require.True(t, slices.ContainsFunc(agent.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == name }), "missing volume %s", name)
 	}
@@ -1197,7 +1194,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/configs"})
 	require.Contains(t, agent.Spec.PodSpec.Volumes, customConfigVolume)
 	require.True(t, main.Resources.Requests.Cpu().Equal(resource.MustParse("62")))
-	require.Equal(t, resource.MustParse("4096Mi"), main.Resources.Requests[corev1.ResourceHugePagesPrefix+"2Mi"])
+	require.True(t, main.Resources.Requests[corev1.ResourceHugePagesPrefix+"2Mi"].Equal(resource.MustParse("4096Mi")))
 
 	t.Log("Verify Cyborg receives its generated config and InfiniBand bindings instead of fallback PVCs")
 	require.Contains(t, cyborg.Spec.PodSpec.Containers, sidecar)
@@ -1275,6 +1272,21 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.T) {
 	t.Log("Share the immutable build registry across entrypoint cases")
 	registry := newTestDataModelRegistry(t, t.TempDir())
+	staticEnvNames := []string{
+		"POD_IP", "POD_NAME", "POD_NAMESPACE", "POD_UID", "LPU_MODEL_NAME", "CYBORG_FPGA_GPI_REPLICA_INDEX",
+		"DYN_SYSTEM_ENABLED", "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "DYN_SYSTEM_PORT", "DYN_HEALTH_CHECK_ENABLED",
+		"NIXL_TELEMETRY_ENABLE", "NIXL_TELEMETRY_EXPORTER", "NIXL_TELEMETRY_PROMETHEUS_PORT", "DYN_FORWARDPASS_METRIC_PORT",
+	}
+
+	t.Log("Use ordinary component defaults as the shared environment and port contract")
+	commonDefaults, err := (&dynamo.BaseComponentDefaults{}).GetBaseContainer(dynamo.ComponentContext{})
+	require.NoError(t, err)
+	workerDefaults, err := dynamo.NewWorkerDefaults().GetBaseContainer(dynamo.ComponentContext{})
+	require.NoError(t, err)
+	roleDefaults := map[string]corev1.Container{
+		lpxv1alpha1.PodRoleAgent: commonDefaults, lpxv1alpha1.PodRoleConductor: commonDefaults,
+		lpxv1alpha1.PodRoleCyborgWorker: workerDefaults,
+	}
 	modes := []struct {
 		name            string
 		file            string
@@ -1289,19 +1301,19 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 		{name: "HX hybrid", file: "node-local-v3-hx-hybrid.input.yaml", hybrid: true, hx: true},
 	}
 	intents := []struct {
-		name          string
-		command       []string
-		args          []string
-		cyborgCommand []string
-		cyborgArgs    []string
-		hybridOnly    bool
-		configPath    *string
-		configRole    int
-		envFrom       bool
-		customProbes  bool
+		name              string
+		command           []string
+		args              []string
+		cyborgCommand     []string
+		cyborgArgs        []string
+		hybridOnly        bool
+		configPath        *string
+		configRole        int
+		envFrom           bool
+		customPodSettings bool
 	}{
 		{name: "image entrypoint and image command"},
-		{name: "custom exec health probes", command: []string{"/opt/custom-runtime"}, customProbes: true},
+		{name: "custom pod settings and exec health probes", command: []string{"/opt/custom-runtime"}, customPodSettings: true},
 		{name: "default startup without config mount", configPath: ptr.To(""), configRole: 1},
 		{name: "default startup with misplaced config mount", configPath: ptr.To("/custom"), configRole: 1},
 		{name: "default Agent without config mount", configPath: ptr.To("")},
@@ -1347,11 +1359,12 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 					continue
 				}
 				t.Run(intent.name, func(t *testing.T) {
-					t.Log("Render the LPX LPU and GPU roles from the same command intent")
+					t.Log("Author LPX LPU and GPU runtime settings independently of fixture defaults")
 					dgd := &v1beta1.DynamoGraphDeployment{}
 					require.NoError(t, yaml.Unmarshal(payload, dgd))
 					component := dgd.GetComponentByName("lpu")
 					require.NotNil(t, component)
+					component.SharedMemorySize = nil
 					agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 					templates := []*corev1.PodTemplateSpec{agent.PodTemplate, component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate}
 					for roleIndex, template := range templates {
@@ -1365,8 +1378,62 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 						}
 						main.Command = slices.Clone(command)
 						main.Args = slices.Clone(args)
+						template.Spec.SecurityContext, main.SecurityContext = nil, nil
+						template.Spec.HostNetwork, template.Spec.HostIPC = false, false
+						template.Spec.HostUsers, template.Spec.DNSConfig = nil, nil
+						template.Spec.DNSPolicy, template.Spec.RestartPolicy = "", ""
+						template.Spec.TerminationGracePeriodSeconds, template.Spec.Tolerations = nil, nil
+						main.Ports = nil
+						main.Env = slices.DeleteFunc(main.Env, func(variable corev1.EnvVar) bool { return slices.Contains(staticEnvNames, variable.Name) })
+						template.Spec.Volumes = slices.DeleteFunc(template.Spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == commonconsts.KubeValueNameSharedMemory })
+						main.VolumeMounts = slices.DeleteFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool {
+							return mount.MountPath == commonconsts.DefaultSharedMemoryMountPath
+						})
+						requests, limits := main.Resources.Requests, main.Resources.Limits
+						main.Resources.Requests, main.Resources.Limits = corev1.ResourceList{}, corev1.ResourceList{}
+						maps.Copy(main.Resources.Requests, requests)
+						maps.Copy(main.Resources.Limits, limits)
+						for _, resources := range []corev1.ResourceList{main.Resources.Requests, main.Resources.Limits} {
+							maps.DeleteFunc(resources, func(name corev1.ResourceName, _ resource.Quantity) bool {
+								return name != corev1.ResourceName(commonconsts.KubeResourceGPUNvidia)
+							})
+						}
 						main.StartupProbe, main.LivenessProbe, main.ReadinessProbe = nil, nil, nil
-						if intent.customProbes {
+						if intent.customPodSettings {
+							component.SharedMemorySize = ptr.To(resource.MustParse("0"))
+							template.Spec.SecurityContext = &corev1.PodSecurityContext{
+								RunAsUser: ptr.To(int64(1000)), RunAsGroup: ptr.To(int64(2000)), RunAsNonRoot: ptr.To(true),
+								FSGroup: ptr.To(int64(3000)), FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
+								SupplementalGroups: []int64{4000}, Sysctls: []corev1.Sysctl{{Name: "net.ipv4.tcp_keepalive_time", Value: "600"}},
+								SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+							}
+							main.SecurityContext = &corev1.SecurityContext{
+								Privileged: ptr.To(false), RunAsUser: ptr.To(int64(1000)), RunAsGroup: ptr.To(int64(2000)),
+								RunAsNonRoot: ptr.To(true), ReadOnlyRootFilesystem: ptr.To(true),
+							}
+							template.Spec.HostNetwork, template.Spec.HostIPC = true, true
+							template.Spec.HostUsers = ptr.To(true)
+							template.Spec.DNSPolicy = corev1.DNSNone
+							template.Spec.DNSConfig = &corev1.PodDNSConfig{Nameservers: []string{"192.0.2.1"}, Searches: []string{"custom.test"}}
+							template.Spec.RestartPolicy = corev1.RestartPolicyOnFailure
+							template.Spec.TerminationGracePeriodSeconds = ptr.To(int64(17))
+							template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/runtime", Operator: corev1.TolerationOpEqual, Value: "allowed", Effect: corev1.TaintEffectNoSchedule}}
+							main.Ports = []corev1.ContainerPort{{Name: "custom", ContainerPort: 4321, Protocol: corev1.ProtocolUDP}}
+							for _, name := range staticEnvNames {
+								main.Env = append(main.Env, corev1.EnvVar{Name: name, Value: "authored-" + name})
+							}
+							template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+								Name: commonconsts.KubeValueNameSharedMemory, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+									Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("32Mi")),
+								}},
+							})
+							main.VolumeMounts = append(main.VolumeMounts, corev1.VolumeMount{Name: commonconsts.KubeValueNameSharedMemory, MountPath: commonconsts.DefaultSharedMemoryMountPath})
+							main.Resources.Requests[corev1.ResourceCPU] = resource.MustParse("500m")
+							main.Resources.Limits[corev1.ResourceCPU] = resource.MustParse("2")
+							for _, resources := range []corev1.ResourceList{main.Resources.Requests, main.Resources.Limits} {
+								resources[corev1.ResourceMemory] = resource.MustParse("128Mi")
+								resources[corev1.ResourceHugePagesPrefix+"2Mi"] = resource.MustParse("2Mi")
+							}
 							main.StartupProbe = &corev1.Probe{
 								ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/custom-health", fmt.Sprint(roleIndex), "started"}}},
 								FailureThreshold: 12, PeriodSeconds: 4, TimeoutSeconds: 2,
@@ -1380,6 +1447,12 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 								FailureThreshold: 2, PeriodSeconds: 5, TimeoutSeconds: 1,
 							}
 						}
+						template.Spec.Containers = append(template.Spec.Containers, corev1.Container{
+							Name: "observer", Image: "observer:test", Command: []string{"/custom-observer"},
+							Env:             []corev1.EnvVar{{Name: "POD_IP", Value: "sidecar-owned"}},
+							SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To(int64(2000))},
+						})
+						main = &template.Spec.Containers[0]
 						main.Env = append(main.Env, corev1.EnvVar{Name: "LPX_ALLOCATION", Value: "forged-allocation"})
 						if intent.envFrom && roleIndex == 0 {
 							main.EnvFrom = []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "unrelated-env"}}}}
@@ -1416,19 +1489,70 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 					}
 					require.NoError(t, err)
 
-					t.Log("Verify every role preserves authored startup and health probes, including omission")
+					t.Log("Verify shared defaults remain overridable while runtime-specific omissions stay empty")
 					var agents, conductors, cyborgs int
 					for _, clique := range pcs.Spec.Template.Cliques {
-						main := clique.Spec.PodSpec.Containers[0]
-						authored := templates[1].Spec.Containers[0]
+						pod := clique.Spec.PodSpec
+						main := pod.Containers[0]
+						authoredPod := templates[1].Spec
 						if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
-							authored = templates[0].Spec.Containers[0]
+							authoredPod = templates[0].Spec
+						}
+						authored := authoredPod.Containers[0]
+						if !intent.customPodSettings {
+							defaults := roleDefaults[clique.Annotations[lpxv1alpha1.PodRoleAnnotation]]
+							authoredPod.RestartPolicy = corev1.RestartPolicyAlways
+							authoredPod.TerminationGracePeriodSeconds = ptr.To(int64(60))
+							authored.Ports = defaults.Ports
+							authored.Env = append(slices.Clone(defaults.Env), corev1.EnvVar{Name: "POD_IP", ValueFrom: &corev1.EnvVarSource{
+								FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+							}})
+							authoredPod.Volumes = append(slices.Clone(authoredPod.Volumes), corev1.Volume{
+								Name: commonconsts.KubeValueNameSharedMemory, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+									Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("8Gi")),
+								}},
+							})
+							authored.VolumeMounts = append(slices.Clone(authored.VolumeMounts), corev1.VolumeMount{
+								Name: commonconsts.KubeValueNameSharedMemory, MountPath: commonconsts.DefaultSharedMemoryMountPath,
+							})
 						}
 						require.Equal(t, authored.Command, main.Command, "%s command", clique.Name)
 						require.True(t, slices.Equal(authored.Args, main.Args), "%s args", clique.Name)
 						require.Equal(t, authored.StartupProbe, main.StartupProbe, "%s startup", clique.Name)
 						require.Equal(t, authored.LivenessProbe, main.LivenessProbe, "%s liveness", clique.Name)
 						require.Equal(t, authored.ReadinessProbe, main.ReadinessProbe, "%s readiness", clique.Name)
+						require.Equal(t, authored.SecurityContext, main.SecurityContext, "%s container security", clique.Name)
+						require.Equal(t, authoredPod.SecurityContext, pod.SecurityContext, "%s pod security", clique.Name)
+						require.Equal(t, authoredPod.HostNetwork, pod.HostNetwork, "%s host network", clique.Name)
+						require.Equal(t, authoredPod.HostIPC, pod.HostIPC, "%s host IPC", clique.Name)
+						require.Equal(t, authoredPod.HostUsers, pod.HostUsers, "%s host users", clique.Name)
+						require.Equal(t, authoredPod.DNSPolicy, pod.DNSPolicy, "%s DNS policy", clique.Name)
+						require.Equal(t, authoredPod.DNSConfig, pod.DNSConfig, "%s DNS config", clique.Name)
+						require.Equal(t, authoredPod.RestartPolicy, pod.RestartPolicy, "%s restart", clique.Name)
+						require.Equal(t, authoredPod.TerminationGracePeriodSeconds, pod.TerminationGracePeriodSeconds, "%s grace period", clique.Name)
+						require.Equal(t, authoredPod.Tolerations, pod.Tolerations, "%s tolerations", clique.Name)
+						require.Equal(t, authored.Ports, main.Ports, "%s ports", clique.Name)
+						require.Equal(t, authoredPod.InitContainers, pod.InitContainers, "%s init containers", clique.Name)
+						require.Equal(t, authoredPod.Containers[1:], pod.Containers[1:], "%s sidecars", clique.Name)
+						actualEnv := slices.DeleteFunc(slices.Clone(main.Env), func(variable corev1.EnvVar) bool { return !slices.Contains(staticEnvNames, variable.Name) })
+						expectedEnv := slices.DeleteFunc(slices.Clone(authored.Env), func(variable corev1.EnvVar) bool { return !slices.Contains(staticEnvNames, variable.Name) })
+						require.ElementsMatch(t, expectedEnv, actualEnv, "%s static environment", clique.Name)
+						actualResources := main.Resources.DeepCopy()
+						delete(actualResources.Requests, "lpu.nvidia.com/lpu")
+						delete(actualResources.Limits, "lpu.nvidia.com/lpu")
+						delete(actualResources.Requests, "nvidia.com/lpu")
+						delete(actualResources.Limits, "nvidia.com/lpu")
+						require.True(t, apiequality.Semantic.DeepEqual(authored.Resources, *actualResources), "%s resources: expected %v, got %v", clique.Name, authored.Resources, *actualResources)
+						actualVolumes := slices.DeleteFunc(slices.Clone(pod.Volumes), func(volume corev1.Volume) bool { return volume.Name != commonconsts.KubeValueNameSharedMemory })
+						expectedVolumes := slices.DeleteFunc(slices.Clone(authoredPod.Volumes), func(volume corev1.Volume) bool { return volume.Name != commonconsts.KubeValueNameSharedMemory })
+						require.ElementsMatch(t, expectedVolumes, actualVolumes, "%s shared memory volumes", clique.Name)
+						actualMounts := slices.DeleteFunc(slices.Clone(main.VolumeMounts), func(mount corev1.VolumeMount) bool {
+							return mount.MountPath != commonconsts.DefaultSharedMemoryMountPath
+						})
+						expectedMounts := slices.DeleteFunc(slices.Clone(authored.VolumeMounts), func(mount corev1.VolumeMount) bool {
+							return mount.MountPath != commonconsts.DefaultSharedMemoryMountPath
+						})
+						require.ElementsMatch(t, expectedMounts, actualMounts, "%s shared memory mounts", clique.Name)
 						switch clique.Annotations[lpxv1alpha1.PodRoleAnnotation] {
 						case lpxv1alpha1.PodRoleAgent:
 							agents++
@@ -1441,7 +1565,6 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 							require.NotContains(t, main.Env, corev1.EnvVar{Name: "LPX_ALLOCATION", Value: "forged-allocation"})
 						case lpxv1alpha1.PodRoleCyborgWorker:
 							cyborgs++
-							require.NotEmpty(t, main.Ports)
 						}
 					}
 					require.Positive(t, agents)

@@ -120,7 +120,9 @@ spec:
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
-              value: default
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
             - name: NATS_SERVER
               value: nats-address
             - name: NIC_NAME
@@ -128,7 +130,6 @@ spec:
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -174,7 +175,6 @@ spec:
                 lpu.nvidia.com/lpu: "8"
             securityContext:
               privileged: true
-              runAsUser: 0
             startupProbe:
               failureThreshold: 60
               httpGet:
@@ -208,16 +208,9 @@ spec:
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch
-            runAsGroup: 0
-            runAsNonRoot: false
-            runAsUser: 0
           terminationGracePeriodSeconds: 60
           tolerations:
           - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
             operator: Exists
           volumes:
           - name: model-storage
@@ -320,6 +313,10 @@ spec:
               value: prometheus
             - name: NIXL_TELEMETRY_PROMETHEUS_PORT
               value: "19090"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:

@@ -197,7 +197,7 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 			}}}},
 		},
 	}}
-	conductorPodSpec.Containers[0].Env = []corev1.EnvVar{{Name: lpuModelNameEnvVar, ValueFrom: modelAnnotationSource}}
+	conductorPodSpec.Containers[0].Env = []corev1.EnvVar{{Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource}}
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
@@ -224,9 +224,9 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	require.Equal(t, []string{"/bin/bash"}, agent.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"-c", "custom-agent"}, agent.Spec.PodSpec.Containers[0].Args)
 	require.Contains(t, agent.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name:  lpuModelNameEnvVar,
-		Value: projection.Model(),
+		Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource,
 	})
+	require.Equal(t, projection.Model(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
 }
 
 func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
@@ -260,6 +260,8 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 		template.Labels = map[string]string{"owner": component.ComponentName}
 		template.Annotations = map[string]string{"owner": component.ComponentName}
 		template.Spec.Containers[0].Image = component.ComponentName + "-runtime"
+		template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "AUTHORED_STAGE", Value: component.ComponentName}}
+		template.Spec.Tolerations = []corev1.Toleration{{Key: "custom.example/stage", Operator: corev1.TolerationOpEqual, Value: component.ComponentName}}
 		stages[component.ComponentName] = *template.DeepCopy()
 	}
 	conductorTemplate := source.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate

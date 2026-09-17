@@ -99,11 +99,11 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				configureAgentScheduling(&pod, role.family)
 				switch {
 				case role.conductor:
-					configureNodeLocalConductorRuntime(&pod, role.family, "allocation")
+					configureNodeLocalConductorRuntime(&pod, "allocation")
 				case role.direct:
 					configureDirectHybridAgentRuntime(&pod, "config")
 				default:
-					configureNodeLocalAgentRuntime(&pod, role.family)
+					configureAgentIdentity(&pod)
 				}
 
 				t.Log("Retain the sidecar and bind only the authored main runtime")
@@ -118,14 +118,12 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				} else {
 					require.Equal(t, lpuAgentContainerName, container.Name)
 				}
-				if role.conductor || role.family == BuildFamilyHX && !role.direct {
-					require.Equal(t, authored.SecurityContext, container.SecurityContext)
-				}
+				require.Equal(t, authored.SecurityContext, container.SecurityContext)
 
 				t.Log("Keep static environment values template-owned, including intentional omission")
 				dynamicEnv := map[string]bool{
-					"POD_IP": true, "LPX_ALLOCATION": role.conductor,
-					"TOPOLOGIES": role.direct, "GAS_DIR": role.direct,
+					"LPX_ALLOCATION": role.conductor,
+					"TOPOLOGIES":     role.direct, "GAS_DIR": role.direct,
 				}
 				container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool { return dynamicEnv[variable.Name] })
 				if role.conductor {

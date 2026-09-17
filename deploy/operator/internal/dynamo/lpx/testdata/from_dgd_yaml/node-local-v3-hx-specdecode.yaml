@@ -183,13 +183,14 @@ spec:
             - name: LPU_FPGA_RECONFIGURE_METHOD
               value: cvp
             - name: LPU_MODEL_NAME
-              value: draft0
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
             - name: NATS_SERVER
               value: nats-address
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -222,9 +223,6 @@ spec:
                 nvidia.com/lpu: "16"
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
@@ -255,9 +253,6 @@ spec:
             resources: {}
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /sys
               name: host-sys
@@ -271,10 +266,6 @@ spec:
           terminationGracePeriodSeconds: 60
           tolerations:
           - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
             operator: Exists
           volumes:
           - name: model-storage
@@ -362,13 +353,14 @@ spec:
             - name: LPU_FPGA_RECONFIGURE_METHOD
               value: cvp
             - name: LPU_MODEL_NAME
-              value: draft1
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
             - name: NATS_SERVER
               value: nats-address
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -401,9 +393,6 @@ spec:
                 nvidia.com/lpu: "16"
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
@@ -434,9 +423,6 @@ spec:
             resources: {}
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /sys
               name: host-sys
@@ -450,10 +436,6 @@ spec:
           terminationGracePeriodSeconds: 60
           tolerations:
           - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
             operator: Exists
           volumes:
           - name: model-storage
@@ -541,13 +523,14 @@ spec:
             - name: LPU_FPGA_RECONFIGURE_METHOD
               value: cvp
             - name: LPU_MODEL_NAME
-              value: target
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
             - name: NATS_SERVER
               value: nats-address
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -580,9 +563,6 @@ spec:
                 nvidia.com/lpu: "16"
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
@@ -613,9 +593,6 @@ spec:
             resources: {}
             securityContext:
               privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /sys
               name: host-sys
@@ -629,10 +606,6 @@ spec:
           terminationGracePeriodSeconds: 60
           tolerations:
           - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
             operator: Exists
           volumes:
           - name: model-storage
@@ -787,7 +760,6 @@ spec:
             - name: POD_IP
               valueFrom:
                 fieldRef:
-                  apiVersion: v1
                   fieldPath: status.podIP
             - name: POD_NAME
               valueFrom:
@@ -814,10 +786,6 @@ spec:
               successThreshold: 1
               timeoutSeconds: 1
             resources: {}
-            securityContext:
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /nfs
               name: model-storage
@@ -838,10 +806,6 @@ spec:
             image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}
-            securityContext:
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
             volumeMounts:
             - mountPath: /tmp/dynamo-lpu-ssh
               name: single-v2-ssh-key

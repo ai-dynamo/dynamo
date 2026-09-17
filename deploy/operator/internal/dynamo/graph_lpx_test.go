@@ -36,23 +36,20 @@ func TestBackendDetectionSkipsNonWorkers(t *testing.T) {
 	}
 }
 
-func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
+func TestRenderSelectedLPXRolePodSettings(t *testing.T) {
 	tests := []struct {
-		name     string
-		authored *corev1.PodSecurityContext
-		expected *corev1.PodSecurityContext
+		name             string
+		authored         *corev1.PodSecurityContext
+		sharedMemorySize *resource.Quantity
+		volumes          []corev1.Volume
+		mounts           []corev1.VolumeMount
 	}{
 		{
 			name: "no authored security context",
-			expected: &corev1.PodSecurityContext{
-				FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
-				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
-			},
 		},
 		{
 			name:     "authored fsGroup without policy",
 			authored: &corev1.PodSecurityContext{FSGroup: ptr.To(int64(2000))},
-			expected: &corev1.PodSecurityContext{FSGroup: ptr.To(int64(2000))},
 		},
 		{
 			name: "authored always policy",
@@ -60,25 +57,25 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 				FSGroup:             ptr.To(int64(2000)),
 				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
 			},
-			expected: &corev1.PodSecurityContext{
-				FSGroup:             ptr.To(int64(2000)),
-				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
-			},
 		},
 		{
 			name:     "authored empty security context",
 			authored: &corev1.PodSecurityContext{},
-			expected: &corev1.PodSecurityContext{},
 		},
 		{
 			name: "authored root security context",
 			authored: &corev1.PodSecurityContext{
 				RunAsUser: ptr.To(int64(0)), RunAsGroup: ptr.To(int64(0)), RunAsNonRoot: ptr.To(false),
 			},
-			expected: &corev1.PodSecurityContext{
-				RunAsUser: ptr.To(int64(0)), RunAsGroup: ptr.To(int64(0)), RunAsNonRoot: ptr.To(false),
-			},
 		},
+		{
+			name: "explicit shared memory size", sharedMemorySize: ptr.To(resource.MustParse("64Mi")),
+			volumes: []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("64Mi")),
+			}}}},
+			mounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
+		},
+		{name: "explicit zero shared memory size", sharedMemorySize: ptr.To(resource.MustParse("0"))},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -87,7 +84,7 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test"},
 			}
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode,
+				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode, SharedMemorySize: test.sharedMemorySize,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers:      []corev1.Container{{Name: "main", Image: "cyborg:test"}},
 					SecurityContext: test.authored,
@@ -100,8 +97,16 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()})
 			require.NoError(t, err)
 
-			t.Log("Retain authored security context and default only an absent one")
-			require.Equal(t, test.expected, template.Spec.SecurityContext)
+			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")
+			if test.sharedMemorySize == nil {
+				test.volumes = []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+					Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("8Gi")),
+				}}}}
+				test.mounts = []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}}
+			}
+			require.Equal(t, test.authored, template.Spec.SecurityContext)
+			require.ElementsMatch(t, test.volumes, template.Spec.Volumes)
+			require.ElementsMatch(t, test.mounts, template.Spec.Containers[0].VolumeMounts)
 		})
 	}
 }

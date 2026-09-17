@@ -40,6 +40,10 @@ spec:
                 value: '19877'
               - name: SERVER_HOSTS_FILE
                 value: /tmp/lpu_servers
+              - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['grove.io/podclique-pod-index']
               startupProbe:
                 failureThreshold: 720
                 httpGet:
@@ -66,7 +70,8 @@ spec:
                 mountPath: /configs
               - name: infiniband
                 mountPath: /dev/infiniband
-              - {name: model-storage, mountPath: /nfs}
+              - name: model-storage
+                mountPath: /nfs
               resources:
                 claims:
                 - name: gpu
@@ -75,7 +80,12 @@ spec:
               hostPath:
                 path: /dev/infiniband
                 type: Directory
-            - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
       - name: agent
         podTemplate:
           spec:
@@ -89,6 +99,10 @@ spec:
               resources:
                 limits:
                   lpu.nvidia.com/devices: '1'
+                  hugepages-2Mi: 4Gi
+                requests:
+                  cpu: '62'
+                  hugepages-2Mi: 4Gi
               startupProbe:
                 failureThreshold: 60
                 httpGet:
@@ -118,20 +132,51 @@ spec:
                 value: '19877'
               - name: READINESS_PORT
                 value: '19878'
+              - name: LPU_MODEL_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage
               - name: config
                 mountPath: /configs
-              - {name: hugepages, mountPath: /dev/hugepages}
-              - {name: host-sys, mountPath: /sys}
-              - {name: host-dev, mountPath: /dev}
-              - {name: ssh-secret, mountPath: /ssh-pk, readOnly: true}
+              - name: hugepages
+                mountPath: /dev/hugepages
+              - name: host-sys
+                mountPath: /sys
+              - name: host-dev
+                mountPath: /dev
+              - name: ssh-secret
+                mountPath: /ssh-pk
+                readOnly: true
+              securityContext:
+                privileged: true
             volumes:
             - name: model-storage
               persistentVolumeClaim:
                 claimName: model-storage
-            - {name: host-dev, hostPath: {path: /dev, type: Directory}}
-            - {name: host-sys, hostPath: {path: /sys, type: Directory}}
-            - {name: hugepages, emptyDir: {medium: HugePages}}
-            - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 420}}
+            - name: host-dev
+              hostPath:
+                path: /dev
+                type: Directory
+            - name: host-sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: hugepages
+              emptyDir:
+                medium: HugePages
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 420
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            tolerations:
+            - key: lpu.nvidia.com/node
+              operator: Exists
