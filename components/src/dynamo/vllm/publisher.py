@@ -94,16 +94,16 @@ class PrometheusDecodeRemotePrefillAdmissionMetrics:
         self.model_name = model_name
         self.component_name = component_name
 
-    def _labels(self, dp_rank: int | None) -> dict[str, str]:
+    def _labels(self, dp_rank: int) -> dict[str, str]:
         return {
             labels.MODEL: self.model_name,
             labels.COMPONENT: self.component_name,
-            labels.DP_RANK: "unrouted" if dp_rank is None else str(dp_rank),
+            labels.DP_RANK: str(dp_rank),
         }
 
     def set_state(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
         *,
         limit: int,
         active: int,
@@ -116,7 +116,7 @@ class PrometheusDecodeRemotePrefillAdmissionMetrics:
 
     def observe_wait(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
         *,
         wait_seconds: float,
         limit_hit: bool,
@@ -126,10 +126,10 @@ class PrometheusDecodeRemotePrefillAdmissionMetrics:
         if limit_hit:
             self.limit_hits.labels(**metric_labels).inc()
 
-    def record_cancelled(self, dp_rank: int | None) -> None:
+    def record_cancelled(self, dp_rank: int) -> None:
         self.cancelled_waiters.labels(**self._labels(dp_rank)).inc()
 
-    def record_release(self, dp_rank: int | None, reason: str) -> None:
+    def record_release(self, dp_rank: int, reason: str) -> None:
         self.releases.labels(
             **self._labels(dp_rank),
             reason=reason,

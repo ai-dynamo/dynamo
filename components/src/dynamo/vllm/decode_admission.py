@@ -16,7 +16,7 @@ class DecodeRemotePrefillAdmissionMetrics(Protocol):
 
     def set_state(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
         *,
         limit: int,
         active: int,
@@ -26,17 +26,17 @@ class DecodeRemotePrefillAdmissionMetrics(Protocol):
 
     def observe_wait(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
         *,
         wait_seconds: float,
         limit_hit: bool,
     ) -> None:
         ...
 
-    def record_cancelled(self, dp_rank: int | None) -> None:
+    def record_cancelled(self, dp_rank: int) -> None:
         ...
 
-    def record_release(self, dp_rank: int | None, reason: str) -> None:
+    def record_release(self, dp_rank: int, reason: str) -> None:
         ...
 
 
@@ -72,7 +72,7 @@ class DecodeRemotePrefillLease:
     def __init__(
         self,
         owner: DecodeRemotePrefillAdmission,
-        dp_rank: int | None,
+        dp_rank: int,
         gate: _Gate,
     ) -> None:
         self._owner = owner
@@ -108,11 +108,11 @@ class DecodeRemotePrefillAdmission:
             raise ValueError("remote-prefill admission limit must be non-negative")
         self.limit = limit
         self._metrics = metrics
-        self._gates: dict[int | None, _Gate] = {}
+        self._gates: dict[int, _Gate] = {}
 
     async def acquire(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
     ) -> DecodeRemotePrefillLease | None:
         """Acquire one permit for a local DP rank.
 
@@ -159,7 +159,7 @@ class DecodeRemotePrefillAdmission:
 
     def snapshot(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
     ) -> DecodeRemotePrefillAdmissionSnapshot:
         """Return admission state for one local DP rank."""
         gate = self._gates.get(dp_rank)
@@ -185,7 +185,7 @@ class DecodeRemotePrefillAdmission:
             releases=gate.releases,
         )
 
-    def _set_state(self, dp_rank: int | None, gate: _Gate) -> None:
+    def _set_state(self, dp_rank: int, gate: _Gate) -> None:
         if self._metrics is not None:
             self._metrics.set_state(
                 dp_rank,
@@ -196,7 +196,7 @@ class DecodeRemotePrefillAdmission:
 
     def _record_release(
         self,
-        dp_rank: int | None,
+        dp_rank: int,
         gate: _Gate,
         reason: str,
     ) -> None:

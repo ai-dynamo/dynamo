@@ -21,7 +21,7 @@ pytestmark = [
 
 async def _wait_for_waiters(
     admission: DecodeRemotePrefillAdmission,
-    dp_rank: int | None,
+    dp_rank: int,
     expected: int,
 ) -> None:
     for _ in range(100):
@@ -107,12 +107,12 @@ async def test_waiter_cancellation_cleans_state():
 @pytest.mark.asyncio
 async def test_release_is_idempotent():
     admission = DecodeRemotePrefillAdmission(limit=1)
-    lease = await admission.acquire(dp_rank=None)
+    lease = await admission.acquire(dp_rank=0)
     assert lease is not None
 
     assert lease.release("first_output") is True
     assert lease.release("terminal_before_first_output") is False
 
-    snapshot = admission.snapshot(None)
+    snapshot = admission.snapshot(0)
     assert snapshot.active == 0
     assert snapshot.releases == 1
