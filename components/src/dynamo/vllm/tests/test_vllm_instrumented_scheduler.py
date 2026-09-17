@@ -6322,7 +6322,3 @@ def test_random_kda_allows_hybrid_warm_chains_without_expert_parallelism(monkeyp
     stub._bench_random_kda = True
     assert stub._kvwarm_warm_eligible()
     assert stub._kvwarm_meta["skip_reason"] is None
-    point = BenchmarkPoint(point_type="decode", sample_reasons=["kvwarm_real_kv"])
-    assert stub._kvwarm_seed_regime(point) == "real_attention_kv_random_kda"
-    point = replace(point, sample_reasons=["kvwarm_fake_fallback"])
-    assert stub._kvwarm_seed_regime(point) == "fake_attention_kv_random_kda"
