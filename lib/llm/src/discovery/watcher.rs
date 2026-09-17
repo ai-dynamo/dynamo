@@ -10,10 +10,7 @@ use tokio::sync::{Notify, mpsc::Sender};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use dynamo_kv_router::{
-    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
-    selector::{DefaultWorkerSelector, WorkerSelector},
-};
+use dynamo_kv_router::PrefillLoadEstimator;
 use dynamo_runtime::{
     DistributedRuntime,
     discovery::{DiscoveryInstance, DiscoveryQuery, DiscoveryStream, ModelCardInstanceId},
@@ -32,10 +29,11 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
     },
     local_model::runtime_config::{
-        ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
+        VLLM_INFERENCE_V1_GENERATE_CAPABILITY, VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -184,10 +182,7 @@ pub enum ModelUpdate {
     Removed(ModelDeploymentCard),
 }
 
-pub struct ModelWatcher<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig>,
-{
+pub struct ModelWatcher {
     manager: Arc<ModelManager>,
     drt: DistributedRuntime,
     router_config: RouterConfig,
@@ -211,9 +206,7 @@ where
     /// Worker capabilities accepted by the frontend's engine-native Generate routes.
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-    /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
-    require_typed_worker_role: bool,
+    selection_policy: SelectionPolicySource,
 }
 
 pub(crate) struct PreparedWorkerSet {
@@ -270,7 +263,7 @@ fn removed_model_cards(
         .collect()
 }
 
-impl ModelWatcher<DefaultWorkerSelector> {
+impl ModelWatcher {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         runtime: DistributedRuntime,
@@ -282,7 +275,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
     ) -> ModelWatcher {
-        Self::new_with_worker_selector_factory(
+        Self::new_with_selection_policy(
             runtime,
             model_manager,
             router_config,
@@ -291,23 +284,12 @@ impl ModelWatcher<DefaultWorkerSelector> {
             chat_engine_factory,
             prefill_load_estimator,
             metrics,
-            false,
-            Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(
-                    Some(config.clone()),
-                    worker_type.default_selector_label(),
-                )
-            }),
+            SelectionPolicySource::Registry,
         )
     }
-}
 
-impl<Sel> ModelWatcher<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new_with_worker_selector_factory(
+    pub(crate) fn new_with_selection_policy(
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
@@ -316,8 +298,7 @@ where
         chat_engine_factory: Option<ChatEngineFactoryCallback>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         metrics: Arc<Metrics>,
-        require_typed_worker_role: bool,
-        worker_selector_factory: WorkerSelectorFactory<Sel>,
+        selection_policy: SelectionPolicySource,
     ) -> Self {
         Self {
             manager: model_manager,
@@ -335,8 +316,7 @@ where
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
-            worker_selector_factory,
-            require_typed_worker_role,
+            selection_policy,
         }
     }
 
@@ -433,7 +413,27 @@ where
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
-        validate_selector_worker_role(card, self.require_typed_worker_role)?;
+        validate_policy_worker_role(card, &self.selection_policy)?;
+
+        // Prepare without exact video routing unless the cohort agreed on a contract.
+        let removed_video_contract = spec.video_contract.is_none()
+            && [
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            ]
+            .into_iter()
+            .fold(false, |removed, key| {
+                card.runtime_config.runtime_data.remove(key).is_some() || removed
+            });
+        if removed_video_contract {
+            tracing::warn!(
+                target: "mm_routing",
+                model_name = card.name(),
+                group = %spec.key.id(),
+                "WorkerSet members publish different Qwen video prompt-expansion contracts; \
+                 exact video routing disabled for this group"
+            );
+        }
 
         // Use per-worker-set router config if the worker provided one in its MDC,
         // otherwise fall back to the frontend-level global config. Policy selections
@@ -579,21 +579,16 @@ where
             // need the shared chooser in KV mode.
             let kv_chooser =
                 if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
-                    let selector = (self.worker_selector_factory)(
-                        &router_config.kv_router_config,
-                        effective_worker_type(card.worker_type, card.model_type),
-                        RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
-                    );
                     let mut chooser = self
                         .manager
-                        .kv_chooser_for_with_selector_and_client(
+                        .kv_chooser_for_with_policy_and_client(
                             load_context
                                 .as_ref()
                                 .expect("routing load context must exist")
                                 .client()
                                 .clone(),
                             card.kv_cache_block_size,
-                            selector,
+                            self.selection_policy.clone(),
                             Some(router_config.kv_router_config.clone()),
                             self.prefill_load_estimator.clone(),
                             card.worker_type,
@@ -630,13 +625,13 @@ where
 
                 // Fallback only: a prefill worker that declares its own
                 // `router_config` overrides this at activation time.
-                Some(PrefillRouter::new_with_selector_factory(
+                Some(PrefillRouter::new_with_selection_policy(
                     None,
                     self.manager.clone(),
                     router_config.router_mode,
                     card.kv_cache_block_size,
                     Some(prefill_config),
-                    self.worker_selector_factory.clone(),
+                    self.selection_policy.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,
@@ -669,7 +664,7 @@ where
 
             let preprocessed_routing = if needs_preprocessed_routing {
                 Some(
-                    entrypoint::input::build_preprocessed_routing_with_selector(
+                    entrypoint::input::build_preprocessed_routing_with_session_affinity_mode(
                         &client,
                         self.manager.clone(),
                         router_config.router_mode,
@@ -1027,10 +1022,7 @@ where
 }
 
 #[async_trait]
-impl<Sel> ControllerHost for ModelWatcher<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl ControllerHost for ModelWatcher {
     type Prepared = PreparedWorkerSet;
 
     fn normalize(
@@ -1058,6 +1050,7 @@ where
         };
         let mdc_checksum = card.mdcsum().to_string();
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
+        let video_contract = qwen_video_contract_digest(&card);
         Ok(Some(DesiredInstance {
             key: mcid.to_path(),
             mcid,
@@ -1066,6 +1059,7 @@ where
             group_key,
             mdc_checksum,
             projection_fingerprint,
+            video_contract,
         }))
     }
 
@@ -1174,6 +1168,7 @@ where
             .collect::<HashMap<_, _>>();
         self.manager.replace_discovery_group(
             &group_id,
+            None,
             members
                 .iter()
                 .map(|member| (member.key.clone(), member.card.clone()))
@@ -1196,6 +1191,83 @@ where
             {
                 self.emit_update(ModelUpdate::Removed(card));
             }
+        }
+        Ok(())
+    }
+
+    fn replace_prepared_group(
+        &self,
+        spec: &GroupSpec,
+        mut prepared: Self::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        let group_id = spec.key.id();
+        let previous = self
+            .manager
+            .discovery_group_adapter_cards(&group_id)
+            .into_iter()
+            .map(|card| (card.name().to_string(), card))
+            .collect::<HashMap<_, _>>();
+        let adapter_was_available = previous
+            .keys()
+            .cloned()
+            .chain(
+                adapters
+                    .iter()
+                    .map(|adapter| adapter.card.name().to_string()),
+            )
+            .map(|name| {
+                (
+                    name.clone(),
+                    self.manager.get_committed_model(&name).is_some(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let worker_set = prepared
+            .worker_set
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        let mut committed_members = members
+            .iter()
+            .map(|member| (member.key.clone(), member.card.clone()))
+            .collect::<Vec<_>>();
+        if let Some((_, card)) = committed_members
+            .iter_mut()
+            .find(|(key, _)| key == &spec.representative.key)
+        {
+            *card = prepared.card.clone();
+        }
+        let desired = adapters
+            .iter()
+            .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))
+            .collect::<HashMap<_, _>>();
+        self.manager.replace_discovery_group(
+            &group_id,
+            Some(worker_set),
+            committed_members,
+            adapters
+                .iter()
+                .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
+                .collect(),
+        )?;
+        self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        for (name, card) in &desired {
+            if !adapter_was_available.get(name).copied().unwrap_or(false)
+                && self.manager.get_committed_model(name).is_some()
+            {
+                self.emit_update(ModelUpdate::Added(card.clone()));
+            }
+        }
+        for (name, card) in previous {
+            if adapter_was_available.get(&name).copied().unwrap_or(false)
+                && self.manager.get_committed_model(&name).is_none()
+            {
+                self.emit_update(ModelUpdate::Removed(card));
+            }
+        }
+        if prepared.card.model_type.supports_chat() {
+            self.notify_on_model.notify_waiters();
         }
         Ok(())
     }
@@ -1293,11 +1365,17 @@ fn effective_router_config<'a>(
     Cow::Owned(effective)
 }
 
-fn validate_selector_worker_role(
+/// A custom policy factory cannot infer whether an untyped legacy card is
+/// decode or aggregated, so it requires an explicit `worker_type`.
+fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
-    require_typed_worker_role: bool,
+    policy: &SelectionPolicySource,
 ) -> anyhow::Result<()> {
-    if require_typed_worker_role && card.worker_type.is_none() {
+    if matches!(
+        policy,
+        SelectionPolicySource::Factory(_) | SelectionPolicySource::Prepared(_)
+    ) && card.worker_type.is_none()
+    {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
@@ -1314,6 +1392,25 @@ fn lora_projection_fingerprint(card: &ModelDeploymentCard) -> anyhow::Result<Str
     });
     canonicalize_json(&mut value);
     Ok(blake3::hash(&serde_json::to_vec(&value)?).to_string())
+}
+
+/// Hashes the published Qwen video prompt-expansion contract.
+pub(super) fn qwen_video_contract_digest(card: &ModelDeploymentCard) -> Option<String> {
+    let mut contracts = serde_json::Map::new();
+    for key in [
+        VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ] {
+        if let Some(contract) = card.runtime_config.runtime_data.get(key) {
+            contracts.insert(key.to_string(), contract.clone());
+        }
+    }
+    if contracts.is_empty() {
+        return None;
+    }
+    let mut contracts = serde_json::Value::Object(contracts);
+    canonicalize_json(&mut contracts);
+    Some(blake3::hash(contracts.to_string().as_bytes()).to_string())
 }
 
 fn canonicalize_json(value: &mut serde_json::Value) {
@@ -1364,6 +1461,43 @@ mod tests {
     use dynamo_runtime::pipeline::Error;
     use dynamo_runtime::{Runtime, distributed::DistributedConfig};
     use futures::StreamExt;
+
+    #[test]
+    fn qwen_video_contract_digest_is_canonical_and_engine_specific() {
+        fn card_with_contract(key: &str, contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config
+                .runtime_data
+                .insert(key.to_string(), contract);
+            card
+        }
+
+        let absent = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(qwen_video_contract_digest(&absent), None);
+
+        let vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+        );
+        let reordered_vllm = card_with_contract(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"resize_mode": "round_ties_even", "placeholder_target": "bare_video_token"}),
+        );
+        let sglang = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({"placeholder_target": "bare_video_token", "resize_mode": "round_ties_even"}),
+        );
+
+        assert_eq!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&reordered_vllm)
+        );
+        assert_ne!(
+            qwen_video_contract_digest(&vllm),
+            qwen_video_contract_digest(&sglang),
+            "engine-specific contracts must not share a cohort fingerprint"
+        );
+    }
 
     #[tokio::test]
     async fn retired_worker_set_prevents_late_prefill_from_retained_chat_pipeline() {
@@ -2044,14 +2178,17 @@ mod tests {
             endpoint_id,
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            video_contract: qwen_video_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
         let spec = GroupSpec {
             key,
             mdc_checksum: desired.mdc_checksum.clone(),
+            fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
             representative: desired.clone(),
+            video_contract: desired.video_contract.clone(),
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
         let prepared = watcher
@@ -2140,14 +2277,17 @@ mod tests {
             endpoint_id,
             mdc_checksum: card.mdcsum().to_string(),
             projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            video_contract: qwen_video_contract_digest(&card),
             card,
             group_key: key.clone(),
         };
         let spec = GroupSpec {
             key,
             mdc_checksum: desired.mdc_checksum.clone(),
+            fingerprint: desired.mdc_checksum.clone(),
             generation: 1,
             representative: desired,
+            video_contract: None,
         };
         let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
 
@@ -2623,12 +2763,16 @@ mod tests {
 
     #[test]
     fn custom_selector_requires_explicit_worker_type() {
+        let registry = SelectionPolicySource::Registry;
+        let factory = SelectionPolicySource::Factory(Arc::new(|_, _, _| {
+            unreachable!("role validation never constructs the policy")
+        }));
         let mut card = ModelDeploymentCard::with_name_only("model");
-        assert!(validate_selector_worker_role(&card, false).is_ok());
-        assert!(validate_selector_worker_role(&card, true).is_err());
+        assert!(validate_policy_worker_role(&card, &registry).is_ok());
+        assert!(validate_policy_worker_role(&card, &factory).is_err());
 
         card.worker_type = Some(WorkerType::Decode);
-        assert!(validate_selector_worker_role(&card, true).is_ok());
+        assert!(validate_policy_worker_role(&card, &factory).is_ok());
     }
 
     #[test]

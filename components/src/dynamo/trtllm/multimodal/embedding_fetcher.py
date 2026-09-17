@@ -250,6 +250,16 @@ def _create_request_with_urls(
 
     modified_request = copy.deepcopy(original_request)
 
+    mm_data = modified_request.get("multi_modal_data")
+    if isinstance(mm_data, dict) and isinstance(mm_data.get("image_url"), list):
+        filtered_items: List[Any] = []
+        for item in mm_data["image_url"]:
+            if isinstance(item, dict) and item.get("Url") in image_urls:
+                filtered_items.append(item)
+            elif isinstance(item, str) and item in image_urls:
+                filtered_items.append(item)
+        mm_data["image_url"] = filtered_items
+
     # Extract messages
     messages = modified_request.get("extra_args", {}).get(
         "messages", modified_request.get("messages", [])
