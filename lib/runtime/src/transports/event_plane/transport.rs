@@ -21,11 +21,6 @@ pub type WireStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 /// Transport-agnostic interface for publishing events.
 #[async_trait]
 pub trait EventTransportTx: Send + Sync {
-    /// Wait for any asynchronous transport startup before advertising a ready source.
-    async fn wait_ready(&self) -> Result<()> {
-        Ok(())
-    }
-
     /// Publish raw envelope bytes to a subject/topic.
     async fn publish(&self, subject: &str, envelope_bytes: Bytes) -> Result<()>;
 

@@ -157,8 +157,6 @@ pub(crate) struct RemovedDiscoveryGroup {
 ///
 /// Note: Don't implement Clone for this, put it in an Arc instead.
 pub struct ModelManager {
-    /// KV frontends must not report ready before any model and its feeds are usable.
-    require_ready_model: AtomicBool,
     /// Model name → Model (which contains WorkerSets with engines)
     models: DashMap<String, Arc<Model>>,
 
@@ -217,7 +215,6 @@ impl Default for ModelManager {
 impl ModelManager {
     pub fn new() -> Self {
         Self {
-            require_ready_model: AtomicBool::new(false),
             models: DashMap::new(),
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
@@ -1096,25 +1093,6 @@ impl ModelManager {
             .models
             .values()
             .any(|model| model.is_ready_to_serve())
-    }
-
-    pub(crate) fn require_model_readiness(&self) {
-        self.require_ready_model.store(true, Ordering::Relaxed);
-    }
-
-    pub(crate) fn frontend_routing_ready(&self) -> bool {
-        if !self.require_ready_model.load(Ordering::Relaxed) {
-            return true;
-        }
-        let catalog = self.catalog.load();
-        catalog
-            .models
-            .values()
-            .any(|model| model.is_ready_to_serve())
-            && catalog
-                .models
-                .values()
-                .all(|model| model.kv_event_sources_ready())
     }
 
     pub fn model_display_names(&self) -> HashSet<String> {

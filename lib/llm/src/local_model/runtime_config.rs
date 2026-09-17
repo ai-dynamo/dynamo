@@ -406,17 +406,6 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
-    /// Upgraded relays opt into frontend readiness for every declared DP rank.
-    /// Absence preserves the discovery contract of older workers.
-    pub fn requires_kv_event_source_readiness(&self) -> bool {
-        self.kv_event_publishing_enabled != Some(false)
-            && self
-                .runtime_data
-                .get("require_kv_event_source_readiness")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-    }
-
     /// Check whether a runtime boolean is explicitly enabled.
     ///
     /// Rust callers commonly store booleans, while compatibility cards may

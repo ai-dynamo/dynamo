@@ -63,7 +63,7 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    if !state.is_ready() || !state.manager().frontend_routing_ready() {
+    if !state.is_ready() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({

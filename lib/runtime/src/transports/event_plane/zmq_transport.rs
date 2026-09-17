@@ -18,20 +18,17 @@ use anyhow::{Context as _, Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{SinkExt, Stream, StreamExt};
+use futures::{SinkExt, StreamExt};
 use once_cell::sync::OnceCell;
 use std::ffi::OsStr;
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
     publish::{Publish, publish},
     subscribe::{Subscribe, subscribe},
 };
-use tokio::sync::{Mutex, broadcast, watch};
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::task::AbortOnDropHandle;
 
 /// Returns the process-wide shared ZMQ context.
@@ -75,218 +72,6 @@ const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
-
-/// Keeps a socket's monitor alive until event production has been disabled.
-///
-/// libzmq sends monitor events synchronously. Dropping its PAIR receiver while
-/// monitoring remains enabled can block an I/O thread on a later disconnect.
-pub struct MonitoredZmqSocket<S: AsZmqSocket> {
-    socket: S,
-    readiness: Option<ZmqConnectionReadiness>,
-}
-
-impl<S: AsZmqSocket> MonitoredZmqSocket<S> {
-    fn unmonitored(socket: S) -> Self {
-        Self {
-            socket,
-            readiness: None,
-        }
-    }
-
-    fn monitored(socket: S, context: &Context) -> Result<Self> {
-        let readiness = monitor_connection(socket.get_socket(), context)?;
-        Ok(Self {
-            socket,
-            readiness: Some(readiness),
-        })
-    }
-
-    fn readiness(&self) -> ZmqConnectionReadiness {
-        self.readiness
-            .as_ref()
-            .expect("socket is monitored")
-            .clone()
-    }
-}
-
-impl<S: AsZmqSocket> AsZmqSocket for MonitoredZmqSocket<S> {
-    fn get_socket(&self) -> &zmq::Socket {
-        self.socket.get_socket()
-    }
-}
-
-impl<S: AsZmqSocket> Deref for MonitoredZmqSocket<S> {
-    type Target = S;
-    fn deref(&self) -> &S {
-        &self.socket
-    }
-}
-
-impl<S: AsZmqSocket> DerefMut for MonitoredZmqSocket<S> {
-    fn deref_mut(&mut self) -> &mut S {
-        &mut self.socket
-    }
-}
-
-impl<S: AsZmqSocket + Stream + Unpin> Stream for MonitoredZmqSocket<S> {
-    type Item = S::Item;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().socket).poll_next(cx)
-    }
-}
-
-impl<S: AsZmqSocket> Drop for MonitoredZmqSocket<S> {
-    fn drop(&mut self) {
-        if self.readiness.is_some() {
-            // rust-zmq cannot pass the null endpoint used to stop monitoring.
-            // Replacing the monitor with a zero-event monitor disables event
-            // production synchronously, before the old receiver is aborted.
-            // A fresh endpoint avoids racing the old monitor's asynchronous close.
-            let endpoint = format!("inproc://dynamo-zmq-disabled-{}", uuid::Uuid::new_v4());
-            if let Err(error) = self.socket.get_socket().monitor(&endpoint, 0) {
-                tracing::debug!(%error, "Unable to disable closing ZMQ socket monitor");
-            }
-        }
-    }
-}
-
-/// Tracks completed ZMTP handshakes independently of the data receive loop.
-///
-/// The subscription is configured before connecting. A completed handshake means
-/// the transport can forward events; PUB/SUB does not acknowledge the remote
-/// publisher's processing of SUBSCRIBE and this is not a delivery guarantee.
-#[derive(Clone)]
-pub struct ZmqConnectionReadiness {
-    connected: watch::Receiver<std::collections::HashSet<String>>,
-    endpoints: Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
-    // Keep the receiver connected even if Tokio cancels its reader first during
-    // shutdown. The owning data socket can then disable monitoring safely.
-    _monitor_socket: Arc<Mutex<tmq::pair::Pair>>,
-    _monitor_task: Arc<AbortOnDropHandle<()>>,
-}
-
-impl ZmqConnectionReadiness {
-    /// Wait for the endpoint's transport handshake. Callers own the startup
-    /// deadline and cancellation policy; dropping this future is safe.
-    pub async fn wait_connected(&self, endpoint: &str) -> Result<()> {
-        let mut aliases = std::collections::HashSet::from([endpoint.to_string()]);
-        if let Some(recorded) = self.endpoints.lock().get(endpoint) {
-            aliases.insert(recorded.clone());
-        }
-        if let Some(address) = endpoint.strip_prefix("tcp://") {
-            if let Ok(address) = address.parse::<std::net::SocketAddr>() {
-                aliases.insert(format!("tcp://{address}"));
-            } else {
-                // libzmq may report the hostname on its initial connection and
-                // the resolved IP after reconnecting. LAST_ENDPOINT alone does
-                // not cover both spellings. Resolve only startup hostnames;
-                // numeric TCP and IPC endpoints do not perform a DNS lookup.
-                let addresses = tokio::net::lookup_host(address)
-                    .await
-                    .with_context(|| format!("Failed to resolve ZMQ endpoint {endpoint}"))?;
-                aliases.extend(addresses.map(|address| format!("tcp://{address}")));
-            }
-        }
-        let mut connected = self.connected.clone();
-        loop {
-            if !connected.borrow_and_update().is_disjoint(&aliases) {
-                return Ok(());
-            }
-            connected
-                .changed()
-                .await
-                .context("ZMQ connection monitor stopped")?;
-        }
-    }
-
-    fn record_endpoint(&self, socket: &zmq::Socket, endpoint: &str) -> Result<()> {
-        // Preserve libzmq's initial spelling; reconnects may use a resolved IP.
-        let resolved = socket
-            .get_last_endpoint()?
-            .map_err(|_| anyhow!("ZMQ endpoint is not valid UTF-8"))?;
-        self.endpoints.lock().insert(endpoint.to_string(), resolved);
-        Ok(())
-    }
-}
-
-/// Start a SUB socket with an observable connection handshake.
-///
-/// Socket construction remains nonblocking. Readiness is observed separately so
-/// adding an unavailable peer does not block an existing grouped receive loop.
-pub fn connect_subscriber_with_readiness(
-    endpoint: &str,
-    topic: &str,
-    rcvhwm: i32,
-) -> Result<(MonitoredZmqSocket<Subscribe>, ZmqConnectionReadiness)> {
-    anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
-    anyhow::ensure!(
-        endpoint.starts_with("tcp://") || endpoint.starts_with("ipc://"),
-        "ZMQ connection readiness requires a TCP or IPC endpoint"
-    );
-    let context = shared_zmq_context()?;
-    let socket = context
-        .socket(zmq::SUB)
-        .map_err(|error| map_socket_creation_error(error.into()))?;
-    socket.set_rcvhwm(rcvhwm)?;
-    socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
-    socket.set_linger(0)?;
-    socket.set_reconnect_ivl(100)?;
-    socket.set_reconnect_ivl_max(5000)?;
-    socket.set_tcp_keepalive(1)?;
-    socket.set_subscribe(topic.as_bytes())?;
-
-    let socket =
-        <tmq::subscribe::SubscribeWithoutTopic as tmq::FromZmqSocket<_>>::from_zmq_socket(socket)?
-            .subscribe(topic.as_bytes())?;
-    let socket = MonitoredZmqSocket::monitored(socket, &context)?;
-    let readiness = socket.readiness();
-    socket.get_socket().connect(endpoint)?;
-    readiness.record_endpoint(socket.get_socket(), endpoint)?;
-    Ok((socket, readiness))
-}
-
-fn monitor_connection(socket: &zmq::Socket, context: &Context) -> Result<ZmqConnectionReadiness> {
-    let monitor_endpoint = format!("inproc://dynamo-zmq-ready-{}", uuid::Uuid::new_v4());
-    let events = zmq::SocketEvent::HANDSHAKE_SUCCEEDED.to_raw()
-        | zmq::SocketEvent::DISCONNECTED.to_raw()
-        | zmq::SocketEvent::MONITOR_STOPPED.to_raw();
-    let monitor = tmq::pair(context)
-        .set_linger(0)
-        .connect(&monitor_endpoint)?;
-    socket.monitor(&monitor_endpoint, i32::from(events))?;
-
-    let monitor = Arc::new(Mutex::new(monitor));
-    let reader = monitor.clone();
-    let (connected_tx, connected) = watch::channel(std::collections::HashSet::new());
-    let monitor_task = tokio::spawn(async move {
-        let mut monitor = reader.lock().await;
-        while let Some(Ok(frames)) = monitor.next().await {
-            if frames.len() != 2 || frames[0].len() < 2 {
-                continue;
-            }
-            let event = u16::from_ne_bytes([frames[0][0], frames[0][1]]);
-            if event == zmq::SocketEvent::MONITOR_STOPPED.to_raw() {
-                break;
-            }
-            let Ok(endpoint) = std::str::from_utf8(&frames[1]) else {
-                continue;
-            };
-            connected_tx.send_modify(|connected| {
-                if event == zmq::SocketEvent::HANDSHAKE_SUCCEEDED.to_raw() {
-                    connected.insert(endpoint.to_string());
-                } else if event == zmq::SocketEvent::DISCONNECTED.to_raw() {
-                    connected.remove(endpoint);
-                }
-            });
-        }
-    });
-    Ok(ZmqConnectionReadiness {
-        connected,
-        endpoints: Arc::default(),
-        _monitor_socket: monitor,
-        _monitor_task: Arc::new(AbortOnDropHandle::new(monitor_task)),
-    })
-}
 
 const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached libzmq's ZMQ_MAX_SOCKETS limit or its file-descriptor limit. Reduce direct-ZMQ peers or raise the limit with `ulimit -n`";
 const PROCESS_FD_LIMIT_GUIDANCE: &str = "The process reached its file-descriptor limit. Reduce open file descriptors or raise the limit with `ulimit -n`";
@@ -379,9 +164,8 @@ impl AsRef<[u8]> for ZmqMessageOwner {
 
 /// ZMQ PUB transport for publishing events.
 pub struct ZmqPubTransport {
-    socket: Arc<Mutex<MonitoredZmqSocket<Publish>>>,
+    socket: Arc<Mutex<Publish>>,
     topic: String,
-    readiness: Option<(ZmqConnectionReadiness, Vec<String>)>,
 }
 
 impl ZmqPubTransport {
@@ -415,9 +199,8 @@ impl ZmqPubTransport {
 
         Ok((
             Self {
-                socket: Arc::new(Mutex::new(MonitoredZmqSocket::unmonitored(socket))),
+                socket: Arc::new(Mutex::new(socket)),
                 topic: topic.to_string(),
-                readiness: None,
             },
             actual_endpoint,
         ))
@@ -429,7 +212,20 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        Self::connect_multiple(&[xsub_endpoint.to_string()], topic).await
+        let ctx = shared_zmq_context()?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
+
+        tracing::info!(
+            endpoint = %xsub_endpoint,
+            topic = %topic,
+            sndhwm = ZMQ_SNDHWM,
+            "ZMQ PUB transport connected to broker XSUB"
+        );
+
+        Ok(Self {
+            socket: Arc::new(Mutex::new(socket)),
+            topic: topic.to_string(),
+        })
     }
 
     /// Connect to multiple broker XSUB endpoints (HA mode)
@@ -440,22 +236,10 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context()?;
-        let socket = ctx
-            .socket(zmq::PUB)
-            .map_err(|error| map_socket_creation_error(error.into()))?;
-        socket.set_sndhwm(ZMQ_SNDHWM)?;
-        socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
-        let socket = MonitoredZmqSocket::monitored(
-            <Publish as tmq::FromZmqSocket<_>>::from_zmq_socket(socket)?,
-            &ctx,
-        )?;
-        let readiness = socket.readiness();
-        socket.get_socket().connect(first_endpoint)?;
-        readiness.record_endpoint(socket.get_socket(), first_endpoint)?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
             socket.get_socket().connect(endpoint)?;
-            readiness.record_endpoint(socket.get_socket(), endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ PUB connected to broker XSUB");
         }
 
@@ -469,22 +253,12 @@ impl ZmqPubTransport {
         Ok(Self {
             socket: Arc::new(Mutex::new(socket)),
             topic: topic.to_string(),
-            readiness: Some((readiness, xsub_endpoints.to_vec())),
         })
     }
 }
 
 #[async_trait]
 impl EventTransportTx for ZmqPubTransport {
-    async fn wait_ready(&self) -> Result<()> {
-        if let Some((readiness, endpoints)) = &self.readiness {
-            for endpoint in endpoints {
-                readiness.wait_connected(endpoint).await?;
-            }
-        }
-        Ok(())
-    }
-
     async fn publish(&self, _subject: &str, envelope_bytes: Bytes) -> Result<()> {
         let codec = MsgpackCodec;
         let (publisher_id, sequence) = codec.decode_envelope_identity(&envelope_bytes)?;
@@ -533,46 +307,24 @@ pub type ZmqWireStream =
 ///
 /// The caller must keep this value in one task. ZMQ SUB sockets are not thread-safe.
 pub struct DynamicZmqSubSocket {
-    socket: MonitoredZmqSocket<Subscribe>,
+    socket: Subscribe,
     expected_topic: Vec<u8>,
-    readiness: Option<ZmqConnectionReadiness>,
 }
 
 impl DynamicZmqSubSocket {
-    /// Start a dynamically managed socket and expose its connection handshakes.
-    pub fn connect_with_readiness(
-        endpoint: &str,
-        topic: &str,
-        rcvhwm: i32,
-    ) -> Result<(Self, ZmqConnectionReadiness)> {
-        let (socket, readiness) = connect_subscriber_with_readiness(endpoint, topic, rcvhwm)?;
-        Ok((
-            Self {
-                socket,
-                expected_topic: topic.as_bytes().to_vec(),
-                readiness: Some(readiness.clone()),
-            },
-            readiness,
-        ))
-    }
-
     /// Connect a new SUB socket with an explicit receive high-water mark.
     pub fn connect_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Self> {
         let socket = ZmqSubTransport::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
         tracing::info!(endpoint, topic, rcvhwm, "Dynamic ZMQ SUB socket connected");
         Ok(Self {
-            socket: MonitoredZmqSocket::unmonitored(socket),
+            socket,
             expected_topic: topic.as_bytes().to_vec(),
-            readiness: None,
         })
     }
 
     /// Connect this SUB socket to one more publisher endpoint.
     pub fn add_endpoint(&mut self, endpoint: &str) -> Result<()> {
         self.socket.get_socket().connect(endpoint)?;
-        if let Some(readiness) = &self.readiness {
-            readiness.record_endpoint(self.socket.get_socket(), endpoint)?;
-        }
         Ok(())
     }
 
@@ -638,21 +390,6 @@ pub struct ValidatedZmqSource {
 }
 
 impl ValidatedZmqSource {
-    /// Connect after the subscribed socket has completed its transport handshake.
-    pub async fn connect_ready(
-        endpoint: &str,
-        topic: &str,
-        expected_publisher_id: u64,
-        rcvhwm: i32,
-    ) -> Result<Self> {
-        Ok(Self {
-            stream: ZmqSubTransport::connect_single_consumer_ready(endpoint, topic, rcvhwm).await?,
-            expected_topic: topic.to_string(),
-            expected_publisher_id,
-            codec: Codec::default(),
-        })
-    }
-
     pub async fn connect_default(
         endpoint: &str,
         topic: &str,
@@ -716,36 +453,6 @@ impl ValidatedZmqSource {
 }
 
 impl ZmqSubTransport {
-    /// Connect one consumer after the subscribed socket's transport handshake.
-    pub async fn connect_single_consumer_ready(
-        endpoint: &str,
-        topic: &str,
-        rcvhwm: i32,
-    ) -> Result<ZmqWireStream> {
-        let (socket, readiness) = connect_subscriber_with_readiness(endpoint, topic, rcvhwm)?;
-        readiness.wait_connected(endpoint).await?;
-        Self::single_consumer_stream(socket, topic)
-    }
-
-    /// Connect a consumer after every broker transport handshake completes.
-    pub async fn connect_single_consumer_multiple_ready(
-        endpoints: &[String],
-        topic: &str,
-    ) -> Result<ZmqWireStream> {
-        let (first, rest) = endpoints
-            .split_first()
-            .context("Cannot connect to zero endpoints")?;
-        let (socket, readiness) = connect_subscriber_with_readiness(first, topic, ZMQ_RCVHWM)?;
-        for endpoint in rest {
-            socket.get_socket().connect(endpoint)?;
-            readiness.record_endpoint(socket.get_socket(), endpoint)?;
-        }
-        for endpoint in endpoints {
-            readiness.wait_connected(endpoint).await?;
-        }
-        Self::single_consumer_stream(socket, topic)
-    }
-
     fn connect_socket(endpoint: &str, topic: &str) -> Result<Subscribe> {
         Self::connect_socket_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
     }
@@ -834,10 +541,7 @@ impl ZmqSubTransport {
         Self::single_consumer_stream(socket, topic)
     }
 
-    fn single_consumer_stream<S>(mut socket: S, topic: &str) -> Result<ZmqWireStream>
-    where
-        S: Stream<Item = tmq::Result<Multipart>> + Send + Unpin + 'static,
-    {
+    fn single_consumer_stream(mut socket: Subscribe, topic: &str) -> Result<ZmqWireStream> {
         let expected_topic = topic.as_bytes().to_vec();
 
         let stream = stream! {
@@ -1039,102 +743,6 @@ mod tests {
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use std::collections::HashSet;
     use tokio::time::{Duration, timeout};
-
-    #[tokio::test]
-    async fn subscriber_readiness_waits_for_handshake_with_hostname() {
-        // Reserve the port with a plain TCP listener: a TCP connection alone is
-        // insufficient, and no ZMTP publisher exists until the explicit bind.
-        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        let endpoint = format!("tcp://localhost:{port}");
-        let (_socket, readiness) =
-            connect_subscriber_with_readiness(&endpoint, "kv-events", 128).unwrap();
-        assert!(
-            timeout(
-                Duration::from_millis(25),
-                readiness.wait_connected(&endpoint)
-            )
-            .await
-            .is_err(),
-            "socket construction or a plain TCP connection must not report ready"
-        );
-
-        drop(reservation);
-        let (_publisher, _) =
-            ZmqPubTransport::bind(&format!("tcp://127.0.0.1:{port}"), "kv-events")
-                .await
-                .unwrap();
-        timeout(Duration::from_secs(5), readiness.wait_connected(&endpoint))
-            .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "publisher handshake did not arrive: {error}; aliases={:?}, connected={:?}",
-                    readiness.endpoints.lock(),
-                    readiness.connected.borrow()
-                )
-            })
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn subscriber_readiness_teardown_preserves_shared_context() {
-        // Closing a monitored socket must not leave a libzmq I/O thread blocked
-        // trying to send to a monitor receiver that has already been dropped.
-        // Reuse the same context across enough connections to exercise every I/O
-        // thread, and require the first publication after each connection.
-        let context = shared_zmq_context().unwrap();
-        let topic = "monitor-lifetime";
-        for sequence in 0..16_u64 {
-            let publisher = context.socket(zmq::XPUB).unwrap();
-            publisher.set_linger(0).unwrap();
-            publisher.set_rcvtimeo(2_000).unwrap();
-            publisher.bind("tcp://127.0.0.1:*").unwrap();
-            let endpoint = publisher.get_last_endpoint().unwrap().unwrap();
-            let mut stream = timeout(Duration::from_secs(2), async {
-                if sequence % 2 == 0 {
-                    ZmqSubTransport::connect_single_consumer_ready(&endpoint, topic, 128).await
-                } else {
-                    ZmqSubTransport::connect_single_consumer_multiple_ready(&[endpoint], topic)
-                        .await
-                }
-            })
-            .await
-            .expect("previous monitor teardown must not block another connection")
-            .unwrap();
-            let payload = encoded_event(topic, 23, sequence);
-            let published = payload.clone();
-            let send = tokio::task::spawn_blocking(move || {
-                // XPUB observes the subscription so this teardown regression
-                // does not depend on PUB/SUB's unrelated slow-joiner timing.
-                let subscription = publisher.recv_bytes(0).unwrap();
-                assert_eq!(&subscription[1..], topic.as_bytes());
-                assert_eq!(subscription[0], 1);
-                publisher
-                    .send_multipart(
-                        [
-                            topic.as_bytes().to_vec(),
-                            23_u64.to_be_bytes().to_vec(),
-                            sequence.to_be_bytes().to_vec(),
-                            Frame::new(published).encode().to_vec(),
-                        ],
-                        0,
-                    )
-                    .unwrap();
-                publisher
-            });
-            let message = timeout(Duration::from_secs(2), stream.next())
-                .await
-                .expect("the first event must arrive after each connection")
-                .unwrap()
-                .unwrap();
-            assert_eq!(message.publisher_id, 23);
-            assert_eq!(message.sequence, sequence);
-            assert_eq!(message.payload, payload);
-            let publisher = send.await.unwrap();
-            drop(stream);
-            drop(publisher);
-        }
-    }
 
     #[test]
     fn emfile_errno_selects_source_specific_guidance() {

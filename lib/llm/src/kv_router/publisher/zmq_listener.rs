@@ -6,16 +6,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::protocols::*;
 use dynamo_kv_router::zmq_wire::*;
 
 use crate::kv_router::metrics::kv_publisher_metrics;
-use dynamo_runtime::transports::event_plane::zmq_transport::connect_subscriber_with_readiness;
-
-use crate::utils::zmq::multipart_message;
+use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 pub(super) struct DecodedZmqKvBatch {
     pub(super) source_cursor: u64,
@@ -57,7 +55,6 @@ pub(super) async fn start_zmq_listener(
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
-    ready: Option<oneshot::Sender<()>>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -68,34 +65,18 @@ pub(super) async fn start_zmq_listener(
     let mut normalizer = ZmqEventNormalizer::new(kv_block_size)
         .with_image_token_id(image_token_id)
         .with_video_token_id(video_token_id);
-    // Preserve the native-ingress socket's default receive high-water mark.
-    let (mut socket, connection) = match connect_subscriber_with_readiness(
-        &zmq_endpoint,
-        &zmq_topic,
-        1_000,
-    ) {
-        Ok(connection) => connection,
+    let socket = match connect_sub_socket(&zmq_endpoint, Some(&zmq_topic)).await {
+        Ok(socket) => socket,
         Err(error) => {
             tracing::error!(endpoint = %zmq_endpoint, topic = %zmq_topic, error = %error, "ZMQ listener failed to connect");
             return;
         }
     };
-    tokio::select! {
-        _ = cancellation_token.cancelled() => return,
-        result = connection.wait_connected(&zmq_endpoint) => {
-            if let Err(error) = result {
-                tracing::error!(endpoint = %zmq_endpoint, %error, "ZMQ listener connection failed");
-                return;
-            }
-        }
-    }
+    let mut socket = socket;
     let metrics = kv_publisher_metrics();
 
     if cancellation_token.is_cancelled() {
         return;
-    }
-    if let Some(ready) = ready {
-        let _ = ready.send(());
     }
 
     let mut messages_processed = 0u64;

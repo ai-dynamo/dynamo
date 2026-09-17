@@ -732,7 +732,7 @@ async fn run_source(
         let connection = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            connection = group_pool.connect_ready(publisher_id, &endpoint, task_generation) => connection,
+            connection = group_pool.connect(publisher_id, &endpoint, task_generation) => connection,
         };
         let mut connection = match connection {
             Ok(connection) => connection,

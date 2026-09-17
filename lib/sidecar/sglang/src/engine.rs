@@ -955,20 +955,6 @@ fn build_engine_config(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
-    // The leader declares readiness for the whole worker, even when all KV
-    // publishers are remote. Source descriptors are validated before registration.
-    if discovery
-        .server_info
-        .get("kv_events")
-        .is_some_and(|value| !value.is_null())
-        || discovery
-            .server_info
-            .get("kv_event_sources")
-            .and_then(Value::as_array)
-            .is_some_and(|sources| !sources.is_empty())
-    {
-        runtime_data.insert("require_kv_event_source_readiness".into(), true.into());
-    }
     if let Some(total_tokens) =
         hicache_native_offloading_capacity(&discovery.server_info, &discovery.model_info)
     {
@@ -1293,10 +1279,6 @@ mod tests {
         let sources = discover_kv_event_sources(&discovery, &mut config, &endpoint).unwrap();
 
         assert_eq!(
-            config.runtime_data["require_kv_event_source_readiness"],
-            true
-        );
-        assert_eq!(
             sources,
             [
                 DiscoveredKvEventSource {
@@ -1353,12 +1335,6 @@ mod tests {
 
         // An explicit empty source list must not fall back to all global ranks.
         discovery.server_info["kv_event_sources"] = json!([]);
-        config =
-            build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
-        assert_eq!(
-            config.runtime_data["require_kv_event_source_readiness"],
-            true
-        );
         assert!(
             discover_kv_event_sources(&discovery, &mut config, &endpoint)
                 .unwrap()
@@ -1369,16 +1345,6 @@ mod tests {
             json!([])
         );
         assert_eq!(config.llm.as_ref().unwrap().data_parallel_size, Some(8));
-
-        let mut disabled = discovery.clone();
-        disabled.server_info["kv_events"] = serde_json::Value::Null;
-        let disabled_config =
-            build_engine_config(&disabled, DisaggregationMode::Aggregated, None, None).unwrap();
-        assert!(
-            !disabled_config
-                .runtime_data
-                .contains_key("require_kv_event_source_readiness")
-        );
 
         // Engines without the new metadata field retain the old multinode guard.
         discovery

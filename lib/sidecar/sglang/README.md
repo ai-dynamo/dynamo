@@ -69,17 +69,6 @@ local KV events to Dynamo without accepting inference requests. A TP-only
 follower that holds part of a replica but has no local KV publisher does not
 need a sidecar.
 
-For KV routing, the frontend's `/health` stays unready until every registered
-DP rank has an advertised relay and the router has connected its event
-subscription. The leader registers before this gate so followers can discover
-it. Each relay advertises only after its engine subscription has established a
-connection and outbound publishing is available; creating a publisher object
-alone does not mark it ready. This contract applies to single-node sidecars as
-well. Launchers can wait for frontend readiness before sending requests.
-
-Readiness describes connected feeds, not durable event delivery: ZeroMQ PUB/SUB
-does not acknowledge individual subscriptions or KV events.
-
 Launch each sidecar separately with `--grpc-endpoint` pointing to its local
 SGLang server. This requires an SGLang build exposing node-local
 `kv_event_sources` through `GetServerInfo` on leaders and followers started

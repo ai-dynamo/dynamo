@@ -666,11 +666,7 @@ impl DistributedRuntime {
         let Some(nats_client) = self.nats_client.as_ref() else {
             anyhow::bail!("KV router's EventSubscriber requires NATS");
         };
-        let subscriber = nats_client.client().subscribe(subject).await?;
-        // Establish the subscription at the server before frontend readiness can
-        // release the first request (and its first KV event).
-        nats_client.client().flush().await?;
-        Ok(subscriber)
+        Ok(nats_client.client().subscribe(subject).await?)
     }
 
     /// TODO (karenc): This is a temporary KV router measure for worker query requests.

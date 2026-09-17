@@ -1,14 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent, WorkerId, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
 use dynamo_runtime::{
     component::{Component, Endpoint},
     discovery::EventTransportKind,
@@ -16,7 +12,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::{EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
 };
-use tokio::sync::{Semaphore, oneshot, watch};
+use tokio::sync::{Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -26,12 +22,8 @@ use super::{
     worker_query::WorkerQueryClient,
 };
 use crate::{
-    discovery::{
-        KvSourceId, KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus,
-        RuntimeConfigWatch,
-    },
+    discovery::{KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus},
     kv_router::{Indexer, KvEventSourceRequirement, metrics::RouterWorkerStatusMetrics},
-    local_model::runtime_config::ModelRuntimeConfig,
     worker_type::WorkerType,
 };
 
@@ -67,7 +59,6 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
     let mut retry_delay = SUBSCRIPTION_INITIAL_BACKOFF;
 
     loop {
-        client.clear_transport_readiness();
         let view = membership_watch.borrow_and_update().clone();
         update_mismatch_metric(
             &metrics,
@@ -134,9 +125,6 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
             continue;
         }
         client.sync_membership().await;
-        if subscriber.is_some() {
-            client.publish_ready_sources();
-        }
 
         // Subscriber construction establishes buffering before membership activation starts
         // initial recovery. Re-reading the watch above rejects a stale endpoint binding.
@@ -175,7 +163,6 @@ async fn run_subscription_supervisor<T: RecoveryTarget>(
                 continue;
             }
             ScopeExit::Retry => {
-                client.clear_transport_readiness();
                 let view = client.sync_membership().await;
                 update_subscription_failure_metric(
                     &metrics,
@@ -239,7 +226,6 @@ async fn consume_scope<T: RecoveryTarget>(
                 if view.resolved_kv_state_endpoint() != Some(kv_state_endpoint) {
                     return ScopeExit::Rebind;
                 }
-                client.publish_ready_sources();
             }
             result = subscriber.next() => {
                 let Some(result) = result else {
@@ -383,18 +369,9 @@ pub(crate) struct KvEventSubscriptionHandle {
     completions: Vec<oneshot::Receiver<()>>,
     runtime: tokio::runtime::Handle,
     task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
-    readiness: watch::Receiver<bool>,
 }
 
 impl KvEventSubscriptionHandle {
-    pub(crate) fn readiness(&self) -> watch::Receiver<bool> {
-        self.readiness.clone()
-    }
-
-    pub(crate) fn is_ready(&self) -> bool {
-        *self.readiness.borrow()
-    }
-
     pub(crate) fn set_task_guard(
         &mut self,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
@@ -431,8 +408,6 @@ pub async fn start_subscriber(
     endpoint: Endpoint,
     indexer: Indexer,
     membership_watch: KvSourceMembershipWatch,
-    runtime_configs: RuntimeConfigWatch,
-    admitted_workers: watch::Receiver<Vec<WorkerId>>,
     block_size: u32,
     model: String,
     worker_role: Option<WorkerType>,
@@ -476,13 +451,6 @@ pub async fn start_subscriber(
         cancel.child_token(),
     )
     .await?;
-    let (readiness, readiness_completion) = start_readiness_watch(
-        runtime_configs,
-        admitted_workers,
-        membership_watch.fork_receiver(),
-        client.ready_sources(),
-        cancel.child_token(),
-    );
     let health_completion = source_health::spawn(
         membership_watch.fork_receiver(),
         model.clone(),
@@ -519,15 +487,9 @@ pub async fn start_subscriber(
         let cancel = cancellation_guard.disarm();
         return Ok(KvEventSubscriptionHandle {
             cancel,
-            completions: vec![
-                completion_rx,
-                health_completion,
-                state_completion,
-                readiness_completion,
-            ],
+            completions: vec![completion_rx, health_completion, state_completion],
             runtime,
             task_guard: None,
-            readiness,
         });
     }
 
@@ -561,15 +523,9 @@ pub async fn start_subscriber(
         let cancel = cancellation_guard.disarm();
         return Ok(KvEventSubscriptionHandle {
             cancel,
-            completions: vec![
-                completion_rx,
-                health_completion,
-                state_completion,
-                readiness_completion,
-            ],
+            completions: vec![completion_rx, health_completion, state_completion],
             runtime,
             task_guard: None,
-            readiness,
         });
     }
 
@@ -602,87 +558,10 @@ pub async fn start_subscriber(
     let cancel = cancellation_guard.disarm();
     Ok(KvEventSubscriptionHandle {
         cancel,
-        completions: vec![
-            completion_rx,
-            health_completion,
-            state_completion,
-            readiness_completion,
-        ],
+        completions: vec![completion_rx, health_completion, state_completion],
         runtime,
         task_guard: None,
-        readiness,
     })
-}
-
-fn required_sources_ready(
-    configs: &HashMap<WorkerId, ModelRuntimeConfig>,
-    membership: &KvSourceMembershipView,
-    connected: &HashSet<KvSourceId>,
-) -> bool {
-    // The serving card may arrive before its runtime-config watch has caught up.
-    if configs.is_empty() {
-        return false;
-    }
-    configs.iter().all(|(&worker_id, config)| {
-        if !config.requires_kv_event_source_readiness() {
-            return true;
-        }
-        let expected_endpoint = config
-            .kv_state_endpoint
-            .as_ref()
-            .unwrap_or(&membership.serving_endpoint);
-        if membership.resolved_kv_state_endpoint() != Some(expected_endpoint) {
-            return false;
-        }
-        let Ok(ranks) = config.data_parallel_rank_range() else {
-            return false;
-        };
-        ranks.into_iter().all(|dp_rank| {
-            membership
-                .status(&WorkerWithDpRank::new(worker_id, dp_rank))
-                .and_then(KvSourceStatus::active_source)
-                .is_some_and(|source| connected.contains(&source.source_id()))
-        })
-    })
-}
-
-fn start_readiness_watch(
-    mut configs: RuntimeConfigWatch,
-    mut admitted_workers: watch::Receiver<Vec<WorkerId>>,
-    mut membership: KvSourceMembershipWatch,
-    mut connected: watch::Receiver<HashSet<KvSourceId>>,
-    cancel: CancellationToken,
-) -> (watch::Receiver<bool>, oneshot::Receiver<()>) {
-    let (sender, readiness) = watch::channel(false);
-    let (completion_tx, completion) = oneshot::channel();
-    tokio::spawn(async move {
-        loop {
-            let admitted = admitted_workers.borrow_and_update().clone();
-            let mut current_configs = configs.borrow_and_update().clone();
-            current_configs.retain(|worker, _| admitted.contains(worker));
-            let ready = current_configs.len() == admitted.len()
-                && required_sources_ready(
-                    &current_configs,
-                    &membership.borrow_and_update(),
-                    &connected.borrow_and_update(),
-                );
-            sender.send_if_modified(|current| {
-                let changed = *current != ready;
-                *current = ready;
-                changed
-            });
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                changed = configs.changed() => if changed.is_err() { break; },
-                changed = admitted_workers.changed() => if changed.is_err() { break; },
-                changed = membership.changed() => if changed.is_err() { break; },
-                changed = connected.changed() => if changed.is_err() { break; },
-            }
-        }
-        sender.send_replace(false);
-        let _ = completion_tx.send(());
-    });
-    (readiness, completion)
 }
 
 pub(crate) struct RecoverySupervisor<T: RecoveryTarget> {
@@ -761,76 +640,6 @@ mod tests {
     use dynamo_kv_router::protocols::WorkerWithDpRank;
 
     use crate::discovery::{KvEventSource, KvStateEndpointResolution};
-
-    #[test]
-    fn readiness_requires_connected_sources_for_every_opted_in_rank() {
-        let mut config = ModelRuntimeConfig {
-            kv_event_publishing_enabled: Some(true),
-            ..Default::default()
-        };
-        config.runtime_data.insert(
-            "require_kv_event_source_readiness".to_string(),
-            serde_json::json!(true),
-        );
-        for size in [1, 2] {
-            config.data_parallel_size = size;
-            let configs = HashMap::from([(7, config.clone())]);
-            let mut view = metric_view(KvSourceStatus::Missing, Some(true));
-            for rank in 0..size {
-                view.sources
-                    .insert(WorkerWithDpRank::new(7, rank), KvSourceStatus::Missing);
-            }
-            let mut connected = HashSet::new();
-            assert!(!required_sources_ready(&configs, &view, &connected));
-            for rank in 0..size {
-                let worker = WorkerWithDpRank::new(7, rank);
-                let source = KvEventSource {
-                    kv_state_endpoint: view.serving_endpoint.clone(),
-                    worker,
-                    publisher_id: 11 + u64::from(rank),
-                    recovery_target: None,
-                };
-                view.sources
-                    .insert(worker, KvSourceStatus::ActiveLiveOnly(source.clone()));
-                // Advertising an object alone does not establish its subscription.
-                assert!(!required_sources_ready(&configs, &view, &connected));
-                connected.insert(source.source_id());
-                assert_eq!(
-                    required_sources_ready(&configs, &view, &connected),
-                    rank + 1 == size
-                );
-            }
-            let follower = WorkerWithDpRank::new(7, size - 1);
-            view.sources.insert(follower, KvSourceStatus::Missing);
-            assert!(
-                !required_sources_ready(&configs, &view, &connected),
-                "relay removal withdraws readiness"
-            );
-        }
-    }
-
-    #[test]
-    fn readiness_preserves_legacy_and_disabled_event_workers() {
-        let mut config = ModelRuntimeConfig::default();
-        let view = metric_view(KvSourceStatus::Missing, None);
-        let connected = HashSet::new();
-        assert!(!required_sources_ready(&HashMap::new(), &view, &connected));
-        assert!(required_sources_ready(
-            &HashMap::from([(7, config.clone())]),
-            &view,
-            &connected
-        ));
-        config.runtime_data.insert(
-            "require_kv_event_source_readiness".to_string(),
-            serde_json::json!(true),
-        );
-        config.kv_event_publishing_enabled = Some(false);
-        assert!(required_sources_ready(
-            &HashMap::from([(7, config)]),
-            &view,
-            &connected
-        ));
-    }
 
     fn metric_view(status: KvSourceStatus, capability: Option<bool>) -> KvSourceMembershipView {
         let serving_endpoint = EndpointId {
@@ -916,7 +725,6 @@ mod tests {
             completions,
             runtime: tokio::runtime::Handle::current(),
             task_guard: None,
-            readiness: watch::channel(false).1,
         };
 
         tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
@@ -940,7 +748,6 @@ mod tests {
             completions: vec![completion_rx],
             runtime: tokio::runtime::Handle::current(),
             task_guard: None,
-            readiness: watch::channel(false).1,
         };
         handle.set_task_guard(teardown.clone());
         drop(teardown);

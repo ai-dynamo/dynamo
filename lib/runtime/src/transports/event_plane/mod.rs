@@ -315,12 +315,6 @@ pub struct EventPublisher {
 }
 
 impl EventPublisher {
-    /// Wait for the outbound transport to establish its forwarding connection.
-    /// Direct publishers already have a bound socket; broker publishers await ZMTP.
-    pub async fn wait_ready(&self) -> Result<()> {
-        self.tx.wait_ready().await
-    }
-
     /// Create a publisher for an endpoint-scoped topic.
     pub async fn for_endpoint(endpoint: &Endpoint, topic: impl Into<String>) -> Result<Self> {
         let transport_kind = endpoint.drt().default_event_transport_kind();
@@ -669,26 +663,6 @@ pub struct EventSubscriber {
 }
 
 impl EventSubscriber {
-    /// Establish broker connections before returning the subscriber. Direct ZMQ
-    /// sources have their own per-source readiness in the KV router.
-    pub async fn for_endpoint_id_with_transport_ready(
-        drt: &DistributedRuntime,
-        endpoint: &EndpointId,
-        topic: impl Into<String>,
-        transport_kind: EventTransportKind,
-    ) -> Result<Self> {
-        Self::new_internal_with_readiness(
-            drt,
-            EventScope::Endpoint {
-                endpoint: endpoint.clone(),
-            },
-            topic.into(),
-            transport_kind,
-            true,
-        )
-        .await
-    }
-
     /// Create a subscriber for an endpoint-scoped topic.
     pub async fn for_endpoint(endpoint: &Endpoint, topic: impl Into<String>) -> Result<Self> {
         let transport_kind = endpoint.drt().default_event_transport_kind();
@@ -789,16 +763,6 @@ impl EventSubscriber {
         topic: String,
         transport_kind: EventTransportKind,
     ) -> Result<Self> {
-        Self::new_internal_with_readiness(drt, scope, topic, transport_kind, false).await
-    }
-
-    async fn new_internal_with_readiness(
-        drt: &DistributedRuntime,
-        scope: EventScope,
-        topic: String,
-        transport_kind: EventTransportKind,
-        wait_for_connections: bool,
-    ) -> Result<Self> {
         let discovery = drt.discovery();
         let routing_key = scope.subject(&topic);
 
@@ -816,21 +780,7 @@ impl EventSubscriber {
                     // BROKER MODE: Connect to broker's XPUB (single or multiple endpoints)
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
 
-                    let stream: WireStream = if wait_for_connections {
-                        let stream =
-                            zmq_transport::ZmqSubTransport::connect_single_consumer_multiple_ready(
-                                &broker.xpub_endpoints,
-                                &routing_key,
-                            )
-                            .await?;
-                        let stream: WireStream =
-                            Box::pin(stream.map(|result| result.map(|message| message.payload)));
-                        if broker.xpub_endpoints.len() > 1 {
-                            Box::pin(DeduplicatingStream::new(stream, codec.clone(), 100_000))
-                        } else {
-                            stream
-                        }
-                    } else if broker.xpub_endpoints.len() == 1 {
+                    let stream: WireStream = if broker.xpub_endpoints.len() == 1 {
                         // One EventSubscriber has one consumer. Poll the ZMQ socket
                         // directly instead of forwarding through a lossy broadcast channel.
                         let stream = zmq_transport::ZmqSubTransport::connect_single_consumer(

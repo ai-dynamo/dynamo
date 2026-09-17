@@ -11,7 +11,6 @@ use std::{
 };
 
 use anyhow::Result;
-use dynamo_runtime::transports::event_plane::zmq_transport::ZmqConnectionReadiness;
 use dynamo_runtime::transports::event_plane::{
     Codec, DynamicZmqSubSocket, ValidatedEnvelope, ValidatedZmqSource, ZmqWireMessage,
 };
@@ -98,7 +97,6 @@ struct SocketGroup {
     command_tx: mpsc::UnboundedSender<GroupCommand>,
     cancel: CancellationToken,
     handle: JoinHandle<()>,
-    readiness: ZmqConnectionReadiness,
 }
 
 struct PoolInner {
@@ -124,7 +122,6 @@ pub(crate) struct DirectZmqSubRegistration {
     publisher_id: u64,
     generation: u64,
     armed: bool,
-    readiness: ZmqConnectionReadiness,
 }
 
 pub(crate) enum DirectZmqSubConnection {
@@ -190,35 +187,6 @@ impl Drop for DirectZmqSubRegistration {
 }
 
 impl DirectZmqSubPool {
-    /// Unlike socket construction, readiness requires a completed transport handshake.
-    pub(crate) async fn connect_ready(
-        &self,
-        publisher_id: u64,
-        endpoint: &str,
-        generation: u64,
-    ) -> Result<DirectZmqSubConnection> {
-        if self.endpoints_per_sub == 1 {
-            anyhow::ensure!(
-                !self.inner.lock().closed,
-                "direct-ZMQ socket pool is closed"
-            );
-            let source =
-                ValidatedZmqSource::connect_ready(endpoint, &self.topic, publisher_id, self.rcvhwm)
-                    .await?;
-            anyhow::ensure!(
-                !self.inner.lock().closed,
-                "direct-ZMQ socket pool is closed"
-            );
-            return Ok(DirectZmqSubConnection::Dedicated(source));
-        }
-        let registration = self
-            .register_grouped(publisher_id, endpoint, generation)
-            .await?;
-        // The group task keeps forwarding existing peers while this peer connects.
-        registration.readiness.wait_connected(endpoint).await?;
-        Ok(DirectZmqSubConnection::Grouped(registration))
-    }
-
     pub(crate) fn new(
         topic: impl Into<Arc<str>>,
         endpoints_per_sub: usize,
@@ -274,7 +242,7 @@ impl DirectZmqSubPool {
     ) -> Result<DirectZmqSubRegistration> {
         let (sender, receiver) = mpsc::channel(self.rcvhwm as usize);
         let disconnected = CancellationToken::new();
-        let (group_id, completion, readiness) = {
+        let (group_id, completion) = {
             let mut inner = self.inner.lock();
             Self::reap_failed_groups(&mut inner);
             anyhow::ensure!(!inner.closed, "direct-ZMQ socket pool is closed");
@@ -318,15 +286,12 @@ impl DirectZmqSubPool {
                     group.assignments.remove(&publisher_id);
                     anyhow::bail!("direct-ZMQ socket group stopped");
                 }
-                (group_id, Some(completion), group.readiness.clone())
+                (group_id, Some(completion))
             } else {
                 // libzmq connects asynchronously. Keep group creation serialized so
                 // concurrent registrations cannot create excess transient sockets.
-                let (socket, readiness) = DynamicZmqSubSocket::connect_with_readiness(
-                    endpoint,
-                    &self.topic,
-                    self.rcvhwm,
-                )?;
+                let socket =
+                    DynamicZmqSubSocket::connect_with_rcvhwm(endpoint, &self.topic, self.rcvhwm)?;
                 let group_id = inner.next_group_id;
                 inner.next_group_id = inner.next_group_id.wrapping_add(1);
                 let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -355,10 +320,9 @@ impl DirectZmqSubPool {
                         command_tx,
                         cancel,
                         handle,
-                        readiness: readiness.clone(),
                     },
                 );
-                (group_id, None, readiness)
+                (group_id, None)
             }
         };
         let registration = DirectZmqSubRegistration {
@@ -369,7 +333,6 @@ impl DirectZmqSubPool {
             receiver,
             disconnected,
             armed: true,
-            readiness,
         };
 
         let Some(completion) = completion else {

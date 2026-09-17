@@ -34,9 +34,6 @@ pub mod realtime;
 pub mod service_v2;
 pub mod sglang_generate;
 
-#[cfg(test)]
-mod kv_relay_readiness_tests;
-
 pub use axum;
 pub use frontend_extension::{
     FrontendExtensionContext, FrontendRouteExtension, FrontendRouteSet,
