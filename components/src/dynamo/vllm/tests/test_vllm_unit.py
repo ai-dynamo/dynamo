@@ -1761,6 +1761,39 @@ class TestForwardPassMetricsActivation:
 
         assert engine_cfg.scheduler_cls is None
 
+    def test_kv_transfer_connector_enables_remote_wait_telemetry(self, monkeypatch):
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(
+            scheduler_cls=None,
+            kv_transfer_config=SimpleNamespace(kv_connector="OffloadingConnector"),
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert (
+            engine_cfg.scheduler_cls
+            == "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+        )
+        assert envs.DYN_FORWARDPASS_METRIC_PORT == 20380
+
+    def test_custom_scheduler_does_not_start_implicit_remote_wait_relay(
+        self, monkeypatch
+    ):
+        vllm_main = _load_vllm_main()
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(
+            scheduler_cls="example.CustomScheduler",
+            kv_transfer_config=SimpleNamespace(kv_connector="OffloadingConnector"),
+        )
+
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+        assert vllm_main.setup_fpm_relay(
+            dynamo_cfg, SimpleNamespace(), engine_cfg
+        ) is None
+
     def test_disabled_trace_does_not_start_relay(self, monkeypatch):
         vllm_main = _load_vllm_main()
         monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)

@@ -44,6 +44,16 @@ pub const DEFAULT_MAX_BATCHED_TOKENS: u64 = 10_000_000;
 
 const ADMISSION_CHANNEL_CAPACITY: usize = 65_536;
 
+fn selected_cached_tokens(
+    isl_tokens: usize,
+    selected_cached_blocks: u32,
+    block_size: u32,
+) -> usize {
+    (selected_cached_blocks as usize)
+        .saturating_mul(block_size as usize)
+        .min(isl_tokens)
+}
+
 struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
@@ -1411,6 +1421,7 @@ impl<
 
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(&request, selected.selection.worker);
+        let selected_cached_blocks = selected.selected_worker_tiers.disk_blocks;
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1435,7 +1446,7 @@ impl<
 
         let prefill_load_hint = self.prefill_load_hint_for(
             request.isl_tokens,
-            selected.selection.cached_tokens,
+            selected_cached_blocks,
             request.track_prefill_tokens,
         );
 
@@ -1537,13 +1548,20 @@ impl<
     fn prefill_load_hint_for(
         &self,
         isl_tokens: usize,
-        cached_tokens: usize,
+        selected_cached_blocks: u32,
         track_prefill_tokens: bool,
     ) -> Option<PrefillLoadHint> {
         if !track_prefill_tokens {
             return None;
         }
 
+        // Selection deliberately discounts lower-tier hits because transfer is
+        // slower than a device hit. Do not carry that discount into active
+        // prefill accounting: host/disk-resident tokens are transfer work, not
+        // GPU prefill compute. Remote-transfer pressure is reported separately
+        // by the worker from WAITING_FOR_REMOTE_KVS.
+        let cached_tokens =
+            selected_cached_tokens(isl_tokens, selected_cached_blocks, self.block_size);
         let effective_isl = effective_prefill_tokens(isl_tokens, cached_tokens);
         if effective_isl == 0 {
             return None;
@@ -2248,6 +2266,12 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[test]
+    fn prefill_load_hint_excludes_all_selected_cached_tiers_from_compute() {
+        let cached_tokens = selected_cached_tokens(1_024, 48, 16);
+        assert_eq!(effective_prefill_tokens(1_024, cached_tokens), 256);
     }
 
     #[test]

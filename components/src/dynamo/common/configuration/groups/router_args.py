@@ -36,6 +36,7 @@ _ROUTER_FIELDS: tuple[str, ...] = (
     "active_decode_blocks_threshold",
     "active_prefill_tokens_threshold",
     "active_prefill_tokens_threshold_frac",
+    "remote_kv_waiting_tokens_threshold",
     "session_affinity_ttl_secs",
     "session_affinity_mode",
 )
@@ -82,6 +83,7 @@ class RouterConfigBase(ConfigBase):
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
+    remote_kv_waiting_tokens_threshold: Optional[int]
 
     def router_kwargs(self) -> dict:
         """Return a dict suitable for ``RouterConfig(mode, kv_config, **kwargs)``."""
@@ -109,6 +111,10 @@ class RouterConfigBase(ConfigBase):
                 "--active-prefill-tokens-threshold-frac must be a finite value >= 0"
             )
 
+        remote_kv_threshold = self.remote_kv_waiting_tokens_threshold
+        if remote_kv_threshold is not None and remote_kv_threshold < 0:
+            raise ValueError("--remote-kv-waiting-tokens-threshold must be >= 0")
+
     def log_rejection_thresholds(self) -> None:
         """Log which independently configured rejection checks are active."""
         configured = [
@@ -125,6 +131,10 @@ class RouterConfigBase(ConfigBase):
                 (
                     "--active-prefill-tokens-threshold-frac",
                     self.active_prefill_tokens_threshold_frac,
+                ),
+                (
+                    "--remote-kv-waiting-tokens-threshold",
+                    self.remote_kv_waiting_tokens_threshold,
                 ),
             )
             if value is not None
@@ -309,6 +319,19 @@ class RouterArgGroup(ArgGroup):
                 "OR logic with --active-prefill-tokens-threshold."
             ),
             arg_type=nullable_float,
+        )
+        add_argument(
+            g,
+            flag_name="--remote-kv-waiting-tokens-threshold",
+            env_var="DYN_REMOTE_KV_WAITING_TOKENS_THRESHOLD",
+            default=None,
+            help=(
+                "Literal token threshold for external-KV transfer backlog. A worker "
+                "remains eligible for prefix-affine routing until tokens in "
+                "WAITING_FOR_REMOTE_KVS exceed this value. Unset by default; pass "
+                "'None' to disable it."
+            ),
+            arg_type=nullable_int,
         )
 
 

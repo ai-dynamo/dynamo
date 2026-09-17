@@ -78,27 +78,32 @@ pub(crate) struct LoadThresholdConfig {
     active_prefill_tokens_threshold: Option<u64>,
     #[pyo3(get)]
     active_prefill_tokens_threshold_frac: Option<f64>,
+    #[pyo3(get)]
+    remote_kv_waiting_tokens_threshold: Option<u64>,
 }
 
 #[pymethods]
 impl LoadThresholdConfig {
     #[new]
-    #[pyo3(signature = (*, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None))]
+    #[pyo3(signature = (*, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, remote_kv_waiting_tokens_threshold=None))]
     fn new(
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
+        remote_kv_waiting_tokens_threshold: Option<u64>,
     ) -> PyResult<Self> {
         let config = validate_load_threshold_config(
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
+            remote_kv_waiting_tokens_threshold,
         )
         .map_err(PyValueError::new_err)?;
         Ok(Self {
             active_decode_blocks_threshold: config.active_decode_blocks_threshold,
             active_prefill_tokens_threshold: config.active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac: config.active_prefill_tokens_threshold_frac,
+            remote_kv_waiting_tokens_threshold: config.remote_kv_waiting_tokens_threshold,
         })
     }
 }
@@ -109,6 +114,7 @@ impl LoadThresholdConfig {
             active_decode_blocks_threshold: self.active_decode_blocks_threshold,
             active_prefill_tokens_threshold: self.active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac: self.active_prefill_tokens_threshold_frac,
+            remote_kv_waiting_tokens_threshold: self.remote_kv_waiting_tokens_threshold,
         }
     }
 }
@@ -117,11 +123,13 @@ fn validate_load_threshold_config(
     active_decode_blocks_threshold: Option<f64>,
     active_prefill_tokens_threshold: Option<u64>,
     active_prefill_tokens_threshold_frac: Option<f64>,
+    remote_kv_waiting_tokens_threshold: Option<u64>,
 ) -> Result<RsLoadThresholdConfig, String> {
     let config = RsLoadThresholdConfig {
         active_decode_blocks_threshold,
         active_prefill_tokens_threshold,
         active_prefill_tokens_threshold_frac,
+        remote_kv_waiting_tokens_threshold,
     };
     config
         .validate()
@@ -1828,6 +1836,7 @@ mod metric_worker_type_tests {
             active_decode_blocks_threshold: Some(0.8),
             active_prefill_tokens_threshold: Some(1024),
             active_prefill_tokens_threshold_frac: Some(0.5),
+            remote_kv_waiting_tokens_threshold: Some(8192),
         };
         let (router, runtime) = standalone_encode_router(
             "python-standalone-encode-configured-load",
@@ -1846,26 +1855,28 @@ mod load_threshold_config_tests {
 
     #[test]
     fn default_config_disables_overload_thresholds() {
-        let config = validate_load_threshold_config(None, None, None).unwrap();
+        let config = validate_load_threshold_config(None, None, None, None).unwrap();
         assert!(!config.is_configured());
     }
 
     #[test]
     fn valid_config_preserves_all_thresholds() {
-        let config = validate_load_threshold_config(Some(0.75), Some(512), Some(0.5)).unwrap();
+        let config =
+            validate_load_threshold_config(Some(0.75), Some(512), Some(0.5), Some(8192)).unwrap();
         assert_eq!(
             config,
             RsLoadThresholdConfig {
                 active_decode_blocks_threshold: Some(0.75),
                 active_prefill_tokens_threshold: Some(512),
                 active_prefill_tokens_threshold_frac: Some(0.5),
+                remote_kv_waiting_tokens_threshold: Some(8192),
             }
         );
     }
 
     #[test]
     fn invalid_config_returns_validation_error() {
-        let error = validate_load_threshold_config(Some(1.1), None, None).unwrap_err();
+        let error = validate_load_threshold_config(Some(1.1), None, None, None).unwrap_err();
         assert!(error.contains(
             "invalid load threshold config: active_decode_blocks_threshold must be between 0.0 and 1.0"
         ));
