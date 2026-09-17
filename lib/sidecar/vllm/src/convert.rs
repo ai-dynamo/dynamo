@@ -46,7 +46,7 @@ pub(crate) fn build_generate_request(
         })
     {
         return Err(client::invalid_argument(format!(
-            "extra_args.vllm_tito.sampling_params.{key} is not supported by vllm-proto 0.3.0; use the chat/completions API"
+            "extra_args.vllm_tito.sampling_params.{key} is not supported by the sidecar; use the chat/completions API"
         )));
     }
 
