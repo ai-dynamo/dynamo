@@ -94,7 +94,7 @@ async def _transcribe(
     args: argparse.Namespace,
     pcm: bytes,
     text_input: _RealtimeTextInput | None = None,
-) -> tuple[str, float, float]:
+) -> tuple[str, float, float, float]:
     async with session.ws_connect(
         _websocket_url(args.base_url), max_msg_size=64 * 1024 * 1024
     ) as websocket:
@@ -120,7 +120,7 @@ async def _transcribe(
 
         started = time.perf_counter()
 
-        async def receive_transcript() -> tuple[str, float, float]:
+        async def receive_transcript() -> tuple[str, float, float, float]:
             first_transcript_at: float | None = None
             while True:
                 message = await asyncio.wait_for(websocket.receive(), args.timeout)
@@ -142,8 +142,9 @@ async def _transcribe(
                         await text_input.commit(transcript)
                     return (
                         transcript,
-                        first_transcript_at - started,
-                        completed_at - started,
+                        started,
+                        first_transcript_at,
+                        completed_at,
                     )
                 elif event_type == "error":
                     raise RuntimeError(event.get("error", event))
@@ -214,7 +215,6 @@ async def _generate_realtime(
     websocket: ClientWebSocketResponse,
     args: argparse.Namespace,
 ) -> tuple[str, float, float]:
-    started = time.perf_counter()
     await websocket.send_json({"type": "response.create"})
 
     first_token_at: float | None = None
@@ -235,7 +235,7 @@ async def _generate_realtime(
             break
     if first_token_at is None:
         raise RuntimeError("realtime LLM returned no text")
-    return "".join(output), first_token_at - started, completed_at - started
+    return "".join(output), first_token_at, completed_at
 
 
 async def _create_user_item(
@@ -267,7 +267,6 @@ async def _complete_realtime(
 async def _complete_chat(
     session: aiohttp.ClientSession, args: argparse.Namespace, transcript: str
 ) -> tuple[str, float, float]:
-    started = time.perf_counter()
     first_token_at: float | None = None
     output: list[str] = []
     async with session.post(
@@ -298,7 +297,7 @@ async def _complete_chat(
     completed_at = time.perf_counter()
     if first_token_at is None:
         raise RuntimeError("chat LLM returned no text")
-    return "".join(output), first_token_at - started, completed_at - started
+    return "".join(output), first_token_at, completed_at
 
 
 async def run(args: argparse.Namespace) -> None:
@@ -319,9 +318,12 @@ async def run(args: argparse.Namespace) -> None:
                 if args.llm_transport == "realtime" and realtime_llm is not None
                 else None
             )
-            transcript, asr_first_transcript, asr_completed = await _transcribe(
-                session, args, pcm, text_input
-            )
+            (
+                transcript,
+                asr_started,
+                asr_first_transcript,
+                asr_completed,
+            ) = await _transcribe(session, args, pcm, text_input)
             if not transcript.strip():
                 raise RuntimeError("ASR returned an empty transcript")
             llm = None
@@ -341,19 +343,27 @@ async def run(args: argparse.Namespace) -> None:
         "audio_bytes": len(pcm),
         "audio_rms": round(rms, 1),
         "tts_ttfb_ms": round(tts_ttfb * 1000, 1),
-        "asr_first_transcript_ms": round(asr_first_transcript * 1000, 1),
-        "asr_completed_ms": round(asr_completed * 1000, 1),
+        "asr_first_transcript_ms": round(
+            (asr_first_transcript - asr_started) * 1000, 1
+        ),
+        "asr_completed_ms": round((asr_completed - asr_started) * 1000, 1),
         "transcript": transcript,
     }
     if llm is not None:
-        response_text, llm_ttft, llm_total = llm
+        # Use event timestamps so final-text correction and handoff are included,
+        # not just the time spent waiting after response.create or the HTTP POST.
+        response_text, first_token_at, completed_at = llm
         result.update(
             {
                 "llm_transport": args.llm_transport,
-                "llm_ttft_from_asr_final_ms": round(llm_ttft * 1000, 1),
-                "llm_total_from_asr_final_ms": round(llm_total * 1000, 1),
+                "llm_ttft_from_asr_final_ms": round(
+                    (first_token_at - asr_completed) * 1000, 1
+                ),
+                "llm_total_from_asr_final_ms": round(
+                    (completed_at - asr_completed) * 1000, 1
+                ),
                 "asr_start_to_llm_first_token_ms": round(
-                    (asr_completed + llm_ttft) * 1000, 1
+                    (first_token_at - asr_started) * 1000, 1
                 ),
                 "response_text": response_text,
             }

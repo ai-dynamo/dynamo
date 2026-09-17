@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import aiohttp
 import pytest
+import smoke_speech_loop
 from smoke_speech_loop import (
     _complete_chat,
     _complete_realtime,
@@ -131,7 +132,7 @@ async def test_transcription_forwards_deltas_to_realtime_llm_before_commit():
         chunk_bytes=2,
     )
 
-    transcript, first_delta, completed = await _transcribe(
+    transcript, started, first_delta, completed = await _transcribe(
         _WebSocketSession(asr_websocket),
         args,
         b"\x00\x00",
@@ -139,7 +140,7 @@ async def test_transcription_forwards_deltas_to_realtime_llm_before_commit():
     )
 
     assert transcript == "hello"
-    assert 0 <= first_delta <= completed
+    assert started <= first_delta <= completed
     assert llm_websocket.sent == [
         {"type": "input_text.append", "text": "hello"},
         {"type": "input_text.commit"},
@@ -209,3 +210,29 @@ async def test_chat_llm_streams_same_transcript_and_collects_text():
             "stream": True,
         },
     )
+
+
+async def test_report_measures_from_asr_final_including_handoff(monkeypatch, capsys):
+    async def synthesize(session, args):
+        return b"\x01\x00", 0.01
+
+    async def transcribe(session, args, pcm, text_input):
+        return "hello", 10.0, 11.0, 12.0
+
+    async def complete_chat(session, args, transcript):
+        return "answer", 12.4, 13.0
+
+    monkeypatch.setattr(smoke_speech_loop, "_synthesize", synthesize)
+    monkeypatch.setattr(smoke_speech_loop, "_transcribe", transcribe)
+    monkeypatch.setattr(smoke_speech_loop, "_complete_chat", complete_chat)
+
+    await smoke_speech_loop.run(
+        SimpleNamespace(timeout=1.0, llm_transport="chat", min_rms=0.0)
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["asr_first_transcript_ms"] == 1000.0
+    assert report["asr_completed_ms"] == 2000.0
+    assert report["llm_ttft_from_asr_final_ms"] == 400.0
+    assert report["llm_total_from_asr_final_ms"] == 1000.0
+    assert report["asr_start_to_llm_first_token_ms"] == 2400.0
