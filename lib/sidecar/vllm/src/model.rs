@@ -220,10 +220,7 @@ impl DiscoveredModel {
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
         let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
         let data_parallel_size = u64::from(self.data_parallel_size_local());
-        // Control exposes the aggregate across locally attached DP engines. This arithmetic-mean
-        // estimate assumes homogeneous ranks; exact division does not prove they are equal.
-        // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
-        // publish it atomically; never relabel this quotient as exact for hard admission.
+        // Control reports total KV blocks across the frontend's local DP engines.
         let per_rank = total_kv_blocks / data_parallel_size;
 
         if per_rank == 0 {
