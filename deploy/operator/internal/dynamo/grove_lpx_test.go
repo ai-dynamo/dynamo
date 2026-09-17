@@ -6,7 +6,6 @@ package dynamo
 import (
 	"testing"
 
-	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,7 +33,7 @@ func TestEvaluateLPXGroveReadinessUsesEachComponentRuntimeNamespace(t *testing.T
 		Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{draft, serving}},
 	}
 
-	readiness, err := EvaluateLPXGroveReadiness(t.Context(), nil, source, &v1alpha1.LPXGraphDeployment{}, nil)
+	readiness, err := EvaluateLPXGroveReadiness(t.Context(), nil, source, nil, nil)
 	require.NoError(t, err)
 	require.NotEqual(t, source.GetDynamoNamespaceForComponent(&draft), source.GetDynamoNamespaceForComponent(&serving))
 	require.Equal(t, source.GetDynamoNamespaceForComponent(&draft), readiness.ComponentStatuses[draft.ComponentName].RuntimeNamespace)

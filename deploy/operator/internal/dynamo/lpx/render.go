@@ -224,7 +224,7 @@ func RenderSelectedNodeLocal(
 		}
 	}
 
-	// The LPX-only PCS owns one scaling group for the complete engine.
+	// Seed the complete-engine group at its immutable minimum; live capacity is managed through /scale.
 	members := selectedTemplateNames
 	if hybrid {
 		members = append(members, plan.CyborgTemplate)
@@ -233,7 +233,7 @@ func RenderSelectedNodeLocal(
 		Name:         lpxScalingGroupTemplateName,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
-		Replicas:     ptr.To(plan.Replicas),
+		Replicas:     ptr.To(ptr.Deref(input.MinAvailable, 1)),
 		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
 	}}
 

@@ -44,7 +44,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	configv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
@@ -1452,11 +1451,6 @@ func (in *LPXGraphDeploymentStatus) DeepCopyInto(out *LPXGraphDeploymentStatus) 
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
-	}
-	if in.ExpiredRequestUIDs != nil {
-		in, out := &in.ExpiredRequestUIDs, &out.ExpiredRequestUIDs
-		*out = make([]types.UID, len(*in))
-		copy(*out, *in)
 	}
 	if in.Components != nil {
 		in, out := &in.Components, &out.Components

@@ -176,7 +176,10 @@ spec:
                   description: components reports logical replicas by authored component name, never Agent Pods.
                   type: object
                 conditions:
-                  description: conditions report compilation, placement, and runtime readiness.
+                  description: |-
+                    conditions reports readiness and scheduling deadline failures.
+                    Ready uses reason Ready, Pending, or Failed and a diagnostic message.
+                    SchedulingFailed independently retains deadline failure and retry state.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.
                     properties:
@@ -234,18 +237,6 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
-                expiredRequestUIDs:
-                  description: |-
-                    expiredRequestUIDs records requests selected for deadline cleanup until they disappear,
-                    even if their scheduler phase or the deployment input changes.
-                  items:
-                    description: |-
-                      UID is a type that holds unique ID values, including UUIDs.  Because we
-                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
-                      intent and helps make sure that UIDs and names do not get conflated.
-                    type: string
-                  type: array
-                  x-kubernetes-list-type: set
                 modelDownload:
                   description: modelDownload retains the existing remote-build download progress.
                   properties:

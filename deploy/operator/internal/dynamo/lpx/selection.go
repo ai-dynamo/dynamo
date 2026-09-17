@@ -9,10 +9,12 @@ import (
 	"fmt"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"k8s.io/utils/ptr"
 )
 
 const (
+	// MaxSpecDecodeNumDrafts bounds the supported speculative-decoding draft fanout.
+	MaxSpecDecodeNumDrafts = 8
+
 	draftStageName     = "draft"
 	runtimeModelDraft  = "draft"
 	runtimeModelTarget = "target"
@@ -56,21 +58,6 @@ func ServingComponent(dgd *dynamov1beta1.DynamoGraphDeployment) *dynamov1beta1.D
 		return soleComponent
 	}
 	return nil
-}
-
-// SelectedModelNames returns build-backed runtime model identities, in canonical
-// stage and draft-instance order, for a supported runtime.
-// dgd must be non-nil and is not mutated.
-func SelectedModelNames(dgd *dynamov1beta1.DynamoGraphDeployment) ([]string, error) {
-	components := Components(dgd)
-	if err := validateLPXComposition(dgd, len(components)).ToAggregate(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrUnsupportedRuntime, err)
-	}
-	var names []string
-	for index, component := range components {
-		names = append(names, expandedSelectedModelNames(index, len(components), int(ptr.Deref(component.Replicas, 1)))...)
-	}
-	return names, nil
 }
 
 func expandedSelectedModelNames(index, componentCount, draftCount int) []string {

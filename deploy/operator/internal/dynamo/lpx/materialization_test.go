@@ -35,7 +35,7 @@ func TestPlanMaterializationBounds(t *testing.T) {
 		{name: "hybrid", models: 1, projection: hybridProjection},
 		{name: "LPU-only", models: 1, projection: lpuOnlyProjection},
 		{name: "SpecDecode", models: 2, projection: lpuOnlyProjection},
-		{name: "maximum draft fanout", models: maxSpecDecodeNumDrafts + 1, projection: lpuOnlyProjection},
+		{name: "maximum draft fanout", models: MaxSpecDecodeNumDrafts + 1, projection: lpuOnlyProjection},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Build independent projections without using component names in identities")

@@ -6,7 +6,21 @@ package v1alpha1
 import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
+)
+
+const (
+	// LPXReadyCondition reports if LPXGraphDeployment object is ready.
+	// Note: This condition type is defined to ensure consistent naming of conditions across objects.
+	// Please use object specific variants of this condition which provides more details for each context where
+	// the same condition type exists.
+	LPXReadyCondition = "Ready"
+)
+
+// LPX readiness reasons distinguish progress from failure when Ready is false.
+const (
+	LPXReadyReasonReady   = "Ready"
+	LPXReadyReasonPending = "Pending"
+	LPXReadyReasonFailed  = "Failed"
 )
 
 // LPXGraphDeploymentSpec is the operator's handoff for all LPX components in a DGD.
@@ -26,16 +40,13 @@ type LPXGraphDeploymentStatus struct {
 	// Every spec.inputRevision change advances the child generation.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	// conditions report compilation, placement, and runtime readiness.
+	// conditions reports readiness and scheduling deadline failures.
+	// Ready uses reason Ready, Pending, or Failed and a diagnostic message.
+	// SchedulingFailed independently retains deadline failure and retry state.
 	// +optional
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// expiredRequestUIDs records requests selected for deadline cleanup until they disappear,
-	// even if their scheduler phase or the deployment input changes.
-	// +optional
-	// +listType=set
-	ExpiredRequestUIDs []types.UID `json:"expiredRequestUIDs,omitempty"`
 	// components reports logical replicas by authored component name, never Agent Pods.
 	// +optional
 	Components map[string]v1beta1.ComponentReplicaStatus `json:"components,omitempty"`

@@ -28,7 +28,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-decode-54f76f5c988eb748
+  name: dgd-lpx-v2-vllm-94cd-decode-<decode-config-hash-prefix>
   namespace: inference-engine
 ---
 data:
@@ -166,7 +166,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
+  name: dgd-lpx-v2-vllm-94cd-lpu-<lpu-config-hash-prefix>
   namespace: inference-engine
 ---
 metadata:
@@ -188,7 +188,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: e586b76cc8ccd9a1ed2e1b0297032eb1da420881dcfdcb632a4f00f4971308ff
+        nvidia.com/extra-resources-hash: <lpu-config-hash>
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:cc75fd5ce4533f15c01b89d239027e6d9be0917011a7624ae79b6b66f1638398
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d62a2d499f40ba8487c2405eaccf330b5ea52a18efea2fc010c9ac0d63ff71d9
@@ -392,14 +392,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
+              name: dgd-lpx-v2-vllm-94cd-lpu-<lpu-config-hash-prefix>
             name: config
         replicas: 17
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 54f76f5c988eb748803edb9e69ca144c7be656c2028d23217ef3135cbb8fe463
+        nvidia.com/extra-resources-hash: <decode-config-hash>
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d62a2d499f40ba8487c2405eaccf330b5ea52a18efea2fc010c9ac0d63ff71d9
         scheduling.lpu.nvidia.com/role: cyborg-worker
@@ -571,7 +571,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-decode-54f76f5c988eb748
+              name: dgd-lpx-v2-vllm-94cd-decode-<decode-config-hash-prefix>
             name: config
         replicas: 1
         roleName: cond
@@ -590,7 +590,7 @@ spec:
       - cond
       minAvailable: 1
       name: lpx
-      replicas: 2
+      replicas: 1
     terminationDelay: 15m0s
 status:
   availableReplicas: 0

@@ -40,25 +40,83 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// validateLPXPodTemplateSpec checks image and annotation semantics beyond the Pod schema.
-// LPX intent validation additionally checks main-container and placement rules.
+// validatePodTemplateSpec checks LPX role templates beyond the admitted Pod schema.
 // template and fldPath are non-nil.
-func (v *sharedValidation) validateLPXPodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path) field.ErrorList {
+func (v *sharedValidation) validatePodTemplateSpec(template *corev1.PodTemplateSpec, fldPath *field.Path, role string) field.ErrorList {
 	allErrs := apivalidation.ValidateAnnotations(template.Annotations, fldPath.Child("metadata", "annotations"))
+	return append(allErrs, v.validatePodSpec(&template.Spec, fldPath.Child("spec"), role)...)
+}
+
+// validatePodSpec protects LPX-owned container names, addressing, and placement.
+// spec and fldPath are non-nil; Kubernetes schema validation runs before this method.
+func (v *sharedValidation) validatePodSpec(spec *corev1.PodSpec, fldPath *field.Path, role string) field.ErrorList {
+	var allErrs field.ErrorList
+	agent := role == nvidiacomv1beta1.ComponentRoleLPXAgent
+	if !hasContainerNamed(spec.Containers, consts.MainContainerName) {
+		allErrs = append(allErrs, field.Required(fldPath.Child("containers"), fmt.Sprintf("LPX %s component requires a %q runtime container", role, consts.MainContainerName)))
+	}
+
+	// Agent names are build-independent; conductor names depend on the compiled execution mode.
 	for _, group := range []struct {
 		name       string
 		containers []corev1.Container
 	}{
-		{"containers", template.Spec.Containers},
-		{"initContainers", template.Spec.InitContainers},
+		{"containers", spec.Containers},
+		{"initContainers", spec.InitContainers},
 	} {
 		for index, container := range group.containers {
 			if strings.TrimSpace(container.Image) == "" {
-				allErrs = append(allErrs, field.Required(fldPath.Child("spec", group.name).Index(index).Child("image"), "must specify a non-empty image"))
+				allErrs = append(allErrs, field.Required(fldPath.Child(group.name).Index(index).Child("image"), "must specify a non-empty image"))
+			}
+			if agent && container.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
+				allErrs = append(allErrs, field.Forbidden(fldPath.Child(group.name).Index(index).Child("name"), fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name)))
 			}
 		}
 	}
+
+	// Every LPX role uses controller-owned addressing and scheduler selection.
+	if spec.SchedulerName != "" && spec.SchedulerName != corev1.DefaultSchedulerName {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("schedulerName"), "LPX owns role scheduler selection"))
+	}
+	for _, entry := range []struct{ name, value string }{
+		{"hostname", spec.Hostname}, {"subdomain", spec.Subdomain}, {"nodeName", spec.NodeName},
+	} {
+		if entry.value != "" {
+			allErrs = append(allErrs, field.Forbidden(fldPath.Child(entry.name), "LPX owns role addressing and placement"))
+		}
+	}
+	if len(spec.TopologySpreadConstraints) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologySpreadConstraints"), "LPX owns role placement"))
+	}
+	if !agent {
+		return allErrs
+	}
+
+	// Required node affinity is the only authored Agent placement constraint.
+	if len(spec.NodeSelector) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("nodeSelector"), "LPX exclusively owns Agent node selection"))
+	}
+	if a := spec.Affinity; a != nil &&
+		((a.NodeAffinity != nil && len(a.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0) ||
+			(a.PodAffinity != nil && (len(a.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 || len(a.PodAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0)) ||
+			(a.PodAntiAffinity != nil && (len(a.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution) != 0 || len(a.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) != 0))) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("affinity"), "node-local LPX supports only required nodeAffinity"))
+	}
+	if len(spec.SchedulingGates) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("schedulingGates"), "Grove and LPX own Agent scheduling gates"))
+	}
+	if len(spec.ResourceClaims) != 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("resourceClaims"), "node-local LPX Agents cannot use ResourceClaims"))
+	}
 	return allErrs
+}
+
+// validateLPXConfig validates the build reference. config and fldPath must be non-nil.
+func (v *sharedValidation) validateLPXConfig(config *nvidiacomv1beta1.LPXConfig, fldPath *field.Path) field.ErrorList {
+	if strings.TrimSpace(config.BuildID) == "" {
+		return field.ErrorList{field.Required(fldPath.Child("buildId"), "LPX component requires a buildId")}
+	}
+	return nil
 }
 
 // sharedValidation carries request-wide dependencies and accumulation used by
@@ -100,7 +158,9 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	allErrs := field.ErrorList{}
 
 	// Validate the provider-native fragment in this component context.
-	if spec.ProviderOverride != nil {
+	if spec.ProviderOverride != nil && spec.IsLPX() {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX component does not support Grove topology overrides"))
+	} else if spec.ProviderOverride != nil {
 		allErrs = append(allErrs, v.validateProviderOverride(
 			spec.ProviderOverride,
 			fldPath.Child("providerOverride"),
@@ -116,6 +176,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpec(
 	// Preserve the LPX role-template boundary after conversion from the alpha schema.
 	if spec.IsLPX() && spec.PodTemplate != nil {
 		allErrs = append(allErrs, field.Forbidden(fldPath.Child("podTemplate"), "LPX Pod templates belong to roles"))
+	}
+	if spec.IsLPX() && spec.TopologyConstraint != nil {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("topologyConstraint"), "LPX does not support Grove topologyConstraint"))
+	}
+	if spec.LPX != nil {
+		allErrs = append(allErrs, v.validateLPXConfig(spec.LPX, fldPath.Child("lpx"))...)
 	}
 
 	// Enforce Grove-only availability semantics before validating later fields.
@@ -237,7 +303,7 @@ func hasUnsupportedMultinode(spec *nvidiacomv1beta1.DynamoComponentDeploymentSha
 }
 
 // validateMultinodeComponentType rejects unsupported new combinations and
-// ratchets identical legacy violations on update. fldPath points to multinode.
+// ratchets identical non-LPX legacy violations on update. fldPath points to multinode.
 func validateMultinodeComponentType(
 	newSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -246,7 +312,7 @@ func validateMultinodeComponentType(
 	if !hasUnsupportedMultinode(newSpec) {
 		return nil
 	}
-	if oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
+	if !newSpec.IsLPX() && oldSpec != nil && oldSpec.ComponentType == newSpec.ComponentType &&
 		hasUnsupportedMultinode(oldSpec) &&
 		apiequality.Semantic.DeepEqual(oldSpec.Multinode, newSpec.Multinode) {
 		return nil
@@ -465,7 +531,7 @@ func (v *sharedValidation) validateComponentRoleSpec(
 	// LPX renders role templates directly and has no provider-override lowering.
 	if options.component != nil && options.component.IsLPX() {
 		if role.PodTemplate != nil {
-			allErrs = append(allErrs, v.validateLPXPodTemplateSpec(role.PodTemplate, fldPath.Child("podTemplate"))...)
+			allErrs = append(allErrs, v.validatePodTemplateSpec(role.PodTemplate, fldPath.Child("podTemplate"), role.Name)...)
 		} else if role.Name == nvidiacomv1beta1.ComponentRoleLPXAgent {
 			allErrs = append(allErrs, field.Required(fldPath.Child("podTemplate"), "the LPX agent role requires a podTemplate"))
 		}
@@ -745,7 +811,6 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 			"checkpoint functionality requires component type to be explicitly set to worker, prefill, or decode",
 		))
 	} else if checkpointConfig.Enabled &&
-		componentType != nvidiacomv1beta1.ComponentTypeLPX &&
 		!dynamo.IsWorkerComponent(string(componentType)) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath,

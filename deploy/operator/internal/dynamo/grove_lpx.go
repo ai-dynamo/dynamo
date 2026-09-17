@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 
-	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
@@ -23,7 +22,9 @@ import (
 
 // EvaluateLPXGroveReadiness observes one complete engine, including every role
 // in every replica. Ordinary DGD components are deliberately not evaluated here.
-func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source *v1beta1.DynamoGraphDeployment, deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha1.PodCliqueSet) (GroveReadiness, error) {
+// source is non-nil. pcs and group may be nil while materializing; otherwise the
+// caller has verified ownership, deletion state, and the single-group template.
+func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source *v1beta1.DynamoGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, group *grovev1alpha1.PodCliqueScalingGroup) (GroveReadiness, error) {
 	component := lpx.ServingComponent(source)
 	status := v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup, RuntimeNamespace: source.GetDynamoNamespaceForComponent(component)}
 	// Draft instances are counted from their own complete Agent cliques.
@@ -51,8 +52,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 	pending := func(message string) GroveReadiness {
 		return result(false, v1beta1.DGDReadyReasonSomeResourcesNotReady, message)
 	}
-	if pcs == nil || !pcs.DeletionTimestamp.IsZero() || !metav1.IsControlledBy(pcs, deployment) ||
-		len(pcs.Spec.Template.PodCliqueScalingGroupConfigs) != 1 {
+	if pcs == nil {
 		return pending("Waiting for the exact LPX PodCliqueSet"), nil
 	}
 	hash := getAcceptedPCSRevisionHash(pcs)
@@ -62,16 +62,12 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 	config := pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]
 	groupName := grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, config.Name)
 	status.ComponentNames = []string{groupName}
-	group := &grovev1alpha1.PodCliqueScalingGroup{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: pcs.Namespace, Name: groupName}, group); err != nil {
-		if apierrors.IsNotFound(err) {
-			return pending("Waiting for the LPX scaling group"), nil
-		}
-		return GroveReadiness{}, err
+	if group == nil {
+		return pending("Waiting for the LPX scaling group"), nil
 	}
 	status.Replicas, status.UpdatedReplicas = group.Status.Replicas, group.Status.UpdatedReplicas
 	status.AvailableReplicas = ptr.To(group.Status.AvailableReplicas)
-	if !metav1.IsControlledBy(group, pcs) || !group.DeletionTimestamp.IsZero() || group.Status.ObservedGeneration == nil || *group.Status.ObservedGeneration != group.Generation {
+	if group.Status.ObservedGeneration == nil || *group.Status.ObservedGeneration != group.Generation {
 		return pending("Waiting for the exact observed LPX scaling group"), nil
 	}
 	status.ScheduledReplicas = ptr.To(group.Status.ScheduledReplicas)

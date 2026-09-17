@@ -328,42 +328,6 @@ func TestResolveSelectedWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	require.Equal(t, before, dgd)
 }
 
-func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *testing.T) {
-	t.Log("Author placement and container identity errors on both roles")
-	agent, conductor := testLPXPodTemplate("agent"), testLPXPodTemplate("conductor")
-	agent.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
-	agent.Spec.Containers[0].Args = []string{"--allocation=forged", "--"}
-	agent.Spec.Hostname = "custom-host"
-	agent.Spec.Containers = append(agent.Spec.Containers, corev1.Container{Name: "agent", Image: "sidecar"})
-	agent.Spec.InitContainers = append(agent.Spec.InitContainers, corev1.Container{Name: "agent", Image: "setup"})
-	conductor.Spec.NodeName = "chosen-node"
-	conductor.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
-		MaxSkew: 1, TopologyKey: "zone", WhenUnsatisfiable: corev1.DoNotSchedule,
-	}}
-	dgd := newSelectedTestDGD(t, "selected", testLPXComponent("lpx", "build",
-		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent},
-		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor},
-	))
-
-	t.Log("Aggregate every actionable error at its authored path before acquiring a build")
-	_, err := ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
-	for _, message := range []string{
-		"spec.components[0].roles[0].podTemplate.spec.hostname: Forbidden: LPX owns role addressing and placement",
-		`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-		`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
-		"spec.components[0].roles[1].podTemplate.spec.nodeName: Forbidden: LPX owns role addressing and placement",
-		"spec.components[0].roles[1].podTemplate.spec.topologySpreadConstraints: Forbidden: LPX owns role placement",
-	} {
-		require.ErrorContains(t, err, message)
-	}
-
-	t.Log("Reject missing main containers for both roles before acquiring a build")
-	agent.Spec.Containers, conductor.Spec.Containers = nil, nil
-	_, err = ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
-	require.ErrorContains(t, err, `spec.components[0].roles[0].podTemplate.spec.containers: Required value: LPX agent component requires a "main" runtime container`)
-	require.ErrorContains(t, err, `spec.components[0].roles[1].podTemplate.spec.containers: Required value: LPX conductor component requires a "main" runtime container`)
-}
-
 func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t *testing.T) {
 	t.Log("Acquire LPU-only and hybrid builds that select different runtime container identities")
 	lpuSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
@@ -464,8 +428,6 @@ func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t 
 				before := dgd.DeepCopy()
 
 				t.Log("Defer conductor-name checks until the immutable build has been acquired")
-				require.Empty(t, ValidateAgentContainerNames(dgd))
-				require.Empty(t, ValidateSelectedIntent(dgd))
 				_, err := ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
 				require.ErrorIs(t, err, ErrBuildSnapshotAcquisition)
 

@@ -148,10 +148,8 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 			} else if _, exists := status.Properties["lpx"]; exists {
 				t.Errorf("%s %s unexpectedly groups private child status", name, version.Name)
 			}
-			for _, field := range []string{"modelDownload", "placement"} {
-				if status.Properties[field].Type != objectType {
-					t.Errorf("%s %s is missing the typed %s projection", name, version.Name, field)
-				}
+			if status.Properties["modelDownload"].Type != objectType {
+				t.Errorf("%s %s is missing the typed modelDownload projection", name, version.Name)
 			}
 		}
 	}

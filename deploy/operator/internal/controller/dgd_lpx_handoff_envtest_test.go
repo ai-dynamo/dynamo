@@ -218,14 +218,16 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), key, source)) || !assert.NoError(c, env.Client().Get(t.Context(), key, child)) {
 			return
 		}
-		failed := meta.FindStatusCondition(child.Status.Conditions, "Failed")
+		failed := meta.FindStatusCondition(child.Status.Conditions, "Ready")
 		ready := meta.FindStatusCondition(source.Status.Conditions, "Ready")
 		if !assert.NotNil(c, failed) || !assert.NotNil(c, ready) {
 			return
 		}
 		assert.Greater(c, child.Generation, child.Status.ObservedGeneration)
 		assert.Equal(c, child.Generation, failed.ObservedGeneration)
-		assert.Equal(c, metav1.ConditionTrue, failed.Status)
+		assert.Equal(c, metav1.ConditionFalse, failed.Status)
+		assert.Len(c, child.Status.Conditions, 1)
+		assert.Equal(c, v1alpha1.LPXReadyReasonFailed, failed.Reason)
 		assert.Contains(c, failed.Message, "exceeded quota: block-lpx-publication")
 		assert.Equal(c, v1beta1.DGDStateFailed, source.Status.State)
 		assert.Equal(c, source.Generation, ready.ObservedGeneration)
@@ -244,42 +246,23 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	require.NoError(t, env.Client().List(t.Context(), requests, client.InNamespace(env.Namespace())))
 	require.Empty(t, requests.Items)
 
-	t.Log("Accept an LPX runtime-invalid edit and report its exact rejection on the public DGD")
-	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	t.Log("Reject invalid placement at admission without changing the source or child revision")
+	sourceGeneration, childGeneration := source.Generation, child.Generation
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		if err := env.Client().Get(t.Context(), key, source); err != nil {
 			return err
 		}
 		source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName = "manual-placement"
 		return env.Client().Update(t.Context(), source)
-	}))
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		if !assert.NoError(c, env.Client().Get(t.Context(), key, source)) || !assert.NoError(c, env.Client().Get(t.Context(), key, child)) {
-			return
-		}
-		failed := meta.FindStatusCondition(child.Status.Conditions, "Failed")
-		ready := meta.FindStatusCondition(source.Status.Conditions, "Ready")
-		if !assert.NotNil(c, failed) || !assert.NotNil(c, ready) {
-			return
-		}
-		assert.Equal(c, child.Generation, failed.ObservedGeneration)
-		assert.Equal(c, "LPXRejected", failed.Reason)
-		assert.Contains(c, failed.Message, "spec.components[0].roles[1].podTemplate.spec.nodeName")
-		assert.Contains(c, failed.Message, "LPX owns role addressing and placement")
-		assert.Equal(c, v1beta1.DGDStateFailed, source.Status.State)
-		assert.Equal(c, source.Generation, ready.ObservedGeneration)
-		assert.Equal(c, metav1.ConditionFalse, ready.Status)
-		assert.Equal(c, failed.Reason, ready.Reason)
-		assert.Equal(c, failed.Message, ready.Message)
-	}, 20*time.Second, 50*time.Millisecond)
-
-	t.Log("Repair the accepted configuration so the same DGD and child can reconcile again")
-	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		if err := env.Client().Get(t.Context(), key, source); err != nil {
-			return err
-		}
-		source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName = ""
-		return env.Client().Update(t.Context(), source)
-	}))
+	})
+	require.True(t, apierrors.IsInvalid(err), "%v", err)
+	require.ErrorContains(t, err, "spec.components[0].roles[1].podTemplate.spec.nodeName")
+	require.ErrorContains(t, err, "LPX owns role addressing and placement")
+	require.NoError(t, env.Client().Get(t.Context(), key, source))
+	require.NoError(t, env.Client().Get(t.Context(), key, child))
+	require.Equal(t, sourceGeneration, source.Generation)
+	require.Equal(t, childGeneration, child.Generation)
+	require.Empty(t, source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeName)
 
 	t.Log("Release quota and observe alpha LGD ownership of the published PCS and runtime resources without waiting for scheduling")
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
@@ -326,14 +309,27 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NotEmpty(t, child.UID)
 	require.NotEqual(t, source.UID, child.UID)
 	require.Equal(t, metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK), metav1.GetControllerOf(child))
-	require.NoError(t, dynamo.ValidateLPXSource(child, source))
+	revision, err := dynamo.LPXInputRevision(source, child.Annotations[dynamo.LPXRestartAnnotation])
+	require.NoError(t, err)
+	require.Equal(t, revision, child.Spec.InputRevision)
 
 	t.Log("Project the observed download payload and its actionable failure")
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
-	child.Status.Conditions = []metav1.Condition{{Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation,
-		LastTransitionTime: metav1.Now(), Reason: "PublicationDenied", Message: "Check the namespace quota"}}
+	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation,
+		LastTransitionTime: metav1.Now(), Reason: v1alpha1.LPXReadyReasonFailed, Message: "Check the namespace quota"}}
+	failureTime := metav1.NewTime(time.Now().Add(-time.Minute).UTC().Truncate(time.Second))
+	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+		Type: "SchedulingFailed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation,
+		LastTransitionTime: failureTime, Reason: "LPXSchedulingDeadlineExceeded", Message: "An LPX request exceeded its scheduling deadline",
+	})
 	require.NoError(t, env.Client().Status().Update(t.Context(), child))
+	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(child), child))
+	require.Len(t, child.Status.Conditions, 2)
+	schedulingFailed := meta.FindStatusCondition(child.Status.Conditions, "SchedulingFailed")
+	require.NotNil(t, schedulingFailed)
+	require.True(t, failureTime.Equal(&schedulingFailed.LastTransitionTime))
+	require.Equal(t, child.Generation, schedulingFailed.ObservedGeneration)
 	projected := v1beta1.DynamoGraphDeploymentStatus{}
 	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
 	projectLPXChildStatus(source, child, result, &projected)
@@ -361,7 +357,9 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, child.Generation+1, updated.Generation)
 	require.NotEqual(t, child.Spec.InputRevision, updated.Spec.InputRevision)
-	require.NoError(t, dynamo.ValidateLPXSource(updated, source))
+	revision, err = dynamo.LPXInputRevision(source, updated.Annotations[dynamo.LPXRestartAnnotation])
+	require.NoError(t, err)
+	require.Equal(t, revision, updated.Spec.InputRevision)
 	require.Equal(t, child.Status.ObservedGeneration, updated.Status.ObservedGeneration)
 	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
 	projectLPXChildStatus(source, updated, result, &projected)

@@ -76,6 +76,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   Desired number of complete component instances. For a single-node component, each instance is one pod. For a multinode component, each instance contains all of its roles. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
 
   For a single `type: lpx` component in a DGD, this counts complete engine replicas, not individual role Pods. Hybrid and LPU-only engines allow up to `2496` replicas; generated Pod hostname limits may lower that maximum. In a speculative pair, draft replicas count model instances (`1–8`), and target replicas must be `1`. LPX does not support scaling adapters or scale-to-zero.
+
+  When LPX serving-component `replicas` is omitted, the controller follows the live Grove `PodCliqueScalingGroup` (PCSG) replica count without writing its Scale subresource. This externally managed count is lost when the `PodCliqueSet` (PCS) or PCSG is replaced, including PCS replacement for immutable workload or compiler-provenance changes. The new group starts from the template's `minAvailable` seed (default `1`); the external scaler must reapply its desired capacity. Explicit DGD `replicas` are reapplied by the operator after replacement.
 </ParamField>
 
 <ParamField path="minAvailable" type="integer">

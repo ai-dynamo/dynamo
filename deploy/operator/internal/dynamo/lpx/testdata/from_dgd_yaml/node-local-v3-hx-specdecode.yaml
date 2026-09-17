@@ -38,7 +38,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+  name: node-local-v3-hx-specdecode-1f7a-lpu-<lpu-config-hash-prefix>
   namespace: test
 ---
 metadata:
@@ -60,7 +60,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: <lpu-config-hash>
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:f56f9a20b94c49c03962f35597fe341c5fe6f3b806a4545e9af4eacb003e8e3e
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:6b42344f7916f4778ffdef73249a7395bbc7a082466cc457953af5de5544c80f
@@ -207,14 +207,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-<lpu-config-hash-prefix>
             name: config
         replicas: 1
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: <lpu-config-hash>
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:f56f9a20b94c49c03962f35597fe341c5fe6f3b806a4545e9af4eacb003e8e3e
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b94a35c4a019e3213f4497e105522208d2a2707e8469ec13c22d46b99d53c227
@@ -361,14 +361,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-<lpu-config-hash-prefix>
             name: config
         replicas: 1
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: <lpu-config-hash>
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:cb97b5eb27b508190a4d23dd15ce77ca690e9e7531d577607a22c8bced914cb2
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8440780b5cdc30ae4bbcf80fda3cce06027325884a8b69751577112153ab2cf5
@@ -515,14 +515,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-<lpu-config-hash-prefix>
             name: config
         replicas: 1
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 19888d3182c23d086b0246d1bf8fce4a6d48e188bc47fd23bbe6cce6a61c7361
+        nvidia.com/extra-resources-hash: <lpu-config-hash>
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:47a34d03645a20d4e73d067f226f9f758e7cfda8170b2eb1d845a24ee043b231
         scheduling.lpu.nvidia.com/role: conductor
@@ -714,7 +714,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v3-hx-specdecode-1f7a-lpu-19888d3182c23d08
+              name: node-local-v3-hx-specdecode-1f7a-lpu-<lpu-config-hash-prefix>
             name: config
         replicas: 1
         roleName: cond

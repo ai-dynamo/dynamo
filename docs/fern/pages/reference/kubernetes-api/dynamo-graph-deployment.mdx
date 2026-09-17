@@ -77,6 +77,8 @@ spec:
 
 <ParamField path="labels" type="map[string]string">
   Labels propagated to all child resources. Same precedence rules as `annotations`.
+
+  For LPX, metadata synchronization keeps the PCS labels and clique templates consistent after queue edits. Moving an existing KAI PodGroup to another queue depends on the Grove backend; metadata synchronization does not recreate existing PodGroups.
 </ParamField>
 
 <ParamField path="priorityClassName" type="string">
@@ -89,8 +91,13 @@ spec:
 
 <Indent>
   <ParamField path="attemptDeadlineSeconds" type="int64">
-    Wall-clock limit for each pending LPU pipeline request, measured from the scheduler-published start of its current scheduling cycle until it reports `Bound`, `NoFit`, or `Unsupported`. The deadline is not armed until the scheduler publishes `status.schedulingStartedAt`, and a later scheduling cycle resets that timestamp. Valid values are `1` through `9,223,372,036`; omission means unlimited.
-    Expiry reports `LPXSchedulingDeadlineExceeded` and deletes the expired request. When `replicas` is explicit, it also lowers the Grove replica count to the surviving prefix; externally managed capacity is left unchanged. A later LPX input revision authorizes another publication. This field is not a solver budget.
+    Best-effort deadline for each LPU pipeline request's scheduling cycle. The timer starts at the scheduler's `status.schedulingStartedAt`; without that timestamp, no deadline is running. A later scheduling cycle supplies a new timestamp. Valid values are `1` through `9,223,372,036`; omission means unlimited. This field is not a solver budget or an overall deployment readiness timeout.
+
+    Current-generation `Bound`, `NoFit`, and `Unsupported` receipts are exempt. `Degraded`, `Releasing`, and `Released` receipts are also exempt when their committed execution was accepted for the current request generation. `NoFit` can therefore leave the deployment Pending indefinitely, and a `Bound` request can still wait indefinitely for runtime readiness.
+
+    Deadline handling runs after download checks, compiler-registry resolution, and desired-state validation. An outage or invalid desired configuration can delay failure reporting and cleanup indefinitely, even after the deadline has elapsed. The timer does not bound asynchronous cleanup or finalization.
+
+    Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly. A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
   </ParamField>
 </Indent>
 

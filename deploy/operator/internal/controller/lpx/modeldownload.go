@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"sort"
 	"time"
 
@@ -20,12 +21,12 @@ import (
 	modelpb "github.com/ai-dynamo/modelexpress/modelexpress_client/go/gen/modelexpress/model"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
 	modelDownloadRequeueAfter          = 5 * time.Second
-	modelDownloadPendingReason  string = "model_download_in_progress"
 	modelDownloadPendingMessage string = "Waiting for model downloads to complete"
 
 	modelDownloadRefreshInterval = 24 * time.Hour
@@ -53,68 +54,93 @@ func newLPXModelRegistry(config *configv1alpha1.OperatorConfiguration) (lpx.Mode
 	return registry, nil
 }
 
-// reconcileModelDownloads checks the nonnil DGD's remote builds and updates the
-// owned, nonnil child's download status without mutating the DGD. forceCheck
-// bypasses the refresh interval until an immutable LPX selection exists.
+// reconcileModelDownloads gates startup on downloaded builds. A successful
+// observation remains usable during periodic refreshes of a Ready deployment.
+// deployment and dgd are non-nil.
 func (r *graphReconciler) reconcileModelDownloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
-	forceCheck bool,
-) (bool, error) {
-	current := deployment.Status.ObservedGeneration == deployment.Generation
-	previous := deployment.Status.ModelDownload
-	if !forceCheck && current && previous != nil && previous.LastCheckedAt != nil &&
-		time.Since(previous.LastCheckedAt.Time) < modelDownloadRefreshInterval {
-		return true, nil
-	}
-	running := !forceCheck && current && meta.IsStatusConditionTrue(deployment.Status.Conditions, "Ready")
-	checkCtx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
-	defer cancel()
+) (ctrl.Result, error) {
+	var (
+		lastCheckedAt  *metav1.Time
+		existingBuilds []string
+		recheck        bool
+	)
 
-	downloaded, ready, err := ensureModelsDownloaded(checkCtx, dgd, r.modelRegistry)
-	checkSucceeded := ready && err == nil
-	// Retain the running child's last observation when refresh is incomplete.
-	if !running || checkSucceeded {
+	if modelDownload := deployment.Status.ModelDownload; modelDownload != nil {
+		ready := meta.IsStatusConditionTrue(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
+		lastCheckedAt = modelDownload.LastCheckedAt
+		recheck = ready && deployment.Status.ObservedGeneration == deployment.Generation && lastCheckedAt != nil
+
+		if lastCheckedAt != nil && time.Since(lastCheckedAt.Time) < modelDownloadRefreshInterval {
+			existingBuilds = modelDownload.Builds
+		}
+	}
+
+	downloaded, ready, err := ensureModelsDownloaded(ctx, dgd, r.modelRegistry, existingBuilds)
+	if err != nil || !ready {
+		if recheck {
+			if err != nil {
+				log.FromContext(ctx).Error(err, "Unable to refresh model downloads")
+			}
+			return ctrl.Result{}, nil
+		}
+
 		deployment.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: downloaded}
-	} else if previous == nil {
-		deployment.Status.ModelDownload = &v1beta1.ModelDownloadStatus{}
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		setReadyCondition(deployment, v1beta1.DGDStatePending, modelDownloadPendingMessage)
+		return ctrl.Result{RequeueAfter: modelDownloadRequeueAfter}, nil
 	}
-	if checkSucceeded {
-		checkedAt := metav1.Now()
-		deployment.Status.ModelDownload.LastCheckedAt = &checkedAt
+
+	if len(existingBuilds) == 0 {
+		lastCheckedAt = new(metav1.Now())
 	}
-	if !running {
-		return ready, err
-	}
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to refresh model downloads", "dgd", dgd.Name)
-	}
-	return true, nil
+
+	deployment.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: downloaded, LastCheckedAt: lastCheckedAt}
+	return ctrl.Result{}, nil
 }
 
 func ensureModelsDownloaded(
 	ctx context.Context,
 	dgd *v1beta1.DynamoGraphDeployment,
 	registry lpx.ModelRegistry,
+	existingBuilds []string,
 ) ([]string, bool, error) {
 	builds, err := collectBuilds(dgd, registry)
 	if err != nil {
 		return nil, false, err
 	}
 
-	downloaded := make([]string, 0, len(builds))
-	var downloadErrors []error
-	for i, buildURL := range builds {
+	if len(builds) == 0 {
+		return nil, true, nil
+	}
+
+	var (
+		downloaded     = make([]string, 0, len(builds))
+		downloadErrors []error
+	)
+
+	ctx, cancel := context.WithTimeout(ctx, modelDownloadCheckTimeout)
+	defer cancel()
+
+	perBuildTimeout := modelDownloadCheckTimeout / time.Duration(len(builds))
+
+	for _, buildURL := range builds {
 		build := buildURL.String()
-		buildCtx := ctx
-		cancel := func() {}
-		if deadline, ok := ctx.Deadline(); ok && i < len(builds)-1 {
-			perBuildTimeout := time.Until(deadline) / time.Duration(len(builds)-i)
-			buildCtx, cancel = context.WithTimeout(ctx, perBuildTimeout)
+
+		if slices.Contains(existingBuilds, build) {
+			downloaded = append(downloaded, build)
+			continue
 		}
-		buildDownloaded, err := registry.EnsureDownloaded(buildCtx, buildURL)
+
+		ctx, cancel := context.WithTimeout(ctx, perBuildTimeout)
+		buildDownloaded, err := registry.EnsureDownloaded(ctx, buildURL)
 		cancel()
+
 		if err != nil {
 			downloadErrors = append(downloadErrors, fmt.Errorf("ensure model %q is downloaded: %w", build, err))
 			continue

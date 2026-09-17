@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -21,7 +22,6 @@ import (
 	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
@@ -105,32 +105,8 @@ func LPXRestartToken(source *v1beta1.DynamoGraphDeployment, previous string) str
 	return previous
 }
 
-// ValidateLPXSource rejects foreign, stale, or fabricated child handoffs before
-// the LPX controller acquires a build or publishes a workload.
-// Both objects must be non-nil.
-func ValidateLPXSource(deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) error {
-	owner := metav1.GetControllerOf(deployment)
-	if deployment.Namespace != source.Namespace ||
-		owner == nil || owner.APIVersion != v1beta1.GroupVersion.String() || owner.Kind != "DynamoGraphDeployment" ||
-		owner.Name != source.Name || owner.UID != source.UID {
-		return fmt.Errorf("LPXGraphDeployment requires its exact source DGD and controller owner")
-	}
-	if provider := source.Annotations[commonconsts.KubeAnnotationWorkloadProvider]; provider != "" && provider != commonconsts.WorkloadProviderGrove {
-		return fmt.Errorf("LPX requires the Grove workload provider")
-	}
-	if !source.DeletionTimestamp.IsZero() {
-		return fmt.Errorf("source DGD is being deleted")
-	}
-	restart := LPXRestartToken(source, deployment.Annotations[LPXRestartAnnotation])
-	revision, err := LPXInputRevision(source, restart)
-	if err != nil {
-		return err
-	}
-	if deployment.Spec.InputRevision != revision || deployment.Annotations[LPXRestartAnnotation] != restart {
-		return fmt.Errorf("LPXGraphDeployment is waiting for the current source input revision")
-	}
-	return nil
-}
+// ErrLPXSourcePending means the source and child snapshots await a matching handoff.
+var ErrLPXSourcePending = errors.New("LPXGraphDeployment is waiting for the current source input revision")
 
 // lpxInputRevisionPayload is the normalized source intent hashed for inputRevision.
 // Keep complete selection and rendering inputs so nested role templates and build

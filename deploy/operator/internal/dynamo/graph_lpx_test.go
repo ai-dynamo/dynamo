@@ -36,13 +36,14 @@ func TestBackendDetectionSkipsNonWorkers(t *testing.T) {
 	}
 }
 
-func TestRenderSelectedLPXRolePodSettings(t *testing.T) {
+func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 	tests := []struct {
 		name             string
 		authored         *corev1.PodSecurityContext
 		sharedMemorySize *resource.Quantity
 		volumes          []corev1.Volume
 		mounts           []corev1.VolumeMount
+		container        corev1.Container
 	}{
 		{
 			name: "no authored security context",
@@ -76,6 +77,22 @@ func TestRenderSelectedLPXRolePodSettings(t *testing.T) {
 			mounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
 		},
 		{name: "explicit zero shared memory size", sharedMemorySize: ptr.To(resource.MustParse("0"))},
+		{name: "image entrypoint with arguments", container: corev1.Container{Args: []string{"serve"}}},
+		{name: "explicit command with image arguments", container: corev1.Container{Command: []string{"/custom-runtime"}}},
+		{name: "shell startup", container: corev1.Container{
+			Command: []string{"/bin/sh", "-c"}, Args: []string{"exec /custom-runtime --allocation $LPX_ALLOCATION"},
+		}},
+		{name: "SGLang startup without backend injection", container: corev1.Container{
+			Command: []string{"python3"}, Args: []string{"-m", "dynamo.sglang"},
+		}},
+		{name: "TensorRT-LLM startup without backend injection", container: corev1.Container{
+			Command: []string{"python3"}, Args: []string{"-m", "dynamo.trtllm"},
+		}},
+		{name: "authored health probes", container: corev1.Container{
+			StartupProbe:   &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/health", "started"}}}, FailureThreshold: 12},
+			LivenessProbe:  &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/health", "live"}}}, PeriodSeconds: 6},
+			ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/health", "ready"}}}, TimeoutSeconds: 2},
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -83,10 +100,12 @@ func TestRenderSelectedLPXRolePodSettings(t *testing.T) {
 			source := &v1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "hybrid", Namespace: "test"},
 			}
+			container := test.container.DeepCopy()
+			container.Name, container.Image = "main", "cyborg:test"
 			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 				ComponentName: "engine", ComponentType: v1beta1.ComponentTypeDecode, SharedMemorySize: test.sharedMemorySize,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers:      []corev1.Container{{Name: "main", Image: "cyborg:test"}},
+					Containers:      []corev1.Container{*container},
 					SecurityContext: test.authored,
 				}},
 			}
@@ -107,6 +126,14 @@ func TestRenderSelectedLPXRolePodSettings(t *testing.T) {
 			require.Equal(t, test.authored, template.Spec.SecurityContext)
 			require.ElementsMatch(t, test.volumes, template.Spec.Volumes)
 			require.ElementsMatch(t, test.mounts, template.Spec.Containers[0].VolumeMounts)
+
+			t.Log("Leave startup and health checks template-owned, including omission")
+			main := template.Spec.Containers[0]
+			require.Equal(t, container.Command, main.Command)
+			require.Equal(t, container.Args, main.Args)
+			require.Equal(t, container.StartupProbe, main.StartupProbe)
+			require.Equal(t, container.LivenessProbe, main.LivenessProbe)
+			require.Equal(t, container.ReadinessProbe, main.ReadinessProbe)
 		})
 	}
 }

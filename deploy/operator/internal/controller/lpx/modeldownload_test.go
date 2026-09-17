@@ -14,57 +14,35 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 )
 
 const (
 	modelDownloadTestBuildID       = "gs://bucket/model/build"
 	modelDownloadTestSecondBuildID = "gs://bucket/model/second-build"
 	modelDownloadTestLocalBuildID  = "file:///models/local-build"
-	modelDownloadTestDGDName       = "test-dgd"
-	modelDownloadTestNamespace     = "default"
 )
 
 func TestEnsureModelsDownloaded(t *testing.T) {
-	t.Log("Use the real registry to check missing Model Express configuration")
-	withoutModelExpress, err := lpx.NewModelRegistry("", nil)
-	require.NoError(t, err)
-
-	t.Log("Own a mixed graph with reversed build order and a previously cached source")
+	t.Log("Own a mixed graph with reversed build order")
 	pending := newModelDownloadDGD(modelDownloadTestSecondBuildID, modelDownloadTestBuildID)
 	pending.Spec.Components = append([]v1beta1.DynamoComponentDeploymentSharedSpec{{
 		ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
 	}}, pending.Spec.Components...)
-	cached := newModelDownloadDGD(modelDownloadTestBuildID, modelDownloadTestSecondBuildID)
-	cached.Status.LPX = &v1beta1.DynamoGraphDeploymentLPXStatus{
-		ModelDownload: &v1beta1.ModelDownloadStatus{Builds: []string{modelDownloadTestBuildID}},
-	}
 	tests := []struct {
 		name       string
 		dgd        *v1beta1.DynamoGraphDeployment
 		registry   lpx.ModelRegistry
+		existing   []string
 		wantReady  bool
 		wantErr    string
 		wantCalls  []string
 		wantBuilds []string
 	}{
-		{
-			name:     "returns Model Express client error for remote builds when Model Express is not configured",
-			dgd:      newModelDownloadDGD(modelDownloadTestBuildID),
-			registry: withoutModelExpress,
-			wantErr:  "Model Express client is required for GCS model downloads",
-		},
 		{
 			name:      "local build does not call Model Express",
 			dgd:       newModelDownloadDGD(modelDownloadTestLocalBuildID),
@@ -80,14 +58,15 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 			wantBuilds: []string{modelDownloadTestBuildID},
 		},
 		{
-			name: "checks every remote build regardless of cached status",
-			dgd:  cached,
+			name:     "checks only uncached builds and drops unselected cached builds",
+			dgd:      newModelDownloadDGD(modelDownloadTestBuildID, modelDownloadTestSecondBuildID),
+			existing: []string{modelDownloadTestBuildID, "gs://bucket/removed/build"},
 			registry: newModelDownloadRegistry(t, map[string]bool{
 				modelDownloadTestBuildID:       true,
 				modelDownloadTestSecondBuildID: true,
 			}, nil),
 			wantReady:  true,
-			wantCalls:  []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID},
+			wantCalls:  []string{modelDownloadTestSecondBuildID},
 			wantBuilds: []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID},
 		},
 		{
@@ -110,8 +89,8 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Check every selected remote build without acquiring its snapshot")
-			builds, ready, err := ensureModelsDownloaded(t.Context(), tt.dgd, tt.registry)
+			t.Log("Check uncached selected builds without acquiring their compiler snapshots")
+			builds, ready, err := ensureModelsDownloaded(t.Context(), tt.dgd, tt.registry, tt.existing)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 			} else {
@@ -136,22 +115,22 @@ func TestEnsureModelsDownloadedSharesDeadlineAcrossBuilds(t *testing.T) {
 	)
 	ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 	defer cancel()
+	started := time.Now()
 
 	t.Log("Continue checking later builds and retain their completed progress")
-	builds, ready, err := ensureModelsDownloaded(ctx, dgd, registry)
+	builds, result, err := ensureModelsDownloaded(ctx, dgd, registry, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	require.ErrorContains(t, err, "download failed")
-	require.False(t, ready)
+	require.Zero(t, result)
 	require.Equal(t, []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID}, registry.calls)
 	require.Equal(t, []string{modelDownloadTestSecondBuildID}, builds)
 	require.Zero(t, registry.acquireBuildSnapshotCalls)
 
-	t.Log("Reserve time for the second build without extending the parent's budget")
-	deadline, _ := ctx.Deadline()
+	t.Log("Each download receives a bounded share of the total check budget")
 	require.Len(t, registry.deadlines, 2)
-	require.False(t, registry.deadlines[0].IsZero())
-	require.True(t, registry.deadlines[0].Before(registry.deadlines[1]))
-	require.Equal(t, deadline, registry.deadlines[1])
+	for _, deadline := range registry.deadlines {
+		require.WithinDuration(t, started.Add(modelDownloadCheckTimeout/2), deadline, time.Second)
+	}
 }
 
 func TestRunningLPXModelDownloadRefresh(t *testing.T) {
@@ -190,7 +169,7 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Refresh a running workload while preserving its downloaded builds")
 			dgd := newModelDownloadDGD(modelDownloadTestBuildID)
-			child := newLPXTestDeployment(t, dgd)
+			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
 			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
 				Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: &metav1.Time{Time: tt.checkedAt},
 			}
@@ -203,9 +182,9 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 
 			lpx := &graphReconciler{modelRegistry: registry}
 			for range 2 {
-				ready, err := lpx.reconcileModelDownloads(t.Context(), child, dgd, false)
+				result, err := lpx.reconcileModelDownloads(t.Context(), child, dgd)
 				require.NoError(t, err)
-				require.True(t, ready)
+				require.Zero(t, result)
 			}
 			if len(registry.calls) != tt.wantCalls {
 				t.Fatalf("ModelExpress calls = %d, want %d", len(registry.calls), tt.wantCalls)
@@ -225,93 +204,73 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 	}
 }
 
-func TestInitialLPXModelDownloadChecksHaveDeadline(t *testing.T) {
-	for _, forceCheck := range []bool{false, true} {
-		t.Run(fmt.Sprintf("forceCheck=%t", forceCheck), func(t *testing.T) {
+func TestEnsureModelsDownloadedCheckTimeout(t *testing.T) {
+	for _, parentTimeout := range []time.Duration{time.Hour, time.Second} {
+		t.Run(parentTimeout.String(), func(t *testing.T) {
+			t.Log("Bound the download RPC by both the check timeout and the caller's deadline")
 			dgd := newModelDownloadDGD(modelDownloadTestBuildID)
-			child := newLPXTestDeployment(t, dgd)
 			registry := newModelDownloadRegistry(t, map[string]bool{modelDownloadTestBuildID: true}, nil)
-			lifecycle := &graphReconciler{modelRegistry: registry}
 			started := time.Now()
+			ctx, cancel := context.WithTimeout(t.Context(), parentTimeout)
+			defer cancel()
 
-			ready, err := lifecycle.reconcileModelDownloads(t.Context(), child, dgd, forceCheck)
-
+			_, ready, err := ensureModelsDownloaded(ctx, dgd, registry, nil)
 			require.NoError(t, err)
 			require.True(t, ready)
 			require.Len(t, registry.deadlines, 1)
-			require.False(t, registry.deadlines[0].IsZero())
-			require.WithinDuration(t, started.Add(modelDownloadCheckTimeout), registry.deadlines[0], time.Second)
+			require.WithinDuration(t, started.Add(min(parentTimeout, modelDownloadCheckTimeout)), registry.deadlines[0], 100*time.Millisecond)
 		})
 	}
 }
 
-func TestModelDownloadSpecChangeRemainsFailClosed(t *testing.T) {
-	t.Log("Keep the source's download status independent of the unobserved child")
-	source := newModelDownloadDGD(modelDownloadTestBuildID)
-	source.Status.LPX = &v1beta1.DynamoGraphDeploymentLPXStatus{
-		ModelDownload: &v1beta1.ModelDownloadStatus{Builds: []string{modelDownloadTestBuildID}},
-	}
-	child := newLPXTestDeployment(t, source)
-	child.Status.ObservedGeneration = child.Generation - 1
-	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
-	child.Status.ModelDownload = source.Status.LPX.ModelDownload.DeepCopy()
-	child.Status.ModelDownload.LastCheckedAt = ptr.To(metav1.Now())
-	registry := newModelDownloadRegistry(t, nil, map[string]error{modelDownloadTestBuildID: fmt.Errorf("ModelExpress unavailable")})
-	lifecycle := &graphReconciler{modelRegistry: registry}
-	t.Log("Do not reuse a fresh download check for an unobserved LPX generation")
-	ready, err := lifecycle.reconcileModelDownloads(t.Context(), child.DeepCopy(), source, false)
-	require.ErrorContains(t, err, "ModelExpress unavailable")
-	require.False(t, ready)
-	t.Log("The child controller persists failed download progress without publishing a PCS")
-	r := newLPXTestReconciler(t, registry, child, source)
-	_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-	require.ErrorContains(t, err, "ModelExpress unavailable")
-	updated := &v1alpha1.LPXGraphDeployment{}
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), updated))
-	require.NotNil(t, updated.Status.ModelDownload)
-	require.Empty(t, updated.Status.ModelDownload.Builds)
-	require.False(t, meta.IsStatusConditionTrue(updated.Status.Conditions, "Ready"))
-	require.Equal(t, []string{modelDownloadTestBuildID}, source.Status.LPX.ModelDownload.Builds)
-}
+func TestModelDownloadCacheAcrossRevisions(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		build      string
+		cacheAge   time.Duration
+		observed   bool
+		ready      bool
+		wantCached bool
+	}{
+		{name: "unchanged build survives an input edit", build: modelDownloadTestBuildID, wantCached: true},
+		{name: "new build is checked after an input edit", build: modelDownloadTestSecondBuildID},
+		{name: "expired cache is checked after an input edit", build: modelDownloadTestBuildID, cacheAge: modelDownloadRefreshInterval},
+		{name: "observed but not Ready still checks new builds", build: modelDownloadTestSecondBuildID, observed: true},
+		{name: "old Ready receipt cannot hide a new build failure", build: modelDownloadTestSecondBuildID, ready: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Retain a previous build's successful download while changing the desired input")
+			dgd := newModelDownloadDGD(tc.build)
+			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
+			if tc.observed {
+				child.Status.ObservedGeneration = child.Generation
+			}
+			if tc.ready {
+				setReadyCondition(child, v1beta1.DGDStateSuccessful, "Previous input is ready")
+			}
+			checkedAt := metav1.NewTime(time.Now().Add(-tc.cacheAge))
+			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
+				Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: &checkedAt,
+			}
+			registry := newModelDownloadRegistry(t, nil, map[string]error{tc.build: fmt.Errorf("ModelExpress unavailable")})
+			r := &graphReconciler{modelRegistry: registry}
 
-func TestLPXDisabledRevisionPreservesObservationFence(t *testing.T) {
-	t.Log("A new revision starts with old download observations and no scheduling deadline")
-	source := newModelDownloadDGD(modelDownloadTestSecondBuildID)
-	source.Generation++
-	child := newLPXTestDeployment(t, source)
-	child.Status.ObservedGeneration = child.Generation
-	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
-		Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: ptr.To(metav1.Now()),
+			t.Log("Reuse only fresh matching builds; new or expired builds must be checked successfully")
+			result, err := r.reconcileModelDownloads(t.Context(), child, dgd)
+			require.Zero(t, result)
+			if tc.wantCached {
+				require.NoError(t, err)
+				require.Empty(t, registry.calls)
+				require.Equal(t, &checkedAt, child.Status.ModelDownload.LastCheckedAt)
+				require.Equal(t, []string{tc.build}, child.Status.ModelDownload.Builds)
+			} else {
+				require.ErrorContains(t, err, "ModelExpress unavailable")
+				require.Equal(t, []string{tc.build}, registry.calls)
+				require.Empty(t, child.Status.ModelDownload.Builds)
+				require.Nil(t, child.Status.ModelDownload.LastCheckedAt)
+			}
+		})
 	}
-	child.Generation++
-	previousGeneration := child.Status.ObservedGeneration
-	require.Nil(t, lpxRequestDeadlineSeconds(source))
-	registry := newModelDownloadRegistry(t, map[string]bool{modelDownloadTestSecondBuildID: true}, nil)
-	r := newLPXTestReconciler(t, registry, child, source)
-	r.runtimeConfig.Gate = features.Gates{LPX: true}
-	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
-
-	t.Log("Disabled reconciliation reports the new failure without marking the new revision as observed")
-	for range 2 {
-		_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-		require.NoError(t, err)
-		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
-		require.Equal(t, previousGeneration, child.Status.ObservedGeneration)
-		require.Nil(t, child.Status.ModelDownload)
-		require.Empty(t, registry.calls, "the early exit has not checked either build")
-		failed := meta.FindStatusCondition(child.Status.Conditions, "Failed")
-		require.Equal(t, child.Generation, failed.ObservedGeneration)
-		require.Equal(t, "LPXUnavailable", failed.Reason)
-	}
-
-	t.Log("Resumed download checking cannot reuse the previous revision's cached success")
-	r.runtimeConfig.Gate.Grove = true
-	ready, err := r.reconcileModelDownloads(t.Context(), child, source, false)
-	require.NoError(t, err)
-	require.True(t, ready)
-	require.Equal(t, []string{modelDownloadTestSecondBuildID}, registry.calls)
-	require.Equal(t, []string{modelDownloadTestSecondBuildID}, child.Status.ModelDownload.Builds)
-	require.NotNil(t, child.Status.ModelDownload.LastCheckedAt)
 }
 
 type fakeModelDownloadRegistry struct {
@@ -344,35 +303,14 @@ func newModelDownloadRegistry(t *testing.T, ready map[string]bool, errs map[stri
 	return &fakeModelDownloadRegistry{ModelRegistry: registry, ready: ready, err: errs}
 }
 
+// newModelDownloadDGD supplies only the component-to-build mapping consumed by download checks.
 func newModelDownloadDGD(buildIDs ...string) *v1beta1.DynamoGraphDeployment {
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       modelDownloadTestDGDName,
-			Namespace:  modelDownloadTestNamespace,
-			Generation: 1,
-			UID:        types.UID("test-dgd-uid"),
-		},
-	}
-	// Each build belongs to a distinct public component; only the target serves.
-	for i, buildID := range buildIDs {
-		component := v1beta1.DynamoComponentDeploymentSharedSpec{
-			ComponentName: "lpx-worker", ComponentType: v1beta1.ComponentTypeLPX, Replicas: ptr.To(int32(1)),
+	dgd := &v1beta1.DynamoGraphDeployment{}
+	for index, buildID := range buildIDs {
+		dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: fmt.Sprintf("model-%d", index), ComponentType: v1beta1.ComponentTypeLPX,
 			LPX: &v1beta1.LPXConfig{BuildID: buildID},
-			Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "main", Image: "lpu-runtime"}},
-			}}}},
-		}
-		if i == len(buildIDs)-1 {
-			component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{
-				Name: v1beta1.ComponentRoleLPXConductor,
-				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main", Image: "lpu-runtime", Command: []string{"/bin/nova"}}},
-				}},
-			})
-		} else {
-			component.ComponentName = "draft"
-		}
-		dgd.Spec.Components = append(dgd.Spec.Components, component)
+		})
 	}
 	return dgd
 }

@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -62,19 +63,34 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	t.Log("Cover XT configuration mounts and HX hybrid model-storage paths")
 	hybrid := newV3CompilerFixture()
 	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
+	xtSnapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
+	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	tests := []struct {
-		name     string
-		family   lpxv1alpha1.TargetFamily
-		pipeline Pipeline
-		snapshot *BuildSnapshot
+		name       string
+		family     lpxv1alpha1.TargetFamily
+		pipeline   Pipeline
+		snapshot   *BuildSnapshot
+		configPath string
 	}{
 		{
 			name: "XT config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
-			snapshot: acquireTestSnapshot(t, writeV2CompilerFixture(t)),
+			snapshot: xtSnapshot, configPath: "/custom",
+		},
+		{
+			name: "XT omitted config mount", family: lpxv1alpha1.TargetFamilyXt8888, pipeline: PipelineSingle,
+			snapshot: xtSnapshot,
+		},
+		{
+			name: "HX omitted config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			snapshot: hxSnapshot,
+		},
+		{
+			name: "HX custom config mount", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineSingle,
+			snapshot: hxSnapshot, configPath: "/custom",
 		},
 		{
 			name: "HX hybrid storage", family: lpxv1alpha1.TargetFamilyHx16x8x2x3, pipeline: PipelineLPX,
-			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)),
+			snapshot: acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)), configPath: "/configs",
 		},
 	}
 	for _, test := range tests {
@@ -101,10 +117,25 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				}},
 				Spec: renderTestPodSpec(),
 			}
-			if test.family == lpxv1alpha1.TargetFamilyXt8888 {
+			template.Spec.Tolerations = []corev1.Toleration{
+				{Key: "cluster.example/custom", Operator: corev1.TolerationOpExists},
+				{Key: "lpu.nvidia.com/node", Operator: corev1.TolerationOpExists},
+			}
+			if test.family == lpxv1alpha1.TargetFamilyXt8888 && test.configPath != "" {
+				template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{
+					Name: lpuConfigVolumeName,
+					VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "authored-config"}, DefaultMode: ptr.To[int32](0440),
+					}},
+				})
+			}
+			template.Spec.Containers[0].VolumeMounts = slices.DeleteFunc(template.Spec.Containers[0].VolumeMounts,
+				func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName })
+			if test.configPath != "" {
 				template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/custom"})
-			} else {
+					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: test.configPath})
+			}
+			if test.pipeline == PipelineLPX {
 				template.Spec.Containers[0].VolumeMounts[0].MountPath = "/model-cache"
 				pcs.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = "/model-cache"
 			}
@@ -132,14 +163,16 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Equal(t, projection.Digest().String(), agent.Annotations[WorkloadDigestAnnotation])
 			require.Equal(t, projection.CompilerSnapshotDigest(), agent.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 
+			t.Log("Preserve authored placement and volumes")
+			require.Equal(t, template.Spec.Tolerations, agent.Spec.PodSpec.Tolerations)
+			require.Subset(t, agent.Spec.PodSpec.Volumes, template.Spec.Volumes)
+
 			t.Log("Resolve runtime mounts using the authored storage path")
-			if test.family == lpxv1alpha1.TargetFamilyXt8888 {
+			if test.pipeline != PipelineLPX {
 				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
-				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/custom"})
-				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
+				require.Equal(t, template.Spec.Containers[0].VolumeMounts, conductor.Spec.PodSpec.Containers[0].VolumeMounts)
+				require.Equal(t, template.Spec.Containers[0].VolumeMounts, agent.Spec.PodSpec.Containers[0].VolumeMounts)
 			} else {
 				cyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
 				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/model-cache"})

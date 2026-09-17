@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
 
@@ -32,17 +33,15 @@ type BuildSnapshotSource interface {
 	AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error)
 }
 
-// ResolveSelectedWorkload validates and projects the selected LPX workload in dgd.
-// dgd and source must be non-nil. The function reads but does not mutate dgd.
+// ResolveSelectedWorkload projects admitted LPX intent against immutable builds.
+// dgd and source must be non-nil; dgd must select LPX and have passed webhook validation.
+// The function reads but does not mutate dgd.
 func ResolveSelectedWorkload(
 	ctx context.Context,
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	source BuildSnapshotSource,
 ) (*SelectedWorkload, error) {
-	components, allErrs := validateSelectedIntent(dgd)
-	if err := allErrs.ToAggregate(); err != nil {
-		return nil, err
-	}
+	components := Components(dgd)
 	projections := make([]*ModelProjection, 0, len(components))
 	var snapshot NormalizedBuildSnapshot
 	var pipeline Pipeline
@@ -189,4 +188,28 @@ func validateSelectedConductor(
 	}
 
 	return nil
+}
+
+// validateRolePodSpecContainerNames checks both lists that share the Pod's name space.
+// spec and fldPath must be non-nil.
+func validateRolePodSpecContainerNames(spec *corev1.PodSpec, fldPath *field.Path, reservedName string) field.ErrorList {
+	// Both lists must avoid the materialized role container name.
+	allErrs := field.ErrorList{}
+	for _, group := range []struct {
+		name       string
+		containers []corev1.Container
+	}{
+		{"containers", spec.Containers},
+		{"initContainers", spec.InitContainers},
+	} {
+		for containerIndex, container := range group.containers {
+			if container.Name == reservedName {
+				allErrs = append(allErrs, field.Forbidden(
+					fldPath.Child(group.name).Index(containerIndex).Child("name"),
+					fmt.Sprintf("LPX reserves %q for the materialized role container", container.Name),
+				))
+			}
+		}
+	}
+	return allErrs
 }

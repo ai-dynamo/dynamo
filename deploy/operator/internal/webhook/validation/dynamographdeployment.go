@@ -218,10 +218,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
-	// Reserve the Agent name before build-dependent conductor validation runs in the LPX controller.
-	allErrs = append(allErrs, dynamolpx.ValidateAgentContainerNames(dgd)...)
-
-	// LPX children require the durable Grove route before runtime validation can be deferred.
+	// LPX children require the Grove route for materialization.
 	if dgd.HasLPXComponent() && !grovePathway {
 		allErrs = append(allErrs, field.Forbidden(field.NewPath("spec", "components"), grovePathwayRequirement))
 	}
@@ -305,8 +302,18 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 	allErrs := field.ErrorList{}
 
+	// LPX cardinality determines the root overrides and shared draft/target contract.
+	lpxComponentCount := 0
+	for i := range spec.Components {
+		if spec.Components[i].IsLPX() {
+			lpxComponentCount++
+		}
+	}
+
 	// Validate the root provider fragment against the selected graph workload program.
-	if spec.ProviderOverride != nil {
+	if spec.ProviderOverride != nil && lpxComponentCount > 0 {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("providerOverride"), "LPX does not support Grove topology overrides on the deployment"))
+	} else if spec.ProviderOverride != nil {
 		allErrs = append(allErrs, v.validateProviderOverride(
 			spec.ProviderOverride,
 			fldPath.Child("providerOverride"),
@@ -326,12 +333,32 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
+	if lpxComponentCount > 2 {
+		allErrs = append(allErrs, field.Forbidden(componentsPath, "requires one complete LPX component or a shared draft and target pair"))
+	}
 	components := componentsByName(spec.Components)
-	hasLPXComponent := false
+	hasLPXComponent := lpxComponentCount > 0
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
-		hasLPXComponent = hasLPXComponent || component.IsLPX()
+
+		// Draft fanout expands models; the target owns the shared endpoint and availability.
+		if lpxComponentCount == 2 && component.IsLPX() {
+			replicas := k8sptr.Deref(component.Replicas, 1)
+			if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
+				if replicas > dynamolpx.MaxSpecDecodeNumDrafts {
+					allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "draft replicas must be between 1 and 8"))
+				}
+				if component.ModelRef != nil {
+					allErrs = append(allErrs, field.Forbidden(componentPath.Child("modelRef"), "the shared target owns the serving endpoint"))
+				}
+				if k8sptr.Deref(component.MinAvailable, 1) != 1 {
+					allErrs = append(allErrs, field.Forbidden(componentPath.Child("minAvailable"), "draft minAvailable must be omitted or 1; the shared target owns minimum availability"))
+				}
+			} else if replicas != 1 {
+				allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
+			}
+		}
 
 		// Externally managed components validate their generated names in their own controller.
 		if opts.grovePathway && !component.ManagedByExternalController() {
@@ -404,13 +431,34 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			return conductorComponentsPath.Key(spec.Components[index].ComponentName)
 		}
 	}
-	allErrs = append(allErrs, dynamolpx.ValidateConductorRoles(spec, conductorComponentsPath, componentPath)...)
+	conductorCount := 0
+	for index := range spec.Components {
+		component := &spec.Components[index]
+		if !component.IsLPX() {
+			continue
+		}
+		for roleIndex, role := range component.Roles {
+			if role.Name != nvidiacomv1beta1.ComponentRoleLPXConductor {
+				continue
+			}
+			conductorCount++
+			if role.PodTemplate == nil {
+				allErrs = append(allErrs, field.Required(componentPath(index).Child("roles").Index(roleIndex).Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
+			}
+		}
+	}
+	if hasLPXComponent && conductorCount != 1 {
+		allErrs = append(allErrs, field.Forbidden(conductorComponentsPath, "LPX components must declare exactly one conductor role"))
+	}
 
 	if spec.Restart != nil {
 		allErrs = append(allErrs, v.validateRestart(spec.Restart, fldPath.Child("restart"), components)...)
 	}
 
 	constraintPath := fldPath.Child("topologyConstraint")
+	if hasLPXComponent && spec.TopologyConstraint != nil {
+		allErrs = append(allErrs, field.Forbidden(constraintPath, "LPX does not support Grove topologyConstraint"))
+	}
 	hasComponentConstraint := false
 	for i := range spec.Components {
 		if spec.Components[i].TopologyConstraint != nil {

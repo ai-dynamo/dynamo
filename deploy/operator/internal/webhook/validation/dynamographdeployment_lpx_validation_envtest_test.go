@@ -127,7 +127,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy: Forbidden: is not supported when an LPX component is selected`},
 		},
 		{
-			name: "LPX topology and checkpoint support is deferred to the child controller",
+			name: "LPX rejects topology and checkpoint configuration",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
 					ClusterTopologyName: "grove-topology", PackDomain: "rack",
@@ -138,6 +138,11 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
 			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].topologyConstraint: Forbidden: LPX does not support Grove topologyConstraint",
+				"spec.components[0].experimental.checkpoint: Forbidden: checkpoint functionality is supported only for worker, prefill, and decode components",
+				"spec.topologyConstraint: Forbidden: LPX does not support Grove topologyConstraint",
+			},
 		},
 		{
 			name: "LPX admits an ordinary component checkpoint",
@@ -298,7 +303,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantSchemaErr: "spec.components[0].lpx.buildId: Invalid value: \"\": spec.components[0].lpx.buildId in body should be at least 1 chars long",
 		},
 		{
-			name: "v1alpha1 LPX root template remains rejected when runtime validation is deferred",
+			name: "v1alpha1 LPX rejects root templates and whitespace build IDs together",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				component := dgd.Spec.Services["lpx"]
 				component.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{MainContainer: &corev1.Container{Image: "runtime"}}
@@ -306,13 +311,15 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			wantWebhookErrs: []string{
 				"spec.components[0].podTemplate: Forbidden: LPX Pod templates belong to roles",
+				"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId",
 			},
 		},
 		{
-			name: "v1alpha1 LPX whitespace build ID validation is deferred to the child controller",
+			name: "v1alpha1 LPX rejects whitespace build IDs",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].LPX.BuildID = " "
 			}),
+			wantWebhookErrs: []string{"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId"},
 		},
 		// Conductor startup is explicit on both source API versions and on every update.
 		{
@@ -416,6 +423,121 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		},
 		// Selected LPX workload shapes.
 		{
+			name: "LPX rejects multinode configuration",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components"},
+		},
+		{
+			name:               "LPX does not grandfather invalid multinode configuration",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components"},
+		},
+		{
+			name: "LPX rejects a whitespace-only build reference",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.BuildID = "  "
+			}),
+			wantWebhookErrs: []string{"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId"},
+		},
+		{
+			name:          "v1alpha1 LPX rejects a whitespace-only build reference on UPDATE",
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].LPX.BuildID = "  "
+			}),
+			wantWebhookErrs: []string{"spec.components[0].lpx.buildId: Required value: LPX component requires a buildId"},
+		},
+		{
+			name: "LPX requires main containers in both roles",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				for index := range dgd.Spec.Components[0].Roles {
+					dgd.Spec.Components[0].Roles[index].PodTemplate.Spec.Containers[0].Name = "sidecar"
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[0].podTemplate.spec.containers: Required value: LPX agent component requires a "main" runtime container`,
+				`spec.components[0].roles[1].podTemplate.spec.containers: Required value: LPX conductor component requires a "main" runtime container`,
+			},
+		},
+		{
+			name:          "LPX rejects conductor placement on UPDATE",
+			oldDeployment: betaLPXDGDForAdmission(nil),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				spec := &dgd.Spec.Components[0].Roles[1].PodTemplate.Spec
+				spec.NodeName = "chosen-node"
+				spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{MaxSkew: 1, TopologyKey: "zone", WhenUnsatisfiable: corev1.DoNotSchedule}}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].roles[1].podTemplate.spec.nodeName: Forbidden: LPX owns role addressing and placement",
+				"spec.components[0].roles[1].podTemplate.spec.topologySpreadConstraints: Forbidden: LPX owns role placement",
+			},
+		},
+		{
+			name: "LPX rejects three model components with one conductor",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, nil)
+				extra := dgd.Spec.Components[0].DeepCopy()
+				extra.ComponentName = "extra-draft"
+				dgd.Spec.Components = append(dgd.Spec.Components, *extra)
+			}),
+			wantWebhookErrs: []string{"spec.components: Forbidden: requires one complete LPX component or a shared draft and target pair"},
+		},
+		{
+			name: "LPX rejects zero draft replicas",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, k8sptr.To(int32(0)))
+			}),
+			wantCELErr: "spec.components[0]: Invalid value: replicas must be positive when type is lpx",
+		},
+		{
+			name: "LPX admits maximum draft fanout with default minimum availability",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, k8sptr.To(int32(8)))
+				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(1))
+			}),
+		},
+		{
+			name: "LPX rejects draft endpoint and minimum availability at authored indices",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, k8sptr.To(int32(3)))
+				dgd.Spec.Components[0], dgd.Spec.Components[1] = dgd.Spec.Components[1], dgd.Spec.Components[0]
+				draft := &dgd.Spec.Components[1]
+				draft.MinAvailable = k8sptr.To(int32(2))
+				draft.ModelRef = &nvidiacomv1beta1.ModelReference{Name: "draft-model"}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[1].modelRef: Forbidden: the shared target owns the serving endpoint",
+				"spec.components[1].minAvailable: Forbidden: draft minAvailable must be omitted or 1; the shared target owns minimum availability",
+			},
+		},
+		{
+			name: "LPX admits singleton minimum availability",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+			}),
+		},
+		{
+			name: "v1alpha1 LPX rejects shared target scaling on UPDATE",
+			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaLPXSpecDec(dgd, nil)
+			}),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaLPXSpecDec(dgd, nil)
+				dgd.Spec.Services["target"].Replicas = k8sptr.To(int32(2))
+			}),
+			wantWebhookErrs: []string{"spec.components[1].replicas: Invalid value: 2: shared target replicas must be one"},
+		},
+		{
 			name: "LPX roles reject provider overrides",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[0].ProviderOverride = groveProviderOverride("", `{"topologyConstraint":{"pack":{"required":"rack"}}}`)
@@ -431,19 +553,27 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
-			name:          "LPX provider override support on update is deferred to the child controller",
+			name:          "LPX rejects provider overrides on UPDATE",
 			oldDeployment: betaLPXDGDForAdmission(nil),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = groveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{"pack":{"required":"rack"}}}}}`)
 				dgd.Spec.Components[0].ProviderOverride = groveProviderOverride("", `{"topologyConstraint":{"pack":{"required":"rack"}}}`)
 			}),
+			wantWebhookErrs: []string{
+				"spec.providerOverride: Forbidden: LPX does not support Grove topology overrides on the deployment",
+				"spec.components[0].providerOverride: Forbidden: LPX component does not support Grove topology overrides",
+			},
 		},
 		{
-			name: "v1alpha1 LPX provider override support is deferred after conversion",
+			name: "v1alpha1 LPX rejects provider overrides after conversion",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.ProviderOverride = alphaGroveProviderOverride("", `{"spec":{"template":{"topologyConstraint":{"pack":{"required":"rack"}}}}}`)
 				dgd.Spec.Services["lpx"].ProviderOverride = alphaGroveProviderOverride("", `{"topologyConstraint":{"pack":{"required":"rack"}}}`)
 			}),
+			wantWebhookErrs: []string{
+				"spec.providerOverride: Forbidden: LPX does not support Grove topology overrides on the deployment",
+				"spec.components[0].providerOverride: Forbidden: LPX component does not support Grove topology overrides",
+			},
 		},
 		{
 			name: "LPX admits an ordinary component provider override",
@@ -475,7 +605,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX Agent placement validation is deferred to the child controller",
+			name: "LPX rejects controller-owned Agent placement",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, nil)
 				spec := &dgd.Spec.Components[0].Roles[0].PodTemplate.Spec
@@ -495,12 +625,26 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: "custom"}}
 				spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "device", ResourceClaimName: k8sptr.To("device-claim")}}
 			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].roles[0].podTemplate.spec.schedulerName: Forbidden: LPX owns role scheduler selection",
+				"spec.components[0].roles[0].podTemplate.spec.hostname: Forbidden: LPX owns role addressing and placement",
+				"spec.components[0].roles[0].podTemplate.spec.subdomain: Forbidden: LPX owns role addressing and placement",
+				"spec.components[0].roles[0].podTemplate.spec.nodeName: Forbidden: LPX owns role addressing and placement",
+				"spec.components[0].roles[0].podTemplate.spec.topologySpreadConstraints: Forbidden: LPX owns role placement",
+				"spec.components[0].roles[0].podTemplate.spec.nodeSelector: Forbidden: LPX exclusively owns Agent node selection",
+				"spec.components[0].roles[0].podTemplate.spec.affinity: Forbidden: node-local LPX supports only required nodeAffinity",
+				"spec.components[0].roles[0].podTemplate.spec.schedulingGates: Forbidden: Grove and LPX own Agent scheduling gates",
+				"spec.components[0].roles[0].podTemplate.spec.resourceClaims: Forbidden: node-local LPX Agents cannot use ResourceClaims",
+			},
 		},
 		{
-			name: "LPX SpecDecode draft replica support is deferred to the child controller",
+			name: "LPX rejects excessive draft fanout",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				setBetaLPXSpecDec(dgd, k8sptr.To(int32(9)))
 			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].replicas: Invalid value: 9: draft replicas must be between 1 and 8",
+			},
 		},
 		{
 			name: "lpx requires a agent role",
@@ -554,7 +698,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX PCSG name overflow validation is deferred to the child controller",
+			name: "LPX admits long component names independently of generated PCSG names",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].ComponentName = longLPXComponentName
 			}),

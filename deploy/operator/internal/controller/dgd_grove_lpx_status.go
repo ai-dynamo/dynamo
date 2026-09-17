@@ -48,20 +48,20 @@ func mergeLPXChildStatus(
 		}
 	}
 
-	if ordinary.State != v1beta1.DGDStateFailed && current {
-		failed := meta.FindStatusCondition(child.Status.Conditions, "Failed")
-		if failed != nil && failed.Status == metav1.ConditionTrue && failed.ObservedGeneration == child.Generation {
-			ordinary.State = v1beta1.DGDStateFailed
-			ordinary.Reason, ordinary.Message = Reason(failed.Reason), Message(failed.Message)
-			return ordinary, status
-		}
-	}
-	if observed {
+	// A current failure is actionable even if reconciliation did not finish.
+	if current {
 		ready := meta.FindStatusCondition(child.Status.Conditions, "Ready")
-		if ready != nil && ready.ObservedGeneration == child.Generation && ready.Status == metav1.ConditionTrue {
+		if ordinary.State != v1beta1.DGDStateFailed && ready != nil &&
+			ready.ObservedGeneration == child.Generation && ready.Status == metav1.ConditionFalse &&
+			ready.Reason == v1alpha1.LPXReadyReasonFailed {
+			ordinary.State = v1beta1.DGDStateFailed
+			ordinary.Reason, ordinary.Message = Reason(ready.Reason), Message(ready.Message)
 			return ordinary, status
 		}
-		if ordinary.State != v1beta1.DGDStateFailed && ready != nil && ready.ObservedGeneration == child.Generation {
+		if observed && ready != nil && ready.ObservedGeneration == child.Generation && ready.Status == metav1.ConditionTrue {
+			return ordinary, status
+		}
+		if observed && ordinary.State != v1beta1.DGDStateFailed && ready != nil && ready.ObservedGeneration == child.Generation {
 			ordinary.State = v1beta1.DGDStatePending
 			ordinary.Reason, ordinary.Message = Reason(ready.Reason), Message(ready.Message)
 			return ordinary, status

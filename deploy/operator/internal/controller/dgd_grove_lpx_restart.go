@@ -93,11 +93,20 @@ func (r *lpxRestartProgressResolver) observeRestart(
 	child := &v1alpha1.LPXGraphDeployment{}
 	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil ||
 		child.Status.ObservedGeneration != child.Generation || !child.DeletionTimestamp.IsZero() ||
-		dynamo.ValidateLPXSource(child, source) != nil || source.Spec.Restart == nil ||
+		!metav1.IsControlledBy(child, source) || source.Spec.Restart == nil ||
 		child.Annotations[dynamo.LPXRestartAnnotation] != source.Spec.Restart.ID {
 		return nil
 	}
-	ready := meta.FindStatusCondition(child.Status.Conditions, "Ready")
+
+	// Restart progress is resolved before handoff; an old Ready child cannot cover a newer DGD input.
+	restart := dynamo.LPXRestartToken(source, child.Annotations[dynamo.LPXRestartAnnotation])
+	revision, err := dynamo.LPXInputRevision(source, restart)
+	if err != nil || child.Spec.InputRevision != revision {
+		return nil
+	}
+
+	// The current input must also have a Ready receipt for the child's current generation.
+	ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != child.Generation {
 		return nil
 	}

@@ -177,7 +177,10 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 	child, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	require.NotEmpty(t, child.Spec.InputRevision)
-	require.NoError(t, dynamo.ValidateLPXSource(child, source))
+	require.Equal(t, metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK), metav1.GetControllerOf(child))
+	revision, err := dynamo.LPXInputRevision(source, child.Annotations[dynamo.LPXRestartAnnotation])
+	require.NoError(t, err)
+	require.Equal(t, revision, child.Spec.InputRevision)
 	require.NotContains(t, child.Annotations, "lpx.nvidia.com/podcliqueset-name")
 	pending := ReconcileResult{State: v1beta1.DGDStatePending}
 	projectLPXChildStatus(source, child, &pending, &v1beta1.DynamoGraphDeploymentStatus{})
@@ -259,10 +262,10 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	child.Status.Components["lpx"] = partial
 	child.Status.ModelDownload = nil
 	result.Reason = "CheckpointReady"
-	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: "LPXRetiring"})
+	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonPending, Message: "Waiting for removed LPX requests"})
 	projectLPXChildStatus(source, child, &result, &status)
 	require.Equal(t, v1beta1.DGDStatePending, result.State)
-	require.Equal(t, Reason("LPXRetiring"), result.Reason)
+	require.Equal(t, Reason(v1alpha1.LPXReadyReasonPending), result.Reason)
 	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{}, status.LPX)
 	require.Equal(t, source.Status.Placement, status.Placement)
 	require.Equal(t, partial, result.ComponentStatus["lpx"])
@@ -307,7 +310,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			child, source, _ := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 			child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Replicas: 1}}
 			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"stale-build"}}
-			child.Status.Conditions = []metav1.Condition{{Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "PublicationDenied", Message: "Check the namespace quota"}}
+			child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonFailed, Message: "Check the namespace quota"}}
 			result := ReconcileResult{State: v1beta1.DGDStateSuccessful}
 			status := v1beta1.DynamoGraphDeploymentStatus{LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
 				ModelDownload: child.Status.ModelDownload.DeepCopy(),
@@ -320,7 +323,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			case "old-condition":
 				child.Status.Conditions[0].ObservedGeneration--
 			case "cleared-condition":
-				child.Status.Conditions[0].Status = metav1.ConditionFalse
+				child.Status.Conditions[0].Reason = v1alpha1.LPXReadyReasonPending
 			case "deleting":
 				child.DeletionTimestamp = ptr.To(metav1.Now())
 			case "ordinary-failure":
@@ -407,7 +410,9 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 			source.Status.Restart = completed.Status
 			source.Spec.Restart.ID = "restart-2"
 			source.Generation++
-			require.NoError(t, dynamo.ValidateLPXSource(updated, source))
+			revision, err := dynamo.LPXInputRevision(source, updated.Annotations[dynamo.LPXRestartAnnotation])
+			require.NoError(t, err)
+			require.Equal(t, revision, updated.Spec.InputRevision)
 			unchanged, err = handoff.Reconcile(t.Context(), source)
 			require.NoError(t, err)
 			require.Equal(t, updated, unchanged)
@@ -744,7 +749,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	child, err := (&dgdLPXHandoff{client: kube}).Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	child.Status.ObservedGeneration = child.Generation
-	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: "ModelDownloadPending"}}
+	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonPending, Message: "Waiting for model downloads"}}
 	require.NoError(t, kube.Status().Update(t.Context(), child))
 	config := &configv1alpha1.OperatorConfiguration{}
 	config.Namespace.Restricted = source.Namespace
@@ -819,15 +824,15 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	t.Log("An actionable child failure remains visible while the ordinary checkpoint is still pending")
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
-		Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation,
-		Reason: "LPXReconciliationFailed", Message: "publish LPX workload: storage volume mount is missing",
+		Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation,
+		Reason: v1alpha1.LPXReadyReasonFailed, Message: "publish LPX workload: storage volume mount is missing",
 	})
 	require.NoError(t, kube.Status().Update(t.Context(), child))
 	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
 	failed := meta.FindStatusCondition(result.Status.Conditions, "Ready")
-	require.Equal(t, "LPXReconciliationFailed", failed.Reason)
+	require.Equal(t, v1alpha1.LPXReadyReasonFailed, failed.Reason)
 	require.Contains(t, failed.Message, "storage volume mount is missing")
 	require.Equal(t, v1beta1.ComponentCheckpointStatus{CheckpointName: friendlyCheckpointName}, result.Status.Checkpoints["prefill"])
 

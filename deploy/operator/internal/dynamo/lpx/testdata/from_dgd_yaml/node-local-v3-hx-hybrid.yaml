@@ -17,7 +17,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-hybrid-be18-lpu-f8b027cf29abf6cd
+  name: node-local-v3-hx-hybrid-be18-lpu-<lpu-config-hash-prefix>
   namespace: test
 ---
 metadata:
@@ -39,7 +39,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: f8b027cf29abf6cdbab73060b6697b18f7107df8c993859d94073d6012107d12
+        nvidia.com/extra-resources-hash: <lpu-config-hash>
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:1b19ea57d294e47602beabc264d0173ec31a48c53cb5c411a0dd53e19a4880f1
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c27c1242c5beb1b585c26d005fcbf0844369c7b173e3b6547b18aa62bd4b3351
@@ -194,7 +194,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-hybrid-be18-lpu-f8b027cf29abf6cd
+              name: node-local-v3-hx-hybrid-be18-lpu-<lpu-config-hash-prefix>
             name: config
         replicas: 1
         roleName: agt

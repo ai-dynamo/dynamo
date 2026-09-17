@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"slices"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
@@ -27,8 +27,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	consts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	lpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 )
 
 const (
@@ -85,7 +85,7 @@ func (r *lpuEvictionReconciler) evictionRequestsForConfigMap(ctx context.Context
 	// A late runtime table observation must wake disrupted Agents using that exact table.
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(config.GetNamespace()), client.MatchingLabels{
-		commonconsts.KubeLabelDynamoComponentType: commonconsts.ComponentTypeLPX,
+		consts.KubeLabelDynamoComponentType: consts.ComponentTypeLPX,
 	}); err != nil {
 		log.FromContext(ctx).Error(err, "list LPU eviction triggers for runtime ConfigMap")
 		return nil
@@ -96,8 +96,8 @@ func (r *lpuEvictionReconciler) evictionRequestsForConfigMap(ctx context.Context
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		root := pod.Labels[grovecommon.LabelPartOfKey]
-		hash := pod.Annotations[commonconsts.AnnotationExtraResourcesHash]
-		if r.isTrigger(pod) && root != "" && hash != "" && dynamolpx.LPUConfigMapName(root, hash) == config.GetName() {
+		hash := pod.Annotations[consts.AnnotationExtraResourcesHash]
+		if r.isTrigger(pod) && root != "" && hash != "" && lpx.LPUConfigMapName(root, hash) == config.GetName() {
 			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(pod)})
 		}
 	}
@@ -114,11 +114,11 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 	if err := r.Get(ctx, client.ObjectKey{Namespace: trigger.Namespace, Name: owner.Name}, clique); err != nil {
 		return nil, err
 	}
-	if clique.UID != owner.UID || !dynamolpx.OwnsPodClique(ctx, r.Client, clique) {
+	if clique.UID != owner.UID || !lpx.OwnsPodClique(ctx, r.Client, clique) {
 		return nil, fmt.Errorf("cannot verify ownership of LPU eviction trigger pod %s/%s", trigger.Namespace, trigger.Name)
 	}
 
-	mode := lpxv1alpha1.WorkloadMode(trigger.Annotations[dynamolpx.WorkloadModeAnnotation])
+	mode := lpxv1alpha1.WorkloadMode(trigger.Annotations[lpx.WorkloadModeAnnotation])
 	if mode == "" {
 		return nil, nil
 	}
@@ -131,12 +131,12 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 	case lpxv1alpha1.WorkloadModeV2StrictHybrid, lpxv1alpha1.WorkloadModeV3HxStrictHybrid:
 		// The Pod's content-addressed runtime table survives native template updates.
 		root := trigger.Labels[grovecommon.LabelPartOfKey]
-		hash := trigger.Annotations[commonconsts.AnnotationExtraResourcesHash]
+		hash := trigger.Annotations[consts.AnnotationExtraResourcesHash]
 		if root == "" || hash == "" {
 			return nil, fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no runtime ConfigMap identity", trigger.Namespace, trigger.Name)
 		}
 		var config corev1.ConfigMap
-		key := client.ObjectKey{Namespace: trigger.Namespace, Name: dynamolpx.LPUConfigMapName(root, hash)}
+		key := client.ObjectKey{Namespace: trigger.Namespace, Name: lpx.LPUConfigMapName(root, hash)}
 		if err := r.Get(ctx, key, &config); err != nil {
 			return nil, fmt.Errorf("read LPU-GPU eviction runtime ConfigMap: %w", err)
 		}
@@ -146,14 +146,14 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 
 		// Bind the table to the verified deployment and the Pod's full content hash.
 		configOwner := metav1.GetControllerOf(&config)
-		if configOwner == nil || configOwner.APIVersion != nvidiacomv1alpha1.GroupVersion.String() ||
-			configOwner.Kind != nvidiacomv1alpha1.LPXGraphDeploymentGVK.Kind ||
-			configOwner.Name != clique.Annotations[dynamolpx.DeploymentNameAnnotation] ||
-			string(configOwner.UID) != clique.Annotations[dynamolpx.DeploymentUIDAnnotation] ||
-			dynamolpx.LPUConfigMapHash(&config) != hash {
+		if configOwner == nil || configOwner.APIVersion != v1alpha1.GroupVersion.String() ||
+			configOwner.Kind != v1alpha1.LPXGraphDeploymentGVK.Kind ||
+			configOwner.Name != clique.Annotations[lpx.DeploymentNameAnnotation] ||
+			string(configOwner.UID) != clique.Annotations[lpx.DeploymentUIDAnnotation] ||
+			lpx.LPUConfigMapHash(&config) != hash {
 			return nil, fmt.Errorf("cannot authenticate LPU-GPU eviction runtime ConfigMap %s", key)
 		}
-		triggerPartition, err := dynamolpx.LPUAgentRuntimePartition(trigger, &config)
+		triggerPartition, err := lpx.LPUAgentRuntimePartition(trigger, &config)
 		if err != nil {
 			return nil, fmt.Errorf("parse LPU-GPU eviction trigger pod %s/%s: %w", trigger.Namespace, trigger.Name, err)
 		}
@@ -161,7 +161,7 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 		// Select the full runtime partition before authorizing any sibling deletion.
 		selected := pods[:0]
 		for _, pod := range pods {
-			partition, err := dynamolpx.LPUAgentRuntimePartition(&pod, &config)
+			partition, err := lpx.LPUAgentRuntimePartition(&pod, &config)
 			if err != nil {
 				return nil, fmt.Errorf("parse LPU-GPU eviction candidate pod %s/%s: %w", pod.Namespace, pod.Name, err)
 			}
@@ -178,8 +178,8 @@ func (r *lpuEvictionReconciler) podsForTrigger(ctx context.Context, trigger *cor
 
 func (r *lpuEvictionReconciler) allModelPods(ctx context.Context, trigger *corev1.Pod) ([]corev1.Pod, error) {
 	labels := trigger.GetLabels()
-	dgdName := labels[commonconsts.KubeLabelDynamoGraphDeploymentName]
-	component := labels[commonconsts.KubeLabelDynamoComponent]
+	dgdName := labels[consts.KubeLabelDynamoGraphDeploymentName]
+	component := labels[consts.KubeLabelDynamoComponent]
 	pcsg := labels[grovecommon.LabelPodCliqueScalingGroup]
 	pcsgReplica := labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex]
 	if dgdName == "" || component == "" || pcsg == "" || pcsgReplica == "" {
@@ -188,8 +188,8 @@ func (r *lpuEvictionReconciler) allModelPods(ctx context.Context, trigger *corev
 
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods, client.InNamespace(trigger.Namespace), client.MatchingLabels{
-		commonconsts.KubeLabelDynamoGraphDeploymentName:    dgdName,
-		commonconsts.KubeLabelDynamoComponent:              component,
+		consts.KubeLabelDynamoGraphDeploymentName:          dgdName,
+		consts.KubeLabelDynamoComponent:                    component,
 		grovecommon.LabelPodCliqueScalingGroup:             pcsg,
 		grovecommon.LabelPodCliqueScalingGroupReplicaIndex: pcsgReplica,
 	}); err != nil {
@@ -207,7 +207,7 @@ func (r *lpuEvictionReconciler) allModelPods(ctx context.Context, trigger *corev
 			owner.APIVersion != candidateOwner.APIVersion || owner.Kind != candidateOwner.Kind ||
 			owner.Name != candidateOwner.Name || owner.UID != candidateOwner.UID ||
 			pod.Labels[grovecommon.LabelPodTemplateHash] != trigger.Labels[grovecommon.LabelPodTemplateHash] ||
-			pod.Annotations[commonconsts.AnnotationExtraResourcesHash] != trigger.Annotations[commonconsts.AnnotationExtraResourcesHash] ||
+			pod.Annotations[consts.AnnotationExtraResourcesHash] != trigger.Annotations[consts.AnnotationExtraResourcesHash] ||
 			model != "" && pod.Annotations[lpxv1alpha1.PodModelAnnotation] != model
 	}), nil
 }
@@ -243,13 +243,13 @@ func (r *lpuEvictionReconciler) deletePods(ctx context.Context, trigger *corev1.
 }
 
 func (r *lpuEvictionReconciler) isLPUAgentPod(pod *corev1.Pod) bool {
-	componentType := pod.Labels[commonconsts.KubeLabelDynamoComponentType]
-	return componentType == commonconsts.ComponentTypeLPX &&
+	componentType := pod.Labels[consts.KubeLabelDynamoComponentType]
+	return componentType == consts.ComponentTypeLPX &&
 		pod.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent
 }
 
 func (r *lpuEvictionReconciler) isTrigger(pod *corev1.Pod) bool {
-	if pod.Spec.SchedulerName != dynamolpx.SchedulerName || !r.isLPUAgentPod(pod) || pod.DeletionTimestamp == nil {
+	if pod.Spec.SchedulerName != lpx.SchedulerName || !r.isLPUAgentPod(pod) || pod.DeletionTimestamp == nil {
 		return false
 	}
 	return slices.ContainsFunc(pod.Status.Conditions, func(condition corev1.PodCondition) bool {
