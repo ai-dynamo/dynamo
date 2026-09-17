@@ -1009,9 +1009,6 @@ mod tests {
         let model = Model::new("llama".to_string());
         assert!(model.claim_engine_error_report());
 
-        // Requests run against committed snapshots, and a publication builds a new
-        // one; the throttle has to carry over or a republishing model reports on
-        // every request.
         let snapshot = model.snapshot();
         assert!(!snapshot.claim_engine_error_report());
         assert!(!snapshot.snapshot().claim_engine_error_report());
