@@ -381,6 +381,11 @@ impl Runtime {
     /// [`Runtime::shutdown_complete_token`]. Externally owned runtimes are never torn
     /// down here.
     ///
+    /// After the coordinator finishes normally, the teardown thread drops the owned
+    /// executors without a timeout. Tasks that never yield or blocking tasks that never
+    /// return can keep that thread blocked indefinitely. Shutdown completion notification
+    /// does not wait for this executor cleanup.
+    ///
     /// Calling this more than once is a no-op after the first call.
     pub fn shutdown(&self) {
         // Runs here, not in the coordinator task, so it cannot be lost with it; ahead of the
