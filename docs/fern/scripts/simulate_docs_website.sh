@@ -102,6 +102,12 @@ rm -f "$WT/fern/convert_callouts.py"
 mkdir -p "$WT/fern/scripts"
 [ -f "$SRC/scripts/convert_callouts.py" ] && cp "$SRC/scripts/convert_callouts.py" "$WT/fern/scripts/convert_callouts.py" || true
 rm -rf "$WT/fern/components"; cp -r "$SRC/components" "$WT/fern/components"
+# The nightly selector data is a publish-time artifact too. Generated after the
+# copy and into the checkout, so the replay never overwrites the source tree's
+# module. Offline: this gate checks composition, not nightly freshness, so it
+# must not depend on NGC being reachable.
+"$PY" "$SRC/scripts/gen_nightly_selector.py" --offline \
+  --out "$WT/fern/components/nightly-selector-data.generated.ts"
 rm -rf "$WT/fern/products"
 cp "$SRC/pages/home/index.mdx" "$WT/fern/index.mdx"
 perl -pi -e 's|\.\./\.\./assets/|./assets/|g' "$WT/fern/index.mdx"

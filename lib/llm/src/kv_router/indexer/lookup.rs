@@ -110,6 +110,15 @@ impl Indexer {
             .await
     }
 
+    pub(crate) async fn find_primary_match_details_ref(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<MatchDetails, KvRouterError> {
+        self.lookup_pipeline()
+            .find_primary_match_details(HashInput::Borrowed(sequence))
+            .await
+    }
+
     pub(crate) async fn find_matches_by_tier(
         &self,
         sequence: Vec<LocalBlockHash>,
