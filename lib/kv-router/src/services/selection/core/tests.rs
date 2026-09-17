@@ -11,7 +11,7 @@ use super::*;
 use crate::protocols::ActiveSequenceEventData;
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
-use crate::services::indexer::backend::test_util::store_event;
+use crate::services::indexer::backend::{RemotePrimary, test_util::store_event};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::sleep;
@@ -390,8 +390,6 @@ async fn bookings_populate_the_approximate_primary_without_kv_events(
 #[tokio::test]
 async fn unreachable_remote_indexer_is_reported_not_ready() {
     use crate::indexer::{KvRouterError, TieredMatchDetails};
-    use crate::services::indexer::backend::RemotePrimary;
-
     struct OfflineRemote;
     #[async_trait::async_trait]
     impl RemotePrimary for OfflineRemote {
@@ -719,6 +717,40 @@ fn capturing_policy_factory() -> (
     (factory, observed)
 }
 
+// Keep clock- and poll-order tests independent of the native indexer thread.
+struct ReadyIndexer;
+#[async_trait::async_trait]
+impl RemotePrimary for ReadyIndexer {
+    async fn find_matches_by_tier(
+        &self,
+        _: Vec<LocalBlockHash>,
+        _: bool,
+    ) -> anyhow::Result<TieredMatchDetails> {
+        Ok(TieredMatchDetails::default())
+    }
+    async fn record_routing_decision(
+        &self,
+        _: WorkerWithDpRank,
+        _: RoutingDecisionHashes,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn use_kv_events(&self) -> bool {
+        true
+    }
+}
+struct ReadyIngress;
+#[async_trait::async_trait]
+impl KvEventIngress for ReadyIngress {
+    fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+        Indexer::Remote {
+            primary: Arc::new(ReadyIndexer),
+            approx: None,
+            primary_records_routing_decisions: false,
+        }
+    }
+}
+
 type SharedCacheCalls = Arc<parking_lot::Mutex<Vec<(Vec<u32>, u32, Option<String>)>>>;
 
 /// Shared cache that reports every block as a hit and records each query.
@@ -811,8 +843,8 @@ async fn shutdown_interrupts_shared_cache_wait(#[case] shutdown: bool) {
     let shared = Arc::new(PausedSharedCache::default());
     let core = Arc::new(core_with_host(SelectionHost {
         cache: HostCache {
+            index: KvIndexSource::Owned(Arc::new(ReadyIngress)),
             shared: Some(shared.clone()),
-            ..HostCache::default()
         },
         ..SelectionHost::default()
     }));
@@ -1461,8 +1493,6 @@ async fn shutdown_interrupts_indexer_waits(
     #[case] shutdown: bool,
     #[case] record_error: bool,
 ) {
-    use crate::services::indexer::backend::RemotePrimary;
-
     struct PausedIndexer {
         block_lookup: bool,
         record_error: bool,
@@ -2315,39 +2345,6 @@ async fn advisory_select_reports_worker_load_and_busy_evaluation() {
 async fn ready_indexer_preserves_decode_projection_before_worker_monitor(
     #[case] allow_monitor: bool,
 ) {
-    use crate::services::indexer::backend::RemotePrimary;
-    struct ReadyIndexer;
-    #[async_trait::async_trait]
-    impl RemotePrimary for ReadyIndexer {
-        async fn find_matches_by_tier(
-            &self,
-            _: Vec<LocalBlockHash>,
-            _: bool,
-        ) -> anyhow::Result<TieredMatchDetails> {
-            Ok(TieredMatchDetails::default())
-        }
-        async fn record_routing_decision(
-            &self,
-            _: WorkerWithDpRank,
-            _: RoutingDecisionHashes,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-        fn use_kv_events(&self) -> bool {
-            true
-        }
-    }
-    struct ReadyIngress;
-    #[async_trait::async_trait]
-    impl KvEventIngress for ReadyIngress {
-        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
-            Indexer::Remote {
-                primary: Arc::new(ReadyIndexer),
-                approx: None,
-                primary_records_routing_decisions: false,
-            }
-        }
-    }
     let core = core_with(
         test_config(true),
         SelectionHost {
