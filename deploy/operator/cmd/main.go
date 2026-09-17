@@ -261,7 +261,6 @@ func run() error {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
-	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
@@ -475,28 +474,13 @@ func run() error {
 			return fmt.Errorf("failed to register webhooks: %w", err)
 		}
 
-		// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-		// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-		// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
+		// Inject the CA bundles using the upstream provisioning and scope policy.
 		caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 		if err != nil {
 			return fmt.Errorf("unable to create CA bundle injector: %w", err)
 		}
-		if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-			if isClusterWide {
-				err = caInjector.InjectAll(ctx)
-			} else {
-				err = caInjector.InjectAdmission(ctx)
-			}
-			if err != nil {
-				return fmt.Errorf("failed to inject CA bundles into webhook configurations: %w", err)
-			}
-		} else if isClusterWide {
-			// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-			// blocks startup instead of running with unauthenticated conversion.
-			if err := caInjector.InjectCRDConversionCA(ctx); err != nil {
-				return fmt.Errorf("failed to inject CRD conversion CA bundle: %w", err)
-			}
+		if err := caInjector.Inject(ctx); err != nil {
+			return fmt.Errorf("failed to inject CA bundles into webhook configurations: %w", err)
 		}
 
 		// mgr.Start reads tls.crt and tls.key from the projected Secret volume
@@ -600,16 +584,6 @@ func registerControllers(
 	if err := controller.SetupDynamoModel(mgr, controller.DynamoModelSetupOptions{
 		SetupOptions: setupOptions,
 	}); err != nil {
-		return err
-	}
-	// A disabled gate omits the external watch while retaining finalizer cleanup reconciliation.
-	if !runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		setupLog.Info(
-			"Registering DynamoCheckpoint controller without PodSnapshot watch",
-			"reason", "checkpoint feature gate is disabled",
-		)
-	}
-	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
 		return err
 	}
 	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external

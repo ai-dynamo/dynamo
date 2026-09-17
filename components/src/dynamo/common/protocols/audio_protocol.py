@@ -12,7 +12,7 @@ code-generated from the Rust definitions; for now they are maintained
 manually and must be kept in sync.
 """
 
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -27,12 +27,24 @@ class AudioNvExt(BaseModel):
     leaves the N-2 compatibility window in v1.7.
     """
 
+    cfg_scale: Optional[float] = None
+    """Classifier-free guidance strength (Audex only, which is why it is an
+    extension rather than a top-level OpenAI field; vLLM-Omni likewise takes it
+    under ``extra_params``). 1.0 disables guidance; 1.5 is the recommended TTS
+    quality setting, and 3.0 the official TTA setting (applied by default for
+    text-to-audio)."""
+
 
 class NvCreateAudioSpeechRequest(BaseModel):
     """Request for audio speech generation (/v1/audio/speech endpoint).
 
     Follows vLLM-Omni's OpenAICreateSpeechRequest format.
     """
+
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     # Standard OpenAI params
     input: str

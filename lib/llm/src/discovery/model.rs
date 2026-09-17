@@ -27,7 +27,7 @@ use crate::types::{
         classify::OpenAIClassifyStreamingEngine, completions::OpenAICompletionsStreamingEngine,
         embeddings::OpenAIEmbeddingsStreamingEngine, generate::GenerateStreamingEngine,
         images::OpenAIImagesStreamingEngine, pooling::OpenAIPoolingStreamingEngine,
-        videos::OpenAIVideosStreamingEngine,
+        rerank::OpenAIRerankStreamingEngine, videos::OpenAIVideosStreamingEngine,
     },
 };
 
@@ -238,6 +238,13 @@ impl Model {
         self.worker_sets
             .iter()
             .any(|entry| entry.value().has_pooling_engine())
+    }
+
+    /// Check if any WorkerSet has a rerank engine.
+    pub fn has_rerank_engine(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().has_rerank_engine())
     }
 
     /// Check if any WorkerSet has a tensor engine.
@@ -578,6 +585,11 @@ impl Model {
             .ok_or_else(|| self.engine_error(self.has_pooling_engine()))
     }
 
+    pub fn get_rerank_engine(&self) -> Result<OpenAIRerankStreamingEngine, ModelManagerError> {
+        self.select_worker_set_with(|ws| ws.rerank_engine.clone())
+            .ok_or_else(|| self.engine_error(self.has_rerank_engine()))
+    }
+
     pub fn get_images_engine(&self) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
         self.select_worker_set_with(|ws| ws.images_engine.clone())
             .ok_or_else(|| self.engine_error(self.has_images_engine()))
@@ -678,20 +690,20 @@ impl Model {
 
     // -- Worker monitoring (aggregated across WorkerSets) --
 
-    /// Get load threshold config from the first WorkerSet that has a monitor.
-    /// When `config` is Some, updates ALL monitors (each WorkerSet has its own).
+    /// Get load threshold config from the first WorkerSet with a threshold handle.
+    /// When `config` is Some, updates every handle. WorkerSets may share a handle.
     pub fn load_threshold_config(
         &self,
         config: Option<&LoadThresholdConfig>,
     ) -> Option<LoadThresholdConfig> {
         let mut result = None;
         for entry in self.worker_sets.iter() {
-            if let Some(ref monitor) = entry.value().worker_monitor {
+            if let Some(ref thresholds) = entry.value().load_thresholds {
                 if let Some(cfg) = config {
-                    monitor.set_load_threshold_config(cfg);
+                    thresholds.update(cfg);
                 }
                 if result.is_none() {
-                    result = Some(monitor.load_threshold_config());
+                    result = Some(thresholds.get());
                 }
             }
         }

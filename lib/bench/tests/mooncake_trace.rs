@@ -47,6 +47,8 @@ use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 const BLOCK_SIZE: u32 = 128;
+// mooncake_trace_1000.jsonl records one hash per 512-token trace block.
+const TRACE_BLOCK_SIZE: u32 = 512;
 const NUM_GPU_BLOCKS: usize = 16384;
 const NUM_UNIQUE_INFERENCE_WORKERS: usize = 10;
 const CKF_PARITY_WORKERS: usize = 16;
@@ -1024,7 +1026,7 @@ async fn generate_replay_artifacts_waits_for_completion_delay() -> anyhow::Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_open_loop_smoke_completes_exact_ids_and_drains() -> anyhow::Result<()> {
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, 2, 42)?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, 2, 42)?;
     let artifacts = generate_replay_artifacts(&traces, NUM_GPU_BLOCKS, BLOCK_SIZE, None).await?;
     let benchmark = MooncakeBenchmarkConfig {
         benchmark_duration_ms: 5_000,
@@ -1171,8 +1173,14 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
     let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
 
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces =
-        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let traces = process_mooncake_trace(
+        &fixture,
+        TRACE_BLOCK_SIZE,
+        1,
+        1,
+        NUM_UNIQUE_INFERENCE_WORKERS,
+        42,
+    )?;
     let artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
 
     let variants = [
@@ -1223,7 +1231,7 @@ async fn mooncake_trace_replays_without_warnings_across_indexer_variants() -> an
 async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
     let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     make_ckf_parity_corpus_quiescent(&mut artifact_sets);
     let stats = measure_ckf_parity(&artifact_sets, &warning_count, true, 1).await?;
@@ -1243,7 +1251,7 @@ async fn mooncake_trace_replays_through_fixed_d16_ckf() -> anyhow::Result<()> {
 async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()> {
     let warning_count = support::warning_counter(&["dynamo_kv_router::indexer", "dynamo_mocker"]);
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces = process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
+    let traces = process_mooncake_trace(&fixture, TRACE_BLOCK_SIZE, 1, 1, CKF_PARITY_WORKERS, 42)?;
     let mut artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     make_ckf_parity_corpus_quiescent(&mut artifact_sets);
     let stats = measure_ckf_parity(&artifact_sets, &warning_count, false, 1).await?;
@@ -1259,8 +1267,14 @@ async fn mooncake_trace_measures_fixed_d16_ckf_tolerance() -> anyhow::Result<()>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mooncake_trace_branch_sharded_depth4_matches_baseline() -> anyhow::Result<()> {
     let fixture = support::fixture_path("mooncake_trace_1000.jsonl")?;
-    let traces =
-        process_mooncake_trace(&fixture, BLOCK_SIZE, 1, 1, NUM_UNIQUE_INFERENCE_WORKERS, 42)?;
+    let traces = process_mooncake_trace(
+        &fixture,
+        TRACE_BLOCK_SIZE,
+        1,
+        1,
+        NUM_UNIQUE_INFERENCE_WORKERS,
+        42,
+    )?;
     let artifact_sets = generate_mock_engine_parity_artifacts(&traces).await?;
     let variants = [
         MooncakeIndexerConfig::radix_tree(),

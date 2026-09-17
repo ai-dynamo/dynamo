@@ -120,7 +120,7 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](router-guide.md#kubernetes-deployment) in the Router Guide.
+For basic Kubernetes deployment with the KV Router, see [Dynamo Frontend Routing](../../../../kubernetes/kv-aware-routing/dynamo-frontend.md).
 
 ### Complete K8s Examples
 

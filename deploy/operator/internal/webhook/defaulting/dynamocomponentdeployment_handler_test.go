@@ -25,6 +25,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
@@ -90,6 +91,34 @@ func TestDCDDefaulter_DefaultsComponentNameOnCreate(t *testing.T) {
 				t.Fatalf("spec.name = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDCDDefaulter_DefaultsMultinodeRoleReplicasOnUpdate(t *testing.T) {
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker"},
+		Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4},
+				Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				},
+			},
+		},
+	}
+
+	defaulter := NewDCDDefaulter()
+	if err := defaulter.Default(admissionCtx(admissionv1.Update, nvidiacomv1beta1.DynamoComponentDeploymentGVK), dcd); err != nil {
+		t.Fatalf("Default() unexpected error: %v", err)
+	}
+
+	roles := dcd.Spec.Roles
+	if got := ptr.Deref(roles[0].Replicas, 0); got != 1 {
+		t.Fatalf("leader replicas = %d, want 1", got)
+	}
+	if got := ptr.Deref(roles[1].Replicas, 0); got != 3 {
+		t.Fatalf("worker replicas = %d, want 3", got)
 	}
 }
 

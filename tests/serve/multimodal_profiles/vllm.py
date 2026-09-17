@@ -21,6 +21,9 @@ from tests.utils.multimodal import (
     make_image_payload_b64,
     make_image_payload_cached_tokens,
     make_image_payload_uuid_passthrough,
+    make_mixed_image_video_payload,
+    make_qwen35_custom_encoder_multi_image_payload,
+    make_qwen35_custom_encoder_payload,
     make_video_payload,
 )
 from tests.utils.payload_builder import (
@@ -78,10 +81,11 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
-    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # CustomEncoder: a custom in-process vision encoder beside the decoder
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
+    "agg_custom_qwen3_5": "agg_qwen3_5_native.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -191,6 +195,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -216,6 +221,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=400,
                 profiled_vram_gib=13.0,
@@ -249,17 +255,45 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
                 profiled_vram_gib=15.0,
                 requested_vllm_kv_cache_bytes=4_096_361_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    # Rust frontend decode -> NIXL RGB transfer -> separate
+                    # encode worker -> embedding transfer -> colocated PD.
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             "epd": TopologyConfig(
+                health_check_workers=True,
+                health_check_worker_count=3,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
-                requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=536_870_912,
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    # Rust frontend decode -> NIXL RGB transfer -> Encode ->
+                    # Prefill embedding handoff -> Decode generation.
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             "epd_video": TopologyConfig(
-                marks=[pytest.mark.post_merge, pytest.mark.installs_extra_dependencies],
+                health_check_workers=True,
+                health_check_worker_count=3,
+                # E/P/D regression gate: the decode handoff must retain both
+                # the reconstructed image placeholder and reloaded video.
+                marks=[
+                    pytest.mark.post_merge,
+                    pytest.mark.installs_extra_dependencies,
+                ],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
@@ -274,9 +308,25 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                         "opencv-python-headless"
                     ],
                 },
-                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
+                tests=[
+                    MmCase(
+                        suffix="mixed_frontend_decoding",
+                        payload=make_mixed_image_video_payload(
+                            MULTIMODAL_VIDEO_EXPECTED,
+                            frontend_decoding=True,
+                        ),
+                        followup_payloads=[
+                            make_video_payload(
+                                MULTIMODAL_VIDEO_EXPECTED,
+                                frontend_decoding=True,
+                            )
+                        ],
+                        extra_script_args=["--frontend-decoding"],
+                    )
+                ],
             ),
             "p_d": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
@@ -299,6 +349,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=19.0,
@@ -328,6 +379,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 profiled_vram_gib=16.0,
@@ -378,6 +430,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # hit-rate ceiling (N-1)/N. Filler 120 → ~6 blocks → ceiling ≈0.83;
             # threshold 0.7 fires on real degradation, tolerates variance.
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.pre_merge],
                 timeout_s=400,
                 profiled_vram_gib=8.0,
@@ -392,6 +445,27 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                             prompt_filler_repeats=120,
                         )
                     )
+                ],
+            ),
+            "agg_custom_qwen3_5": TopologyConfig(
+                marks=[pytest.mark.nightly],
+                timeout_s=900,
+                profiled_vram_gib=4.7,
+                # Reuse the aggregate profile's 2x-safe KV cache cap.
+                requested_vllm_kv_cache_bytes=920_126_000,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[
+                    MmCase(
+                        suffix="single_image",
+                        payload=make_qwen35_custom_encoder_payload(),
+                    ),
+                    MmCase(
+                        suffix="multi_image",
+                        payload=make_qwen35_custom_encoder_multi_image_payload(),
+                    ),
                 ],
             ),
         },

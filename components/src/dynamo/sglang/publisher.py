@@ -293,10 +293,11 @@ class DynamoSglangPublisher:
     def init_kv_event_publish(self) -> List[KvEventPublisher]:
         """Initialize KV event publisher(s) if configured.
 
-        For DP attention mode, creates one subscriber per LOCAL DP rank port.
-        Each SGLang scheduler in DP attention mode publishes to a unique port
-        (base_port + attn_dp_rank). In multi-node setups, each node's dynamo.sglang
-        instance subscribes only to the DP ranks running on that node.
+        Creates one subscriber per local KV-cache rank. Pure DP schedulers use
+        their DP replica rank while DP-attention schedulers use their attention
+        DP rank. Both publish to a unique port derived from the base endpoint.
+        In multi-node DP-attention setups, each node's dynamo.sglang instance
+        subscribes only to the ranks running on that node.
 
         Multi-node handling:
         - Each node runs dynamo.sglang alongside its local SGLang DP ranks
@@ -328,7 +329,7 @@ class DynamoSglangPublisher:
             dp_ranks = get_local_dp_rank_range(self.server_args)
             if len(dp_ranks) > 1:
                 logging.info(
-                    "DP attention mode: subscribing to local DP ranks [%d, %d)",
+                    "Subscribing to local DP ranks [%d, %d)",
                     dp_ranks.start,
                     dp_ranks.stop,
                 )
@@ -479,7 +480,7 @@ async def setup_sgl_metrics(
     and starts a ``DynamoSglangPublisher`` that pulls scheduler metrics
     over ZMQ and (optionally) forwards KV events / FPM stats.
 
-    For **embedding workers** (``config.dynamo_args.embedding_worker``),
+    For **embedding and rerank workers**,
     the chat-shaped pipeline is **skipped entirely**: pooling engines
     have no KV cache, no prefill/decode phase, and no scheduler metrics
     worth collecting, so every metric in that pipeline would emit zeros
@@ -500,9 +501,11 @@ async def setup_sgl_metrics(
     """
     metrics_labels = [("model", engine.server_args.served_model_name)]
 
-    if getattr(config.dynamo_args, "embedding_worker", False):
+    if getattr(config.dynamo_args, "embedding_worker", False) or getattr(
+        config.dynamo_args, "rerank_worker", False
+    ):
         logging.info(
-            "Embedding worker: skipping chat-shaped Prometheus + KV-event "
+            "Pooling worker: skipping chat-shaped Prometheus + KV-event "
             "wiring (no KV cache, no prefill/decode, no scheduler metrics). "
             "Embedding-shaped metrics are registered separately."
         )
