@@ -107,7 +107,7 @@ unsafe extern "C" fn create(
         *out_error = ByteSliceV1::EMPTY;
     }
 
-    match catch_unwind(AssertUnwindSafe(|| create_impl(request))) {
+    match catch_unwind(AssertUnwindSafe(|| unsafe { create_impl(request) })) {
         Ok(Ok(placement)) => {
             // Safety: `out_handle` was validated above.
             unsafe { *out_handle = PlacementHandleV1(Box::into_raw(Box::new(placement)).cast()) };
@@ -131,8 +131,8 @@ unsafe extern "C" fn create(
     }
 }
 
-fn create_impl(request: PlacementCreateRequestV1) -> Result<ConfiguredPlacement, String> {
-    validate_create_request_v1(&request)
+unsafe fn create_impl(request: PlacementCreateRequestV1) -> Result<ConfiguredPlacement, String> {
+    unsafe { validate_create_request_v1(&request) }
         .map_err(|error| format!("invalid Dynamo placement create request: {error:?}"))?;
     validate_empty_options(request.options_namespace, request.provider_options)?;
     let (max_running_requests, total_kv_blocks) = decode_capacity_profile(&request.capacities)?;

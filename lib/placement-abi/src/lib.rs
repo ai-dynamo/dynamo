@@ -1182,7 +1182,15 @@ pub unsafe fn validate_descriptor_v1(
 }
 
 /// Validates the bounded creation payload without creating an instance.
-pub fn validate_create_request_v1(
+///
+/// # Safety
+///
+/// If `request.workers.len` is non-zero and within [`MAX_CREATE_WORKERS_V1`],
+/// `request.workers.data` must point to readable [`WorkerTopologyV1`] records
+/// for the duration of this call. The nested `scheduler_ids` slices are only
+/// checked for valid pointer shape and bounded length. The function rejects
+/// oversized slices before reading the outer worker slice.
+pub unsafe fn validate_create_request_v1(
     request: &PlacementCreateRequestV1,
 ) -> Result<(), CreateRequestValidationError> {
     if (request.struct_size as usize) < std::mem::size_of::<PlacementCreateRequestV1>() {
@@ -1190,6 +1198,10 @@ pub fn validate_create_request_v1(
     }
     if request.payload_version != PLACEMENT_CREATE_PAYLOAD_VERSION_V1 {
         return Err(CreateRequestValidationError::UnsupportedPayloadVersion);
+    }
+    if request.workers.len > MAX_CREATE_WORKERS_V1 || request.capacities.len > MAX_CREATE_WORKERS_V1
+    {
+        return Err(CreateRequestValidationError::TooManyWorkers);
     }
     if !valid_slice(request.workers.data, request.workers.len)
         || !valid_slice(request.capacities.data, request.capacities.len)
@@ -1201,12 +1213,8 @@ pub fn validate_create_request_v1(
     {
         return Err(CreateRequestValidationError::NullSlice);
     }
-    if !valid_worker_topology_slice(request.workers) {
+    if !unsafe { valid_worker_topology_slice(request.workers) } {
         return Err(CreateRequestValidationError::NullSlice);
-    }
-    if request.workers.len > MAX_CREATE_WORKERS_V1 || request.capacities.len > MAX_CREATE_WORKERS_V1
-    {
-        return Err(CreateRequestValidationError::TooManyWorkers);
     }
     if request.options_namespace.len > MAX_CREATE_OPTION_BYTES_V1
         || request.provider_options.len > MAX_CREATE_OPTION_BYTES_V1
@@ -1387,15 +1395,21 @@ fn valid_worker_topology(worker: &WorkerTopologyV1) -> bool {
     valid_slice(worker.scheduler_ids.data, worker.scheduler_ids.len)
 }
 
-fn valid_worker_topology_slice(workers: WorkerTopologySliceV1) -> bool {
+/// Checks the nested scheduler-id slices in a bounded worker slice.
+///
+/// # Safety
+///
+/// `workers` must have already passed [`valid_slice`] and therefore point to
+/// readable [`WorkerTopologyV1`] records whenever its length is non-zero.
+unsafe fn valid_worker_topology_slice(workers: WorkerTopologySliceV1) -> bool {
     let Some(worker_len) = checked_slice_len::<WorkerTopologyV1>(workers.len) else {
         return false;
     };
     if worker_len == 0 {
         return true;
     }
-    // Safety: the outer slice has been checked by the caller before this helper
-    // is invoked; this helper is only used during bounded ABI validation.
+    // Safety: required by this helper's contract; the caller checked the outer
+    // slice before invoking it.
     let workers = unsafe { std::slice::from_raw_parts(workers.data, worker_len) };
     workers.iter().all(valid_worker_topology)
 }
@@ -1540,8 +1554,39 @@ mod tests {
         };
 
         assert_eq!(
-            validate_create_request_v1(&request),
+            unsafe { validate_create_request_v1(&request) },
             Err(CreateRequestValidationError::NullSlice)
+        );
+    }
+
+    #[test]
+    fn create_validation_rejects_oversized_workers_before_reading_topology() {
+        let request = PlacementCreateRequestV1 {
+            struct_size: std::mem::size_of::<PlacementCreateRequestV1>() as u32,
+            payload_version: PLACEMENT_CREATE_PAYLOAD_VERSION_V1,
+            flags: 0,
+            reserved: 0,
+            selector_seed: [0; 32],
+            workers: WorkerTopologySliceV1 {
+                data: std::ptr::NonNull::<WorkerTopologyV1>::dangling().as_ptr(),
+                len: MAX_CREATE_WORKERS_V1 + 1,
+            },
+            capacities: WorkerCapacitySliceV1::default(),
+            options_namespace: ByteSliceV1::EMPTY,
+            provider_options: ByteSliceV1::EMPTY,
+            limits: PlacementLimitsV1 {
+                max_mutations: 1,
+                max_admission_results: 1,
+                max_released: 1,
+                max_diagnostic_bytes: 1,
+            },
+        };
+
+        // Safety: the oversized outer worker slice is intentionally unreadable;
+        // validation must reject its length before inspecting any elements.
+        assert_eq!(
+            unsafe { validate_create_request_v1(&request) },
+            Err(CreateRequestValidationError::TooManyWorkers)
         );
     }
 
@@ -1578,7 +1623,7 @@ mod tests {
         };
 
         assert_eq!(
-            validate_create_request_v1(&request),
+            unsafe { validate_create_request_v1(&request) },
             Err(CreateRequestValidationError::NullSlice)
         );
     }
