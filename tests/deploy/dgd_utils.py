@@ -19,7 +19,7 @@ import kr8s
 import pytest
 import requests
 import yaml
-from kr8s.objects import Pod, Service
+from kr8s.objects import Pod, Service, new_class
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
@@ -32,6 +32,9 @@ from tests.utils.client import send_request
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
+
+# Declare the CRD explicitly so clusters without it return a normal 404.
+SnapshotJob = new_class("SnapshotJob", version="nvidia.com/v1alpha1")
 
 # Shared chat-completion request defaults and response validation.
 #
@@ -1624,41 +1627,40 @@ class ManagedDeployment:
             self._logger,
         )
 
-    async def _get_checkpoint_pod_logs(self) -> set[str]:
+    def _get_checkpoint_pod_logs(self) -> set[str]:
         """Preserve source pod diagnostics and return pods handled by this path."""
         collected_pods: set[str] = set()
-        if self._custom_api is None:
-            return collected_pods
-
         try:
-            jobs = await retry_vcluster_api_async(
+            jobs = retry_vcluster_api(
                 "listing checkpoint jobs",
-                partial(
-                    self._custom_api.list_namespaced_custom_object,
-                    group="nvidia.com",
-                    version="v1alpha1",
-                    namespace=self.namespace,
-                    plural="snapshotjobs",
-                    label_selector=(
-                        "nvidia.com/dynamo-graph-deployment-name="
-                        f"{self._deployment_name}"
-                    ),
-                    _request_timeout=30,
+                lambda: list(
+                    kr8s.get(
+                        SnapshotJob,
+                        namespace=self.namespace,
+                        label_selector=(
+                            "nvidia.com/dynamo-graph-deployment-name="
+                            f"{self._deployment_name}"
+                        ),
+                    )
                 ),
-                (aiohttp.ClientConnectionError, TimeoutError),
+                _KR8S_VCLUSTER_CONNECTION_ERRORS,
                 self._logger,
             )
-        except exceptions.ApiException as exc:
+        except kr8s.ServerError as exc:
             # Non-checkpoint deployments may run without the SnapshotJob CRD.
-            if exc.status != 404:
+            if exc.response is None or exc.response.status_code != 404:
                 self._logger.warning("Failed to list checkpoint jobs: %s", exc)
             return collected_pods
-        except (aiohttp.ClientError, TimeoutError) as exc:
+        except (
+            kr8s.APITimeoutError,
+            kr8s.ConnectionClosedError,
+            httpx.HTTPError,
+        ) as exc:
             self._logger.warning("Failed to list checkpoint jobs: %s", exc)
             return collected_pods
 
-        for job in jobs.get("items", []):
-            metadata = job.get("metadata", {})
+        for job in jobs:
+            metadata = job.raw.get("metadata", {})
             name, uid = metadata.get("name"), metadata.get("uid")
             if not name or not uid:
                 continue
@@ -1679,7 +1681,7 @@ class ManagedDeployment:
             for pod in pods:
                 try:
                     self.get_pod_manifest_logs_metrics(
-                        "CheckpointSource", pod, collect_metrics=False
+                        "checkpoint", pod, collect_metrics=False
                     )
                     collected_pods.add(pod.name)
                 except OSError as exc:
@@ -1886,7 +1888,7 @@ class ManagedDeployment:
 
     async def _cleanup(self):
         try:
-            checkpoint_pods = await self._get_checkpoint_pod_logs()
+            checkpoint_pods = self._get_checkpoint_pod_logs()
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs(exclude_pods=checkpoint_pods)
             self._logger.info(
