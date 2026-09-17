@@ -49,8 +49,6 @@ PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 # path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
 DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
 
-# The CLI fields that name an attention backend. The phase-specific pair takes
-# priority over the combined flag.
 ATTENTION_BACKEND_CLI_FIELDS = (
     "attention_backend",
     "prefill_attention_backend",
