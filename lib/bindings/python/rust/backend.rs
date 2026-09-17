@@ -591,7 +591,7 @@ impl Worker {
         // to the worker's DistributedRuntime, not the process-wide executor, and
         // are resolved directly by RsWorker without changing environment vars.
         let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
-        let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
+        crate::adopt_bridge_runtime(primary);
 
         Ok(Self {
             engine: Arc::new(engine),
@@ -625,7 +625,7 @@ impl Worker {
         let config = self.config.clone();
         let raw = self.raw;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             // No fallback: `runtime_from_existing` creates the process runtime when there isn't
             // one, so it only fails when the settings themselves are bad. Retrying through
             // `Worker::from_settings` would read those same settings and fail the same way.

@@ -240,6 +240,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "framework_with_efa: marks deployment tests that require an EFA-capable "
         "cluster and an -efa image",
     )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_kvcr: marks deployment tests that require a KVCR-capable "
+        "image and multi-host RDMA",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():
