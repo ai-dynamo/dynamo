@@ -384,7 +384,6 @@ async fn qwen_unified_batch_v1_child() {
 
 #[test]
 fn test_qwen_unified_batch_reverts_to_v1_when_requested() {
-    // Isolate the rollback environment in a child process.
     let exe = std::env::current_exe().expect("test binary path for self re-exec");
     let status = std::process::Command::new(exe)
         .args([
