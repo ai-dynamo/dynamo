@@ -103,10 +103,12 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// PODS (a multi-GPU pod runs its ranks intra-pod). Absent means no follower was
 		// derived: the Grove pathway renders RoleMain through this arm but never
 		// synthesizes one (grove#676), nor does a component with replicas > 1. Keying on
-		// the flag made the shipped moe_elastic_ep_demo.yaml (dp=2, one pod, no
-		// enable-grove opt-out, so Grove is its provider) wait 20 minutes for a second Ray
-		// node nothing would create, then exit -- CrashLoopBackOff on the default workload
-		// provider.
+		// the flag is what broke a shipped manifest: any dp > 1 component that does NOT set
+		// nvidia.com/enable-grove "false" gets Grove wherever the Grove API is installed,
+		// so it waited 20 minutes for a second Ray node nothing would create, then exited
+		// -- CrashLoopBackOff on the default workload provider. (The demo fixture now opts
+		// out of Grove explicitly, which is why it no longer exhibits this; the hazard is
+		// the shape, not that file.)
 		followerReplicas := elasticEPSynthesizedFollowers(annotations)
 
 		// Pin the leader to one local rank -- the other half of the sizing rule synthesis

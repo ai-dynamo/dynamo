@@ -47,6 +47,14 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: vllm-elastic-ep-demo
+  annotations:
+    # Opt out of Grove, which is the DEFAULT provider on any cluster where the Grove API is
+    # installed. Grove runs a component's data-parallel ranks INSIDE one pod and never
+    # synthesizes a follower (grove#676), so on a Grove cluster this manifest would render a
+    # single pod -- contradicting the header above, and leaving
+    # run_elastic_ep_scale_test.sh with no "<leader>-flw" DCD to scale. One pod per rank is
+    # a non-Grove property today, so the fixture that demonstrates it has to say so.
+    nvidia.com/enable-grove: "false"
 spec:
   services:
     Frontend:

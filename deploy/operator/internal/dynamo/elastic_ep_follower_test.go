@@ -622,11 +622,12 @@ func TestSynthesizeElasticEPFollowerDCD_DoesNotTouchASingleRankLeader(t *testing
 //   - any component with replicas > 1, where IsSinglePodElasticEPShape declines and no
 //     follower is derived either
 //
-// tests/fault_tolerance/deploy/templates/vllm/moe_elastic_ep_demo.yaml is the first shape
-// exactly: one pod, --data-parallel-size 2, and no enable-grove opt-out, so Grove is its
-// provider and no follower is ever synthesized. Keyed on the flag, that manifest waited
-// 20 minutes for a second Ray node nothing would ever create and then exited 1 -- a
-// working deployment turned into a CrashLoopBackOff.
+// The first shape is what any dp > 1 component becomes when it does not set
+// nvidia.com/enable-grove "false": Grove is its provider, so it renders one pod and no
+// follower is ever synthesized. Keyed on the flag, such a manifest waited 20 minutes for a
+// second Ray node nothing would ever create and then exited 1 -- a working deployment
+// turned into a CrashLoopBackOff. (The shipped demo fixture hit this before it was given
+// an explicit Grove opt-out.)
 //
 // So the trigger is the follower count synthesis actually stamped, and its absence must
 // render the leader exactly as it rendered before any of this.
