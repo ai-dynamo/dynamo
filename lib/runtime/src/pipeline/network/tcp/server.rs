@@ -762,6 +762,20 @@ async fn handle_accept_error(err: &std::io::Error, backoff: &mut AcceptBackoff) 
     }
 }
 
+#[cfg(test)]
+static RESPONSE_SEND_PROBES: std::sync::LazyLock<
+    Mutex<HashMap<String, mpsc::UnboundedSender<()>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+fn observe_full_response_send(context: &dyn AsyncEngineContext, sender: &mpsc::Sender<Bytes>) {
+    if sender.capacity() == 0
+        && let Some(probe) = RESPONSE_SEND_PROBES.lock().get(context.id())
+    {
+        let _ = probe.send(());
+    }
+}
+
 // Type aliases for boxed split halves used throughout the nested handlers below.
 type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
@@ -1241,12 +1255,33 @@ async fn tcp_listener(
                                 }
                             }
 
-                            if !data.is_empty()
-                                && let Err(err) = response_tx.send(data).await {
+                            #[cfg(test)]
+                            if !data.is_empty() { observe_full_response_send(context.as_ref(), &response_tx); }
+                            if !data.is_empty() {
+                                // A slow consumer must not hold cancellation behind the full buffer.
+                                // Keep this send alive across Stop so draining preserves frame order.
+                                let send = response_tx.send(data);
+                                tokio::pin!(send);
+                                let result = loop {
+                                    tokio::select! {
+                                        biased;
+                                        _ = &mut killed => {
+                                            let _ = control_tx.send(ControlMessage::Kill).await;
+                                            return;
+                                        }
+                                        _ = &mut stopped, if can_stop => {
+                                            can_stop = false;
+                                            let _ = control_tx.send(ControlMessage::Stop).await;
+                                        }
+                                        result = &mut send => break result,
+                                    }
+                                };
+                                if let Err(err) = result {
                                     tracing::debug!(?err, "forwarding body/data to response channel failed");
                                     let _ = control_tx.send(ControlMessage::Kill).await;
                                     break;
-                                };
+                                }
+                            }
                         }
                         Some(Err(e)) => {
                             // TCP RST or decode error from worker — kill only
@@ -1339,6 +1374,202 @@ fn process_control_message(message: Bytes) -> Result<ControlAction> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
+
+    // Observe that the second frame has reached a full channel before cancelling.
+    // On this current-thread runtime the receive task then polls send to Pending
+    // before the test task can resume from the notification.
+    struct ResponseProbeRegistration(String);
+    impl Drop for ResponseProbeRegistration {
+        fn drop(&mut self) {
+            RESPONSE_SEND_PROBES.lock().remove(&self.0);
+        }
+    }
+
+    async fn response_backpressure_case(action: &str) {
+        time::timeout(Duration::from_secs(5), async {
+            let server = test_server().await;
+            let context = Context::new(()).context();
+            let (probe_tx, mut probe_rx) = mpsc::unbounded_channel();
+            RESPONSE_SEND_PROBES
+                .lock()
+                .insert(context.id().to_string(), probe_tx);
+            let _probe = ResponseProbeRegistration(context.id().to_string());
+            let options = StreamOptions::builder()
+                .context(context.clone())
+                .enable_request_stream(false)
+                .enable_response_stream(true)
+                .send_buffer_count(1)
+                .build()
+                .unwrap();
+            let pending = server.register(options).await;
+            let (info, provider) = pending.recv_stream.unwrap().into_parts();
+            let info: TcpStreamConnectionInfo = info.try_into().unwrap();
+            let raw = TcpStream::connect(&info.address).await.unwrap();
+            let (read, write) = tokio::io::split(raw);
+            let mut reader = FramedRead::new(read, TwoPartCodec::default());
+            let mut writer = FramedWrite::new(write, TwoPartCodec::default());
+            writer
+                .send(TwoPartMessage::from_header(
+                    serde_json::to_vec(&CallHomeHandshake {
+                        subject: info.subject,
+                        stream_type: StreamType::Response,
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            writer
+                .send(TwoPartMessage::from_header(
+                    serde_json::to_vec(&ResponseStreamPrologue {
+                        error: None,
+                        typed_error: None,
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let mut receiver = provider.await.unwrap().unwrap();
+            writer
+                .send(TwoPartMessage::from_data(Bytes::from_static(b"first")))
+                .await
+                .unwrap();
+            time::timeout(Duration::from_secs(1), async {
+                while receiver.rx.len() != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            writer
+                .send(TwoPartMessage::from_data(Bytes::from_static(b"second")))
+                .await
+                .unwrap();
+            time::timeout(Duration::from_secs(1), probe_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(receiver.rx.len(), 1);
+            assert!(!context.is_stopped());
+            match action {
+                "kill" => {
+                    context.kill();
+                    assert_eq!(
+                        recv_control_message(&mut reader).await,
+                        ControlMessage::Kill,
+                        "kill must reach peer without draining the retained full receiver"
+                    );
+                    time::timeout(Duration::from_secs(1), async {
+                        while !receiver.rx.is_closed() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("kill must release the response sender");
+                }
+                "stop_then_kill" => {
+                    context.stop();
+                    assert_eq!(
+                        recv_control_message(&mut reader).await,
+                        ControlMessage::Stop
+                    );
+                    assert_eq!(receiver.rx.len(), 1);
+                    context.kill();
+                    assert_eq!(
+                        recv_control_message(&mut reader).await,
+                        ControlMessage::Kill
+                    );
+                    time::timeout(Duration::from_secs(1), async {
+                        while !receiver.rx.is_closed() {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("kill after stop must release sender without draining");
+                }
+                "stop" => {
+                    context.stop();
+                    assert_eq!(
+                        recv_control_message(&mut reader).await,
+                        ControlMessage::Stop,
+                        "stop must reach peer while preserving pending response data"
+                    );
+                    assert!(!receiver.rx.is_closed());
+                    assert_eq!(
+                        receiver.rx.recv().await.unwrap(),
+                        Bytes::from_static(b"first")
+                    );
+                    assert_eq!(
+                        receiver.rx.recv().await.unwrap(),
+                        Bytes::from_static(b"second")
+                    );
+                    writer
+                        .send(TwoPartMessage::from_header(
+                            serde_json::to_vec(&ControlMessage::Sentinel)
+                                .unwrap()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    assert!(receiver.rx.recv().await.is_none());
+                }
+                "drop" => {
+                    drop(receiver);
+                    assert_eq!(
+                        recv_control_message(&mut reader).await,
+                        ControlMessage::Kill
+                    );
+                }
+                "drain" => {
+                    assert!(
+                        reader.next().now_or_never().is_none(),
+                        "normal backpressure must not cancel"
+                    );
+                    assert_eq!(
+                        receiver.rx.recv().await.unwrap(),
+                        Bytes::from_static(b"first")
+                    );
+                    assert_eq!(
+                        receiver.rx.recv().await.unwrap(),
+                        Bytes::from_static(b"second")
+                    );
+                    writer
+                        .send(TwoPartMessage::from_header(
+                            serde_json::to_vec(&ControlMessage::Sentinel)
+                                .unwrap()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                    assert!(receiver.rx.recv().await.is_none());
+                    assert!(!context.is_stopped());
+                }
+                _ => unreachable!(),
+            }
+        })
+        .await
+        .expect("bounded response backpressure case");
+    }
+
+    #[tokio::test]
+    async fn test_full_response_channel_kill() {
+        response_backpressure_case("kill").await;
+    }
+    #[tokio::test]
+    async fn test_full_response_channel_stop() {
+        response_backpressure_case("stop").await;
+    }
+    #[tokio::test]
+    async fn test_full_response_channel_drop() {
+        response_backpressure_case("drop").await;
+    }
+    #[tokio::test]
+    async fn test_full_response_channel_drain() {
+        response_backpressure_case("drain").await;
+    }
+
     use crate::engine::AsyncEngineContextProvider;
     use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::Context;
@@ -1347,6 +1578,11 @@ mod tests {
     use crate::tls_utils::test_certs::self_signed_pair;
     use tokio::io::{AsyncWriteExt, ReadHalf, WriteHalf};
     use tokio::net::TcpStream;
+
+    #[tokio::test]
+    async fn test_full_response_channel_stop_then_kill() {
+        response_backpressure_case("stop_then_kill").await;
+    }
 
     #[test]
     fn build_tls_acceptor_no_env_vars_is_plaintext() {
