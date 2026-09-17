@@ -5,8 +5,8 @@
 
 import argparse
 import json
-import os
 from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,7 +14,9 @@ import requests
 from tqdm import tqdm
 from transformers import AutoTokenizer, set_seed
 
-CHOICES = ("A", "B", "C", "D")
+from tests.lmcache.mmlu_utils import extract_choice, prompt_string
+
+MAX_FEW_SHOT_TOKENS = 4000
 
 
 def get_llm_response(args: argparse.Namespace, prompt: str) -> str:
@@ -28,23 +30,8 @@ def get_llm_response(args: argparse.Namespace, prompt: str) -> str:
     }
     url = f"http://{args.host}:{args.port}/v1/completions"
     response = requests.post(url, json=data, timeout=30)
-    if response.status_code != 200:
-        raise Exception(f"Error: {response.status_code} {response.text}")
+    response.raise_for_status()
     return response.json()["choices"][0]["text"]
-
-
-def prompt_string(df: pd.DataFrame, idx: int, include_answer: bool = True) -> str:
-    prompt = df.iloc[idx, 0]
-    option_count = df.shape[1] - 2
-    for option_index in range(option_count):
-        prompt += f"\n{CHOICES[option_index]}. {df.iloc[idx, option_index + 1]}"
-    prompt += (
-        "\nRespond with **only the letter** (A, B, C, D).  Do **not** output "
-        "any explanation, analysis, or extra words. Answer:"
-    )
-    if include_answer:
-        prompt += f" {df.iloc[idx, option_count + 1]}\n\n"
-    return prompt
 
 
 def evaluate(
@@ -54,18 +41,21 @@ def evaluate(
     test_df: pd.DataFrame,
     tokenizer: AutoTokenizer,
 ) -> float:
-    shared_multi_shot_prefix = [
-        f"The following are multiple choice questions (with answers) "
-        f"                                about {subject}. \n\n"
-    ]
-    shared_multi_shot_prefix_length = 0
+    header = (
+        "The following are multiple choice questions (with answers) "
+        f"about {subject}.\n\n"
+    )
+    shared_multi_shot_prefix = [header]
+    shared_multi_shot_prefix_length = len(
+        tokenizer(header, add_special_tokens=True)["input_ids"]
+    )
     for index in range(dev_df.shape[0]):
         example = prompt_string(dev_df, index)
-        shared_multi_shot_prefix.append(example)
-        token_ids = tokenizer(example, add_special_tokens=True)["input_ids"]
-        shared_multi_shot_prefix_length += len(token_ids)
-        if shared_multi_shot_prefix_length > 4000:
+        token_ids = tokenizer(example, add_special_tokens=False)["input_ids"]
+        if shared_multi_shot_prefix_length + len(token_ids) > MAX_FEW_SHOT_TOKENS:
             break
+        shared_multi_shot_prefix.append(example)
+        shared_multi_shot_prefix_length += len(token_ids)
 
     shared_multi_shot_prefix_str = "".join(shared_multi_shot_prefix)
     prompts = []
@@ -75,26 +65,18 @@ def evaluate(
         prompts.append(f"{shared_multi_shot_prefix_str}\n\n{query_prompt}")
         labels.append(test_df.iloc[index, test_df.shape[1] - 1])
 
-    predictions = [
-        _extract_choice(get_llm_response(args, prompt)) for prompt in prompts
-    ]
+    predictions = [extract_choice(get_llm_response(args, prompt)) for prompt in prompts]
     return float(np.mean(np.array(predictions) == np.array(labels)))
-
-
-def _extract_choice(response: str) -> str:
-    stripped = response.strip()
-    if stripped and stripped[0] in CHOICES:
-        return stripped[0]
-    return next((char for char in stripped if char in CHOICES), "A")
 
 
 def main(args: argparse.Namespace) -> None:
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-    test_files = [
-        name for name in os.listdir("data/test") if name.endswith("_test.csv")
-    ]
-    subjects = sorted(name.split("_test.csv")[0] for name in test_files)
+    data_dir = Path("data")
+    subjects = sorted(
+        path.name.removesuffix("_test.csv")
+        for path in (data_dir / "test").glob("*_test.csv")
+    )
 
     accuracies = []
     num_questions = []
@@ -103,11 +85,9 @@ def main(args: argparse.Namespace) -> None:
         subjects[: args.number_of_subjects], desc="Processing subjects"
     ):
         subject = " ".join(subject_raw.split("_"))
-        dev_df = pd.read_csv(
-            os.path.join("data/dev", subject_raw + "_dev.csv"), header=None
-        )
+        dev_df = pd.read_csv(data_dir / "dev" / f"{subject_raw}_dev.csv", header=None)
         test_df = pd.read_csv(
-            os.path.join("data/test", subject_raw + "_test.csv"), header=None
+            data_dir / "test" / f"{subject_raw}_test.csv", header=None
         )
         accuracy = evaluate(args, subject, dev_df, test_df, tokenizer)
         accuracies.append(accuracy)
@@ -122,7 +102,7 @@ def main(args: argparse.Namespace) -> None:
         "num_questions": sum(num_questions),
     }
 
-    with open(args.result_file, "w") as result_file:
+    with Path(args.result_file).open("w", encoding="utf-8") as result_file:
         for subject, value in output_dict.items():
             result_file.write(json.dumps({subject: value}) + "\n")
 
