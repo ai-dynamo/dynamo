@@ -211,18 +211,22 @@ impl SystemHealth {
 
     /// Extend an endpoint's canary deadline for at most `max_duration`.
     /// Probes and health status updates continue throughout the lease.
+    /// Returns an error if the deadline cannot be represented.
     pub fn begin_canary_maintenance(
         &mut self,
         endpoint: &str,
         max_duration: Duration,
-    ) -> CanaryMaintenanceLease {
+    ) -> anyhow::Result<CanaryMaintenanceLease> {
         let now = Instant::now();
+        let deadline = now.checked_add(max_duration).ok_or_else(|| {
+            anyhow::anyhow!("Canary maintenance duration exceeds the supported deadline range")
+        })?;
         self.prune_expired_canary_maintenance(now);
         let lease = self.next_canary_lease;
         self.next_canary_lease += 1;
         self.canary_maintenance
-            .insert(lease, (endpoint.to_string(), now + max_duration));
-        lease
+            .insert(lease, (endpoint.to_string(), deadline));
+        Ok(lease)
     }
 
     /// Release `lease`, leaving other timeout extensions in place.
@@ -645,7 +649,9 @@ mod tests {
     fn maintenance_extends_deadline_without_hiding_notready() {
         let mut health = verified_health();
         let normal = Instant::now() + Duration::from_secs(3);
-        health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
+        health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
 
         assert!(health.canary_request_deadline(ENDPOINT, normal) > normal);
         assert_eq!(health.canary_request_deadline("other", normal), normal);
@@ -657,7 +663,9 @@ mod tests {
     fn ending_maintenance_restores_normal_deadline() {
         let mut health = verified_health();
         let normal = Instant::now() + Duration::from_secs(3);
-        let lease = health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
+        let lease = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
         health.end_canary_maintenance(lease);
 
         assert_eq!(health.canary_request_deadline(ENDPOINT, normal), normal);
@@ -667,9 +675,13 @@ mod tests {
     fn ending_one_extension_leaves_an_overlapping_extension_active() {
         let mut health = verified_health();
         let normal = Instant::now() + Duration::from_secs(3);
-        let first = health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(60));
+        let first = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(60))
+            .unwrap();
         let first_deadline = health.canary_request_deadline(ENDPOINT, normal);
-        let second = health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
+        let second = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
         assert_eq!(
             health.canary_request_deadline(ENDPOINT, normal),
             first_deadline
@@ -688,8 +700,12 @@ mod tests {
     fn releasing_a_lease_twice_leaves_other_extensions_alone() {
         let mut health = verified_health();
         let normal = Instant::now() + Duration::from_secs(3);
-        let first = health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
-        let second = health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
+        let first = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
+        let second = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
 
         health.end_canary_maintenance(first);
         health.end_canary_maintenance(first);
@@ -703,7 +719,9 @@ mod tests {
     fn maintenance_extension_expires_on_its_own() {
         let mut health = verified_health();
         let normal = Instant::now() + Duration::from_secs(3);
-        let lease = health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
+        let lease = health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
         // Expire the existing lease without a wall-clock sleep.
         health.canary_maintenance.get_mut(&lease).unwrap().1 = Instant::now();
 
@@ -715,7 +733,9 @@ mod tests {
     fn maintenance_extension_still_lets_ready_through() {
         let mut health = verified_health();
         health.set_endpoint_health_status(ENDPOINT, HealthStatus::NotReady);
-        health.begin_canary_maintenance(ENDPOINT, Duration::from_secs(30));
+        health
+            .begin_canary_maintenance(ENDPOINT, Duration::from_secs(30))
+            .unwrap();
 
         health.set_endpoint_health_status(ENDPOINT, HealthStatus::Ready);
         assert!(health.get_health_status().0);

@@ -1455,11 +1455,11 @@ impl DistributedRuntime {
                  {MAX_MAINTENANCE_SECONDS}, got {max_seconds}"
             )));
         }
-        Ok(self
-            .inner
+        self.inner
             .system_health()
             .lock()
-            .begin_canary_maintenance(endpoint, std::time::Duration::from_secs_f64(max_seconds)))
+            .begin_canary_maintenance(endpoint, std::time::Duration::from_secs_f64(max_seconds))
+            .map_err(|err| PyValueError::new_err(err.to_string()))
     }
 
     /// Release a timeout extension without affecting other leases.

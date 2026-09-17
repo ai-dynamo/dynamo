@@ -226,7 +226,17 @@ impl HealthCheckManager {
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let default_deadline = std::time::Instant::now() + timeout;
+            let Some(default_deadline) = std::time::Instant::now().checked_add(timeout) else {
+                error!(
+                    endpoint = %endpoint_subject_owned,
+                    ?timeout,
+                    "Health check timeout exceeds the supported deadline range"
+                );
+                system_health
+                    .lock()
+                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
+                return;
+            };
             let probe = async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
