@@ -24,3 +24,11 @@
 - `cargo fmt --all -- --check` — repository-wide check reports pre-existing
   formatting diffs in the parallel AISim worktree; all touched files were
   formatted directly with rustfmt and `git diff --check` passes.
+
+## Atomic batch API follow-up
+
+- Updated the Dynamo provider for the owned `submit_batch(Vec<DirectRequest>)`
+  API and map poisoned batch failures to `StatusV1::INTERNAL`; the ABI output
+  remains zeroed on every failed batch.
+- The focused provider test was retried after the API update but remains
+  blocked until the parallel AISim core and mocker edits are coherent.

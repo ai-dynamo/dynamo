@@ -23,7 +23,8 @@ use aiperf_steppable_abi::{
     StepResultV1, U32SliceV1,
 };
 use aisimulate_core::replay::loadgen::{
-    CompactDirectRequest, CompactHashIdsLease, DynPlacement, SteppableAgg, SteppableReplay,
+    BatchSubmissionError, CompactDirectRequest, CompactHashIdsLease, DynPlacement, SteppableAgg,
+    SteppableReplay,
 };
 use aisimulate_core::replay::{
     DirectRequest, ReplayEngineConfig, ReplayEngineFactory, ReplayPromptTokenSource,
@@ -341,6 +342,14 @@ fn checked_slice_len<T>(len: u64) -> Option<usize> {
     usize::try_from(len)
         .ok()
         .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<T>())
+}
+
+fn batch_error_status(error: &BatchSubmissionError) -> StatusV1 {
+    if error.is_poisoned() {
+        StatusV1::INTERNAL
+    } else {
+        StatusV1::REJECTED
+    }
 }
 
 unsafe fn borrowed_bytes(slice: ByteSliceV1) -> Result<&'static [u8], StatusV1> {
@@ -796,7 +805,7 @@ unsafe fn submit_batch_impl(
             return StatusV1::REJECTED;
         }
     }
-    match replay.engine.submit_batch(&converted) {
+    match replay.engine.submit_batch(converted) {
         Ok(uuids) => {
             debug_assert_eq!(uuids.len(), output.len());
             for (uuid, request_id) in uuids.into_iter().zip(output.iter_mut()) {
@@ -807,7 +816,7 @@ unsafe fn submit_batch_impl(
         }
         Err(error) => {
             replay.last_error = error.to_string();
-            StatusV1::REJECTED
+            batch_error_status(&error)
         }
     }
 }
@@ -1527,6 +1536,26 @@ mod tests {
         REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS, REQUEST_FLAG_PREFERRED_DP_RANK,
         REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK, REQUEST_FLAG_REPLAY_CONTEXT,
     };
+
+    #[test]
+    fn poisoned_batch_errors_map_to_internal_without_changing_rejections() {
+        assert_eq!(
+            batch_error_status(
+                &aisimulate_core::replay::loadgen::BatchSubmissionError::poisoned(anyhow::anyhow!(
+                    "poisoned"
+                ),)
+            ),
+            StatusV1::INTERNAL
+        );
+        assert_eq!(
+            batch_error_status(
+                &aisimulate_core::replay::loadgen::BatchSubmissionError::unchanged(
+                    anyhow::anyhow!("rejected"),
+                )
+            ),
+            StatusV1::REJECTED
+        );
+    }
 
     #[test]
     fn checked_slice_len_rejects_lengths_that_exceed_isize_byte_bound() {
