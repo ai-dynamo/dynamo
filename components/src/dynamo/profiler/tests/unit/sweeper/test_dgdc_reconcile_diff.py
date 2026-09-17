@@ -126,7 +126,16 @@ def test_duplicate_identity_in_current_still_desired_raises_not_silently_drops()
         compute_actions(desired, current)
 
 
-def test_pareto_front_reordering_produces_only_status_updates() -> None:
+def test_rank_reordering_across_multiple_entries_produces_only_status_updates() -> None:
+    """Generic multi-entry rank-change coverage for the diff algorithm
+    itself, which is agnostic to what rank means -- it only detects
+    whether the value differs. NOT framed as a "Pareto" scenario:
+    Status.Rank's real, confirmed comment is "the one-based scalar
+    ordering and is absent for Pareto searches" -- real Pareto candidates
+    never carry a non-None, reshuffling rank like this at all. See
+    test_pareto_candidates_never_produce_rank_status_updates below for
+    what realistic Pareto data actually looks like.
+    """
     identities = [compute_identity({"components": [{"replicas": n}]}, {}) for n in (2, 4, 8)]
     current = [
         CurrentDGDC(name=f"cand-{i:03d}", identity=identity, rank=i + 1)
@@ -147,3 +156,27 @@ def test_pareto_front_reordering_produces_only_status_updates() -> None:
         ("cand-001", 3),
         ("cand-002", 1),
     }
+
+
+def test_pareto_candidates_never_produce_rank_status_updates() -> None:
+    """Confirmed against the real v1beta2 Go type: Status.Rank is "the
+    one-based scalar ordering and is absent for Pareto searches" -- every
+    real Pareto candidate leaves rank unset (None), regardless of front
+    size or how membership changes. Since rank never varies on either
+    side for realistic Pareto data, an unchanged front must produce zero
+    status_updates, not the numbered reshuffling the test above exercises
+    for the algorithm's generic case."""
+    identities = [compute_identity({"components": [{"replicas": n}]}, {}) for n in (2, 4, 8)]
+    current = [
+        CurrentDGDC(name=f"cand-{i:03d}", identity=identity, rank=None)
+        for i, identity in enumerate(identities)
+    ]
+    desired = [
+        DesiredCandidate(spec={"components": [{"replicas": n}]}, rank=None) for n in (2, 4, 8)
+    ]
+
+    actions = compute_actions(desired, current)
+
+    assert actions.creates == ()
+    assert actions.deletes == ()
+    assert actions.status_updates == ()
