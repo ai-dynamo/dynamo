@@ -24,16 +24,35 @@
 //! did exactly that, and every routing failure became a 503 whose body carried
 //! the router's internal `Debug` text.
 //!
-//! The status classes below match the router's own statement of what each
-//! rejection means: `scheduler_error_status` in
-//! `lib/kv-router/src/services/selection/error.rs`.
+//! # Which status each rejection gets
 //!
-//! That is parity with one other host, not with all of them. The integrated
-//! Frontend answers both the overload family and a queue rejection with
-//! `overload_status_code()` (`lib/llm/src/http/service/error.rs`) — 529 by
-//! default and configurable — rather than the 429/503 split used here. Making
-//! all three hosts agree is a wider decision than this module; until it is
-//! taken, the EPP follows the router's mapping.
+//! The classes below follow `scheduler_error_status` in
+//! `lib/kv-router/src/services/selection/error.rs`, with one deliberate
+//! exception: a queue rejection is **429 here and 503 there**.
+//!
+//! DEP #9755 (`dep:approved`, `dep:implementing`) is prescriptive about this:
+//!
+//! > Terminal router-side rejection **SHOULD** use downstream throttling
+//! > semantics, such as `TooManyRequests` / HTTP 429.
+//!
+//! and names the case explicitly — "This includes router queue full, token
+//! budget exhausted, cached/uncached token queue exhausted, and SLO budget
+//! expired." Its 503 allowance is scoped to the Frontend's *pre-tokenization*
+//! admission gate, which is a different gate from a router queue decision
+//! taken after tokenization.
+//!
+//! The behavioural difference is the point. A queue rejection means this
+//! policy class is at its configured limit, which is a fleet-wide setting, so
+//! a 503 — which invites a gateway to fail over to another endpoint — sends
+//! the client somewhere that cannot help. 429 tells it to back off, which is
+//! the only useful response.
+//!
+//! No host agrees with another today: the selection service answers 503, and
+//! the integrated Frontend answers both this and the overload family with
+//! `overload_status_code()` (`lib/llm/src/http/service/error.rs`), 529 by
+//! default. Converging them is tracked on ai-dynamo/dynamo#14176, where both
+//! mappings are touched at once. Until that lands the EPP follows the DEP
+//! rather than the drifted implementation.
 
 use dynamo_kv_router::scheduling::KvSchedulerError;
 use dynamo_runtime::error::{DynamoError, ErrorType};
@@ -50,7 +69,7 @@ use crate::picker::PickError;
 pub enum RouterRejection {
     /// Downstream capacity is saturated. Retryable backpressure → 429.
     Overloaded,
-    /// A policy-class queue-depth limit refused the request → 503.
+    /// A policy-class queue-depth limit refused the request → 429.
     QueueRejected,
     /// No worker could serve the request right now → 503.
     Unavailable,
@@ -159,10 +178,12 @@ fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
 
 fn classify_scheduler_error(error: &KvSchedulerError) -> RouterRejection {
     // Mirrors `scheduler_error_status` in
-    // `lib/kv-router/src/services/selection/error.rs`. `KvSchedulerError` is
-    // `#[non_exhaustive]`, so the wildcard is required from this crate; it is
-    // also what keeps a newly added variant from failing the build here rather
-    // than being classified conservatively.
+    // `lib/kv-router/src/services/selection/error.rs`, except for
+    // `QueueRejected` — see the module docs for why that one is 429 here.
+    //
+    // `KvSchedulerError` is `#[non_exhaustive]`, so the wildcard is required
+    // from this crate; it is also what keeps a newly added variant from failing
+    // the build here rather than being classified conservatively.
     match error {
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. } => RouterRejection::Overloaded,

@@ -217,11 +217,15 @@ pub enum PickError {
     /// yet; see the module docs on `admission`.
     #[error("all eligible workers are overloaded")]
     RouterOverloaded,
-    /// A router policy-class queue-depth limit refused the request → 503.
+    /// A router policy-class queue-depth limit refused the request → 429.
     ///
-    /// Distinct from [`Self::RouterOverloaded`]: the workers may have capacity
-    /// while the class's queue is full, and the router maps queue rejection to
-    /// 503 rather than 429.
+    /// Kept distinct from [`Self::RouterOverloaded`] even though both answer
+    /// 429: the workers may have capacity while the class's queue is full, and
+    /// the two carry different metric labels and different client messages.
+    ///
+    /// The selection service currently answers this one with 503; the EPP
+    /// deliberately does not follow it there. See the module docs on
+    /// `admission`.
     #[error("router queue is full")]
     RouterQueueRejected,
     /// The request contradicted existing router state, such as a duplicate
