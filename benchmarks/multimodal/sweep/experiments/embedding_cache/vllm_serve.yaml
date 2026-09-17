@@ -19,7 +19,10 @@ skip_plots: true
 restart_server_every_benchmark: true
 uuid_and_strip: true
 prompt_manifest: /dynamo-tmp/data/qwen35_ec_h2d_overlap_manifest.json
-prefix_cache_probe_min_cached_tokens: 7936
+# Qwen3.5's hybrid Mamba/KV cache aligns this 8026-token rendered prompt to
+# 6288 reusable tokens. Require a stable majority hit without assuming pure-KV
+# block accounting.
+prefix_cache_probe_min_cached_tokens: 6000
 
 env:
   DYN_DISABLE_NSYS: "1"

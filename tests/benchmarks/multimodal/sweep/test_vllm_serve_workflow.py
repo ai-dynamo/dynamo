@@ -30,7 +30,7 @@ def test_embedding_cache_sweep_selects_only_requested_arms() -> None:
         "vllm-serve-native-ec-overlap",
     ]
     assert config["env"]["DYN_DISABLE_NSYS"] == "1"
-    assert config["prefix_cache_probe_min_cached_tokens"] == 7936
+    assert config["prefix_cache_probe_min_cached_tokens"] == 6000
     assert len(config["input_files"]) == 2
     assert config["configs"][0]["env"]["PYTHONPATH"] == ("${VLLM_BASELINE_PYTHONPATH}")
     assert config["configs"][1]["env"]["PYTHONPATH"] == ("${VLLM_PATCHED_PYTHONPATH}")
