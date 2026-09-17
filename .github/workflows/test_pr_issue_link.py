@@ -432,6 +432,26 @@ def test_fork_linear_overflow_does_not_mask_a_github_outage(
 
 
 # ------------------------------------------------------------------
+# Which pull requests the check runs on at all
+# ------------------------------------------------------------------
+
+
+def test_the_check_runs_only_against_the_trunk() -> None:
+    """A branch cut for a release must not be subject to this check.
+
+    It takes cherry-picks, and a cherry-pick cites the pull request it picks
+    rather than an issue. The issue link belongs on the original change,
+    which was already checked on its way into the trunk. Nothing in the
+    script enforces this: the base-branch filter on the trigger is the whole
+    mechanism, and dropping it would put a red check on every pick.
+    """
+    workflow = (Path(__file__).parent / "pr-issue-link.yml").read_text()
+    block = re.search(r"\n  pull_request_target:\n((?:    [^\n]*\n|\n)*)", workflow)
+    assert block, "the workflow does not trigger on pull_request_target"
+    assert "branches: [main]" in block.group(1)
+
+
+# ------------------------------------------------------------------
 # The blocking date, which lives in three files a human edits
 # ------------------------------------------------------------------
 

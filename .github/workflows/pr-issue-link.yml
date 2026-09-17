@@ -23,6 +23,14 @@ name: PR Issue Link
 on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened, ready_for_review]
+    # Only pull requests that target the trunk. A branch cut for a release
+    # takes cherry-picks, and a cherry-pick cites the pull request it picks
+    # rather than an issue, which this check does not accept and should not:
+    # the issue link belongs on the original change, which was already
+    # checked on its way into the trunk. Filtering on the base branch here
+    # means the workflow never starts for those, so there is no check to
+    # explain away and none to mark required by accident.
+    branches: [main]
   # The unit tests below exercise the pull request's own copy of the check, so
   # they run on `pull_request` and never on `pull_request_target`: a fork's
   # test file must not execute against the base repository's token.
@@ -40,10 +48,8 @@ env:
   # accident.
   #
   # It falls before the v1.6.0 code freeze on 2026-10-07, so the check first
-  # governs the freeze week. A cherry-pick PR that cites only the pull request
-  # it picks does not satisfy the check, because a PR number is not an issue.
-  # Add the check to branch protection on `main` first and watch a freeze week
-  # before doing the same on any release branch.
+  # governs the freeze week on the trunk. Only the trunk: the base-branch
+  # filter above keeps it away from the pull requests a frozen branch takes.
   #
   # The pull request template and the script default name this date too, so
   # that a contributor reads it before the check fails rather than after. Bump
