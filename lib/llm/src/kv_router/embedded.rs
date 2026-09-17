@@ -349,7 +349,7 @@ impl EmbeddedSelection {
         );
         // The current membership is in the catalog before the router serves.
         if let Some(snapshot) = source.next_snapshot().await
-            && let Err(error) = reconciler.apply(snapshot).await
+            && let Err(error) = reconciler.apply(&snapshot).await
         {
             tracing::warn!(%error, "embedded selection: initial membership reconcile failed");
         }

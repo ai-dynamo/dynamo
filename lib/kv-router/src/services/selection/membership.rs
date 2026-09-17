@@ -77,8 +77,8 @@ impl CatalogReconciler {
     /// not stop the pass: every other worker is still upserted and every
     /// worker absent from the snapshot is still deleted. The first error is
     /// returned so the caller retries the snapshot.
-    pub async fn apply(&mut self, desired: Vec<WorkerRequest>) -> Result<(), SelectionError> {
-        let mut by_id: HashMap<WorkerId, WorkerRequest> = HashMap::with_capacity(desired.len());
+    pub async fn apply(&mut self, desired: &[WorkerRequest]) -> Result<(), SelectionError> {
+        let mut by_id: HashMap<WorkerId, &WorkerRequest> = HashMap::with_capacity(desired.len());
         for request in desired {
             let worker_id = request.worker_id;
             if by_id.insert(worker_id, request).is_some() {
@@ -89,7 +89,7 @@ impl CatalogReconciler {
         }
 
         let mut to_upsert: Vec<WorkerRequest> = Vec::new();
-        for (worker_id, request) in &by_id {
+        for (worker_id, &request) in &by_id {
             // Track before the upsert so a partially applied record is still
             // deleted when the worker leaves the desired set.
             self.tracked.insert(*worker_id);
@@ -115,7 +115,7 @@ impl CatalogReconciler {
                 observer.upserted(&record);
             }
             if record.lifecycle == WorkerLifecycle::Schedulable {
-                let request = by_id.get(&worker_id).expect("upserted id came from by_id");
+                let request = *by_id.get(&worker_id).expect("upserted id came from by_id");
                 self.converged.insert(worker_id, request.clone());
             } else {
                 self.converged.remove(&worker_id);
@@ -180,7 +180,7 @@ impl CatalogReconciler {
                     pending.take().expect("guarded by pending.is_some()")
                 }
             };
-            let outcome = self.apply(snapshot.clone()).await;
+            let outcome = self.apply(&snapshot).await;
             #[cfg(test)]
             self.applies
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -288,22 +288,22 @@ mod tests {
         let core = core();
         let (mut reconciler, counter) = reconciler(&core);
 
-        reconciler.apply(vec![incomplete(1)]).await.expect("apply");
+        reconciler.apply(&[incomplete(1)]).await.expect("apply");
         assert_eq!(counter.upserts(), 1);
         assert_eq!(lifecycle(&core, 1), Some(WorkerLifecycle::Incomplete));
 
         // The same snapshot re-upserts rather than skipping the unconverged worker.
-        reconciler.apply(vec![incomplete(1)]).await.expect("apply");
+        reconciler.apply(&[incomplete(1)]).await.expect("apply");
         assert_eq!(counter.upserts(), 2);
 
         // The never-schedulable worker was still tracked, so leaving deletes it
         // and the catalog no longer lists it.
-        reconciler.apply(Vec::new()).await.expect("apply");
+        reconciler.apply(&[]).await.expect("apply");
         assert_eq!(lifecycle(&core, 1), None);
         assert_eq!(counter.removals(), 1);
 
         // Nothing is tracked any more: an empty snapshot deletes nothing.
-        reconciler.apply(Vec::new()).await.expect("apply");
+        reconciler.apply(&[]).await.expect("apply");
         assert_eq!(counter.removals(), 1);
     }
 
@@ -312,17 +312,17 @@ mod tests {
         let core = core();
         let (mut reconciler, counter) = reconciler(&core);
 
-        reconciler.apply(vec![schedulable(1)]).await.expect("apply");
+        reconciler.apply(&[schedulable(1)]).await.expect("apply");
         assert_eq!(lifecycle(&core, 1), Some(WorkerLifecycle::Schedulable));
         assert_eq!(counter.upserts(), 1);
 
         // An identical desired record is converged and skips its upsert.
-        reconciler.apply(vec![schedulable(1)]).await.expect("apply");
+        reconciler.apply(&[schedulable(1)]).await.expect("apply");
         assert_eq!(counter.upserts(), 1);
 
         let mut moved = schedulable(1);
         moved.endpoint = Some("http://10.0.0.9:8000".to_string());
-        reconciler.apply(vec![moved]).await.expect("apply");
+        reconciler.apply(&[moved]).await.expect("apply");
         assert_eq!(counter.upserts(), 2);
         let record = core
             .list_workers(None, None)
@@ -339,7 +339,7 @@ mod tests {
         let (mut reconciler, counter) = reconciler(&core);
 
         reconciler
-            .apply(vec![schedulable(1), schedulable(2)])
+            .apply(&[schedulable(1), schedulable(2)])
             .await
             .expect("apply");
         assert_eq!(counter.upserts(), 2);
@@ -349,7 +349,7 @@ mod tests {
         let mut changed = schedulable(2);
         changed.endpoint = Some("http://10.0.0.9:8000".to_string());
         let error = reconciler
-            .apply(vec![changed.clone()])
+            .apply(std::slice::from_ref(&changed))
             .await
             .expect_err("failed upsert is reported");
         assert!(matches!(error, SelectionError::Internal(_)), "{error}");
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(reconciler.tracked, HashSet::from([2]));
         // The failed worker is still tracked and is retried once the fault clears.
         core.fail_upsert_for.lock().clear();
-        reconciler.apply(vec![changed]).await.expect("apply");
+        reconciler.apply(&[changed]).await.expect("apply");
         assert_eq!(counter.upserts(), 3);
     }
 
@@ -470,7 +470,7 @@ mod tests {
         let publishes = || core.publish_count.load(Ordering::SeqCst);
 
         reconciler
-            .apply((1..=4).map(schedulable).collect())
+            .apply(&(1..=4).map(schedulable).collect::<Vec<_>>())
             .await
             .expect("apply");
         assert_eq!(
@@ -505,7 +505,7 @@ mod tests {
         let mut other = schedulable(5);
         other.routing_group = "other".to_string();
         reconciler
-            .apply((1..=4).map(schedulable).chain([other]).collect())
+            .apply(&(1..=4).map(schedulable).chain([other]).collect::<Vec<_>>())
             .await
             .expect("apply");
         assert_eq!(publishes(), 2);
@@ -521,7 +521,7 @@ mod tests {
         let mut reconciler = CatalogReconciler::new(Arc::clone(&core));
 
         let error = reconciler
-            .apply(vec![schedulable(1), schedulable(1)])
+            .apply(&[schedulable(1), schedulable(1)])
             .await
             .expect_err("duplicates are rejected");
         assert!(

@@ -399,7 +399,7 @@ models:
 
     async fn register(selector: &Selector, workers: Vec<WorkerRequest>) {
         CatalogReconciler::new(Arc::clone(selector.service.core()))
-            .apply(workers)
+            .apply(&workers)
             .await
             .expect("reconcile should succeed");
     }
@@ -747,7 +747,7 @@ worker_selection:
         let duplicate = incomplete_registration(1);
 
         let error = CatalogReconciler::new(Arc::clone(selector.service.core()))
-            .apply(vec![duplicate.clone(), duplicate])
+            .apply(&[duplicate.clone(), duplicate])
             .await
             .expect_err("duplicate IDs must be rejected");
         assert!(error.to_string().contains("duplicate worker_id 1"));
