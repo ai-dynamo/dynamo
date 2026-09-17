@@ -200,18 +200,34 @@ def dated_tags(image: str) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------- #
 # PyPI
 # --------------------------------------------------------------------------- #
-def published_wheels() -> set[str] | None:
-    """Published ``ai-dynamo`` dev versions; ``None`` when the index is unreachable."""
+def published_wheels(package: str) -> set[str] | None:
+    """Published dev versions for ``package``; ``None`` when its index is unreachable."""
     try:
-        with urllib.request.urlopen(f"{PYPI}/ai-dynamo/", timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(f"{PYPI}/{package}/", timeout=TIMEOUT) as resp:
             html = resp.read().decode()
     except TRANSPORT_ERRORS as exc:
-        warn(f"pypi.nvidia.com index fetch failed: {exc}")
+        warn(f"pypi.nvidia.com index fetch for {package} failed: {exc}")
         return None
     except Exception as exc:
-        warn(f"pypi.nvidia.com index returned an unexpected response: {exc}")
+        warn(
+            f"pypi.nvidia.com index for {package} returned an unexpected response: {exc}"
+        )
         raise
-    return set(re.findall(r"ai_dynamo-(\d+\.\d+\.\d+\.dev\d{8})", html))
+    normalized = package.replace("-", "_")
+    return set(
+        re.findall(rf"{re.escape(normalized)}-(\d+\.\d+\.\d+\.dev\d{{8}})", html)
+    )
+
+
+def published_nightly_packages() -> dict[str, set[str]] | None:
+    """Published dev versions for every package that a ledger row advertises."""
+    published: dict[str, set[str]] = {}
+    for package in NIGHTLY_PACKAGES:
+        versions = published_wheels(package)
+        if versions is None:
+            return None
+        published[package] = versions
+    return published
 
 
 def wheel_for(yyyymmdd: str, sha: str, published: set[str]) -> str | None:
@@ -248,6 +264,11 @@ def newest_published(published: set[str]) -> str | None:
     return max(published, key=key)
 
 
+def ledger_version_published(version: str, published: dict[str, set[str]]) -> bool:
+    """Whether every package advertised by a ledger row published ``version``."""
+    return all(version in published[package] for package in NIGHTLY_PACKAGES)
+
+
 # --------------------------------------------------------------------------- #
 # assembly
 # --------------------------------------------------------------------------- #
@@ -277,7 +298,10 @@ class NightlyBuild:
     packages: list[str]
 
 
-def build(published: set[str]) -> tuple[list[NightlyBackendBuild], list[NightlyBuild]]:
+def build(
+    published: dict[str, set[str]],
+) -> tuple[list[NightlyBackendBuild], list[NightlyBuild]]:
+    dynamo_wheels = published["ai-dynamo"]
     rows: list[NightlyBackendBuild] = []
     tags_by_backend: dict[str, dict[str, str]] = {}
 
@@ -331,9 +355,9 @@ def build(published: set[str]) -> tuple[list[NightlyBackendBuild], list[NightlyB
                 # than the container commit, and no pin moved since. Otherwise use
                 # this version's own run, whose commits were read.
                 yyyymmdd, sha = nights[0]
-                wheel = newest_published(published)
+                wheel = newest_published(dynamo_wheels)
                 if not wheel or wheel_date(wheel) < yyyymmdd or pins_moved_since(sha):
-                    wheel = run_wheel(nights, published)
+                    wheel = run_wheel(nights, dynamo_wheels)
             else:
                 # Pinned rows describe one immutable build, so the wheel has to
                 # come from the exact commit the container tag names. Fall back to
@@ -341,7 +365,7 @@ def build(published: set[str]) -> tuple[list[NightlyBackendBuild], list[NightlyB
                 # container tag, when none of its nights published a wheel.
                 chosen = None
                 for yyyymmdd, sha in nights:
-                    wheel = wheel_for(yyyymmdd, sha, published)
+                    wheel = wheel_for(yyyymmdd, sha, dynamo_wheels)
                     if wheel:
                         chosen = (yyyymmdd, sha, wheel)
                         break
@@ -362,8 +386,8 @@ def build(published: set[str]) -> tuple[list[NightlyBackendBuild], list[NightlyB
     # A ledger row describes the package train, not one backend selector row.
     # Require every runtime repository to publish the same dated tag before
     # showing it; otherwise the existing package list would overstate what
-    # shipped. `wheel_for` also confirms that the matching ai-dynamo wheel is
-    # still present on the NVIDIA package index.
+    # shipped. A ledger row names every package in NIGHTLY_PACKAGES, so require
+    # every one at the exact resolved version before writing it.
     common_dates = (
         set.intersection(*(set(tags) for tags in tags_by_backend.values()))
         if len(tags_by_backend) == len(FRAMEWORKS)
@@ -375,8 +399,8 @@ def build(published: set[str]) -> tuple[list[NightlyBackendBuild], list[NightlyB
         if len(shas) != 1:
             continue
         sha = shas.pop()
-        version = wheel_for(yyyymmdd, sha, published)
-        if version:
+        version = wheel_for(yyyymmdd, sha, dynamo_wheels)
+        if version and ledger_version_published(version, published):
             ledger.append(
                 NightlyBuild(
                     version=version,
@@ -473,11 +497,11 @@ def main() -> int:
         # Both guards protect the same invariant: the publish job syncs whatever
         # this writes, so a module that resolved nothing would replace the live
         # selector's rows with nothing. Fail and leave the published copy alone.
-        published = published_wheels()
+        published = published_nightly_packages()
         if published is None:
             print(
-                "error: pypi.nvidia.com unreachable; refusing to write a module "
-                "with no wheel commands",
+                "error: a required pypi.nvidia.com package index is unreachable; "
+                "refusing to write a module with incomplete package claims",
                 file=sys.stderr,
             )
             return 1
