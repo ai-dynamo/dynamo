@@ -73,7 +73,7 @@ def _mock_fetch_bytes(
         side_effect: If set, the mock raises this exception instead of returning.
     """
 
-    async def _fetch(url, timeout, *, policy=None):
+    async def _fetch(url, timeout, *, policy=None, max_bytes=None):
         if delay > 0:
             await asyncio.sleep(delay)
         if side_effect is not None:
@@ -205,6 +205,18 @@ async def test_http_timeout_raises_408(loader: ImageLoader) -> None:
         assert exc_info.value.status == 408
         assert "Timeout loading image" in exc_info.value.message
         assert "https://example.com/img.png" in exc_info.value.url
+
+
+async def test_http_fetch_honors_configured_media_limit(
+    loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "1")
+    mock_fetch = _mock_fetch_bytes()
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        await loader.load_image("https://example.com/limited.png")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
 
 
 async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:

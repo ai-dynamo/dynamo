@@ -76,6 +76,25 @@ async def test_load_video_uses_vllm_media_connector():
 
 
 @pytest.mark.asyncio
+async def test_http_fetch_honors_configured_media_limit(monkeypatch):
+    monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "1")
+    loader = VideoLoader(
+        url_policy=UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    )
+    frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
+    metadata = {"fps": 1.0, "frames_indices": [0], "total_num_frames": 1}
+    mock_fetch = AsyncMock(return_value=b"video")
+    mock_decode = AsyncMock(return_value=(frames, metadata))
+    monkeypatch.setattr(video_loader_module, "fetch_bytes", mock_fetch)
+    monkeypatch.setattr(loader, "_create_vllm_video_io", lambda kwargs=None: object())
+    monkeypatch.setattr(loader, "_decode_video_bytes", mock_decode)
+
+    await loader._load_video_with_vllm("https://example.com/limited.mp4")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
+
+
+@pytest.mark.asyncio
 async def test_load_video_batch_uses_url_loader():
     loader = VideoLoader()
     first = (
