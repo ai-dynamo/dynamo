@@ -164,9 +164,20 @@ pub struct PositionalIndexer {
     jump_size: usize,
 
     search_mode: SearchMode,
+    lifecycle: super::HashLifecycle,
 }
 
 impl PositionalIndexer {
+    pub fn new_with_delegate(
+        jump_size: usize,
+        search_mode: SearchMode,
+        delegate: Arc<dyn super::KvIndexerDelegate>,
+    ) -> Self {
+        let mut backend = Self::new_with_mode(jump_size, search_mode);
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     /// Create a new PositionalIndexer.
     ///
     /// The search mode defaults to whatever [`DYN_ROUTER_POSITIONAL_SEARCH_MODE`] selects
@@ -192,6 +203,7 @@ impl PositionalIndexer {
             index: DashMap::with_hasher(FxBuildHasher),
             jump_size,
             search_mode,
+            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -427,6 +439,7 @@ impl PositionalIndexer {
                 }
             }
 
+            self.lifecycle.insert(worker, seq_hash);
             // Insert into worker_blocks: worker -> seq_hash -> (position, local_hash)
             match worker_blocks_entry.insert(seq_hash, (position, local_hash)) {
                 Some(existing) if existing == (position, local_hash) => {}
@@ -478,6 +491,7 @@ impl PositionalIndexer {
             if let Some(mut entry) = self.index.get_mut(&(position, local_hash)) {
                 let _ = entry.remove(*seq_hash, worker);
             }
+            self.lifecycle.remove(worker, *seq_hash);
         }
 
         Ok(())
@@ -495,6 +509,7 @@ impl PositionalIndexer {
                 if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                     let _ = entry.remove(*seq_hash, key);
                 }
+                self.lifecycle.remove(key, *seq_hash);
             }
         }
     }
@@ -516,6 +531,7 @@ impl PositionalIndexer {
                     if let Some(mut entry) = self.index.get_mut(&(*position, *local_hash)) {
                         let _ = entry.remove(*seq_hash, worker);
                     }
+                    self.lifecycle.remove(worker, *seq_hash);
                 }
             }
         }

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures::StreamExt;
 use tokio::sync::OwnedSemaphorePermit;
-use tracing::Instrument;
 
 use dynamo_kv_router::selector::WorkerSelector;
 
@@ -15,7 +14,7 @@ use dynamo_runtime::{
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-use super::{PrefillCompletion, PrefillError, PrefillRouter};
+use super::{PrefillCompletion, PrefillError, PrefillRouter, handoff::PrefillTask};
 use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
@@ -69,7 +68,7 @@ where
                     && obj.contains_key("bootstrap_room")
             });
 
-        if !is_bootstrap {
+        let completion = if !is_bootstrap {
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
                     let detail = format!("Prefill router returned error in output stream: {error}");
@@ -84,12 +83,16 @@ where
                         .and_then(|usage| usage.prompt_tokens_details.clone());
                 }
             }
+            None
         } else {
-            tokio::spawn(async move {
+            Some(PrefillTask::spawn(async move {
                 let _task_guard = task_guard;
-                while prefill_response.next().await.is_some() {}
-            });
-        }
+                while let Some(output) = prefill_response.next().await {
+                    PrefillTask::check_output(&output)?;
+                }
+                Ok(())
+            }))
+        };
 
         // A CTX request that reaches EOS/stop during its one-token prefill step
         // is already complete and does not establish a KV-cache handoff. The
@@ -144,6 +147,7 @@ where
                 prompt_tokens_details,
             },
             worker_link: output.worker_trace_link.clone(),
+            completion,
         })
     }
 
@@ -152,19 +156,19 @@ where
         prefill_stream: ManyOut<Annotated<LLMEngineOutput>>,
         tracker: Option<Arc<RequestTracker>>,
         phase_transition_permit: OwnedSemaphorePermit,
-    ) {
-        let span = tracing::Span::current();
+    ) -> PrefillTask {
         let task_guard = self.task_guard.clone();
-        tokio::spawn(
-            async move {
-                drop(phase_transition_permit);
-                match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await {
-                    Ok(_) => tracing::debug!("Prefill background task completed"),
-                    Err(error) => tracing::warn!("Prefill background task error: {error:?}"),
-                }
+        PrefillTask::spawn(async move {
+            drop(phase_transition_permit);
+            match Self::consume_prefill_stream(prefill_stream, tracker, task_guard).await? {
+                PrefillCompletion::Handoff {
+                    completion: Some(task),
+                    ..
+                } => task.wait().await,
+                PrefillCompletion::Terminal { output } => PrefillTask::check_output(&output),
+                _ => Ok(()),
             }
-            .instrument(span),
-        );
+        })
     }
 }
 
@@ -192,6 +196,59 @@ mod tests {
             disaggregated_params: Some(json!({})),
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn bootstrap_tail_failures_reach_completion_observer() {
+        for failure in [
+            Annotated::from_error("connection closed during prefill"),
+            Annotated::from_data(LLMEngineOutput::error("backend prefill failed".to_string())),
+            Annotated::from_data(LLMEngineOutput::cancelled()),
+        ] {
+            let first = Annotated::from_data(LLMEngineOutput {
+                disaggregated_params: Some(json!({
+                    "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
+                })),
+                ..Default::default()
+            });
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+            let stream = stream::iter([first]).chain(stream::once(async move {
+                release_rx.await.unwrap();
+                failure
+            }));
+            let response = ResponseStream::new(Box::pin(stream), Arc::new(Controller::default()));
+            let result = PrefillRouter::<DefaultWorkerSelector>::consume_prefill_stream(
+                response, None, None,
+            )
+            .await
+            .unwrap();
+            let PrefillCompletion::Handoff {
+                completion: Some(completion),
+                ..
+            } = result
+            else {
+                panic!("expected an early handoff with a completion observer");
+            };
+            release_tx.send(()).unwrap();
+            let context = Arc::new(Controller::default());
+            let decode: ManyOut<Annotated<LLMEngineOutput>> =
+                ResponseStream::new(Box::pin(stream::pending()), context.clone());
+            match completion
+                .forward_decode(async { Ok(decode) }, context)
+                .await
+            {
+                Err(error) => assert!(error.to_string().contains("Prefill")),
+                Ok(mut response) => {
+                    let output =
+                        tokio::time::timeout(std::time::Duration::from_secs(1), response.next())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert!(output.err().is_some());
+                    assert!(response.next().await.is_none());
+                }
+            }
+        }
     }
 
     #[tokio::test]

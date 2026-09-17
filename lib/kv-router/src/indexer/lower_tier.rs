@@ -498,13 +498,21 @@ pub struct LowerTierMatchDetails {
 
 /// Standalone lower-tier continuation index.
 pub struct LowerTierIndexer {
+    lifecycle: super::HashLifecycle<IndexedResidencyOwner>,
     edges: DashMap<TransitionKey, EdgeOwnersEntry, FxBuildHasher>,
 }
 
 impl LowerTierIndexer {
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     pub fn new() -> Self {
         Self {
             edges: DashMap::with_hasher(FxBuildHasher),
+            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -608,6 +616,7 @@ impl LowerTierIndexer {
             }
 
             worker_map.insert(block.block_hash, key);
+            self.lifecycle.insert(indexed_owner, block.block_hash);
             parent_hash = Some(block.block_hash);
         }
         Ok(())
@@ -635,6 +644,7 @@ impl LowerTierIndexer {
                 };
 
                 self.remove_owner_from_edge(key, indexed_owner);
+                self.lifecycle.remove(indexed_owner, *block_hash);
             }
 
             worker_map.is_empty()
@@ -689,8 +699,9 @@ impl LowerTierIndexer {
             return;
         }
 
-        for (_, key) in owner_state.blocks {
+        for (hash, key) in owner_state.blocks {
             self.remove_owner_from_edge(key, indexed_owner);
+            self.lifecycle.remove(indexed_owner, hash);
         }
     }
 

@@ -121,6 +121,7 @@ pub struct ConcurrentRadixTree {
     root: SharedBlock,
 
     cleanup: CleanupState,
+    lifecycle: super::HashLifecycle,
 }
 
 impl Default for ConcurrentRadixTree {
@@ -154,11 +155,18 @@ impl Drop for ConcurrentRadixTree {
 }
 
 impl ConcurrentRadixTree {
+    pub fn new_with_delegate(delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        let mut backend = Self::new();
+        backend.lifecycle = super::HashLifecycle::new(delegate);
+        backend
+    }
+
     /// Create a new `ConcurrentRadixTree`.
     pub fn new() -> Self {
         Self {
             root: Arc::new(RwLock::new(Block::new())),
             cleanup: CleanupState::new(),
+            lifecycle: super::HashLifecycle::default(),
         }
     }
 
@@ -335,6 +343,7 @@ impl ConcurrentRadixTree {
             None => self.root.clone(),
         };
 
+        let mut previous_hash = None;
         let mut needs_worker_insert = false;
         let mut duplicate_store = !op.blocks.is_empty();
 
@@ -373,6 +382,9 @@ impl ConcurrentRadixTree {
                 }
             };
 
+            if let Some(hash) = previous_hash.replace(block_data.block_hash) {
+                self.lifecycle.insert(worker, hash);
+            }
             // Update lookup
             match worker_lookup.insert(block_data.block_hash, child.clone()) {
                 Some(existing) if Arc::ptr_eq(&existing, &child) => {}
@@ -391,6 +403,9 @@ impl ConcurrentRadixTree {
             duplicate_store = false;
         }
 
+        if let Some(hash) = previous_hash {
+            self.lifecycle.insert(worker, hash);
+        }
         if duplicate_store && let Some(counters) = counters {
             counters.inc_warning(EventWarningKind::DuplicateStore);
         }
@@ -429,6 +444,7 @@ impl ConcurrentRadixTree {
             };
 
             block.write().drop_worker(worker);
+            self.lifecycle.remove(worker, block_hash);
         }
 
         Ok(())
@@ -448,8 +464,9 @@ impl ConcurrentRadixTree {
 
         for worker in workers {
             if let Some(worker_lookup) = lookup.remove(&worker) {
-                for (_, block) in worker_lookup.into_iter() {
+                for (hash, block) in worker_lookup.into_iter() {
                     block.write().drop_worker(worker);
+                    self.lifecycle.remove(worker, hash);
                 }
             }
         }
@@ -463,8 +480,9 @@ impl ConcurrentRadixTree {
     ) {
         let key = WorkerWithDpRank { worker_id, dp_rank };
         if let Some(worker_lookup) = lookup.remove(&key) {
-            for (_, block) in worker_lookup.into_iter() {
+            for (hash, block) in worker_lookup.into_iter() {
                 block.write().drop_worker(key);
+                self.lifecycle.remove(key, hash);
             }
         }
     }
