@@ -27,6 +27,7 @@ from collections.abc import AsyncGenerator, Iterator
 from typing import Any
 
 from riva.client import AudioEncoding, RecognitionConfig, StreamingRecognitionConfig
+from riva.client.asr import streaming_request_generator
 
 from dynamo._core import Context
 from dynamo.vllm.realtime.connection import RealtimeConnection, RealtimeTurn
@@ -145,13 +146,10 @@ class SpeechNimRealtimeTranscriptionHandler:
         self,
         turn: _AudioTurn,
         loop: asyncio.AbstractEventLoop,
+        responses,
     ) -> str:
         final_segments: list[str] = []
         emitted_interim = ""
-        responses = self.asr_service.streaming_response_generator(
-            audio_chunks=turn.chunks(),
-            streaming_config=self._streaming_config(),
-        )
         for response in responses:
             for result in response.results:
                 if not result.alternatives:
@@ -174,14 +172,20 @@ class SpeechNimRealtimeTranscriptionHandler:
         return " ".join(final_segments) or emitted_interim
 
     async def _run_turn(self, turn: _AudioTurn, context: Context) -> None:
-        transcription_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._transcribe,
-                turn,
-                asyncio.get_running_loop(),
-            )
-        )
+        responses = None
+        transcription_task = None
         try:
+            # The SDK response generator hides the RPC handle. Reuse its request
+            # generator directly so cancellation can also stop the blocking RPC.
+            responses = self.asr_service.stub.StreamingRecognize(
+                streaming_request_generator(turn.chunks(), self._streaming_config()),
+                metadata=self.asr_service.auth.get_auth_metadata(),
+            )
+            transcription_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._transcribe, turn, asyncio.get_running_loop(), responses
+                )
+            )
             # The turn task starts with the first audio chunk so the backend can emit
             # interim results. Apply the backend deadline only after commit;
             # otherwise a long but valid utterance would consume the RPC budget.
@@ -200,18 +204,21 @@ class SpeechNimRealtimeTranscriptionHandler:
                     )
                 )
         except asyncio.CancelledError:
-            turn.close()
-            transcription_task.cancel()
             raise
         except Exception:
-            turn.close()
-            transcription_task.cancel()
             logger.exception("Speech NIM realtime transcription failed")
             await turn.events.put(
                 input_audio_transcription_failed_event(
                     turn.item_id, "Transcription failed"
                 )
             )
+        finally:
+            turn.close()
+            if responses is not None:
+                responses.cancel()
+            if transcription_task is not None:
+                transcription_task.cancel()
+                await asyncio.gather(transcription_task, return_exceptions=True)
 
     def _validate_session(self, session: Any) -> str | None:
         if not isinstance(session, dict) or session.get("type") != "transcription":
