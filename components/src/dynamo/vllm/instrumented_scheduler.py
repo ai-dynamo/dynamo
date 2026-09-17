@@ -5388,18 +5388,23 @@ class InstrumentedScheduler(AsyncScheduler):
             raise RuntimeError(
                 "attention-DP warm-up round settled a stage this rank never closed"
             )
+        verdict = view.ok
+        if not isinstance(verdict, bool):
+            raise RuntimeError(
+                "attention-DP warm-up round settled a stage without a verdict"
+            )
         batch, _, detail = local
         self._kvwarm_stage_local = None
         logger.info(
             "KVWARM: stage batch=%s settled by the group (ok=%s) at round %d",
             batch,
-            view.ok,
+            verdict,
             self._kvwarm_round_seq,
         )
-        if not view.ok:
+        if not verdict:
             detail = {**detail, "group_fallback": True}
             self._kvwarm_shed_chains()
-        self._kvwarm_stage_settle(batch, view.ok, detail)
+        self._kvwarm_stage_settle(batch, verdict, detail)
         return True
 
     def _kvwarm_stage_settle(self, batch: int | None, ok: bool, detail: dict) -> None:
