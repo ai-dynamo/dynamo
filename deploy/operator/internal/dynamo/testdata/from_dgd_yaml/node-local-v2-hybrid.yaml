@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
-  lpu_servers: lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-0
+  lpu_servers: lpx-${GROVE_PCSG_INDEX}-agt-0
   tokenizer_dir: /testdata/node-local-v2-connected-lpx/tokenizer
 immutable: true
 metadata:
@@ -10,7 +10,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
-  name: ltudmjcv-decode-97936407dc305636
+  name: node-local-v2-hybrid-9d06-decode-f8838533ed7ff824
   namespace: test
 ---
 data:
@@ -19,9 +19,9 @@ data:
 
     [datacenters]
     [datacenters.racks]
-    [datacenters.racks.lpu-wkr-m-0]
+    [datacenters.racks.agt]
     available_nodes = [0, 1, 2, 3]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-{node}.${GROVE_HEADLESS_SERVICE}'
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt-{node}.${GROVE_HEADLESS_SERVICE}'
     preferred_start = 0
   gas_dir: /nfs/node-local-v2-connected-lpx
   model_config.toml: |
@@ -49,7 +49,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
-  name: ltudmjcv-lpu-6bebe5759af346e9
+  name: node-local-v2-hybrid-9d06-lpu-5a21b650237fd262
   namespace: test
 ---
 metadata:
@@ -60,7 +60,7 @@ metadata:
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
   labels:
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-hybrid
-  name: ltudmjcv
+  name: node-local-v2-hybrid-9d06
   namespace: test
 spec:
   replicas: 1
@@ -70,174 +70,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 97936407dc3056369df53ef5ff8f62f4b4f451ae1af986e6fc78ad4d75c37c31
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
-        scheduling.lpu.nvidia.com/role: cyborg-worker
-      labels:
-        lpx.nvidia.com/execution-role: gpu
-        lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: lpu
-        nvidia.com/dynamo-component: lpu
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: node-local-v2-hybrid
-        nvidia.com/dynamo-namespace: test-node-local-v2-hybrid
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: node-local-v2-hybrid-lpu
-      name: lpu-engine-gpu
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - args:
-            - --expand-hosts
-            - --
-            - /opt/gpu-runtime
-            - serve
-            command:
-            - /usr/local/bin/cyborg-entrypoint
-            env:
-            - name: CYBORG_BATCH_SIZE
-              value: "1"
-            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
-              value: "1"
-            - name: CYBORG_FPGA_GPI_REPLICA_INDEX
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
-            - name: CYBORG_SWA_CACHE_IDS
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
-            - name: DYN_COMPONENT
-              value: decode
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_FORWARDPASS_METRIC_PORT
-              value: "20380"
-            - name: DYN_HEALTH_CHECK_ENABLED
-              value: "false"
-            - name: DYN_NAMESPACE
-              value: test-node-local-v2-hybrid
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v2-hybrid
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: DYN_SYSTEM_ENABLED
-              value: "true"
-            - name: DYN_SYSTEM_PORT
-              value: "9090"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: '["generate"]'
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
-            - name: GBUILD_MANIFEST_PATH
-              value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
-            - name: NATS_SERVER
-              value: nats-address
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "n"
-            - name: NIXL_TELEMETRY_EXPORTER
-              value: prometheus
-            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
-              value: "19090"
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: RDMA_PORT
-              value: "19877"
-            - name: SERVER_HOSTS_FILE
-              value: /tmp/lpu_servers
-            - name: TOKENIZER_DIR
-              valueFrom:
-                configMapKeyRef:
-                  key: tokenizer_dir
-                  name: ltudmjcv-decode-97936407dc305636
-            - name: TOTAL_REPLICAS
-              value: "1"
-            image: example.invalid/gpu-runtime:test
-            livenessProbe:
-              failureThreshold: 1
-              httpGet:
-                path: /live
-                port: system
-              periodSeconds: 5
-              timeoutSeconds: 4
-            name: main
-            ports:
-            - containerPort: 9090
-              name: system
-              protocol: TCP
-            - containerPort: 19090
-              name: nixl
-              protocol: TCP
-            readinessProbe:
-              failureThreshold: 3
-              httpGet:
-                path: /health
-                port: system
-              periodSeconds: 10
-              timeoutSeconds: 4
-            resources:
-              claims:
-              - name: gpu
-            startupProbe:
-              failureThreshold: 720
-              httpGet:
-                path: /live
-                port: system
-              periodSeconds: 10
-              timeoutSeconds: 5
-            volumeMounts:
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev/infiniband
-              name: infiniband
-            - mountPath: /nfs
-              name: model-storage
-            - mountPath: /dev/shm
-              name: shared-memory
-          resourceClaims:
-          - name: gpu
-            resourceClaimTemplateName: decode-gpu
-          restartPolicy: Always
-          schedulerName: default-scheduler
-          securityContext:
-            fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
-          terminationGracePeriodSeconds: 60
-          volumes:
-          - hostPath:
-              path: /dev/infiniband
-              type: Directory
-            name: infiniband
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: ltudmjcv-decode-97936407dc305636
-            name: config
-        replicas: 1
-        roleName: lpu-engine-gpu
-        startsAfter:
-        - lpu-wkr-m-0
-    - annotations:
-        lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 6bebe5759af346e96ad5bf5bb097effd88b0b56bb7339adbda3868add7aac2e9
+        nvidia.com/extra-resources-hash: 5a21b650237fd262f004a640a67c5ecac0781784fa057703ee95223ab6a30c59
         scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
         scheduling.lpu.nvidia.com/model: default
@@ -252,7 +85,7 @@ spec:
         nvidia.com/dynamo-namespace: test-node-local-v2-hybrid
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: node-local-v2-hybrid-lpu
-      name: lpu-wkr-m-0
+      name: agt
       spec:
         minAvailable: 4
         podSpec:
@@ -278,7 +111,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: gas_dir
-                  name: ltudmjcv-lpu-6bebe5759af346e9
+                  name: node-local-v2-hybrid-9d06-lpu-5a21b650237fd262
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
@@ -312,7 +145,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: topologies
-                  name: ltudmjcv-lpu-6bebe5759af346e9
+                  name: node-local-v2-hybrid-9d06-lpu-5a21b650237fd262
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
@@ -405,10 +238,177 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: ltudmjcv-lpu-6bebe5759af346e9
+              name: node-local-v2-hybrid-9d06-lpu-5a21b650237fd262
             name: config
         replicas: 4
-        roleName: lpu-wkr-m-0
+        roleName: agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: node-local-v2-hybrid
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: f8838533ed7ff8246dfdef9db2185d041489d1dc07addbf57f5893ae77eb5139
+        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
+        scheduling.lpu.nvidia.com/role: cyborg-worker
+      labels:
+        lpx.nvidia.com/execution-role: gpu
+        lpx.nvidia.com/serving: "true"
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v2-hybrid
+        nvidia.com/dynamo-namespace: test-node-local-v2-hybrid
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v2-hybrid-lpu
+      name: cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - --expand-hosts
+            - --
+            - /opt/gpu-runtime
+            - serve
+            command:
+            - /usr/local/bin/cyborg-entrypoint
+            env:
+            - name: CYBORG_BATCH_SIZE
+              value: "1"
+            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
+              value: "1"
+            - name: CYBORG_FPGA_GPI_REPLICA_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: CYBORG_SWA_CACHE_IDS
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: test-node-local-v2-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v2-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RDMA_PORT
+              value: "19877"
+            - name: SERVER_HOSTS_FILE
+              value: /tmp/lpu_servers
+            - name: TOKENIZER_DIR
+              valueFrom:
+                configMapKeyRef:
+                  key: tokenizer_dir
+                  name: node-local-v2-hybrid-9d06-decode-f8838533ed7ff824
+            - name: TOTAL_REPLICAS
+              value: "1"
+            image: example.invalid/gpu-runtime:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              claims:
+              - name: gpu
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev/infiniband
+              name: infiniband
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: decode-gpu
+          restartPolicy: Always
+          schedulerName: default-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - hostPath:
+              path: /dev/infiniband
+              type: Directory
+            name: infiniband
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: node-local-v2-hybrid-9d06-decode-f8838533ed7ff824
+            name: config
+        replicas: 1
+        roleName: cond
+        startsAfter:
+        - agt
     headlessServiceConfig:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
@@ -418,10 +418,10 @@ spec:
         scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
       cliqueNames:
-      - lpu-wkr-m-0
-      - lpu-engine-gpu
+      - agt
+      - cond
       minAvailable: 1
-      name: lpu
+      name: lpx
       replicas: 1
     terminationDelay: 15m0s
 status:

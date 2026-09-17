@@ -128,7 +128,7 @@ func TestLPXHybridPreservesKVTransferTopology(t *testing.T) {
 			t.Log("The Cyborg role receives every topology domain, not an empty mounted directory")
 			items := map[string]string{}
 			for _, clique := range pcs.Spec.Template.Cliques {
-				if clique.Name != selected.CyborgTemplateName() {
+				if clique.Name != plan.CyborgTemplate {
 					continue
 				}
 				require.Equal(t, binding.Name, clique.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName])
@@ -1230,7 +1230,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, lpx.SchedulerName, agent.Spec.PodSpec.SchedulerName)
 	require.Equal(t, int32(plan.Agents[0].Replicas), agent.Spec.Replicas)
 	require.Contains(t, cyborg.Spec.StartsAfter, agent.Name)
-	require.NotContains(t, cyborg.Spec.StartsAfter, "lpu-ldr")
+	require.NotContains(t, cyborg.Spec.StartsAfter, "cond")
 
 	main := agent.Spec.PodSpec.Containers[0]
 	require.Equal(t, "agent", main.Name)
@@ -1356,7 +1356,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, lpuConfigName, extraResources[1].GetName())
 	require.Equal(t, dgd.Namespace, decodeConfig.Namespace)
 	require.Len(t, decodeConfig.Data, 2)
-	require.Equal(t, []string{"lpu-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-0"}, strings.Split(decodeConfig.Data["lpu_servers"], "\n"))
+	require.Equal(t, []string{"lpx-${GROVE_PCSG_INDEX}-agt-0"}, strings.Split(decodeConfig.Data["lpu_servers"], "\n"))
 	require.NotEmpty(t, decodeConfig.Data["tokenizer_dir"])
 	decodeHash := lpx.LPUConfigMapHash(decodeConfig)
 	require.Equal(t, decodeHash, cyborg.Annotations[commonconsts.AnnotationExtraResourcesHash])
@@ -1600,15 +1600,16 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	t.Log("Render the complete LPX workload with ordinary pod spec overrides")
 	selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, newTestDataModelRegistry(t, t.TempDir()))
 	require.NoError(t, err)
+	plan := mustPlanSelectedLPX(t, source, selected)
 	pcs, _, err := renderPodCliqueSet(t.Context(), source,
 		&configv1alpha1.OperatorConfiguration{
 			MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 		},
 		&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected,
-		mustPlanSelectedLPX(t, source, selected), newLPXRenderDeployment(t, source))
+		plan, newLPXRenderDeployment(t, source))
 	require.NoError(t, err)
 	cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
-		return clique.Name == selected.CyborgTemplateName()
+		return clique.Name == plan.CyborgTemplate
 	})
 	require.GreaterOrEqual(t, cliqueIndex, 0)
 	podSpec := pcs.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec

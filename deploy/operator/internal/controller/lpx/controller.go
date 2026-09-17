@@ -487,9 +487,9 @@ func (r *graphReconciler) deleteStaleLPXConfigMaps(ctx context.Context, deployme
 }
 
 func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) error {
-	// Use the same normalized identity for endpoint creation and retirement.
-	component := lpx.ServingComponent(source)
-	serviceName := dynamo.NormalizeKubeResourceName(dynamo.PCSNameForLPX(deployment) + "-" + component.ComponentName)
+	// One serving endpoint belongs to the engine, independently of mutable component names.
+	pcsName := dynamo.PCSNameForLPX(deployment)
+	serviceName := pcsName + "-serve"
 
 	if !commoncontroller.IsK8sDiscoveryEnabled(r.Config.Discovery.Backend, source.Annotations) {
 		service := &corev1.Service{}
@@ -502,6 +502,9 @@ func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1a
 		}
 		return client.IgnoreNotFound(r.Delete(ctx, service, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &service.UID, ResourceVersion: &service.ResourceVersion}}))
 	}
+
+	// Source component metadata is needed only when publishing the serving endpoint.
+	component := lpx.ServingComponent(source)
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName: serviceName, Namespace: deployment.Namespace,
 		ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
@@ -514,6 +517,6 @@ func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1a
 	}
 	// Keep the endpoint on this materialization even when another child shares the source.
 	service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
-	service.Spec.Selector[grovecommon.LabelPartOfKey] = dynamo.PCSNameForLPX(deployment)
+	service.Spec.Selector[grovecommon.LabelPartOfKey] = pcsName
 	return r.syncLPXResource(ctx, deployment, service)
 }

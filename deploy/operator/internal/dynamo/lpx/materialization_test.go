@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -76,42 +77,69 @@ func TestPlanMaterializationBoundsGeneratedPodHostnames(t *testing.T) {
 	hybridProjection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyXt8888, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)))
 	lpuOnlyProjection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyXt8888, PipelineSingle, snapshot)
 
-	t.Log("Use component-derived names at the minimum collision-resistant group budget")
-	tests := []struct {
+	t.Log("Reserve readable roles at the maximum PCS length and scheduling replica count")
+	for _, test := range []struct {
 		name       string
-		pcsLength  int
+		models     int
 		projection *ModelProjection
 	}{
-		{
-			name: "hybrid", pcsLength: 14,
-			projection: hybridProjection,
-		},
-		{
-			name: "LPU-only", pcsLength: 26,
-			projection: lpuOnlyProjection,
-		},
-	}
-	for _, test := range tests {
+		{name: "hybrid", models: 1, projection: hybridProjection},
+		{name: "LPU-only", models: 1, projection: lpuOnlyProjection},
+		{name: "SpecDecode", models: 2, projection: lpuOnlyProjection},
+		{name: "maximum draft fanout", models: maxSpecDecodeNumDrafts + 1, projection: lpuOnlyProjection},
+	} {
 		t.Run(test.name, func(t *testing.T) {
-			test.projection.stage = "longcomponent"
-			workload := &SelectedWorkload{modelProjections: []*ModelProjection{test.projection}, scalingGroupReplicas: 1}
-			pcsName := strings.Repeat("a", test.pcsLength)
-			t.Log("Plan and verify materialization within the DNS hostname budget")
+			t.Log("Build independent projections without using component names in identities")
+			projections := make([]*ModelProjection, test.models)
+			for index := range projections {
+				projection := *test.projection
+				projection.stage = strings.Repeat("component", 7)
+				if test.models > 1 {
+					projection.pipeline = PipelineSpecDecode
+				}
+				projections[index] = &projection
+			}
+			workload := &SelectedWorkload{
+				modelProjections:     projections,
+				scalingGroupReplicas: int32(schedulingAttemptRequestBytesBudget / maximumSchedulingAttemptRequestBytes / test.models),
+			}
+			pcsName := strings.Repeat("a", MaxPodCliqueSetNameLength)
 			plan, err := workload.PlanNodeLocalMaterialization(pcsName)
 			require.NoError(t, err)
-			require.Equal(t, "longcomponent-wkr-m-0", plan.Agents[0].TemplateName)
-			require.Len(t, plan.LPXScalingGroupTemplate, 8)
-			hostname := materializedPodHostname(plan.Agents[0].CliqueName, plan.Agents[0].Replicas-1)
-			if test.projection.pipeline == PipelineLPX {
-				require.Equal(t, "longcomponent-engine-gpu", plan.CyborgTemplate)
-				hostname = materializedPodHostname(plan.CyborgClique, maximumCyborgPodIndex)
-			}
-			require.Len(t, hostname, validation.DNS1123LabelMaxLength)
-			require.Empty(t, validation.IsDNS1123Label(hostname))
+			require.Equal(t, pcsName+"-0-lpx", plan.LPXScalingGroup)
 
-			t.Log("Reject a PCS name that leaves one character too little for the group")
+			t.Log("Validate every role's Grove name budget and the last replica's Pod hostnames")
+			lastReplica := plan.ForReplica(plan.Replicas - 1)
+			hostnames := make([]string, 0, test.models+1)
+			if lastReplica.ConductorClique != "" {
+				require.Equal(t, "cond", plan.ConductorTemplate)
+				hostnames = append(hostnames, materializedPodHostname(lastReplica.ConductorClique, 0))
+				require.Equal(t, commonconsts.MaxCombinedGroveResourceNameLength,
+					len(pcsName)+len(lpxScalingGroupTemplateName)+len(plan.ConductorTemplate))
+			}
+			for _, agent := range lastReplica.Agents {
+				require.LessOrEqual(t, len(pcsName)+len(lpxScalingGroupTemplateName)+len(agent.TemplateName), commonconsts.MaxCombinedGroveResourceNameLength)
+				hostnames = append(hostnames, materializedPodHostname(agent.CliqueName, agent.Replicas-1))
+			}
+			if lastReplica.CyborgClique != "" {
+				require.Equal(t, "cond", plan.CyborgTemplate)
+				hostnames = append(hostnames, materializedPodHostname(lastReplica.CyborgClique, 0))
+			}
+			for _, hostname := range hostnames {
+				require.Empty(t, validation.IsDNS1123Label(hostname))
+			}
+
+			t.Log("Renaming authored components leaves every materialized identity unchanged")
+			for _, projection := range projections {
+				projection.stage = "short"
+			}
+			renamed, err := workload.PlanNodeLocalMaterialization(pcsName)
+			require.NoError(t, err)
+			require.Equal(t, plan, renamed)
+
+			t.Log("Reject a PCS name one character beyond Grove's combined name budget")
 			_, err = workload.PlanNodeLocalMaterialization(pcsName + "a")
-			require.ErrorContains(t, err, "derive LPU scaling-group template name")
+			require.ErrorContains(t, err, "exceeds the LPX maximum of 38 characters")
 		})
 	}
 }

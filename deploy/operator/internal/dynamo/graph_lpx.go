@@ -6,7 +6,7 @@ package dynamo
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -29,7 +29,7 @@ import (
 // RenderLPXBasePodCliqueSet applies shared Dynamo defaults to the Grove envelope
 // and independently owned LPX role templates. The LPX controller completes the
 // compiled workload and its identity. All pointer inputs except secretsRetriever
-// must be non-nil; preflight supplies the validated workload and child PCS name.
+// must be non-nil; preflight supplies the validated workload and its materialization plan.
 func RenderLPXBasePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
@@ -38,14 +38,14 @@ func RenderLPXBasePodCliqueSet(
 	kubeClient client.Reader,
 	secretsRetriever SecretsRetriever,
 	selectedWorkload *dynamolpx.SelectedWorkload,
-	pcsName string,
+	plan *dynamolpx.MaterializationPlan,
 ) (*grovev1alpha1.PodCliqueSet, *dynamolpx.RenderInput, error) {
 	// Reuse the Grove envelope, but keep LPX compilation out of normal rendering.
 	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
 	if err != nil {
 		return nil, nil, err
 	}
-	pcs.Name = pcsName
+	pcs.Name = plan.PodCliqueSetName
 	queue, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
 	if err != nil {
 		return nil, nil, err
@@ -71,7 +71,7 @@ func RenderLPXBasePodCliqueSet(
 		discoveryContext:            NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
 		validatedQueueName:          queue,
 		groveClusterTopologyDomains: topologyDomains,
-	}, selectedWorkload, pcsName)
+	}, selectedWorkload, plan)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -252,35 +252,33 @@ func lpxSchedulingMetadata(metadata map[string]string) map[string]string {
 	return selected
 }
 
-// PCSNameForLPX derives a stable identity from the owning LGD, not its mutable source.
+// PCSNameForLPX keeps the owning LGD's name readable without depending on mutable components.
+// The DGD handoff gives the LGD the same name as its source deployment.
+// deployment must be non-nil and have a valid Kubernetes name.
 func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
-	// Eight characters fit Grove's name budget; a leading letter also permits Services.
+	// Reserve room for Grove's group, role, replica indexes, and Pod suffixes.
+	const maxPrefixLength = dynamolpx.MaxPodCliqueSetNameLength - 1 - 4
+	prefix := strings.ReplaceAll(deployment.Name, ".", "-")
+	if prefix[0] >= '0' && prefix[0] <= '9' {
+		prefix = "lpx-" + prefix
+	}
+	prefix = strings.TrimRight(prefix[:min(len(prefix), maxPrefixLength)], "-")
+
+	// Hash the original identity so truncation, dot normalization, and replacement stay distinct.
 	digest := sha256.Sum256([]byte(deployment.Namespace + "/" + deployment.Name + "/" + string(deployment.UID)))
-	return "l" + strings.ToLower(base32.StdEncoding.EncodeToString(digest[:5])[:7])
-}
-
-func longestLPXCliqueNameLength(componentName string) int {
-	// At most eight drafts and one target use a single-digit model index.
-	return len(strings.ToLower(componentName)) + len(commonconsts.GroveRoleSuffixWorker) + 5
-}
-
-// LPXComponentNameBudget reserves the serving group's name and its longest clique.
-// Shared draft components use the serving component's generated names.
-func LPXComponentNameBudget(componentName string) int {
-	return len(componentName) + longestLPXCliqueNameLength(componentName)
+	return prefix + "-" + hex.EncodeToString(digest[:2])
 }
 
 // renderLPXComponents merges ordinary Dynamo defaults independently into every
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
-// Preflight has validated the runtime shape and every Agent template.
-func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, materializationName string) (*dynamolpx.RenderInput, []*grovev1alpha1.PodCliqueTemplateSpec, error) {
-	// Pass naming and runtime inputs; deployment identity is stamped only on final resources.
+// Preflight supplies the non-nil validated workload and materialization plan.
+func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, []*grovev1alpha1.PodCliqueTemplateSpec, error) {
+	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		MaterializationName: materializationName,
-		MinAvailable:        p.component.MinAvailable,
-		Stages:              make(map[string]corev1.PodTemplateSpec),
-		SSHSecretName:       p.operatorConfig.MPI.SSHSecretName,
+		MinAvailable:  p.component.MinAvailable,
+		Stages:        make(map[string]corev1.PodTemplateSpec),
+		SSHSecretName: p.operatorConfig.MPI.SSHSecretName,
 	}
 
 	// Resolve preserved alpha metadata once for all independently rendered roles.
@@ -337,7 +335,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, m
 		role.MinAvailable = nil
 		defaults := ComponentDefaultsFactory(string(v1beta1.ComponentTypeDecode))
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
-			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, materializationName, lpuTemplate.Spec)
+			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, plan, lpuTemplate.Spec)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -351,7 +349,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, m
 		gpu := p
 		gpu.component = role
 		gpu.componentName = component.ComponentName
-		gpu.r = ServiceRole{Name: workload.CyborgTemplateName(), Role: RoleMain, Replicas: *role.Replicas}
+		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: *role.Replicas}
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults, p.groveClusterTopologyDomains)
 		if err != nil {

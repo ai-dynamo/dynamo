@@ -32,21 +32,24 @@ func TestRenderRuntimeConfigMapSizeLimit(t *testing.T) {
 	require.ErrorContains(t, err, "data is 1048577 bytes; maximum is 1048576")
 }
 
-func TestLPXAuxiliaryNamesAreBounded(t *testing.T) {
-	t.Log("Use a source name already at the Kubernetes length limit")
-	root := strings.Repeat("a", validation.DNS1123SubdomainMaxLength)
+func TestLPXRuntimeConfigNamesMatchPodIdentity(t *testing.T) {
+	for _, root := range []string{"short", strings.Repeat("a", MaxPodCliqueSetNameLength), strings.Repeat("a", validation.LabelValueMaxLength)} {
+		t.Run(root, func(t *testing.T) {
+			t.Log("Render immutable runtime tables for PCS and Pod-label identity bounds")
+			data := map[string]string{"runtime": "config"}
+			lpu, err := renderRuntimeConfigMap("test-namespace", root+"-lpu", data)
+			require.NoError(t, err)
+			decode, err := renderRuntimeConfigMap("test-namespace", root+"-decode", data)
+			require.NoError(t, err)
 
-	t.Log("Render the LPU and decode ConfigMap names")
-	lpuName := LPUConfigMapName(root, "0123456789abcdef")
-	decodeName := boundedAuxiliaryName(root, "-decode-0123456789abcdef")
-
-	t.Log("Keep names valid and distinct while leaving short names unchanged")
-	require.Len(t, lpuName, validation.DNS1123SubdomainMaxLength)
-	require.Len(t, decodeName, validation.DNS1123SubdomainMaxLength)
-	require.Empty(t, validation.IsDNS1123Subdomain(lpuName))
-	require.Empty(t, validation.IsDNS1123Subdomain(decodeName))
-	require.NotEqual(t, lpuName, decodeName)
-	require.Equal(t, "short-lpu-0123456789abcdef", LPUConfigMapName("short", "0123456789abcdef"))
+			t.Log("Resolve the same LPU table from Pod identity and preserve each role suffix")
+			require.Equal(t, LPUConfigMapName(root, LPUConfigMapHash(lpu)), lpu.Name)
+			require.Equal(t, root+"-lpu-"+LPUConfigMapHash(lpu)[:16], lpu.Name)
+			require.Equal(t, root+"-decode-"+LPUConfigMapHash(decode)[:16], decode.Name)
+			require.Empty(t, validation.IsDNS1123Subdomain(lpu.Name))
+			require.Empty(t, validation.IsDNS1123Subdomain(decode.Name))
+		})
+	}
 }
 
 func TestLPURuntimeBuildRef(t *testing.T) {

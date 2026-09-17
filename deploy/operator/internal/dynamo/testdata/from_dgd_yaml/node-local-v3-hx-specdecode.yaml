@@ -7,19 +7,19 @@ data:
 
     [datacenters]
     [datacenters.racks]
-    [datacenters.racks.lpu-wkr-m-0]
+    [datacenters.racks.agt0]
     available_nodes = [0]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-{node}.${GROVE_HEADLESS_SERVICE}'
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt0-{node}.${GROVE_HEADLESS_SERVICE}'
     preferred_start = 0
 
-    [datacenters.racks.lpu-wkr-m-1]
+    [datacenters.racks.agt1]
     available_nodes = [0]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-1-{node}.${GROVE_HEADLESS_SERVICE}'
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt1-{node}.${GROVE_HEADLESS_SERVICE}'
     preferred_start = 0
 
-    [datacenters.racks.lpu-wkr-m-2]
+    [datacenters.racks.agt2]
     available_nodes = [0]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-2-{node}.${GROVE_HEADLESS_SERVICE}'
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt2-{node}.${GROVE_HEADLESS_SERVICE}'
     preferred_start = 0
   model_config.toml: |
     draft_to_target_port = 23456
@@ -101,7 +101,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-  name: ld55picp-lpu-3c4a4d4af295f6cc
+  name: node-local-v3-hx-specdecode-1f7a-lpu-4704125bb939e57b
   namespace: test
 ---
 metadata:
@@ -112,7 +112,7 @@ metadata:
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:13d09d8a4fee0861ed745cf2edb1c3e82d8aa0ffecb7a606270c2e311220bef7
   labels:
     nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
-  name: ld55picp
+  name: node-local-v3-hx-specdecode-1f7a
   namespace: test
 spec:
   replicas: 1
@@ -122,7 +122,544 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 3c4a4d4af295f6cc8c3a32de03d15e2dc07d279fa7d93d95a908841d032ff842
+        nvidia.com/extra-resources-hash: 4704125bb939e57bb6093d7b211bf1b1994f47a4c89e1e4d3958075aa50108b2
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:032d5479203438990d88c1acb177cde66ba776b7cf3ba2037460a1e5fd9ec4ea
+        scheduling.lpu.nvidia.com/model: draft0
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
+      labels:
+        lpx.nvidia.com/execution-role: lpu
+        lpx.nvidia.com/stage: draft
+        nvidia.com/dynamo-component: draft
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
+        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v3-hx-specdecode-draft
+      name: agt0
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - command:
+            - /bin/quasar-entrypoint
+            env:
+            - name: BMC_SSH_ENABLED
+              value: "false"
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GROQ_HAL_V2_BACKGROUND_METRICS
+              value: "false"
+            - name: GROQ_PG613_PORT_CONFIG
+              value: EB3
+            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
+              value: "false"
+            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
+              value: "0"
+            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
+              value: 0000:9a:00.0
+            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
+              value: 0000:7e:00.0
+            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
+              value: "0"
+            - name: GROQ_V2_RESET_ON_OPEN
+              value: "0"
+            - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
+              value: "false"
+            - name: LPU_FPGA_RECONFIGURE_METHOD
+              value: cvp
+            - name: LPU_MODEL_NAME
+              value: draft0
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: REDFISH_BMC_ENABLED
+              value: "false"
+            image: example.invalid/lpu-runtime:test
+            name: agent
+            readinessProbe:
+              failureThreshold: 3
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              successThreshold: 1
+              tcpSocket:
+                port: 2222
+              timeoutSeconds: 1
+            resources:
+              limits:
+                nvidia.com/lpu: "16"
+              requests:
+                nvidia.com/lpu: "16"
+            securityContext:
+              privileged: true
+              runAsGroup: 0
+              runAsNonRoot: false
+              runAsUser: 0
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev
+              name: host-dev
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /ssh-pk
+              name: ssh-secret
+              readOnly: true
+            - mountPath: /dev/shm
+              name: shared-memory
+          dnsPolicy: ClusterFirstWithHostNet
+          hostIPC: true
+          hostNetwork: true
+          initContainers:
+          - command:
+            - /bin/lp30-agent-v2-init
+            env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            image: example.invalid/lpu-runtime:test
+            name: prepare-lp30
+            resources: {}
+            securityContext:
+              privileged: true
+              runAsGroup: 0
+              runAsNonRoot: false
+              runAsUser: 0
+            volumeMounts:
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /dev
+              name: host-dev
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: lpu.nvidia.com/node
+            operator: Exists
+          - key: lpu.nvidia.com/lpu
+            operator: Exists
+          - key: lpu.nvidia.com/node-v2
+            operator: Exists
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: node-local-v3-hx-specdecode-1f7a-lpu-4704125bb939e57b
+            name: config
+        replicas: 1
+        roleName: agt0
+    - annotations:
+        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: 4704125bb939e57bb6093d7b211bf1b1994f47a4c89e1e4d3958075aa50108b2
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ac78cc79aa830484cc606f6bc1f81c9d2e7b3a42033bda25fb7ed3b012354bed
+        scheduling.lpu.nvidia.com/model: draft1
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
+      labels:
+        lpx.nvidia.com/execution-role: lpu
+        lpx.nvidia.com/stage: draft
+        nvidia.com/dynamo-component: draft
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
+        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v3-hx-specdecode-draft
+      name: agt1
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - command:
+            - /bin/quasar-entrypoint
+            env:
+            - name: BMC_SSH_ENABLED
+              value: "false"
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GROQ_HAL_V2_BACKGROUND_METRICS
+              value: "false"
+            - name: GROQ_PG613_PORT_CONFIG
+              value: EB3
+            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
+              value: "false"
+            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
+              value: "0"
+            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
+              value: 0000:9a:00.0
+            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
+              value: 0000:7e:00.0
+            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
+              value: "0"
+            - name: GROQ_V2_RESET_ON_OPEN
+              value: "0"
+            - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
+              value: "false"
+            - name: LPU_FPGA_RECONFIGURE_METHOD
+              value: cvp
+            - name: LPU_MODEL_NAME
+              value: draft1
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: REDFISH_BMC_ENABLED
+              value: "false"
+            image: example.invalid/lpu-runtime:test
+            name: agent
+            readinessProbe:
+              failureThreshold: 3
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              successThreshold: 1
+              tcpSocket:
+                port: 2222
+              timeoutSeconds: 1
+            resources:
+              limits:
+                nvidia.com/lpu: "16"
+              requests:
+                nvidia.com/lpu: "16"
+            securityContext:
+              privileged: true
+              runAsGroup: 0
+              runAsNonRoot: false
+              runAsUser: 0
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev
+              name: host-dev
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /ssh-pk
+              name: ssh-secret
+              readOnly: true
+            - mountPath: /dev/shm
+              name: shared-memory
+          dnsPolicy: ClusterFirstWithHostNet
+          hostIPC: true
+          hostNetwork: true
+          initContainers:
+          - command:
+            - /bin/lp30-agent-v2-init
+            env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            image: example.invalid/lpu-runtime:test
+            name: prepare-lp30
+            resources: {}
+            securityContext:
+              privileged: true
+              runAsGroup: 0
+              runAsNonRoot: false
+              runAsUser: 0
+            volumeMounts:
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /dev
+              name: host-dev
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: lpu.nvidia.com/node
+            operator: Exists
+          - key: lpu.nvidia.com/lpu
+            operator: Exists
+          - key: lpu.nvidia.com/node-v2
+            operator: Exists
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: node-local-v3-hx-specdecode-1f7a-lpu-4704125bb939e57b
+            name: config
+        replicas: 1
+        roleName: agt1
+    - annotations:
+        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: 4704125bb939e57bb6093d7b211bf1b1994f47a4c89e1e4d3958075aa50108b2
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:bbf856a3258227e3e1c5bfdf3c6929648c06853165e30be35de3cde7820ee06a
+        scheduling.lpu.nvidia.com/model: target
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
+      labels:
+        lpx.nvidia.com/execution-role: lpu
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
+        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v3-hx-specdecode-lpu
+      name: agt2
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - command:
+            - /bin/quasar-entrypoint
+            env:
+            - name: BMC_SSH_ENABLED
+              value: "false"
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GROQ_HAL_V2_BACKGROUND_METRICS
+              value: "false"
+            - name: GROQ_PG613_PORT_CONFIG
+              value: EB3
+            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
+              value: "false"
+            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
+              value: "0"
+            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
+              value: 0000:9a:00.0
+            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
+              value: 0000:7e:00.0
+            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
+              value: "0"
+            - name: GROQ_V2_RESET_ON_OPEN
+              value: "0"
+            - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
+              value: "false"
+            - name: LPU_FPGA_RECONFIGURE_METHOD
+              value: cvp
+            - name: LPU_MODEL_NAME
+              value: target
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: REDFISH_BMC_ENABLED
+              value: "false"
+            image: example.invalid/lpu-runtime:test
+            name: agent
+            readinessProbe:
+              failureThreshold: 3
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              successThreshold: 1
+              tcpSocket:
+                port: 2222
+              timeoutSeconds: 1
+            resources:
+              limits:
+                nvidia.com/lpu: "16"
+              requests:
+                nvidia.com/lpu: "16"
+            securityContext:
+              privileged: true
+              runAsGroup: 0
+              runAsNonRoot: false
+              runAsUser: 0
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev
+              name: host-dev
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /ssh-pk
+              name: ssh-secret
+              readOnly: true
+            - mountPath: /dev/shm
+              name: shared-memory
+          dnsPolicy: ClusterFirstWithHostNet
+          hostIPC: true
+          hostNetwork: true
+          initContainers:
+          - command:
+            - /bin/lp30-agent-v2-init
+            env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            image: example.invalid/lpu-runtime:test
+            name: prepare-lp30
+            resources: {}
+            securityContext:
+              privileged: true
+              runAsGroup: 0
+              runAsNonRoot: false
+              runAsUser: 0
+            volumeMounts:
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /dev
+              name: host-dev
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: lpu.nvidia.com/node
+            operator: Exists
+          - key: lpu.nvidia.com/lpu
+            operator: Exists
+          - key: lpu.nvidia.com/node-v2
+            operator: Exists
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: node-local-v3-hx-specdecode-1f7a-lpu-4704125bb939e57b
+            name: config
+        replicas: 1
+        roleName: agt2
+    - annotations:
+        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: 4704125bb939e57bb6093d7b211bf1b1994f47a4c89e1e4d3958075aa50108b2
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:13d09d8a4fee0861ed745cf2edb1c3e82d8aa0ffecb7a606270c2e311220bef7
         scheduling.lpu.nvidia.com/role: conductor
@@ -136,7 +673,7 @@ spec:
         nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: node-local-v3-hx-specdecode-lpu
-      name: lpu-ldr
+      name: cond
       spec:
         minAvailable: 1
         podSpec:
@@ -167,7 +704,7 @@ spec:
               -i /tmp/dynamo-lpu-ssh/private.key
             - --mpi-use-tcp
             - --allocation
-            - lpu-wkr-m-0:lpu-wkr-m-1:lpu-wkr-m-2
+            - agt0:agt1:agt2
             - --agent-disable-auto-restart
             - --agent-server-max-retries
             - "60"
@@ -334,551 +871,14 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: ld55picp-lpu-3c4a4d4af295f6cc
+              name: node-local-v3-hx-specdecode-1f7a-lpu-4704125bb939e57b
             name: config
         replicas: 1
-        roleName: lpu-ldr
+        roleName: cond
         startsAfter:
-        - lpu-wkr-m-0
-        - lpu-wkr-m-1
-        - lpu-wkr-m-2
-    - annotations:
-        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 3c4a4d4af295f6cc8c3a32de03d15e2dc07d279fa7d93d95a908841d032ff842
-        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:032d5479203438990d88c1acb177cde66ba776b7cf3ba2037460a1e5fd9ec4ea
-        scheduling.lpu.nvidia.com/model: draft0
-        scheduling.lpu.nvidia.com/role: agent
-        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
-      labels:
-        lpx.nvidia.com/execution-role: lpu
-        lpx.nvidia.com/stage: draft
-        nvidia.com/dynamo-component: draft
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: node-local-v3-hx-specdecode-draft
-      name: lpu-wkr-m-0
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - command:
-            - /bin/quasar-entrypoint
-            env:
-            - name: BMC_SSH_ENABLED
-              value: "false"
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
-            - name: GROQ_HAL_V2_BACKGROUND_METRICS
-              value: "false"
-            - name: GROQ_PG613_PORT_CONFIG
-              value: EB3
-            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
-              value: "false"
-            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
-              value: "0"
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
-              value: 0000:9a:00.0
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
-              value: 0000:7e:00.0
-            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
-              value: "0"
-            - name: GROQ_V2_RESET_ON_OPEN
-              value: "0"
-            - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
-              value: "false"
-            - name: LPU_FPGA_RECONFIGURE_METHOD
-              value: cvp
-            - name: LPU_MODEL_NAME
-              value: draft0
-            - name: NATS_SERVER
-              value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: REDFISH_BMC_ENABLED
-              value: "false"
-            image: example.invalid/lpu-runtime:test
-            name: agent
-            readinessProbe:
-              failureThreshold: 3
-              initialDelaySeconds: 10
-              periodSeconds: 5
-              successThreshold: 1
-              tcpSocket:
-                port: 2222
-              timeoutSeconds: 1
-            resources:
-              limits:
-                nvidia.com/lpu: "16"
-              requests:
-                nvidia.com/lpu: "16"
-            securityContext:
-              privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
-            volumeMounts:
-            - mountPath: /nfs
-              name: model-storage
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev
-              name: host-dev
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /ssh-pk
-              name: ssh-secret
-              readOnly: true
-            - mountPath: /dev/shm
-              name: shared-memory
-          dnsPolicy: ClusterFirstWithHostNet
-          hostIPC: true
-          hostNetwork: true
-          initContainers:
-          - command:
-            - /bin/lp30-agent-v2-init
-            env:
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            image: example.invalid/lpu-runtime:test
-            name: prepare-lp30
-            resources: {}
-            securityContext:
-              privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
-            volumeMounts:
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /dev
-              name: host-dev
-          restartPolicy: Always
-          schedulerName: lpx-scheduler
-          securityContext:
-            fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
-          terminationGracePeriodSeconds: 60
-          tolerations:
-          - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
-            operator: Exists
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - hostPath:
-              path: /dev
-              type: Directory
-            name: host-dev
-          - hostPath:
-              path: /sys
-              type: Directory
-            name: host-sys
-          - name: ssh-secret
-            secret:
-              defaultMode: 420
-              secretName: ssh-secret
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: ld55picp-lpu-3c4a4d4af295f6cc
-            name: config
-        replicas: 1
-        roleName: lpu-wkr-m-0
-    - annotations:
-        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 3c4a4d4af295f6cc8c3a32de03d15e2dc07d279fa7d93d95a908841d032ff842
-        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ac78cc79aa830484cc606f6bc1f81c9d2e7b3a42033bda25fb7ed3b012354bed
-        scheduling.lpu.nvidia.com/model: draft1
-        scheduling.lpu.nvidia.com/role: agent
-        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
-      labels:
-        lpx.nvidia.com/execution-role: lpu
-        lpx.nvidia.com/stage: draft
-        nvidia.com/dynamo-component: draft
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: node-local-v3-hx-specdecode-draft
-      name: lpu-wkr-m-1
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - command:
-            - /bin/quasar-entrypoint
-            env:
-            - name: BMC_SSH_ENABLED
-              value: "false"
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
-            - name: GROQ_HAL_V2_BACKGROUND_METRICS
-              value: "false"
-            - name: GROQ_PG613_PORT_CONFIG
-              value: EB3
-            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
-              value: "false"
-            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
-              value: "0"
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
-              value: 0000:9a:00.0
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
-              value: 0000:7e:00.0
-            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
-              value: "0"
-            - name: GROQ_V2_RESET_ON_OPEN
-              value: "0"
-            - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
-              value: "false"
-            - name: LPU_FPGA_RECONFIGURE_METHOD
-              value: cvp
-            - name: LPU_MODEL_NAME
-              value: draft1
-            - name: NATS_SERVER
-              value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: REDFISH_BMC_ENABLED
-              value: "false"
-            image: example.invalid/lpu-runtime:test
-            name: agent
-            readinessProbe:
-              failureThreshold: 3
-              initialDelaySeconds: 10
-              periodSeconds: 5
-              successThreshold: 1
-              tcpSocket:
-                port: 2222
-              timeoutSeconds: 1
-            resources:
-              limits:
-                nvidia.com/lpu: "16"
-              requests:
-                nvidia.com/lpu: "16"
-            securityContext:
-              privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
-            volumeMounts:
-            - mountPath: /nfs
-              name: model-storage
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev
-              name: host-dev
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /ssh-pk
-              name: ssh-secret
-              readOnly: true
-            - mountPath: /dev/shm
-              name: shared-memory
-          dnsPolicy: ClusterFirstWithHostNet
-          hostIPC: true
-          hostNetwork: true
-          initContainers:
-          - command:
-            - /bin/lp30-agent-v2-init
-            env:
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            image: example.invalid/lpu-runtime:test
-            name: prepare-lp30
-            resources: {}
-            securityContext:
-              privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
-            volumeMounts:
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /dev
-              name: host-dev
-          restartPolicy: Always
-          schedulerName: lpx-scheduler
-          securityContext:
-            fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
-          terminationGracePeriodSeconds: 60
-          tolerations:
-          - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
-            operator: Exists
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - hostPath:
-              path: /dev
-              type: Directory
-            name: host-dev
-          - hostPath:
-              path: /sys
-              type: Directory
-            name: host-sys
-          - name: ssh-secret
-            secret:
-              defaultMode: 420
-              secretName: ssh-secret
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: ld55picp-lpu-3c4a4d4af295f6cc
-            name: config
-        replicas: 1
-        roleName: lpu-wkr-m-1
-    - annotations:
-        lpx.nvidia.com/deployment-name: node-local-v3-hx-specdecode
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 3c4a4d4af295f6cc8c3a32de03d15e2dc07d279fa7d93d95a908841d032ff842
-        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:bbf856a3258227e3e1c5bfdf3c6929648c06853165e30be35de3cde7820ee06a
-        scheduling.lpu.nvidia.com/model: target
-        scheduling.lpu.nvidia.com/role: agent
-        scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
-      labels:
-        lpx.nvidia.com/execution-role: lpu
-        lpx.nvidia.com/stage: lpu
-        nvidia.com/dynamo-component: lpu
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
-        nvidia.com/dynamo-namespace: test-node-local-v3-hx-specdecode
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: node-local-v3-hx-specdecode-lpu
-      name: lpu-wkr-m-2
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - command:
-            - /bin/quasar-entrypoint
-            env:
-            - name: BMC_SSH_ENABLED
-              value: "false"
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v3-hx-specdecode
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
-            - name: GROQ_HAL_V2_BACKGROUND_METRICS
-              value: "false"
-            - name: GROQ_PG613_PORT_CONFIG
-              value: EB3
-            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
-              value: "false"
-            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
-              value: "0"
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
-              value: 0000:9a:00.0
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
-              value: 0000:7e:00.0
-            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
-              value: "0"
-            - name: GROQ_V2_RESET_ON_OPEN
-              value: "0"
-            - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
-              value: "false"
-            - name: LPU_FPGA_RECONFIGURE_METHOD
-              value: cvp
-            - name: LPU_MODEL_NAME
-              value: target
-            - name: NATS_SERVER
-              value: nats-address
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: REDFISH_BMC_ENABLED
-              value: "false"
-            image: example.invalid/lpu-runtime:test
-            name: agent
-            readinessProbe:
-              failureThreshold: 3
-              initialDelaySeconds: 10
-              periodSeconds: 5
-              successThreshold: 1
-              tcpSocket:
-                port: 2222
-              timeoutSeconds: 1
-            resources:
-              limits:
-                nvidia.com/lpu: "16"
-              requests:
-                nvidia.com/lpu: "16"
-            securityContext:
-              privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
-            volumeMounts:
-            - mountPath: /nfs
-              name: model-storage
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev
-              name: host-dev
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /ssh-pk
-              name: ssh-secret
-              readOnly: true
-            - mountPath: /dev/shm
-              name: shared-memory
-          dnsPolicy: ClusterFirstWithHostNet
-          hostIPC: true
-          hostNetwork: true
-          initContainers:
-          - command:
-            - /bin/lp30-agent-v2-init
-            env:
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
-            image: example.invalid/lpu-runtime:test
-            name: prepare-lp30
-            resources: {}
-            securityContext:
-              privileged: true
-              runAsGroup: 0
-              runAsNonRoot: false
-              runAsUser: 0
-            volumeMounts:
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /dev
-              name: host-dev
-          restartPolicy: Always
-          schedulerName: lpx-scheduler
-          securityContext:
-            fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
-          terminationGracePeriodSeconds: 60
-          tolerations:
-          - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
-            operator: Exists
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - hostPath:
-              path: /dev
-              type: Directory
-            name: host-dev
-          - hostPath:
-              path: /sys
-              type: Directory
-            name: host-sys
-          - name: ssh-secret
-            secret:
-              defaultMode: 420
-              secretName: ssh-secret
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: ld55picp-lpu-3c4a4d4af295f6cc
-            name: config
-        replicas: 1
-        roleName: lpu-wkr-m-2
+        - agt0
+        - agt1
+        - agt2
     headlessServiceConfig:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
@@ -888,12 +888,12 @@ spec:
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:13d09d8a4fee0861ed745cf2edb1c3e82d8aa0ffecb7a606270c2e311220bef7
       cliqueNames:
-      - lpu-ldr
-      - lpu-wkr-m-0
-      - lpu-wkr-m-1
-      - lpu-wkr-m-2
+      - cond
+      - agt0
+      - agt1
+      - agt2
       minAvailable: 1
-      name: lpu
+      name: lpx
       replicas: 1
     terminationDelay: 15m0s
 status:

@@ -46,26 +46,35 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	runtimePath, err := buildRuntimePath(projection.configuredBuild.Path, "/models")
 	require.NoError(t, err)
 	podSpec := renderTestPodSpec()
-	initial, err := workload.RenderCyborgConfigMap("test-namespace", "test-dgd", podSpec)
+	initial, err := workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
 	require.NoError(t, err)
 
 	t.Log("Verify every engine replica addresses only its own Agents")
 	for _, replicas := range []int32{1, 2, 10, 12} {
 		t.Run(strconv.Itoa(int(replicas)), func(t *testing.T) {
 			workload.scalingGroupReplicas = replicas
-			configMap, err := workload.RenderCyborgConfigMap("test-namespace", "test-dgd", podSpec)
+			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
+			require.NoError(t, err)
+			configMap, err := workload.RenderCyborgConfigMap("test-namespace", scaledPlan, podSpec)
 			require.NoError(t, err)
 			require.Equal(t, initial, configMap)
 			require.True(t, *configMap.Immutable)
-			prefix := plan.LPXScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-"
-			require.Equal(t, prefix+"lpu-wkr-m-0-0\n"+prefix+"lpu-wkr-m-0-2", configMap.Data["lpu_servers"])
+			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-"
+			require.Equal(t, prefix+"agt-0\n"+prefix+"agt-2", configMap.Data["lpu_servers"])
 			require.Equal(t, filepath.Join(runtimePath, "tokenizer"), configMap.Data["tokenizer_dir"])
+
+			t.Log("Resolve Cyborg server addresses to the last engine replica's actual Agent hostnames")
+			lastReplica := scaledPlan.ForReplica(replicas - 1)
+			servers := strings.Split(strings.ReplaceAll(configMap.Data["lpu_servers"], "${GROVE_PCSG_INDEX}", strconv.Itoa(int(replicas-1))), "\n")
+			for index, offset := range []int{0, 2} {
+				require.Equal(t, lastReplica.Agents[0].CliqueName+"-"+strconv.Itoa(offset), "test-dgd-0-"+servers[index])
+			}
 		})
 	}
 
 	t.Log("Render a Cap'n Proto build with a nested tokenizer path")
 	projection.configuredBuild.RuntimeTokenizerPath = "metadata/tokenizer"
-	configMap, err := workload.RenderCyborgConfigMap("test-namespace", "test-dgd", podSpec)
+	configMap, err := workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
 
 	t.Log("Verify the nested tokenizer path is rooted in the runtime build")
 	require.NoError(t, err)
@@ -74,14 +83,14 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 
 	t.Log("Reject oversized rendered Cyborg configuration before publication")
 	projection.configuredBuild.RuntimeTokenizerPath = strings.Repeat("x", corev1.MaxSecretSize)
-	_, err = workload.RenderCyborgConfigMap("test-namespace", "test-dgd", podSpec)
+	_, err = workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
 	require.ErrorContains(t, err, "rendered LPX ConfigMap")
 	require.ErrorContains(t, err, "maximum is 1048576")
 
 	t.Log("Render a Cap'n Proto build without tokenizer metadata")
 	projection.configuredBuild.RuntimeTokenizerPath = ""
 	projection.configuredBuild.Path = "relative/build"
-	_, err = workload.RenderCyborgConfigMap("test-namespace", "test-dgd", podSpec)
+	_, err = workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
 
 	t.Log("Verify missing tokenizer metadata is rejected")
 	require.EqualError(t, err, "capnp manifest build is missing model.tokenizer.path")
@@ -127,9 +136,9 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			workload := &SelectedWorkload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
 			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
-			configMap, err := workload.RenderCyborgConfigMap("test", "test-dgd", renderTestPodSpec())
+			configMap, err := workload.RenderCyborgConfigMap("test", plan, renderTestPodSpec())
 			require.NoError(t, err)
-			prefix := plan.LPXScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
+			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
 			servers := make([]string, len(test.wantOffsets))
 			for index, offset := range test.wantOffsets {
 				servers[index] = prefix + strconv.Itoa(offset)

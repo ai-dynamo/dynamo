@@ -8,9 +8,7 @@ package lpx
 import (
 	"crypto/sha256"
 	"fmt"
-	"math"
 	"slices"
-	"strconv"
 	"strings"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -18,9 +16,15 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-const minimumHashedCliqueNameLength = 8
+const (
+	lpxScalingGroupTemplateName = "lpx"
+	conductorTemplateName       = "cond"
+)
 
-const maximumCyborgPodIndex = math.MaxInt32
+// MaxPodCliqueSetNameLength reserves Grove's combined name budget for the fixed
+// scaling group and longest role name, independently of the selected components.
+const MaxPodCliqueSetNameLength = commonconsts.MaxCombinedGroveResourceNameLength -
+	len(lpxScalingGroupTemplateName) - len(conductorTemplateName)
 
 // LPXAttemptRequestStatus stores a name (lpxRequestName uses at most 60 bytes),
 // sha256 digest, and server-issued UUID. Reserve a full DNS label plus JSON syntax
@@ -60,8 +64,6 @@ type MaterializationPlan struct {
 	CyborgTemplate string
 	// LPXScalingGroup is the materialized Grove scaling-group name.
 	LPXScalingGroup string
-	// LPXScalingGroupTemplate is the Grove scaling-group template name.
-	LPXScalingGroupTemplate string
 	// ReplicaIndex is the scaling-group replica represented by this projection.
 	ReplicaIndex int32
 	// Replicas is the total scaling-group replica count.
@@ -71,88 +73,57 @@ type MaterializationPlan struct {
 // PlanNodeLocalMaterialization derives the exact identities shared by graph
 // rendering and lifecycle observation without mutating the workload.
 func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*MaterializationPlan, error) {
-	componentName := w.LPXComponentName()
-	cyborgTemplateName := w.CyborgTemplateName()
-	if strings.TrimSpace(pcsName) == "" || strings.TrimSpace(componentName) == "" {
-		return nil, fmt.Errorf("PodCliqueSet and selected LPX component names are required")
+	// Leave room for the fixed scaling group and every LPX role in Grove's name budget.
+	if strings.TrimSpace(pcsName) == "" {
+		return nil, fmt.Errorf("PodCliqueSet name is required")
+	}
+	if len(pcsName) > MaxPodCliqueSetNameLength {
+		return nil, fmt.Errorf("PodCliqueSet name %q exceeds the LPX maximum of %d characters", pcsName, MaxPodCliqueSetNameLength)
 	}
 
-	conductorTemplate := ""
-	if w.Pipeline() != PipelineLPX {
-		conductorTemplate = strings.ToLower(fmt.Sprintf("%s-%s", componentName, commonconsts.GroveRoleSuffixLeader))
-		if problems := validation.IsDNS1123Label(conductorTemplate); len(problems) != 0 {
-			return nil, fmt.Errorf("conductor template name %q is invalid: %s", conductorTemplate, strings.Join(problems, "; "))
-		}
+	// Nova and Cyborg both implement the authored conductor role.
+	conductorTemplate, cyborgTemplate := conductorTemplateName, ""
+	if w.Pipeline() == PipelineLPX {
+		conductorTemplate, cyborgTemplate = "", conductorTemplateName
 	}
 	agents := make([]ExpectedAgent, 0, len(w.modelProjections))
-	agentScalingGroupTemplateBudget := validation.DNS1123LabelMaxLength
 	for index, projection := range w.modelProjections {
-		name := strings.ToLower(fmt.Sprintf("%s-%s-m-%d", componentName, commonconsts.GroveRoleSuffixWorker, index))
-		if problems := validation.IsDNS1123Label(name); len(problems) != 0 {
-			return nil, fmt.Errorf("Agent template name %q is invalid: %s", name, strings.Join(problems, "; "))
+		name := "agt"
+		if len(w.modelProjections) > 1 {
+			name = fmt.Sprintf("agt%d", index)
 		}
 		agents = append(agents, ExpectedAgent{TemplateName: name, Replicas: projection.agentReplicas})
-		agentScalingGroupTemplateBudget = min(
-			agentScalingGroupTemplateBudget,
-			materializedScalingGroupTemplateNameBudget(pcsName, name, projection.agentReplicas-1),
-		)
-	}
-	maxScalingGroupTemplateLength := validation.DNS1123LabelMaxLength
-	if conductorTemplate != "" {
-		maxScalingGroupTemplateLength = materializedScalingGroupTemplateNameBudget(pcsName, conductorTemplate, 0)
-	}
-	maxScalingGroupTemplateLength = min(maxScalingGroupTemplateLength, agentScalingGroupTemplateBudget)
-	if cyborgTemplateName != "" {
-		maxScalingGroupTemplateLength = min(
-			maxScalingGroupTemplateLength,
-			materializedScalingGroupTemplateNameBudget(
-				pcsName,
-				cyborgTemplateName,
-				maximumCyborgPodIndex,
-			),
-		)
-	}
-	lpxScalingGroupTemplate, err := boundedNameTo(strings.ToLower(componentName), maxScalingGroupTemplateLength)
-	if err != nil {
-		return nil, fmt.Errorf("derive LPU scaling-group template name: %w", err)
 	}
 
 	// Construct the plan with Grove's canonical replica-zero scaling-group identity.
 	plan := &MaterializationPlan{
 		PodCliqueSetName:  pcsName,
 		ConductorTemplate: conductorTemplate,
-		CyborgTemplate:    cyborgTemplateName,
+		CyborgTemplate:    cyborgTemplate,
 		Agents:            agents,
 		LPXScalingGroup: grovecommon.GeneratePodCliqueScalingGroupName(
-			grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0}, lpxScalingGroupTemplate,
+			grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0}, lpxScalingGroupTemplateName,
 		),
-		LPXScalingGroupTemplate: lpxScalingGroupTemplate,
-		Replicas:                w.scalingGroupReplicas,
+		Replicas: w.scalingGroupReplicas,
 	}
 	plan = plan.ForReplica(0)
 
 	return plan, plan.ValidateReplicaCount()
 }
 
-// ValidateReplicaCount checks the longest engine names and bounds request/status allocation.
+// ValidateReplicaCount checks conductor/Agent hostnames and bounds request/status allocation.
 func (p *MaterializationPlan) ValidateReplicaCount() error {
 	// Charge every model/replica for its complete persisted request identity.
 	if p.Replicas < 0 || int64(p.Replicas)*int64(len(p.Agents)) > int64(schedulingAttemptRequestBytesBudget/maximumSchedulingAttemptRequestBytes) {
 		return fmt.Errorf("LPX replica count exceeds the scheduling status size budget")
 	}
-	plan := p.ForReplica(max(0, p.Replicas-1))
-	if plan.ConductorClique != "" {
-		if err := validateMaterializedPodHostnameAtIndex("conductor", plan.ConductorClique, 0); err != nil {
+	if p.ConductorTemplate != "" {
+		if err := p.validatePodHostname("conductor", p.ConductorTemplate, 0); err != nil {
 			return err
 		}
 	}
-	for _, agent := range plan.Agents {
-		if err := validateMaterializedPodHostnameAtIndex("Agent", agent.CliqueName, agent.Replicas-1); err != nil {
-			return err
-		}
-	}
-	if plan.CyborgClique != "" {
-		if err := validateMaterializedPodHostnameAtIndex("Cyborg", plan.CyborgClique, maximumCyborgPodIndex); err != nil {
+	for _, agent := range p.Agents {
+		if err := p.validatePodHostname("Agent", agent.TemplateName, agent.Replicas-1); err != nil {
 			return err
 		}
 	}
@@ -191,7 +162,9 @@ func materializedCliqueNameForReplica(pcsName, templateName string, replica int3
 	)
 }
 
-func validateMaterializedPodHostnameAtIndex(role, cliqueName string, podIndex int) error {
+func (p *MaterializationPlan) validatePodHostname(role, templateName string, podIndex int) error {
+	// Validate the longest replica name without copying the full materialization plan.
+	cliqueName := materializedCliqueNameForReplica(p.LPXScalingGroup, templateName, max(0, p.Replicas-1))
 	hostname := materializedPodHostname(cliqueName, podIndex)
 	if problems := validation.IsDNS1123Label(hostname); len(problems) != 0 {
 		return fmt.Errorf(
@@ -206,40 +179,4 @@ func validateMaterializedPodHostnameAtIndex(role, cliqueName string, podIndex in
 
 func materializedPodHostname(cliqueName string, podIndex int) string {
 	return fmt.Sprintf("%s-%d", cliqueName, podIndex)
-}
-
-func materializedScalingGroupTemplateNameBudget(pcsName, childTemplateName string, podIndex int) int {
-	// Grove materializes "<pcs>-0-<group>-0-<child>-<index>".
-	return validation.DNS1123LabelMaxLength -
-		len(pcsName) -
-		len(childTemplateName) -
-		7 -
-		len(strconv.Itoa(podIndex))
-}
-
-func boundedNameTo(candidate string, maxLength int) (string, error) {
-	if maxLength > validation.DNS1123LabelMaxLength {
-		maxLength = validation.DNS1123LabelMaxLength
-	}
-	if maxLength < minimumHashedCliqueNameLength {
-		return "", fmt.Errorf(
-			"available DNS label budget %d is smaller than the %d-character collision-resistant minimum",
-			maxLength,
-			minimumHashedCliqueNameLength,
-		)
-	}
-	if len(candidate) <= maxLength && len(validation.IsDNS1123Label(candidate)) == 0 {
-		return candidate, nil
-	}
-	digest := sha256.Sum256([]byte(candidate))
-	hash := fmt.Sprintf("%x", digest[:4])
-	prefixLength := maxLength - len(hash) - 1
-	if prefixLength <= 0 {
-		return hash, nil
-	}
-	prefix := strings.TrimRight(candidate[:min(len(candidate), prefixLength)], "-.")
-	if prefix == "" {
-		return hash, nil
-	}
-	return prefix + "-" + hash, nil
 }

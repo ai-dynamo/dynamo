@@ -349,10 +349,10 @@ func (r *graphReconciler) prepareLPXMaterializing(
 				return nil, nil, fmt.Errorf("refusing to use replicas from a foreign LPX scaling group")
 			}
 			plan.Replicas = group.Spec.Replicas
+			if err := plan.ValidateReplicaCount(); err != nil {
+				return nil, &lpxRejected{reason: err.Error()}, nil
+			}
 		}
-	}
-	if err := plan.ValidateReplicaCount(); err != nil {
-		return nil, &lpxRejected{reason: err.Error()}, nil
 	}
 	workloadDigest := workload.Digest().String()
 	requests := make([]lpxModelMaterializing, 0, len(projections)*int(plan.Replicas))

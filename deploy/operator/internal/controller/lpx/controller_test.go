@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -325,7 +327,6 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 		preserve              bool
 	}{
 		{name: "intent", reason: "LPXRejected", message: "providerOverride"},
-		{name: "name budget", reason: "LPXRejected", message: "spec.components[0].name: Invalid value"},
 		{name: "selected workload", reason: "LPXRejected", message: "replica count"},
 		{name: "render", reason: "LPXReconciliationFailed", message: "model storage volume mount"},
 		{name: "invalid source", reason: "LPXReconciliationFailed", message: "source"},
@@ -346,7 +347,7 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 			pcs.UID = "staged-pcs"
 			require.NoError(t, r.Update(t.Context(), pcs))
 			endpoint := &corev1.Service{}
-			endpointKey := client.ObjectKey{Namespace: child.Namespace, Name: pcsKey.Name + "-lpx"}
+			endpointKey := client.ObjectKey{Namespace: child.Namespace, Name: pcsKey.Name + "-serve"}
 			require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
 			endpoint.UID = "staged-endpoint"
 			require.NoError(t, r.Update(t.Context(), endpoint))
@@ -370,8 +371,6 @@ func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
 			switch scenario.name {
 			case "intent":
 				source.Spec.ProviderOverride = &v1beta1.ProviderOverride{Target: "PodCliqueSet"}
-			case "name budget":
-				component.ComponentName = "serving-engines"
 			case "selected workload":
 				component.Replicas = ptr.To(int32(-1))
 			case "render":
@@ -445,7 +444,7 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 			foreignPCS.UID, foreignEndpoint.UID = "foreign-pcs", "foreign-endpoint"
 			foreignRuntime.UID = "foreign-runtime"
 			foreignPCS.Name = dynamo.PCSNameForLPX(child)
-			foreignEndpoint.Name = foreignPCS.Name + "-lpx"
+			foreignEndpoint.Name = foreignPCS.Name + "-serve"
 			foreignRuntime.Name = foreignPCS.Name + "-runtime"
 			foreignPCS.OwnerReferences, foreignEndpoint.OwnerReferences = ordinary.OwnerReferences, ordinary.OwnerReferences
 			foreignRuntime.OwnerReferences = ordinary.OwnerReferences
@@ -565,7 +564,7 @@ func TestLPXEndpointLifecycle(t *testing.T) {
 	t.Log("Publish the LPX-owned endpoint with its serving-role selector")
 	require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))
 	service := &corev1.Service{}
-	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForLPX(child) + "-lpx"}
+	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForLPX(child) + "-serve"}
 	require.NoError(t, r.Get(t.Context(), key, service))
 	require.True(t, metav1.IsControlledBy(service, child))
 	require.Equal(t, consts.KubeLabelValueTrue, service.Spec.Selector[dynamo.LPXServingLabel])
@@ -641,7 +640,7 @@ func TestLPXMaterializationUsesOwnerSourceAndChildIdentity(t *testing.T) {
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: root, Namespace: child.Namespace}},
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: lpx.LPUConfigMapName(root, pcs.Spec.Template.Cliques[0].Annotations[consts.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
-		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-" + lpx.ServingComponent(source).ComponentName, Namespace: child.Namespace}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-serve", Namespace: child.Namespace}},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
 		require.True(t, metav1.IsControlledBy(object, child))
@@ -653,6 +652,110 @@ func TestLPXMaterializationUsesOwnerSourceAndChildIdentity(t *testing.T) {
 	require.NotEmpty(t, requests)
 	for _, request := range requests {
 		require.Equal(t, source.Name, request.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+	}
+}
+
+func TestLPXReadableNamesSurviveServingComponentChanges(t *testing.T) {
+	t.Log("Publish a speculative engine with long deployment and component names")
+	_, source, registry := newLPXSpecDecodeTestDGD(t)
+	source.Name = "apaprotskyi-gpt-oss-20b-lp20-b300"
+	source.Spec.Components[0].ComponentName = "serving-component-with-name"
+	source.Spec.Components[1].ComponentName = "draft-component-with-name"
+	source.Spec.Components[1].Replicas = ptr.To(int32(1))
+	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
+	child := newLPXTestDeployment(t, source)
+	r := newLPXTestReconciler(t, registry, child, source)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	_, err := r.Reconcile(t.Context(), request)
+	require.NoError(t, err)
+	root := dynamo.PCSNameForLPX(child)
+	require.True(t, strings.HasPrefix(root, source.Name+"-"))
+	require.Len(t, root, len(source.Name)+len("-ffff"))
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	pcsKey := client.ObjectKey{Namespace: child.Namespace, Name: root}
+	require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
+	pcs.UID = "stable-pcs"
+	require.NoError(t, r.Update(t.Context(), pcs))
+	endpoint := &corev1.Service{}
+	endpointKey := client.ObjectKey{Namespace: child.Namespace, Name: root + "-serve"}
+	require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
+	endpoint.UID = "stable-endpoint"
+	require.NoError(t, r.Update(t.Context(), endpoint))
+	require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+	beforeGroup := pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]
+	beforeOwners := endpoint.OwnerReferences
+
+	for _, change := range []string{"rename serving component", "move conductor"} {
+		t.Log(change)
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(source), source))
+		require.NoError(t, r.Get(t.Context(), request.NamespacedName, child))
+		if change == "rename serving component" {
+			source.Spec.Components[0].ComponentName = "renamed-serving-component"
+		} else {
+			conductor := *source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
+			source.Spec.Components[0].Roles = slices.DeleteFunc(source.Spec.Components[0].Roles, func(role v1beta1.ComponentRoleSpec) bool {
+				return role.Name == v1beta1.ComponentRoleLPXConductor
+			})
+			source.Spec.Components[1].Roles = append(source.Spec.Components[1].Roles, conductor)
+		}
+		source.Generation++
+		require.NoError(t, r.Update(t.Context(), source))
+		child.Generation++
+		child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
+		require.NoError(t, err)
+		require.NoError(t, r.Update(t.Context(), child))
+
+		t.Log("Keep one PCS and endpoint while updating their serving component metadata")
+		_, err = r.Reconcile(t.Context(), request)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
+		require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
+		require.Equal(t, "stable-pcs", string(pcs.UID))
+		require.Equal(t, "stable-endpoint", string(endpoint.UID))
+		require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 1)
+		require.Equal(t, beforeGroup.Name, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Name)
+		require.Equal(t, beforeGroup.CliqueNames, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames)
+		require.Equal(t, beforeOwners, endpoint.OwnerReferences)
+		require.Equal(t, source.Name, pcs.Labels[consts.KubeLabelDynamoGraphDeploymentName])
+		require.Equal(t, lpx.ServingComponent(source).ComponentName, endpoint.Spec.Selector[consts.KubeLabelDynamoComponent])
+		require.Equal(t, root, endpoint.Spec.Selector[grovecommon.LabelPartOfKey])
+		require.Equal(t, consts.KubeLabelValueTrue, endpoint.Spec.Selector[dynamo.LPXServingLabel])
+		allPCS, allEndpoints := &grovev1alpha1.PodCliqueSetList{}, &corev1.ServiceList{}
+		require.NoError(t, r.List(t.Context(), allPCS))
+		require.NoError(t, r.List(t.Context(), allEndpoints))
+		require.Len(t, allPCS.Items, 1)
+		require.Len(t, allEndpoints.Items, 1)
+
+		t.Log("Select only the conductor and share one runtime config across the clique roster")
+		require.NotEmpty(t, pcs.Spec.Template.Cliques)
+		configHash := pcs.Spec.Template.Cliques[0].Annotations[consts.AnnotationExtraResourcesHash]
+		require.NotEmpty(t, configHash)
+		cliqueNames := make([]string, 0, len(pcs.Spec.Template.Cliques))
+		for _, clique := range pcs.Spec.Template.Cliques {
+			cliqueNames = append(cliqueNames, clique.Name)
+			require.Equal(t, configHash, clique.Annotations[consts.AnnotationExtraResourcesHash])
+			for key, value := range clique.Labels {
+				require.Empty(t, validation.IsValidLabelValue(value), key)
+			}
+			if clique.Name == "cond" {
+				for key, value := range endpoint.Spec.Selector {
+					if key != grovecommon.LabelPartOfKey {
+						require.Equal(t, value, clique.Labels[key], key)
+					}
+				}
+			} else {
+				require.NotContains(t, clique.Labels, dynamo.LPXServingLabel)
+			}
+		}
+		require.ElementsMatch(t, []string{"cond", "agt0", "agt1"}, cliqueNames)
+
+		t.Log("Keep runtime Agent addresses aligned with the clique names")
+		config := &corev1.ConfigMap{}
+		configKey := client.ObjectKey{Namespace: child.Namespace, Name: lpx.LPUConfigMapName(root, configHash)}
+		require.NoError(t, r.Get(t.Context(), configKey, config))
+		require.True(t, metav1.IsControlledBy(config, child))
+		require.Contains(t, config.Data["datacenter.toml"], "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt0-{node}")
+		require.Contains(t, config.Data["datacenter.toml"], "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt1-{node}")
 	}
 }
 
@@ -759,14 +862,8 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 		}},
 		{name: "disabled Grove", messages: []string{"Grove is disabled"}},
 		{name: componentProvider, messages: []string{"requires the Grove workload provider"}},
-		{name: "too long serving name", componentName: "serving-engines", messages: []string{
-			"spec.components[0].name: Invalid value", "combined Grove resource name length 46 exceeds the 45-character limit",
-		}},
-		{name: "reordered shared draft with too long serving name", componentName: "serving-engines", sharedDraft: true, messages: []string{
-			"spec.components[2].name: Invalid value", "combined Grove resource name length 46 exceeds the 45-character limit",
-		}},
-		{name: "maximum legal serving name", componentName: "serving-engine"},
-		{name: "reordered shared draft with maximum legal serving name", componentName: "serving-engine", sharedDraft: true},
+		{name: "long serving name", componentName: strings.Repeat("serving-", 7) + "engine"},
+		{name: "reordered shared draft with long serving name", componentName: strings.Repeat("serving-", 7) + "engine", sharedDraft: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			t.Log("Reconcile authored LPX intent against cold remote builds")

@@ -31,10 +31,8 @@ const (
 	ExecutionRoleLabel = "lpx.nvidia.com/execution-role"
 )
 
-// RenderInput contains the materialization name and fresh stage templates consumed by rendering.
+// RenderInput contains the fresh stage templates and runtime settings consumed by rendering.
 type RenderInput struct {
-	// MaterializationName is the owning LPXGraphDeployment's bounded identity root.
-	MaterializationName string
 	// CyborgConfigMap is rendered before the user's Cyborg defaults are merged.
 	CyborgConfigMap *corev1.ConfigMap
 	// MinAvailable is the minimum number of complete engine replicas in the gang.
@@ -65,6 +63,13 @@ func RenderSelectedNodeLocal(
 ) ([]client.Object, error) {
 	projections := workload.modelProjections
 
+	// Hybrid input owns one GPU clique before the LPU roles are appended.
+	hybrid := projections[0].pipeline == PipelineLPX
+	var cyborg *grovev1alpha1.PodCliqueTemplateSpec
+	if hybrid {
+		cyborg = pcs.Spec.Template.Cliques[0]
+	}
+
 	workloadDigest := workload.Digest().String()
 	agentTemplateNames := make([]string, 0, len(plan.Agents))
 	for _, agent := range plan.Agents {
@@ -89,7 +94,7 @@ func RenderSelectedNodeLocal(
 	}
 	modelStorage.volume = *modelStorage.volume.DeepCopy()
 	modelStorage.mount = *modelStorage.mount.DeepCopy()
-	configMap, err := renderLPUConfigMap(namespace, input.MaterializationName, modelStorage.mount.MountPath, projections, plan.Agents)
+	configMap, err := renderLPUConfigMap(namespace, plan.PodCliqueSetName, modelStorage.mount.MountPath, projections, plan.Agents)
 	if err != nil {
 		return nil, err
 	}
@@ -193,19 +198,17 @@ func RenderSelectedNodeLocal(
 	pcs.Annotations = workloadAnnotations(pcs.Annotations, workloadDigest)
 	// Node-local uses canonical annotation absence for backward compatibility.
 	delete(pcs.Annotations, ExecutionBackendAnnotation)
-	var cyborg *grovev1alpha1.PodCliqueTemplateSpec
-	for _, clique := range pcs.Spec.Template.Cliques {
-		if clique.Name == plan.CyborgTemplate {
-			cyborg = clique
-		}
-	}
 	selectedTemplateNames := agentTemplateNames
 	if conductorTemplateName != "" {
 		selectedTemplateNames = append([]string{conductorTemplateName}, selectedTemplateNames...)
 	}
 
-	hybrid := projections[0].pipeline == PipelineLPX
 	if hybrid {
+		// Bound GPU hostnames using the rendered width of the last engine replica.
+		if err := plan.validatePodHostname("Cyborg", plan.CyborgTemplate, int(cyborg.Spec.Replicas)-1); err != nil {
+			return nil, err
+		}
+
 		// HX Cyborg may inherit its Agent's configuration mount.
 		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 		if cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
@@ -220,7 +223,6 @@ func RenderSelectedNodeLocal(
 			workloadDigest,
 			modelStorage,
 			agentTemplateNames,
-			plan,
 			cyborgConfigMap,
 		); err != nil {
 			return nil, err
@@ -233,7 +235,7 @@ func RenderSelectedNodeLocal(
 		members = append(members, plan.CyborgTemplate)
 	}
 	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{{
-		Name:         plan.LPXScalingGroupTemplate,
+		Name:         lpxScalingGroupTemplateName,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
 		Replicas:     ptr.To(plan.Replicas),

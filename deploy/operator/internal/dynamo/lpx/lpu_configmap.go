@@ -21,7 +21,6 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 )
 
@@ -35,22 +34,10 @@ type lpuModelStorage struct {
 	mount  corev1.VolumeMount
 }
 
-func boundedAuxiliaryName(root, suffix string) string {
-	candidate := root + suffix
-	if len(candidate) <= validation.DNS1123SubdomainMaxLength {
-		return candidate
-	}
-
-	// Distinguish overlong resource names using the full name, including its suffix.
-	digest := sha256.Sum256([]byte(candidate))
-	hashSuffix := fmt.Sprintf("-%x", digest[:4])
-	prefix := strings.TrimRight(candidate[:validation.DNS1123SubdomainMaxLength-len(hashSuffix)], "-.")
-	return prefix + hashSuffix
-}
-
 // LPUConfigMapName names the immutable runtime table using its Pod-template content hash.
+// The root is the PCS identity carried by Grove's part-of Pod label.
 func LPUConfigMapName(root, configHash string) string {
-	return boundedAuxiliaryName(root, fmt.Sprintf("-lpu-%.16s", configHash))
+	return fmt.Sprintf("%s-lpu-%.16s", root, configHash)
 }
 
 func renderLPUConfigMap(
@@ -111,7 +98,7 @@ func renderRuntimeConfigMap(namespace, namePrefix string, data map[string]string
 		Immutable: ptr.To(true),
 		Data:      data,
 	}
-	configMap.Name = boundedAuxiliaryName(namePrefix, fmt.Sprintf("-%.16s", LPUConfigMapHash(configMap)))
+	configMap.Name = fmt.Sprintf("%s-%.16s", namePrefix, LPUConfigMapHash(configMap))
 
 	// Reject oversized configuration before any caller can publish it.
 	totalSize := 0

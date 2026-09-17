@@ -76,17 +76,14 @@ func ApplySelectedCyborgContainerDefaults(
 }
 
 // RenderCyborgConfigMap renders the XT hybrid configuration before Cyborg defaults are merged.
-// The workload must contain the selected hybrid model; agentPodSpec supplies its merged storage.
+// The workload and plan must be non-nil, validated, and describe the selected hybrid model.
+// agentPodSpec supplies its merged storage. The workload and plan are not mutated.
 func (w *SelectedWorkload) RenderCyborgConfigMap(
 	namespace string,
-	root string,
+	plan *MaterializationPlan,
 	agentPodSpec corev1.PodSpec,
 ) (*corev1.ConfigMap, error) {
 	storage, err := lpuModelStorageBinding(agentPodSpec)
-	if err != nil {
-		return nil, err
-	}
-	plan, err := w.PlanNodeLocalMaterialization(root)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +102,7 @@ func (w *SelectedWorkload) RenderCyborgConfigMap(
 	}
 
 	// Cyborg supplies the PCS prefix; startup supplies this engine's Grove index.
-	serverPrefix := plan.LPXScalingGroupTemplate + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
+	serverPrefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
 	servers := make([]string, len(build.Partitions))
 	offset := 0
 	for index, partition := range build.Partitions {
@@ -113,7 +110,7 @@ func (w *SelectedWorkload) RenderCyborgConfigMap(
 		offset += partition.effectiveNodeCount()
 	}
 
-	return renderRuntimeConfigMap(namespace, root+"-decode", map[string]string{
+	return renderRuntimeConfigMap(namespace, plan.PodCliqueSetName+"-decode", map[string]string{
 		"tokenizer_dir": tokenizerDir,
 		"lpu_servers":   strings.Join(servers, "\n"),
 	})

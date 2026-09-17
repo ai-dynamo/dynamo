@@ -15,6 +15,7 @@ import (
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -25,7 +26,7 @@ import (
 
 const (
 	testRenderComponentName = "lpu"
-	testAgentTemplateName   = "lpu-wkr-m-0"
+	testAgentTemplateName   = "agt"
 	testTargetStageName     = "target"
 )
 
@@ -86,7 +87,7 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 		return nil, err
 	}
 	if workload.BuildFamily() == BuildFamilyXT && workload.Pipeline() == PipelineLPX {
-		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(pcs.Namespace, input.MaterializationName, input.Stages[testRenderComponentName].Spec)
+		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(pcs.Namespace, plan, input.Stages[testRenderComponentName].Spec)
 		if err != nil {
 			return nil, err
 		}
@@ -147,9 +148,8 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
 			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				MaterializationName: "test-dgd",
-				Stages:              map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
-				SSHSecretName:       "ssh-secret",
+				Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
+				SSHSecretName: "ssh-secret",
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
@@ -164,14 +164,14 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Resolve runtime mounts using the authored storage path")
 			if test.family == lpxv1alpha1.TargetFamilyXt8888 {
-				conductor := namedClique(t, rendered, "lpu-ldr")
+				conductor := namedClique(t, rendered, "cond")
 				require.Equal(t, "kept", conductor.Annotations["user"])
 				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/custom"})
 				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath})
 			} else {
-				cyborg := namedClique(t, rendered, "lpu-engine-gpu").Spec.PodSpec.Containers[0]
+				cyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
 				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/model-cache"})
 				require.Contains(t, cyborg.Env, corev1.EnvVar{
 					Name: "GBUILD_MANIFEST_PATH", Value: "/model-cache/model-build/manifest.v2.capnp.bin",
@@ -228,20 +228,21 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
-		MaterializationName: "test-dgd",
-		Stages:              map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
-		SSHSecretName:       "ssh-secret",
+		Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
+		SSHSecretName: "ssh-secret",
 	})
 	require.NoError(t, err)
 
 	t.Log("Verify conductor-owned placement and entrypoint behavior")
-	conductor := namedClique(t, rendered, "lpu-ldr")
+	conductor := namedClique(t, rendered, "cond")
 	require.Nil(t, conductor.Spec.PodSpec.Affinity)
 	require.Equal(t, conductorPodSpec.NodeSelector, conductor.Spec.PodSpec.NodeSelector)
 	require.Equal(t, []string{"/bin/bash"}, conductor.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[:2])
 	require.Equal(t, modelAnnotationSource, conductor.Spec.PodSpec.Containers[0].Env[0].ValueFrom)
 	require.Empty(t, conductor.Spec.PodSpec.Containers[0].Env[0].Value)
+	requireFlagValue(t, conductor.Spec.PodSpec.Containers[0].Args, "--allocation", "agt")
+	require.Equal(t, []string{"agt"}, conductor.Spec.StartsAfter)
 
 	t.Log("Verify Agent-owned affinity and logical model binding")
 	agent := namedClique(t, rendered, testAgentTemplateName)
@@ -299,7 +300,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
 	require.NoError(t, err)
 	extraResources, err := RenderSelectedNodeLocal(pcs, selected, plan, RenderInput{
-		MaterializationName: source.Name, Stages: stages, SSHSecretName: "ssh-secret",
+		Stages: stages, SSHSecretName: "ssh-secret",
 	})
 	require.NoError(t, err)
 
@@ -340,6 +341,29 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	require.Equal(t, 1, strings.Count(configMap.Data["model_config.toml"], "[draft.iop]"))
 	require.Equal(t, "draft0\ndraft1\ntarget", configMap.Data["partition_models"])
 	require.Equal(t, before, source)
+
+	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
+	requireFlagValue(t, conductor.Spec.PodSpec.Containers[0].Args, "--allocation", "agt0:agt1:agt2")
+	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
+	var datacenter struct {
+		Datacenters struct {
+			Racks map[string]struct {
+				NodeNameTemplate string `toml:"node_name_template"`
+			}
+		}
+	}
+	require.NoError(t, toml.Unmarshal([]byte(configMap.Data["datacenter.toml"]), &datacenter))
+	require.Len(t, datacenter.Datacenters.Racks, len(plan.Agents))
+	for _, agent := range plan.Agents {
+		rack := datacenter.Datacenters.Racks[agent.TemplateName]
+		hostname := strings.NewReplacer(
+			"${GROVE_PCSG_NAME}", plan.LPXScalingGroup,
+			"${GROVE_PCSG_INDEX}", "0",
+			"{node}", "0",
+			"${GROVE_HEADLESS_SERVICE}", pcs.Name,
+		).Replace(rack.NodeNameTemplate)
+		require.Equal(t, agent.CliqueName+"-0."+pcs.Name, hostname)
+	}
 }
 
 func projectRenderFixture(t *testing.T, family lpxv1alpha1.TargetFamily, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
@@ -365,10 +389,10 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 	}
 	one := int32(1)
 	pcs.Spec.Template.Cliques = []*grovev1alpha1.PodCliqueTemplateSpec{{
-		Name:   "lpu-engine-gpu",
+		Name:   "cond",
 		Labels: map[string]string{"kai.scheduler/queue": "legacy-queue"},
 		Spec: grovev1alpha1.PodCliqueSpec{
-			RoleName: "lpu-engine-gpu", Replicas: 1, MinAvailable: &one,
+			RoleName: "cond", Replicas: 1, MinAvailable: &one,
 			PodSpec: corev1.PodSpec{
 				SchedulerName: corev1.DefaultSchedulerName,
 				Volumes: []corev1.Volume{

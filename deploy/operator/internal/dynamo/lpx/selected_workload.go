@@ -5,8 +5,6 @@
 
 package lpx
 
-import "strings"
-
 // SelectedWorkload is the immutable result of resolving exactly one DGD for
 // LPX scheduling and runtime materialization.
 // Its methods require a successfully resolved, non-nil workload with projections.
@@ -40,13 +38,4 @@ func (w *SelectedWorkload) Pipeline() Pipeline {
 // LPXComponentName returns the serving component name from the final projection.
 func (w *SelectedWorkload) LPXComponentName() string {
 	return w.modelProjections[len(w.modelProjections)-1].stage
-}
-
-// CyborgTemplateName derives the hybrid engine's GPU-role template name.
-// A non-hybrid workload has no Cyborg template.
-func (w *SelectedWorkload) CyborgTemplateName() string {
-	if w.Pipeline() != PipelineLPX {
-		return ""
-	}
-	return strings.ToLower(w.LPXComponentName()) + "-engine-gpu"
 }

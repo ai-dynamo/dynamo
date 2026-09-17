@@ -38,12 +38,12 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	require.Equal(t, PipelineSingle, hx.Pipeline())
 	require.Equal(t, BuildFamilyHX, hx.BuildFamily())
 	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hx.modelProjections[0].RequestSpec("test", "agents", nil).WorkloadMode)
-	require.Empty(t, hx.CyborgTemplateName())
 	require.Equal(t, "LPX", hx.LPXComponentName())
 	plan, err := hx.PlanNodeLocalMaterialization("test-pcs")
 	require.NoError(t, err)
-	require.Equal(t, "lpx", plan.LPXScalingGroupTemplate)
-	require.Equal(t, "lpx-ldr", plan.ConductorTemplate)
+	require.Equal(t, "test-pcs-0-lpx", plan.LPXScalingGroup)
+	require.Equal(t, "cond", plan.ConductorTemplate)
+	require.Empty(t, plan.CyborgTemplate)
 	require.NotEmpty(t, plan.ConductorClique)
 
 	t.Log("Scale Nova engines without changing their model or workload digest")
@@ -81,10 +81,10 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	require.Equal(t, PipelineLPX, xt.Pipeline())
 	require.Equal(t, BuildFamilyXT, xt.BuildFamily())
 	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, xt.modelProjections[0].RequestSpec("test", "agents", nil).WorkloadMode)
-	require.Equal(t, "lpx-engine-gpu", xt.CyborgTemplateName())
 	require.Len(t, xt.modelProjections[0].configuredBuild.Partitions, 2)
 	plan, err = xt.PlanNodeLocalMaterialization("test-pcs")
 	require.NoError(t, err)
+	require.Equal(t, "cond", plan.CyborgTemplate)
 	require.EqualValues(t, 2, plan.Replicas)
 	replica := plan.ForReplica(1)
 	require.NotEqual(t, plan.Agents[0].CliqueName, replica.Agents[0].CliqueName)
@@ -188,7 +188,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			require.Equal(t, "lpx", projections[2].stage)
 			require.Equal(
 				t,
-				[]string{"lpx-wkr-m-0", "lpx-wkr-m-1", "lpx-wkr-m-2"},
+				[]string{"agt0", "agt1", "agt2"},
 				[]string{
 					plan.Agents[0].TemplateName,
 					plan.Agents[1].TemplateName,

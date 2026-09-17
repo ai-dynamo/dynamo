@@ -38,7 +38,7 @@ func renderPodCliqueSet(
 ) (*grovev1alpha1.PodCliqueSet, []client.Object, error) {
 	// Apply shared Dynamo defaults before materializing the independently owned LPX roles.
 	pcs, input, err := dynamo.RenderLPXBasePodCliqueSet(ctx, source, operatorConfig, runtimeConfig,
-		kubeClient, secretsRetriever, workload, plan.PodCliqueSetName)
+		kubeClient, secretsRetriever, workload, plan)
 	if err != nil {
 		return nil, nil, err
 	}

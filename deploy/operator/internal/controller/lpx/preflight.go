@@ -22,11 +22,8 @@ import (
 	"fmt"
 	"maps"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -47,23 +44,6 @@ func (r *graphReconciler) reconcileLPXSafetyPreflight(
 	}
 	if classification != nil {
 		return nil, classification, nil
-	}
-
-	// The serving component owns every Grove name, including the shared draft cliques.
-	serving := dynamolpx.ServingComponent(source)
-	for index := range source.Spec.Components {
-		component := &source.Spec.Components[index]
-		if component != serving {
-			continue
-		}
-		combinedLength := len(dynamo.PCSNameForLPX(deployment)) + dynamo.LPXComponentNameBudget(component.ComponentName)
-		if combinedLength > consts.MaxCombinedGroveResourceNameLength {
-			err := field.Invalid(field.NewPath("spec", "components").Index(index).Child("name"), component.ComponentName,
-				fmt.Sprintf("combined Grove resource name length %d exceeds the %d-character limit; shorten the deployment or component name",
-					combinedLength, consts.MaxCombinedGroveResourceNameLength))
-			return nil, &lpxRejected{reason: err.Error()}, nil
-		}
-		break
 	}
 
 	if len(requests) == 0 {

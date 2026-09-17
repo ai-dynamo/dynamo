@@ -109,6 +109,8 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
 	deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: "workloads", UID: "materialization-uid"}}
 	name := PCSNameForLPX(deployment)
+	t.Log("Keep the deployment name visible with four hexadecimal identity characters")
+	require.Equal(t, "chat-3efb", name)
 	t.Log("An ordinary DGD named chat-lpx must not collide with the LPX PCS of chat")
 	require.NotEqual(t, PCSNameForDGD("chat-lpx", nil), name)
 	require.NotEqual(t, PCSNameForDGD(deployment.Name, nil), name)
@@ -137,15 +139,42 @@ func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
 	deployment.Name = "chat-example"
 	require.NotEqual(t, dotted, PCSNameForLPX(deployment), "normalizing dots must not erase materialization identity")
 
-	t.Log("The source-independent PCS name fits every supported component's Grove and Service name budget")
-	for componentLength := 1; componentLength <= 13; componentLength++ {
-		for _, materializationName := range []string{"c", strings.Repeat("long.", 40) + "chat", "chat.example"} {
-			deployment.Name = materializationName
+	t.Log("Names sharing the same visible prefix still identify different deployments")
+	deployment.Name = strings.Repeat("a", 33) + "-first"
+	first := PCSNameForLPX(deployment)
+	deployment.Name = strings.Repeat("a", 33) + "-second"
+	require.NotEqual(t, first, PCSNameForLPX(deployment))
+}
+
+func TestLPXPCSNamePreservesReadablePrefixWithinGroveBudget(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		prefix string
+	}{
+		{name: "c", prefix: "c"},
+		{name: "gpt-oss-120b-production", prefix: "gpt-oss-120b-production"},
+		{name: "apaprotskyi-llama3-8b-lp20", prefix: "apaprotskyi-llama3-8b-lp20"},
+		{name: "apaprotskyi-gpt-oss-20b-lp20-b300", prefix: "apaprotskyi-gpt-oss-20b-lp20-b300"},
+		{name: "chat.example", prefix: "chat-example"},
+		{name: "120b-chat", prefix: "lpx-120b-chat"},
+		{name: strings.Repeat("a", 33), prefix: strings.Repeat("a", 33)},
+		{name: strings.Repeat("a", 32) + "-chat", prefix: strings.Repeat("a", 32)},
+		{name: strings.Repeat("long.", 40) + "chat", prefix: "long-long-long-long-long-long-lon"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Retain the readable deployment prefix while bounding the complete Grove name")
+			deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+				Name: test.name, Namespace: "workloads", UID: "materialization-uid",
+			}}
 			got := PCSNameForLPX(deployment)
-			require.Empty(t, validation.IsDNS1035Label(got+"-"+strings.Repeat("e", componentLength)), got)
-			require.LessOrEqual(t, len(got)+max(componentLength, 8)+componentLength+len("-engine-gpu"), commonconsts.MaxCombinedGroveResourceNameLength)
+			require.True(t, strings.HasPrefix(got, test.prefix+"-"), got)
+			require.Len(t, got, len(test.prefix)+5)
+			require.Regexp(t, `-[a-f0-9]{4}$`, got)
+			require.LessOrEqual(t, len(got), lpx.MaxPodCliqueSetNameLength)
+			require.LessOrEqual(t, len(got)+len("lpx")+len("cond"), commonconsts.MaxCombinedGroveResourceNameLength)
+			require.Empty(t, validation.IsDNS1035Label(got+"-serve"), got)
 			require.Equal(t, got, PCSNameForLPX(deployment))
-		}
+		})
 	}
 }
 

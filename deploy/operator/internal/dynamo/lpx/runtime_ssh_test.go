@@ -108,7 +108,7 @@ func TestXTRuntimesRejectSSHVolumeCollision(t *testing.T) {
 	const wantError = `volume "ssh-secret" is reserved for MPI SSH Secret "mpi.ssh"`
 	require.ErrorContains(t, configureDirectHybridAgentRuntime(direct, "graph-lpu", "mpi.ssh", false), wantError)
 	require.ErrorContains(t, configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, "mpi.ssh"), wantError)
-	require.ErrorContains(t, configureNodeLocalConductorRuntime(conductor, BuildFamilyXT, "lpu-wkr-m-0", "mpi.ssh"), wantError)
+	require.ErrorContains(t, configureNodeLocalConductorRuntime(conductor, BuildFamilyXT, "agt", "mpi.ssh"), wantError)
 
 	t.Log("Preserve the authored volume in every rejected runtime")
 	for _, pod := range []*corev1.PodSpec{direct, agent, conductor} {

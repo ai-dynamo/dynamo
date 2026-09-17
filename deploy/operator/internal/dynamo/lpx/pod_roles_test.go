@@ -266,7 +266,7 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	agent := *base.DeepCopy()
 
 	t.Log("Lower the image into the Nova conductor and privileged SSH worker roles")
-	require.ErrorContains(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "lpu-wkr-m-0", "ssh-secret"), "writable storage")
+	require.ErrorContains(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "agt", "ssh-secret"), "writable storage")
 	require.ErrorContains(t, configureNodeLocalAgentRuntime(&agent, BuildFamilyHX, false, "ssh-secret"), "writable storage")
 	conductor = *base.DeepCopy()
 	agent = *base.DeepCopy()
@@ -286,7 +286,7 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	)
 	conductorMounts := slices.Clone(conductor.Containers[0].VolumeMounts)
 	agentMounts := slices.Clone(agent.Containers[0].VolumeMounts)
-	require.NoError(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "lpu-wkr-m-0", "ssh-secret"))
+	require.NoError(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "agt", "ssh-secret"))
 	require.NoError(t, configureNodeLocalAgentRuntime(&agent, BuildFamilyHX, false, "ssh-secret"))
 
 	t.Log("Verify the conductor starts Nova with immutable placement and source behavior")
@@ -297,7 +297,7 @@ func TestConfigureNodeLocalLPURuntimeRoles(t *testing.T) {
 	require.Equal(t, []string{"/bin/nova"}, conductorContainer.Command)
 	requireFlagValue(t, conductorContainer.Args, "--datacenter-config-filepath", "/configs/datacenter.toml")
 	require.Contains(t, conductorContainer.Args, "--instance-model-name")
-	requireFlagValue(t, conductorContainer.Args, "--allocation", "lpu-wkr-m-0")
+	requireFlagValue(t, conductorContainer.Args, "--allocation", "agt")
 	require.GreaterOrEqual(t, len(conductorContainer.Args), len(nodeLocalHXAgentEnvironmentArgs))
 	staticSuffixIndex := len(conductorContainer.Args) - len(nodeLocalHXAgentEnvironmentArgs)
 	require.Equal(t, nodeLocalHXAgentEnvironmentArgs, conductorContainer.Args[staticSuffixIndex:])
@@ -378,7 +378,7 @@ func TestConfigureNodeLocalXTConductorSSHInitUsesMainImage(t *testing.T) {
 	podSpec.Containers = append([]corev1.Container{{Name: "metrics", Image: "metrics-sidecar", ImagePullPolicy: corev1.PullAlways}}, podSpec.Containers...)
 
 	t.Log("Configure the conductor without deriving its runtime identity from list position")
-	require.NoError(t, configureNodeLocalConductorRuntime(&podSpec, BuildFamilyXT, "lpu-wkr-m-0", "ssh-secret"))
+	require.NoError(t, configureNodeLocalConductorRuntime(&podSpec, BuildFamilyXT, "agt", "ssh-secret"))
 
 	t.Log("Run SSH initialization with the resolved conductor image and preserve the sidecar")
 	require.Equal(t, "metrics", podSpec.Containers[0].Name)
@@ -399,7 +399,7 @@ func TestXTSSHSecretNameIsNotUsedAsVolumeName(t *testing.T) {
 	direct, agent, conductor := base.DeepCopy(), base.DeepCopy(), base.DeepCopy()
 	require.NoError(t, configureDirectHybridAgentRuntime(direct, "graph-lpu", sshSecretName, false))
 	require.NoError(t, configureNodeLocalAgentRuntime(agent, BuildFamilyXT, false, sshSecretName))
-	require.NoError(t, configureNodeLocalConductorRuntime(conductor, BuildFamilyXT, "lpu-wkr-m-0", sshSecretName))
+	require.NoError(t, configureNodeLocalConductorRuntime(conductor, BuildFamilyXT, "agt", sshSecretName))
 
 	for _, test := range []struct {
 		name   string
@@ -926,7 +926,7 @@ func TestConfigureNodeLocalLPURuntimeRolesRejectsUnsupportedShape(t *testing.T) 
 			conductor := *base.DeepCopy()
 			agent := *base.DeepCopy()
 
-			require.ErrorContains(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "agent", "ssh-secret"), test.errorText)
+			require.ErrorContains(t, configureNodeLocalConductorRuntime(&conductor, BuildFamilyHX, "agt", "ssh-secret"), test.errorText)
 			require.ErrorContains(t, configureNodeLocalAgentRuntime(&agent, BuildFamilyHX, false, "ssh-secret"), test.errorText)
 		})
 	}

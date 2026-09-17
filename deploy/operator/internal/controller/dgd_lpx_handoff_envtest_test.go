@@ -284,7 +284,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	require.NoError(t, env.Client().Delete(t.Context(), quota))
 	pcs := &grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForLPX(child), Namespace: source.Namespace}}
 	configMap := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: source.Namespace}}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-lpx", Namespace: source.Namespace}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pcs.Name + "-serve", Namespace: source.Namespace}}
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
 			return

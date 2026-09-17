@@ -26,7 +26,6 @@ func configureHybridCyborg(
 	workloadDigest string,
 	modelStorage lpuModelStorage,
 	agentTemplateNames []string,
-	plan *MaterializationPlan,
 	cyborgConfigMap *corev1.ConfigMap,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
@@ -79,14 +78,6 @@ func configureHybridCyborg(
 		}
 		cyborg.Annotations[commonconsts.AnnotationExtraResourcesHash] = LPUConfigMapHash(cyborgConfigMap)
 	}
-	if projection.configuredBuild.Family == BuildFamilyXT {
-		cyborg.Spec.StartsAfter = appendUnique(cyborg.Spec.StartsAfter, agentTemplateNames...)
-	}
-	if plan.ConductorTemplate != "" {
-		cyborg.Spec.StartsAfter = appendUnique(cyborg.Spec.StartsAfter, plan.ConductorTemplate)
-	}
-	if projection.configuredBuild.Family != BuildFamilyXT {
-		cyborg.Spec.StartsAfter = appendUnique(cyborg.Spec.StartsAfter, agentTemplateNames...)
-	}
+	cyborg.Spec.StartsAfter = appendUnique(cyborg.Spec.StartsAfter, agentTemplateNames...)
 	return nil
 }

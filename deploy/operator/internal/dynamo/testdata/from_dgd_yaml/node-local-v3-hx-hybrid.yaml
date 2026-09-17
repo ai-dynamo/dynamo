@@ -7,9 +7,9 @@ data:
 
     [datacenters]
     [datacenters.racks]
-    [datacenters.racks.lpu-wkr-m-0]
+    [datacenters.racks.agt]
     available_nodes = [0]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-lpu-wkr-m-0-{node}.${GROVE_HEADLESS_SERVICE}'
+    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt-{node}.${GROVE_HEADLESS_SERVICE}'
     preferred_start = 0
   gas_dir: /nfs/node-local-v3-hx-connected-lpx
   model_config.toml: |
@@ -46,7 +46,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-  name: lxymegpm-lpu-40e022e2d45905fb
+  name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
   namespace: test
 ---
 metadata:
@@ -57,13 +57,188 @@ metadata:
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
   labels:
     nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
-  name: lxymegpm
+  name: node-local-v3-hx-hybrid-be18
   namespace: test
 spec:
   replicas: 1
   template:
     cliqueStartupType: CliqueStartupTypeExplicit
     cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: 7443e572ed6c9124e2bfdacd89de30a0515735f36cfb677a99e1be70668ca8d0
+        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
+      labels:
+        lpx.nvidia.com/execution-role: lpu
+        lpx.nvidia.com/stage: lpu
+        nvidia.com/dynamo-component: lpu
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
+        nvidia.com/dynamo-namespace: test-node-local-v3-hx-hybrid
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: node-local-v3-hx-hybrid-lpu
+      name: agt
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - start
+            command:
+            - /bin/hydra-entrypoint
+            env:
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-node-local-v3-hx-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: node-local-v3-hx-hybrid
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: GAS_DIR
+              valueFrom:
+                configMapKeyRef:
+                  key: gas_dir
+                  name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
+            - name: GLUE_RDMA_PATH_MTU
+              value: "1024"
+            - name: LPU_MODEL_NAME
+              value: default
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIC_NAME
+              value: mlx5_0
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: RDMA_PORT
+              value: "19877"
+            - name: READINESS_PORT
+              value: "19878"
+            - name: TOPOLOGIES
+              valueFrom:
+                configMapKeyRef:
+                  key: topologies
+                  name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
+            - name: UCX_TLS
+              value: tcp
+            image: example.invalid/lpu-runtime:test
+            name: agent
+            readinessProbe:
+              exec:
+                command:
+                - /bin/hydra-entrypoint
+                - ready
+              failureThreshold: 6
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            resources:
+              limits:
+                hugepages-2Mi: 4Gi
+                nvidia.com/lpu: "16"
+              requests:
+                cpu: "62"
+                hugepages-2Mi: 4Gi
+                nvidia.com/lpu: "16"
+            securityContext:
+              privileged: true
+              runAsUser: 0
+            startupProbe:
+              exec:
+                command:
+                - /bin/hydra-entrypoint
+                - ready
+              failureThreshold: 240
+              periodSeconds: 5
+              successThreshold: 1
+              timeoutSeconds: 1
+            volumeMounts:
+            - mountPath: /nfs
+              name: model-storage
+            - mountPath: /configs
+              name: config
+            - mountPath: /dev/hugepages
+              name: hugepages
+            - mountPath: /sys
+              name: host-sys
+            - mountPath: /dev
+              name: host-dev
+            - mountPath: /ssh-pk
+              name: ssh-secret
+              readOnly: true
+            - mountPath: /dev/shm
+              name: shared-memory
+          dnsPolicy: ClusterFirstWithHostNet
+          hostIPC: true
+          hostNetwork: true
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          securityContext:
+            fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
+            runAsGroup: 0
+            runAsNonRoot: false
+            runAsUser: 0
+          terminationGracePeriodSeconds: 60
+          tolerations:
+          - key: lpu.nvidia.com/node
+            operator: Exists
+          - key: lpu.nvidia.com/lpu
+            operator: Exists
+          - key: lpu.nvidia.com/node-v2
+            operator: Exists
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: HugePages
+            name: hugepages
+          - hostPath:
+              path: /sys
+              type: Directory
+            name: host-sys
+          - hostPath:
+              path: /dev
+              type: Directory
+            name: host-dev
+          - name: ssh-secret
+            secret:
+              defaultMode: 420
+              secretName: ssh-secret
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
+            name: config
+        replicas: 1
+        roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
@@ -80,7 +255,7 @@ spec:
         nvidia.com/dynamo-namespace: test-node-local-v3-hx-hybrid
         nvidia.com/metrics-enabled: "true"
         nvidia.com/selector: node-local-v3-hx-hybrid-lpu
-      name: lpu-engine-gpu
+      name: cond
       spec:
         minAvailable: 1
         podSpec:
@@ -202,184 +377,9 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
         replicas: 1
-        roleName: lpu-engine-gpu
+        roleName: cond
         startsAfter:
-        - lpu-wkr-m-0
-    - annotations:
-        lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 40e022e2d45905fb8bce9ead674fe7e847e78a5785b481ef8dbff443218d20e5
-        scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
-        scheduling.lpu.nvidia.com/model: default
-        scheduling.lpu.nvidia.com/role: agent
-        scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
-      labels:
-        lpx.nvidia.com/execution-role: lpu
-        lpx.nvidia.com/stage: lpu
-        nvidia.com/dynamo-component: lpu
-        nvidia.com/dynamo-component-type: lpx
-        nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
-        nvidia.com/dynamo-namespace: test-node-local-v3-hx-hybrid
-        nvidia.com/metrics-enabled: "true"
-        nvidia.com/selector: node-local-v3-hx-hybrid-lpu
-      name: lpu-wkr-m-0
-      spec:
-        minAvailable: 1
-        podSpec:
-          containers:
-          - args:
-            - start
-            command:
-            - /bin/hydra-entrypoint
-            env:
-            - name: DYN_COMPONENT
-              value: lpx
-            - name: DYN_DISCOVERY_BACKEND
-              value: kubernetes
-            - name: DYN_NAMESPACE
-              value: test-node-local-v3-hx-hybrid
-            - name: DYN_PARENT_DGD_K8S_NAME
-              value: node-local-v3-hx-hybrid
-            - name: DYN_PARENT_DGD_K8S_NAMESPACE
-              value: test
-            - name: ETCD_ENDPOINTS
-              value: etcd-address
-            - name: GAS_DIR
-              valueFrom:
-                configMapKeyRef:
-                  key: gas_dir
-                  name: lxymegpm-lpu-40e022e2d45905fb
-            - name: GLUE_RDMA_PATH_MTU
-              value: "1024"
-            - name: LPU_MODEL_NAME
-              value: default
-            - name: NATS_SERVER
-              value: nats-address
-            - name: NIC_NAME
-              value: mlx5_0
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  apiVersion: v1
-                  fieldPath: status.podIP
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            - name: POD_UID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.uid
-            - name: RDMA_PORT
-              value: "19877"
-            - name: READINESS_PORT
-              value: "19878"
-            - name: TOPOLOGIES
-              valueFrom:
-                configMapKeyRef:
-                  key: topologies
-                  name: lxymegpm-lpu-40e022e2d45905fb
-            - name: UCX_TLS
-              value: tcp
-            image: example.invalid/lpu-runtime:test
-            name: agent
-            readinessProbe:
-              exec:
-                command:
-                - /bin/hydra-entrypoint
-                - ready
-              failureThreshold: 6
-              periodSeconds: 5
-              successThreshold: 1
-              timeoutSeconds: 1
-            resources:
-              limits:
-                hugepages-2Mi: 4Gi
-                nvidia.com/lpu: "16"
-              requests:
-                cpu: "62"
-                hugepages-2Mi: 4Gi
-                nvidia.com/lpu: "16"
-            securityContext:
-              privileged: true
-              runAsUser: 0
-            startupProbe:
-              exec:
-                command:
-                - /bin/hydra-entrypoint
-                - ready
-              failureThreshold: 240
-              periodSeconds: 5
-              successThreshold: 1
-              timeoutSeconds: 1
-            volumeMounts:
-            - mountPath: /nfs
-              name: model-storage
-            - mountPath: /configs
-              name: config
-            - mountPath: /dev/hugepages
-              name: hugepages
-            - mountPath: /sys
-              name: host-sys
-            - mountPath: /dev
-              name: host-dev
-            - mountPath: /ssh-pk
-              name: ssh-secret
-              readOnly: true
-            - mountPath: /dev/shm
-              name: shared-memory
-          dnsPolicy: ClusterFirstWithHostNet
-          hostIPC: true
-          hostNetwork: true
-          restartPolicy: Always
-          schedulerName: lpx-scheduler
-          securityContext:
-            fsGroup: 1000
-            fsGroupChangePolicy: OnRootMismatch
-            runAsGroup: 0
-            runAsNonRoot: false
-            runAsUser: 0
-          terminationGracePeriodSeconds: 60
-          tolerations:
-          - key: lpu.nvidia.com/node
-            operator: Exists
-          - key: lpu.nvidia.com/lpu
-            operator: Exists
-          - key: lpu.nvidia.com/node-v2
-            operator: Exists
-          volumes:
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
-          - emptyDir:
-              medium: HugePages
-            name: hugepages
-          - hostPath:
-              path: /sys
-              type: Directory
-            name: host-sys
-          - hostPath:
-              path: /dev
-              type: Directory
-            name: host-dev
-          - name: ssh-secret
-            secret:
-              defaultMode: 420
-              secretName: ssh-secret
-          - emptyDir:
-              medium: Memory
-              sizeLimit: 8Gi
-            name: shared-memory
-          - configMap:
-              name: lxymegpm-lpu-40e022e2d45905fb
-            name: config
-        replicas: 1
-        roleName: lpu-wkr-m-0
+        - agt
     headlessServiceConfig:
       publishNotReadyAddresses: true
     podCliqueScalingGroups:
@@ -389,10 +389,10 @@ spec:
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
       cliqueNames:
-      - lpu-wkr-m-0
-      - lpu-engine-gpu
+      - agt
+      - cond
       minAvailable: 1
-      name: lpu
+      name: lpx
       replicas: 1
     terminationDelay: 15m0s
 status:
