@@ -184,3 +184,6 @@ fern/components/install-selector-data.ts
 
 # Optimization-run artifacts (EXP_ROOT lives at runs/<EXP_ID>/ in the repo root)
 /runs/
+out-aic/
+out-disagg/
+your_search.yaml
