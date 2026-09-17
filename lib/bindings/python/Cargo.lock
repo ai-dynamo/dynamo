@@ -2140,6 +2140,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

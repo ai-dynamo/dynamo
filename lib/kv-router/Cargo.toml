@@ -100,7 +100,3 @@ harness = false
 [[bench]]
 name = "worker_selection"
 harness = false
-
-[[bench]]
-name = "session_prefix_index"
-harness = false

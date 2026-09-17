@@ -2461,6 +2461,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-continuum-session-prefix-bench"
+version = "1.5.0"
+dependencies = [
+ "criterion",
+ "dynamo-kv-router",
+]
+
+[[package]]
 name = "dynamo-custom-policy-builtin"
 version = "1.5.0"
 dependencies = [
@@ -2615,6 +2623,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-llm",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

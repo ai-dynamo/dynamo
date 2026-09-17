@@ -99,6 +99,14 @@ impl KvHintPolicy for SessionKvHintPolicy {
             .collect::<Vec<_>>();
 
         if agent.session_final == Some(true) {
+            tracing::info!(
+                target: "continuum_kv_hints",
+                session_id = %agent.session_id,
+                worker_id = context.selected_worker.worker_id,
+                lineage_block_count = block_hashes.len(),
+                action_type = "kv.evict",
+                "Emitting request-completion KV hint"
+            );
             return Ok(Some(self.hint(
                 &agent.session_id,
                 context.selected_worker.worker_id,
@@ -111,6 +119,16 @@ impl KvHintPolicy for SessionKvHintPolicy {
         let Some(retain) = self.fixed_retention else {
             return Ok(None);
         };
+        tracing::info!(
+            target: "continuum_kv_hints",
+            session_id = %agent.session_id,
+            worker_id = context.selected_worker.worker_id,
+            lineage_block_count = block_hashes.len(),
+            action_type = "kv.retain",
+            priority = retain.priority,
+            ttl_seconds = retain.ttl_seconds,
+            "Emitting request-completion KV hint"
+        );
         Ok(Some(self.hint(
             &agent.session_id,
             context.selected_worker.worker_id,
