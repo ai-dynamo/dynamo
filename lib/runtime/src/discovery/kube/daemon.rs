@@ -960,11 +960,6 @@ mod tests {
         .await
         .expect("stop_reflector_tasks must return once both tasks are aborted, not hang");
 
-        // `stop_reflector_tasks` returning is not itself proof that either task
-        // finished -- an implementation that only calls `abort()` and never
-        // awaits the handle would also return immediately. Awaiting a
-        // `JoinHandle` only resolves once the task (including its drop glue)
-        // has actually finished, so these must already be set here.
         assert!(
             readiness_done.load(Ordering::SeqCst),
             "readiness task must have actually finished, not just been asked to abort"
