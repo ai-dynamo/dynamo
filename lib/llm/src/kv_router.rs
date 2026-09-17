@@ -11,10 +11,12 @@ use std::{
 use anyhow::Result;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
-    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
-        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
+        ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, MatchDetails,
+        RoutingDecisionHashes,
     },
     kv_hints::{
         KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource,
@@ -22,9 +24,9 @@ use dynamo_kv_router::{
     },
     protocols::KV_EVENT_SUBJECT,
     protocols::{
-        BlockExtraInfo, BlockHashOptions, LocalBlockHash, PrefillLoadHint, RouterEvent,
-        RouterRequest, RouterResponse, RoutingConstraints, TokensWithHashes, WorkerConfigLike,
-        WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
+        BlockExtraInfo, BlockHashOptions, ExternalSequenceBlockHash, LocalBlockHash,
+        PrefillLoadHint, RouterEvent, RouterRequest, RouterResponse, RoutingConstraints,
+        TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
     },
     scheduling::{
         AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
@@ -506,6 +508,13 @@ fn log_routing_input_hashes(
     );
 }
 
+fn matched_hash_for_worker(
+    match_details: &MatchDetails,
+    worker: WorkerWithDpRank,
+) -> Option<ExternalSequenceBlockHash> {
+    match_details.last_matched_hashes.get(&worker).copied()
+}
+
 // for router discovery registration
 pub const KV_ROUTER_ENDPOINT: &str = "router-discovery";
 
@@ -558,6 +567,8 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    /// Optional session-aware logical prefix index.
+    session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
 fn resolve_tracking_model_name(
@@ -692,6 +703,7 @@ where
             KvEventSourceRequirement::derive(worker_role, &kv_router_config);
         let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
             || kv_router_config.serve_indexer
+            || kv_router_config.enable_session_prefix_index
             || matches!(
                 kv_event_source_requirement,
                 KvEventSourceRequirement::ConditionalDisaggDecodeCache
@@ -702,6 +714,9 @@ where
         let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
+        let session_prefix_index = kv_router_config
+            .enable_session_prefix_index
+            .then(|| Arc::new(SessionPrefixIndexer::new()));
 
         let indexer = if cache_required {
             Indexer::new(
@@ -710,6 +725,7 @@ where
                 block_size,
                 model_name.as_deref(),
                 cancellation_token.child_token(),
+                session_prefix_index.clone(),
             )
             .await?
         } else {
@@ -873,6 +889,7 @@ where
             lora_filter,
             endpoint_registration: None,
             teardown_task_guard: None,
+            session_prefix_index,
         })
     }
 
@@ -1600,6 +1617,15 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
+        let session_index_context = if is_admitted_routing {
+            self.session_prefix_index
+                .as_ref()
+                .and(session_context.as_ref())
+                .map(|session| session.session_id().to_owned())
+        } else {
+            None
+        };
+        let session_block_hashes = session_index_context.as_ref().map(|_| block_hashes.clone());
         let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
         let has_transfer_capable_workers = self.has_transfer_capable_workers();
@@ -1652,6 +1678,7 @@ where
             .then(|| tiered_matches.kv_transfer_candidates().cloned())
             .flatten();
         drop(tiered_matches);
+
         let find_matches_elapsed = start.elapsed();
 
         // Capture shared cache info for metrics before moving into schedule().
@@ -1727,6 +1754,59 @@ where
                 Err(error) => return Err(map_scheduler_error(error)),
             },
         };
+
+        // Indexing failures never affect routing.
+        if let (Some(session_id), Some(block_hashes)) = (
+            session_index_context.as_ref(),
+            session_block_hashes.as_deref(),
+        ) && let Some(mut residency_version) =
+            self.indexer.session_residency_version(response.best_worker)
+        {
+            for attempt in 0..2 {
+                match self
+                    .indexer
+                    .find_primary_match_details_ref(block_hashes)
+                    .await
+                {
+                    Ok(match_details) => {
+                        let Some(current_version) =
+                            self.indexer.session_residency_version(response.best_worker)
+                        else {
+                            break;
+                        };
+                        if current_version != residency_version {
+                            if attempt == 0 {
+                                residency_version = current_version;
+                                continue;
+                            }
+                            tracing::debug!(
+                                worker = ?response.best_worker,
+                                "skipping session prefix match during concurrent KV eviction"
+                            );
+                            break;
+                        }
+
+                        if let Some(matched_hash) =
+                            matched_hash_for_worker(&match_details, response.best_worker)
+                            && let Err(err) = self.indexer.enqueue_session_match(
+                                session_id,
+                                response.best_worker,
+                                matched_hash,
+                                residency_version,
+                            )
+                        {
+                            tracing::warn!(%err, "failed to record session prefix match");
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "failed to refresh session prefix match");
+                        break;
+                    }
+                }
+            }
+        }
+
         let kv_hint = if is_admitted_routing {
             self.kv_hint_for_selection(
                 context_id,
