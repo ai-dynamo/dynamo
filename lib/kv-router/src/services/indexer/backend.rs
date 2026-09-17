@@ -10,10 +10,13 @@ use tokio_util::sync::CancellationToken;
 use crate::ConcurrentRadixTreeCompressed;
 use crate::ThreadPoolIndexer;
 use crate::indexer::{
-    KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError, LowerTierIndexers,
-    MatchDetails, TieredMatchDetails, TieredMatchProvider, query_lower_tiers,
+    ApproximateRetentionConfig, KvIndexer, KvIndexerInterface, KvIndexerMetrics, KvRouterError,
+    LowerTierIndexers, MatchDetails, TieredMatchDetails, TieredMatchProvider, query_lower_tiers,
 };
-use crate::protocols::{KvCacheEventData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId};
+use crate::protocols::{
+    KvCacheEventData, LocalBlockHash, OverlapScores, RouterEvent, WorkerId, WorkerWithDpRank,
+};
+use dynamo_tokens::SequenceHash;
 
 /// Block-content indexer wrapping a primary device-tier backend plus a
 /// per-tier registry of lower-tier indexers (host-pinned, disk, …).
@@ -26,10 +29,12 @@ pub enum Indexer {
     Single {
         primary: KvIndexer,
         lower_tier: LowerTierIndexers,
+        records_routing_decisions: bool,
     },
     Concurrent {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
+        records_routing_decisions: bool,
     },
 }
 
@@ -65,6 +70,7 @@ impl Indexer {
             Indexer::Single {
                 primary,
                 lower_tier,
+                ..
             } => {
                 if is_clear {
                     let mut reset_error = None;
@@ -95,6 +101,7 @@ impl Indexer {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => {
                 if is_clear {
                     let mut reset_error = None;
@@ -131,6 +138,7 @@ impl Indexer {
             Indexer::Single {
                 primary,
                 lower_tier,
+                ..
             } => {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
@@ -140,6 +148,7 @@ impl Indexer {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker(worker_id).await;
@@ -154,6 +163,7 @@ impl Indexer {
             Indexer::Single {
                 primary,
                 lower_tier,
+                ..
             } => {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
@@ -163,11 +173,52 @@ impl Indexer {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => {
                 for indexer in lower_tier.all() {
                     indexer.remove_worker_dp_rank(worker_id, dp_rank).await;
                 }
                 primary.remove_worker_dp_rank(worker_id, dp_rank).await;
+            }
+        }
+    }
+
+    /// Whether this indexer was built to record standalone approximate routing
+    /// decisions. Request-side recording decisions should consult this flag
+    /// rather than re-deriving capability from router configuration.
+    pub fn can_record_routing_decisions(&self) -> bool {
+        match self {
+            Indexer::Single {
+                records_routing_decisions,
+                ..
+            } => *records_routing_decisions,
+            Indexer::Concurrent {
+                records_routing_decisions,
+                ..
+            } => *records_routing_decisions,
+        }
+    }
+
+    /// Record a standalone approximate routing decision.
+    pub async fn record_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        block_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        if !self.can_record_routing_decisions() {
+            return Ok(());
+        }
+        match self {
+            Indexer::Single { primary, .. } => {
+                primary
+                    .record_ttl_fallback_hashes(worker, block_hashes, sequence_hashes)
+                    .await
+            }
+            Indexer::Concurrent { primary, .. } => {
+                primary
+                    .record_ttl_fallback_hashes(worker, &block_hashes, &sequence_hashes)
+                    .await
             }
         }
     }
@@ -195,6 +246,7 @@ impl Indexer {
             Indexer::Single {
                 primary,
                 lower_tier,
+                ..
             } => {
                 let device = primary.find_match_details(sequence.clone()).await?;
                 let lt = query_lower_tiers(lower_tier, &sequence, &device);
@@ -206,6 +258,7 @@ impl Indexer {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => {
                 let device: MatchDetails =
                     primary.backend().find_match_details_impl(&sequence, false);
@@ -231,6 +284,7 @@ impl Indexer {
             Indexer::Single {
                 primary,
                 lower_tier,
+                ..
             } => (
                 primary.dump_events().await.map_err(anyhow::Error::from)?,
                 lower_tier.entries(),
@@ -238,6 +292,7 @@ impl Indexer {
             Indexer::Concurrent {
                 primary,
                 lower_tier,
+                ..
             } => (
                 primary.dump_events().await.map_err(anyhow::Error::from)?,
                 lower_tier.entries(),
@@ -332,6 +387,7 @@ mod tests {
     use super::test_util::store_event;
     use super::*;
     use crate::indexer::KvIndexerInterface;
+    use crate::indexer::pruning::PruneConfig;
     #[cfg(feature = "metrics")]
     use crate::indexer::{METRIC_EVENT_CLEARED, METRIC_STATUS_OK};
     use crate::protocols::{
@@ -448,6 +504,7 @@ mod tests {
         if let Indexer::Single {
             primary,
             lower_tier,
+            ..
         } = &source
         {
             let _ = primary.flush().await;
@@ -482,6 +539,7 @@ mod tests {
         if let Indexer::Single {
             primary,
             lower_tier,
+            ..
         } = &replayed
         {
             let _ = primary.flush().await;
@@ -519,6 +577,24 @@ mod tests {
             Some(1),
             "disk should report 1 additional block after replay"
         );
+    }
+
+    #[tokio::test]
+    async fn recording_capability_follows_constructed_retention() {
+        let metrics = || Arc::new(KvIndexerMetrics::new_unregistered());
+        let retention = || {
+            Some(ApproximateRetentionConfig::Ttl(PruneConfig {
+                ttl: std::time::Duration::from_secs(60),
+            }))
+        };
+        for num_threads in [1, 2] {
+            let with_retention =
+                create_indexer_with_retention(4, num_threads, metrics(), retention());
+            assert!(with_retention.can_record_routing_decisions());
+
+            let without_retention = create_indexer_with_retention(4, num_threads, metrics(), None);
+            assert!(!without_retention.can_record_routing_decisions());
+        }
     }
 
     #[tokio::test]
@@ -611,25 +687,40 @@ pub fn create_indexer_with_metrics(
     num_threads: usize,
     metrics: Arc<KvIndexerMetrics>,
 ) -> Indexer {
+    create_indexer_with_retention(block_size, num_threads, metrics, None)
+}
+
+pub fn create_indexer_with_retention(
+    block_size: u32,
+    num_threads: usize,
+    metrics: Arc<KvIndexerMetrics>,
+    retention: Option<ApproximateRetentionConfig>,
+) -> Indexer {
+    let records_routing_decisions = retention.is_some();
     if num_threads > 1 {
         Indexer::Concurrent {
-            primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
-                ConcurrentRadixTreeCompressed::new(),
-                num_threads,
-                block_size,
-                Some(metrics),
-            )),
+            primary: Arc::new(
+                ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+                    ConcurrentRadixTreeCompressed::new(),
+                    num_threads,
+                    block_size,
+                    Some(metrics),
+                    retention,
+                ),
+            ),
             lower_tier: LowerTierIndexers::new(num_threads, block_size),
+            records_routing_decisions,
         }
     } else {
         Indexer::Single {
-            primary: KvIndexer::new_with_pruning(
+            primary: KvIndexer::new_with_approximate_retention(
                 CancellationToken::new(),
                 block_size,
                 metrics,
-                None,
+                retention,
             ),
             lower_tier: LowerTierIndexers::new(1, block_size),
+            records_routing_decisions,
         }
     }
 }
