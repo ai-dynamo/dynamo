@@ -92,29 +92,27 @@ class StandaloneRouterHandler:
             logger.error("KvRouter not initialized - cannot process request")
             raise RuntimeError("Router not initialized")
 
-        # Wrap incoming request into PreprocessedRequest format for KvRouter
-        # The request should already have most fields, but we ensure it has the structure
-        # Build routing hints from request (supports both nested routing object and legacy dp_rank)
+        # Forward the inbound request wholesale and overlay only what this
+        # router synthesizes. PreprocessedRequest keeps growing fields
+        # (require_reasoning, kv_hint, router, agent_context,
+        # media_io_kwargs, ...); rebuilding the request from an explicit
+        # allow-list silently dropped every field it did not name, so the
+        # backend saw builder defaults (e.g. require_reasoning=false, which
+        # turns off reasoning token accounting) for requests routed through
+        # here.
         routing = request.get("routing")
         dp_rank = request.get("dp_rank")
         if routing is None and dp_rank is not None:
             routing = {"dp_rank": dp_rank}
 
-        preprocessed_request = {
-            "model": request.get("model", "unknown"),
-            "token_ids": request["token_ids"],
-            "stop_conditions": request.get("stop_conditions", {}),
-            "sampling_options": request.get("sampling_options", {}),
-            "output_options": request.get("output_options", {}),
-            "eos_token_ids": request.get("eos_token_ids", []),
-            "annotations": request.get("annotations", []),
-            "routing": routing,
-            "router_config_override": request.get("router_config_override"),
-            "prefill_result": request.get("prefill_result"),
-            "bootstrap_info": request.get("bootstrap_info"),
-            "extra_args": request.get("extra_args"),
-            "mm_processor_kwargs": request.get("mm_processor_kwargs"),
-        }
+        preprocessed_request = dict(request)
+        preprocessed_request.update(
+            {
+                "model": request.get("model", "unknown"),
+                "token_ids": request["token_ids"],
+                "routing": routing,
+            }
+        )
 
         async for worker_output in await self.kv_router.generate_from_request(
             preprocessed_request  # type: ignore[arg-type]
