@@ -2022,7 +2022,16 @@ class TestRLAdminRouteHardening:
 
     @pytest.mark.asyncio
     async def test_get_weight_version_reports_undeclared_before_any_update(self):
-        handler = self._make_rl_handler()
+        config = _make_config(enable_multimodal=False)
+        config.custom_encoder_class = None
+        # Exercise the real initializer; _make_rl_handler sets the sentinel itself.
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.DecodeWorkerHandler(
+                runtime=MagicMock(),
+                config=config,
+                engine=MagicMock(),
+                default_sampling_params={},
+            )
 
         resp = await handler.get_weight_version({})
 

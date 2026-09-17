@@ -190,6 +190,8 @@ curl http://10.0.0.12:8081/engine/get_weight_version \
 
 A worker tracks only the versions declared to it. `version_declared` is `false`, with `version` set to `null`, until something declares one, either through a `/engine/` weight-update route that carries `weight_version` or through `set_weight_version`. Branch on `version_declared` rather than comparing `version` against a placeholder string: any string, including `"initial"`, is a legal version tag that a caller can declare.
 
+For each Python vLLM worker, check that `routes` from `GET /v1/rl/workers` includes `set_weight_version` before relying on `version_declared`. Older workers omit both that route and the response field; treat a missing `version_declared` as unsupported declaration tracking, not as `false`, because their `"initial"` version cannot distinguish an undeclared worker from an explicit declaration.
+
 Version declarations accept any JSON value, including `null`. An explicit `{"weight_version": null}` is a declaration: `get_weight_version` then returns `"version": null` with `"version_declared": true`.
 
 A weight-update route that omits `weight_version` returns `"version": "unknown"` and leaves the previous declaration unchanged. A worker with no previous declaration remains undeclared. Pass `weight_version` on every update whose version you want the worker to report.
