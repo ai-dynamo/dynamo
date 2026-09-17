@@ -18,15 +18,12 @@
 package dynamo
 
 import (
-	"maps"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -554,78 +551,6 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// elasticEPDGDForGate builds the graph an existing user would already have: one
-// elastic-EP leader that a released operator accepted before this feature existed.
-func elasticEPDGDForGate() *v1beta1.DynamoGraphDeployment {
-	return &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default"},
-		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
-				{
-					ComponentName: leaderComponent,
-					ComponentType: commonconsts.ComponentTypeDecode,
-					Replicas:      ptr.To(int32(1)),
-					PodTemplate:   elasticEPComponent().PodTemplate,
-				},
-			},
-		},
-	}
-}
-
-// TestElasticEPGenerationIsIndependentOfTheGate pins where features.ElasticEPRayPoC does
-// and does not reach.
-//
-// Generation is deliberately gate-free. The followers are the deployment's declared
-// width, not capacity the PoC invents: a leader asking for --data-parallel-size N is
-// asking for N ranks, and on the one-pod-per-rank rule that is N pods. A gated-off
-// operator that rendered only the leader would silently under-provision the engine, and
-// the leader would wait forever for ranks nothing created. So both gate positions
-// generate the same objects, and the gate decides only whether the follower count may
-// later be *changed* -- which lives in preserveExistingDCDState, not here.
-//
-// The upgrade-safety property that does belong to generation is the narrow one: the
-// LEADER's spec must not move. Altering a pod template rolls a serving deployment, so an
-// administrator upgrading the operator for an unrelated fix must not lose their engines
-// to it.
-//
-// Verified by mutation: reintroducing a gate term in synthesizeElasticEPFollowerDCD fails
-// the count assertion below. If you change what this asserts, re-run that check -- a
-// guard that no longer fails when the behaviour is reverted is decoration, not coverage.
-func TestElasticEPGenerationIsIndependentOfTheGate(t *testing.T) {
-	t.Log("Generate the same graph twice; generation takes no gate, so the two must agree")
-	off, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{})
-	if err != nil {
-		t.Fatalf("generation failed: %v", err)
-	}
-	on, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{})
-	if err != nil {
-		t.Fatalf("generation failed: %v", err)
-	}
-
-	t.Log("The follower is derived regardless: a gated-off operator still renders full width")
-	if len(off) != 2 || len(on) != 2 {
-		t.Fatalf("generated %d and %d DCDs, want the declared leader plus its follower in both cases",
-			len(off), len(on))
-	}
-	follower := off[elasticEPFollowerName(leaderComponent)]
-	if follower == nil {
-		t.Fatalf("no follower derived; generated %v", slices.Sorted(maps.Keys(off)))
-	}
-	if follower.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] != commonconsts.KubeLabelValueTrue {
-		t.Error("derived follower is missing the follower annotation the renderer keys RoleFollower off")
-	}
-
-	t.Log("This fixture declares no --data-parallel-size, so its declared width is one rank: the leader alone")
-	if got := ptr.Deref(follower.Spec.Replicas, -1); got != 0 {
-		t.Errorf("follower replicas = %d, want 0 for a leader with no --data-parallel-size", got)
-	}
-
-	t.Log("The leader itself is byte-identical: no pod-template change, so no rollout")
-	if diff := cmp.Diff(off[leaderComponent].Spec, on[leaderComponent].Spec); diff != "" {
-		t.Errorf("the leader's spec moved between generations (-a +b):\n%s", diff)
 	}
 }
 

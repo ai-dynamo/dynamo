@@ -101,6 +101,20 @@ func (r *groveStableResourcesReconciler) Reconcile(
 		// Shape only, not the gate: this Service shipped ungated in #13178. Deleting it
 		// when an upgrade introduces a default-off gate would remove a live leader's
 		// stable address without the deployment changing at all.
+		//
+		// DELIBERATE BEHAVIOUR CHANGE, and the one case where this DOES remove a Service that
+		// #13178 would have created. The predicate that shipped there checked the launch
+		// flags, node count and replica count, but NOT the component type, so a non-worker
+		// component carrying the elastic-EP flags -- a frontend, say -- qualified for a
+		// headless Ray Service. IsSinglePodElasticEPShape adds the worker check, so such a
+		// component no longer qualifies and this call therefore deletes its Service on the
+		// next reconcile.
+		//
+		// Kept narrow on purpose. The Service exists so followers can find their leader's Ray
+		// head, and a non-worker component never gets a follower (synthesis requires
+		// IsWorkerComponent) and never starts a Ray head, so the Service addressed nothing.
+		// Rendering it was the accident; removing it is the correction. Worth knowing on
+		// upgrade, which is why it is stated here rather than left to be discovered.
 		epService, err := r.reconcileElasticEPLeaderService(
 			ctx,
 			dgd,

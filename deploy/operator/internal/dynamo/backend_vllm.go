@@ -102,9 +102,10 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// PODS (a multi-GPU pod runs its ranks intra-pod). Absent means no follower was
 		// derived: the Grove pathway renders RoleMain through this arm but never
 		// synthesizes one (grove#676), nor does a component with replicas > 1. Keying on
-		// the flag made the shipped moe_elastic_ep_demo.yaml (4 GPUs, dp=2, one pod) wait
-		// 20 minutes for a second Ray node nothing would create, then exit --
-		// CrashLoopBackOff on the default workload provider.
+		// the flag made the shipped moe_elastic_ep_demo.yaml (dp=2, one pod, no
+		// enable-grove opt-out, so Grove is its provider) wait 20 minutes for a second Ray
+		// node nothing would create, then exit -- CrashLoopBackOff on the default workload
+		// provider.
 		followerReplicas := elasticEPSynthesizedFollowers(annotations)
 
 		// Pin the leader to one local rank BEFORE the command is wrapped -- the other half
