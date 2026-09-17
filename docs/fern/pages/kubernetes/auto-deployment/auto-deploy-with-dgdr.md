@@ -467,14 +467,21 @@ workload-creation API:
 > creating a `Job` or `Pod` there — including through `overrides.profilingJob`. This is by design
 > and matches how Kubernetes treats every Pod-spawning resource.
 >
-> Enforce the Pod's **security context centrally on the resulting Pods** with
+> Enforce Pod security **centrally on the resulting Pods** with
 > [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
-> (and any admission webhooks). PSA applies no policy until you label the namespace — set
-> `pod-security.kubernetes.io/enforce: <level>` (`baseline` or `restricted`, plus the matching
-> `audit`/`warn` labels) on every namespace where Dynamo runs, exactly as you would for any
-> workload. The operator does not re-implement those checks.
+> (and any admission webhooks), which applies the full
+> [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) —
+> not only `securityContext` fields but also `privileged`, host namespaces, `hostPath` volumes, and
+> host ports. PSA applies no policy until you label the namespace — set
+> `pod-security.kubernetes.io/enforce: <level>` (plus the matching `audit`/`warn` labels) on every
+> namespace where Dynamo runs, exactly as you would for any workload. The operator does not
+> re-implement those checks.
 >
-> PSA governs a Pod's security *context*, not its *identity*: `overrides.profilingJob` can set the
+> Dynamo's operator-generated workloads — including the DGDR profiling Job — satisfy the **`baseline`**
+> standard. Enforce **`baseline`** to block the privileged-container, host-namespace, host-device, and
+> `hostPath` escalation paths while keeping Dynamo running.
+>
+> PSA governs a Pod's security *posture*, not its *identity*: `overrides.profilingJob` can set the
 > Job's `serviceAccountName` and `automountServiceAccountToken`, and those are bounded by RBAC and
 > namespace membership, not by PSA — the same authority any Pod author in the namespace already has.
 > So grant `create`/`update` on DGDRs — and on workload resources generally — only to principals you
@@ -484,8 +491,9 @@ workload-creation API:
 The profiling Job object always remains in the DGDR's own namespace and overrides cannot relocate
 it — but namespace containment is not node or cross-tenant isolation. If admission permits
 privileged containers, host namespaces, host devices, or `hostPath` mounts, a DGDR creator can
-obtain those capabilities through the operator. Apply non-exempt Pod Security Admission (or
-equivalent policy) to every resulting Pod.
+obtain those capabilities through the operator, exactly as any Pod author in the namespace could.
+Enforcing `baseline` non-exempt on every resulting Pod closes those paths; use namespaces as the
+tenancy boundary for anything stronger.
 
 ## Next steps
 
