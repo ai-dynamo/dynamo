@@ -444,6 +444,7 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 		restrictedNamespace  string
 		wantAdmissionCA      string
 		wantConversionCA     string
+		wantCRDReadCount     int
 		wantCRDMutationCount int
 	}{
 		{
@@ -451,6 +452,7 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 			mode:                 configv1alpha1.CertProvisionModeAuto,
 			wantAdmissionCA:      "operator-ca",
 			wantConversionCA:     "operator-ca",
+			wantCRDReadCount:     len(convertibleCRDs),
 			wantCRDMutationCount: 1,
 		},
 		{
@@ -465,6 +467,7 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 			mode:                 configv1alpha1.CertProvisionModeManual,
 			wantAdmissionCA:      "existing-admission-ca",
 			wantConversionCA:     "operator-ca",
+			wantCRDReadCount:     len(convertibleCRDs),
 			wantCRDMutationCount: 1,
 		},
 		{
@@ -499,12 +502,19 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 			crd.Spec.Conversion.Webhook.ClientConfig.CABundle = []byte("cluster-ca")
 			originalService := crd.Spec.Conversion.Webhook.ClientConfig.Service.DeepCopy()
 
-			t.Log("Record every attempted CRD patch or update")
+			t.Log("Record every attempted CRD read, patch, or update")
+			crdReadCount := 0
 			crdMutationCount := 0
 			builder := fake.NewClientBuilder().
 				WithScheme(newScheme()).
 				WithObjects(secret, validating, crd).
 				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, reader client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
+							crdReadCount++
+						}
+						return reader.Get(ctx, key, obj, opts...)
+					},
 					Patch: func(ctx context.Context, writer client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 						if _, ok := obj.(*apiextensionsv1.CustomResourceDefinition); ok {
 							crdMutationCount++
@@ -528,6 +538,9 @@ func TestInjectHonorsNamespaceScope(t *testing.T) {
 			t.Log("Inject CA bundles according to the operator scope and certificate mode")
 			if err := injector.Inject(ctx); err != nil {
 				t.Fatalf("injecting CA bundles: %v", err)
+			}
+			if crdReadCount != tt.wantCRDReadCount {
+				t.Fatalf("CRD read count = %d, want %d", crdReadCount, tt.wantCRDReadCount)
 			}
 
 			t.Log("Verify admission and conversion ownership boundaries")
@@ -619,7 +632,7 @@ func TestInjectCRDConversionCA_ReadsCABundleAndPatchesOnlyCABundle(t *testing.T)
 	injector := newTestInjector(fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(secret, crd), cfg)
 	ctx := context.Background()
 
-	if err := injector.InjectCRDConversionCA(ctx); err != nil {
+	if err := injector.injectCRDConversionCA(ctx); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -673,7 +686,7 @@ func TestInjectCRDConversionCA_WaitsWhenSecretNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
 
-	err := injector.InjectCRDConversionCA(ctx)
+	err := injector.injectCRDConversionCA(ctx)
 	if err == nil {
 		t.Fatal("expected context timeout while waiting for missing secret")
 	}

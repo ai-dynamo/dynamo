@@ -505,7 +505,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Inject webhook CAs according to the certificate mode and operator scope.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
