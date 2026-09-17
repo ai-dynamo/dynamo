@@ -17,9 +17,10 @@
 # 3. A maintainer pushes to a PR branch, for example by merging main into it.
 #    Approval covers that head commit. Later pushes need a new approval.
 # 4. glamr-agent posts `@dynamo-ops please run full CI for <full-head-sha>` on
-#    its own PR. The request may start with a label and colon. Both the commenter
-#    and PR author must have GitHub account ID 282374502, and the SHA must match
-#    the PR's current head. This case does not require signed commits.
+#    its own PR. The request may start with a label and colon. The commenter,
+#    PR author, and head repository owner must all have GitHub account ID
+#    282374502, and the SHA must match the PR's current head. This case does not
+#    require signed commits.
 #    Set the repository Actions variable GLAMR_CI_REQUESTS_DISABLED=true to
 #    disable these requests.
 #
@@ -84,6 +85,7 @@ jobs:
           head=$(jq -r '.head.sha' <<< "$pr")
           if [[ "$GITHUB_EVENT_NAME" == issue_comment ]]; then
             [[ $(jq -r '.user.id' <<< "$pr") == 282374502 ]] || exit 0
+            [[ $(jq -r '.head.repo.owner.id' <<< "$pr") == 282374502 ]] || exit 0
             body=$(jq -r '.comment.body' "$GITHUB_EVENT_PATH")
             pattern='^([^[:space:]]+:[[:blank:]]+)?@dynamo-ops please run full CI for ([0-9a-f]{40})[[:space:]]*$'
             [[ "$body" =~ $pattern ]] || exit 0

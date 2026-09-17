@@ -237,8 +237,9 @@ cargo fmt --all && cargo clippy --workspace
   grant automatic approval; a maintainer can approve the current head manually with
   `/ok to test <sha>`.
   The only signature exception is a full-CI request from `glamr-agent` on its own PR.
-  The workflow checks both GitHub account IDs and requires the request's full SHA to
-  match the PR's current head. Other automatic approvals still require verified signatures.
+  The commenter, PR author, and head repository owner must all be `glamr-agent`,
+  checked by GitHub account ID. The request's full SHA must match the PR's current
+  head. Other automatic approvals still require verified signatures.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
   generated file says so in a `do not edit` marker, and its generator has a
   `--check` mode that fails when the committed output is stale. Resolve a
