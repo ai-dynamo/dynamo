@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       framework:
-        description: 'Backend the test image was built with (vllm, sglang, trtllm, dynamo); labels test metadata and coverage/Allure artifacts'
+        description: 'Backend the test image was built with (dynamo, sglang, triton, trtllm, vllm); labels test metadata and coverage/Allure artifacts'
         required: true
         type: string
       test_type:
@@ -199,8 +199,6 @@ jobs:
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_vllm.py' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_sglang.py' || '' }}
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_trtllm.py' || '' }}
-          ${{ inputs.framework != 'triton' && '--ignore=tests/frontend/grpc/test_triton_identity.py' || '' }}
-          ${{ inputs.framework != 'triton' && '--ignore=components/src/dynamo/triton/tests/' || '' }}
     permissions:
       contents: read
     services:
