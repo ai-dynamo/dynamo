@@ -141,6 +141,14 @@ jobs:
             --timeout=120s
           kubectl get secret hf-token-secret -n "${DGDR_NAMESPACE}" >/dev/null
 
+      - name: Read runtime version for SHA-tagged planner image
+        id: runtime-version
+        shell: bash
+        run: |
+          runtime_version=$(grep -m1 -E '^version[[:space:]]*=' pyproject.toml | sed -nE 's/.*"([0-9]+\.[0-9]+\.[0-9]+)[^"]*".*/\1/p')
+          test -n "${runtime_version}"
+          echo "version=${runtime_version}" >> "$GITHUB_OUTPUT"
+
       - name: Run CPU DGDR tests
         uses: $/.github/actions/dynamo-deploy-test
         with:
@@ -153,7 +161,7 @@ jobs:
           platform_arch: amd64
           test_name: dgdr-${{ matrix.suite }}
           test_file: tests/deploy/test_dgdr.py
-          extra_pytest_args: -m gpu_0 -k=dgdr_${{ matrix.suite }} --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }} --dgdr-hf-token-secret=hf-token-secret
+          extra_pytest_args: -m gpu_0 -k=dgdr_${{ matrix.suite }} --dgdr-name-prefix=ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }} --dgdr-hf-token-secret=hf-token-secret --dgdr-runtime-version=${{ steps.runtime-version.outputs.version }}
           cleanup_deployment: 'false'
 
       - name: Clean up DGDR test namespace

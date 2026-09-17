@@ -73,6 +73,7 @@ class DGDRTestConfig:
     pvc_mount_path: str = "/home/dynamo/.cache/huggingface"
     total_gpus: int = 0
     hf_token_secret: str = ""
+    runtime_version: str = ""
 
 
 def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -119,6 +120,8 @@ def build_dgdr(
         "image": config_.image,
         "searchStrategy": "rapid",
     }
+    if config_.runtime_version:
+        spec["runtimeVersionOverride"] = config_.runtime_version
     if spec_overrides:
         _deep_merge(spec, spec_overrides)
 
