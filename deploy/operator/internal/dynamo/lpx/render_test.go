@@ -122,6 +122,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Equal(t, projection.Digest().String(), rendered.Annotations[WorkloadDigestAnnotation])
 			require.NotContains(t, rendered.Annotations, ExecutionBackendAnnotation)
 			for _, clique := range rendered.Spec.Template.Cliques {
+				require.Equal(t, SchedulerName, clique.Spec.PodSpec.SchedulerName)
 				require.NotContains(t, clique.Annotations, ExecutionBackendAnnotation)
 				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
 					require.Equal(t, projection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])

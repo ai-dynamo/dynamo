@@ -236,6 +236,11 @@ func RenderSelectedNodeLocal(
 		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
 	}}
 
+	// Keep every LPX role in one backend gang, including the KAI fallback roles.
+	for _, clique := range pcs.Spec.Template.Cliques {
+		clique.Spec.PodSpec.SchedulerName = SchedulerName
+	}
+
 	explicit := grovev1alpha1.CliqueStartupTypeExplicit
 	pcs.Spec.Template.StartupType = &explicit
 	return extraResources, nil
@@ -250,7 +255,6 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 	configureAgentScheduling(agentPodSpec, workload.BuildFamily())
 	// Placement is already resolved; shape only the actual conductor's LPX-owned fields.
 	if conductorPodSpec != nil {
-		conductorPodSpec.SchedulerName = corev1.DefaultSchedulerName
 		stripLPUResources(conductorPodSpec)
 		if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
 			return err

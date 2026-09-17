@@ -49,8 +49,6 @@ func configureHybridCyborg(
 		return err
 	}
 
-	cyborg.Spec.PodSpec.SchedulerName = "default-scheduler"
-	delete(cyborg.Labels, commonconsts.KubeLabelKaiSchedulerQueue)
 	cyborg.Annotations = roleAnnotations(
 		cyborg.Annotations,
 		lpxv1alpha1.PodRoleCyborgWorker,

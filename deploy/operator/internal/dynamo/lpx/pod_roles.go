@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	// SchedulerName is the Kubernetes scheduler used for LPX Agent pods.
+	// SchedulerName selects Grove's LPX backend for the complete PodCliqueSet.
 	SchedulerName = "lpx-scheduler"
 
 	v2LPUResourceName corev1.ResourceName = "lpu.nvidia.com/lpu"

@@ -119,6 +119,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			source.Labels = map[string]string{
 				"priorityClassName": "inference", "kai.scheduler/preemptibility": "NonPreemptible",
 				"project": "test", "unrelated": "ignored",
+				commonconsts.KubeLabelKaiSchedulerQueue: "lpx-queue",
 			}
 			metav1.SetMetaDataAnnotation(&source.ObjectMeta, "kai.scheduler/topology", "source-topology")
 			metav1.SetMetaDataAnnotation(&source.ObjectMeta, "unrelated", "ignored")
@@ -139,6 +140,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 						metav1.SetMetaDataAnnotation(&role.PodTemplate.ObjectMeta, "selected-metadata", "from-component")
 						metav1.SetMetaDataAnnotation(&role.PodTemplate.ObjectMeta, commonconsts.RestartAnnotation, "2026-09-07T00:00:00Z")
 						metav1.SetMetaDataLabel(&role.PodTemplate.ObjectMeta, "shared-label", "from-component")
+						metav1.SetMetaDataLabel(&role.PodTemplate.ObjectMeta, commonconsts.KubeLabelKaiSchedulerQueue, "lpx-queue")
 						metav1.SetMetaDataLabel(&role.PodTemplate.ObjectMeta, commonconsts.KubeLabelDynamoNamespace, "authored-namespace")
 					}
 				}
@@ -216,6 +218,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			require.Equal(t, firstResources, secondResources)
 			require.Equal(t, "inference", first.Labels["priorityClassName"])
 			require.Equal(t, "NonPreemptible", first.Labels["kai.scheduler/preemptibility"])
+			require.Equal(t, "lpx-queue", first.Labels[commonconsts.KubeLabelKaiSchedulerQueue])
 			require.Equal(t, "test", first.Labels["project"])
 			require.Equal(t, "explicit-pcs-topology", first.Annotations["kai.scheduler/topology"])
 			require.NotContains(t, first.Annotations, commonconsts.RestartAnnotation)
@@ -302,6 +305,8 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			var conductor, gpuClique *grovev1alpha1.PodCliqueTemplateSpec
 			serving := 0
 			for index, clique := range first.Spec.Template.Cliques {
+				require.Equal(t, lpx.SchedulerName, clique.Spec.PodSpec.SchedulerName, "role %s must use the LPX backend", clique.Name)
+				require.Equal(t, "lpx-queue", clique.Labels[commonconsts.KubeLabelKaiSchedulerQueue])
 				if clique.Labels[dynamo.LPXServingLabel] == commonconsts.KubeLabelValueTrue {
 					serving++
 					require.NotEqual(t, lpxv1alpha1.PodRoleAgent, clique.Annotations[lpxv1alpha1.PodRoleAnnotation])
@@ -948,6 +953,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			)
 			require.NoError(t, err)
 			for _, clique := range got.Spec.Template.Cliques {
+				require.Equal(t, lpx.SchedulerName, clique.Spec.PodSpec.SchedulerName)
 				component := dynamoDeployment.GetComponentByName(clique.Labels[commonconsts.KubeLabelDynamoComponent])
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
@@ -966,6 +972,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			require.NoError(t, err)
 			require.NotEqual(t, normal.Name, got.Name)
 			for _, clique := range normal.Spec.Template.Cliques {
+				require.NotEqual(t, lpx.SchedulerName, clique.Spec.PodSpec.SchedulerName)
 				require.NotEqual(t, selected.LPXComponentName(), clique.Labels[commonconsts.KubeLabelDynamoComponent])
 			}
 			podCliqueSets := []*grovev1alpha1.PodCliqueSet{got}

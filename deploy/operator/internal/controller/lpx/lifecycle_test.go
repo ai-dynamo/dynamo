@@ -163,7 +163,7 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	require.NotContains(t, group.Spec.CliqueNames, "")
 	cyborg := findLPXTestClique(t, objects, desired.plan.CyborgClique)
 	require.NotContains(t, cyborg.Spec.StartsAfter, "")
-	require.Equal(t, corev1.DefaultSchedulerName, cyborg.Spec.PodSpec.SchedulerName)
+	require.Equal(t, lpx.SchedulerName, cyborg.Spec.PodSpec.SchedulerName)
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
 
 	classification := publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)

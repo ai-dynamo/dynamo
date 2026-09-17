@@ -594,7 +594,7 @@ spec:
             - mountPath: /dev/shm
               name: shared-memory
           restartPolicy: Always
-          schedulerName: default-scheduler
+          schedulerName: lpx-scheduler
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch
