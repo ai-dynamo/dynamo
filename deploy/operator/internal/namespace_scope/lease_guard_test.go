@@ -20,14 +20,17 @@ package namespace_scope
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	coordinationv1 "k8s.io/api/coordination/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	typedcoordinationv1 "k8s.io/client-go/kubernetes/typed/coordination/v1"
 	k8stesting "k8s.io/client-go/testing"
 )
 
@@ -82,16 +85,32 @@ func rejectLeaseUpdates(client *fake.Clientset) {
 // lease acquisition: the lease must be gone before the failure reaches the exit boundary.
 func TestLeaseManager_Guard_ReleasesLeaseWhenWorkReturns(t *testing.T) {
 	tests := []struct {
-		name    string
-		workErr error
+		name          string
+		workErr       error
+		leaseDuration time.Duration
+		wantTTL       int32
 	}{
 		{
-			name:    "work fails the way a startup step used to exit",
-			workErr: errStartupFailed,
+			name:          "work fails the way a startup step used to exit",
+			workErr:       errStartupFailed,
+			leaseDuration: 30 * time.Second,
+			wantTTL:       30,
 		},
 		{
-			name:    "work completes normally",
-			workErr: nil,
+			name:          "work completes normally",
+			workErr:       nil,
+			leaseDuration: 30 * time.Second,
+			wantTTL:       30,
+		},
+		{
+			name:          "sub-second lease completes normally",
+			leaseDuration: 30 * time.Millisecond,
+			wantTTL:       1,
+		},
+		{
+			name:          "fractional lease rounds up",
+			leaseDuration: 1500 * time.Millisecond,
+			wantTTL:       2,
 		},
 	}
 
@@ -99,18 +118,27 @@ func TestLeaseManager_Guard_ReleasesLeaseWhenWorkReturns(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Given a lease manager whose renewals succeed")
 			client := fake.NewSimpleClientset()
-			lm := newGuardTestLeaseManager(client, 30*time.Second, 50*time.Millisecond)
+			lm := newGuardTestLeaseManager(client, tt.leaseDuration, 10*time.Millisecond)
 
 			t.Log("When Guard runs work that returns")
 			heldDuringWork := false
+			var publishedTTL int32
 			err := lm.Guard(context.Background(), guardCleanupTimeout, func(context.Context) error {
-				heldDuringWork = leaseExists(t, client)
+				lease, err := client.CoordinationV1().Leases(testNamespace).Get(context.Background(), LeaseName, metav1.GetOptions{})
+				if err != nil {
+					return err
+				}
+				heldDuringWork = true
+				publishedTTL = *lease.Spec.LeaseDurationSeconds
 				return tt.workErr
 			})
 
 			t.Log("Then the lease was held while work ran")
 			if !heldDuringWork {
 				t.Fatal("marker lease should exist while work runs; the deletion assertion below would be vacuous")
+			}
+			if publishedTTL != tt.wantTTL {
+				t.Errorf("published lease TTL = %d, want %d", publishedTTL, tt.wantTTL)
 			}
 
 			t.Log("And the lease is already gone at the moment Guard returns")
@@ -282,5 +310,253 @@ func TestLeaseManager_Guard_DoesNotRunWorkWhenLeaseCannotStart(t *testing.T) {
 	t.Log("And no lease was left behind")
 	if leaseExists(t, client) {
 		t.Error("marker lease should not exist after a failed acquisition")
+	}
+}
+
+func TestLeaseManager_Guard_ReleasesLeaseBeforeRepanicking(t *testing.T) {
+	t.Log("Given a worker that panics while holding the lease")
+	client := fake.NewSimpleClientset()
+	lm := newGuardTestLeaseManager(client, 30*time.Second, time.Second)
+	panicValue := errors.New("worker panic")
+	heldDuringWork := false
+
+	t.Log("Then the caller recovers the original panic after lease deletion")
+	defer func() {
+		if got := recover(); got != panicValue {
+			t.Errorf("recovered %v, want original panic %v", got, panicValue)
+		}
+		if !heldDuringWork {
+			t.Error("worker did not observe its lease before panicking")
+		}
+		if leaseExists(t, client) {
+			t.Error("marker lease still present when panic reached caller")
+		}
+	}()
+
+	t.Log("When Guard runs the panicking worker")
+	_ = lm.Guard(context.Background(), guardCleanupTimeout, func(context.Context) error {
+		_, err := client.CoordinationV1().Leases(testNamespace).Get(context.Background(), LeaseName, metav1.GetOptions{})
+		heldDuringWork = err == nil
+		panic(panicValue)
+	})
+	t.Error("Guard returned instead of propagating the worker panic")
+}
+
+func TestLeaseManager_Guard_CleansUpAmbiguousAcquisition(t *testing.T) {
+	for _, verb := range []string{"create", "update"} {
+		for _, otherOwner := range []bool{false, true} {
+			name := verb + "/own-lease"
+			if otherOwner {
+				name = verb + "/another-holder"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Log("Given an acquisition that commits but loses its response")
+				client := fake.NewSimpleClientset()
+				lm := newGuardTestLeaseManager(client, 30*time.Second, time.Second)
+				transportErr := errors.New("response lost after commit")
+				resource := coordinationv1.SchemeGroupVersion.WithResource("leases")
+				if verb == "update" {
+					lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: LeaseName, Namespace: testNamespace}}
+					if err := client.Tracker().Create(resource, lease, testNamespace); err != nil {
+						t.Fatal(err)
+					}
+				}
+				committed := false
+				client.PrependReactor(verb, "leases", func(action k8stesting.Action) (bool, runtime.Object, error) {
+					var lease *coordinationv1.Lease
+					if verb == "create" {
+						lease = action.(k8stesting.CreateAction).GetObject().(*coordinationv1.Lease).DeepCopy()
+					} else {
+						lease = action.(k8stesting.UpdateAction).GetObject().(*coordinationv1.Lease).DeepCopy()
+					}
+
+					// Give the committed object server metadata and optionally simulate takeover.
+					lease.UID = "committed-lease"
+					lease.ResourceVersion = "2"
+					if otherOwner {
+						holder := "another-manager"
+						lease.Spec.HolderIdentity = &holder
+					}
+					var err error
+					if verb == "create" {
+						err = client.Tracker().Create(resource, lease, testNamespace)
+					} else {
+						err = client.Tracker().Update(resource, lease, testNamespace)
+					}
+					if err != nil {
+						return true, nil, err
+					}
+					committed = true
+					return true, nil, transportErr
+				})
+
+				t.Log("When Guard attempts acquisition")
+				workRan := false
+				err := lm.Guard(context.Background(), guardCleanupTimeout, func(context.Context) error {
+					workRan = true
+					return nil
+				})
+
+				t.Log("Then the committed acquisition error prevents work and cleanup respects ownership")
+				if !committed || !errors.Is(err, transportErr) || workRan {
+					t.Fatalf("committed=%v, error=%v, workRan=%v", committed, err, workRan)
+				}
+				if exists := leaseExists(t, client); exists != otherOwner {
+					t.Errorf("lease exists=%v, want %v", exists, otherOwner)
+				}
+
+				t.Log("And deletion is conditional on the exact owned object")
+				deletes := 0
+				for _, action := range client.Actions() {
+					if action.GetVerb() != "delete" {
+						continue
+					}
+					deletes++
+					preconditions := action.(k8stesting.DeleteAction).GetDeleteOptions().Preconditions
+					if preconditions == nil || preconditions.UID == nil || preconditions.ResourceVersion == nil {
+						t.Fatal("delete omitted ownership preconditions")
+					}
+					if *preconditions.UID != "committed-lease" || *preconditions.ResourceVersion != "2" {
+						t.Errorf("unexpected delete preconditions: %+v", preconditions)
+					}
+				}
+				if otherOwner && deletes != 0 {
+					t.Errorf("attempted %d deletions of another holder's lease", deletes)
+				}
+			})
+		}
+	}
+}
+
+// blockedRenewalClient intercepts Update outside the fake client's reactor lock,
+// allowing cleanup ownership reads to proceed while the RPC is blocked.
+type blockedRenewalClient struct {
+	kubernetes.Interface
+	coordination typedcoordinationv1.CoordinationV1Interface
+}
+
+func (c *blockedRenewalClient) CoordinationV1() typedcoordinationv1.CoordinationV1Interface {
+	return c.coordination
+}
+
+type blockedRenewalCoordination struct {
+	typedcoordinationv1.CoordinationV1Interface
+	lease *blockedRenewalLease
+}
+
+func (c *blockedRenewalCoordination) Leases(string) typedcoordinationv1.LeaseInterface {
+	return c.lease
+}
+
+type blockedRenewalLease struct {
+	typedcoordinationv1.LeaseInterface
+	started      chan struct{}
+	cancelled    chan struct{}
+	release      chan struct{}
+	ignoreCancel bool
+}
+
+func (l *blockedRenewalLease) Update(ctx context.Context, _ *coordinationv1.Lease, _ metav1.UpdateOptions) (*coordinationv1.Lease, error) {
+	// Later attempts after cancellation must not close the notification channels again.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	close(l.started)
+	<-ctx.Done()
+	close(l.cancelled)
+	if l.ignoreCancel {
+		<-l.release
+	}
+	return nil, ctx.Err()
+}
+
+func TestLeaseManager_Guard_BoundsBlockedRenewal(t *testing.T) {
+	for _, watchdog := range []bool{false, true} {
+		for _, ignoreCancel := range []bool{false, true} {
+			name := "work-return"
+			if watchdog {
+				name = "expiry-watchdog"
+			}
+			if ignoreCancel {
+				name += "/ignores-cancellation"
+			} else {
+				name += "/honors-cancellation"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Log("Given a renewal RPC that cannot complete before shutdown")
+				client := fake.NewSimpleClientset()
+				lease := &blockedRenewalLease{
+					LeaseInterface: client.CoordinationV1().Leases(testNamespace),
+					started:        make(chan struct{}), cancelled: make(chan struct{}),
+					release: make(chan struct{}), ignoreCancel: ignoreCancel,
+				}
+				defer close(lease.release)
+				coordination := &blockedRenewalCoordination{CoordinationV1Interface: client.CoordinationV1(), lease: lease}
+				wrapped := &blockedRenewalClient{Interface: client, coordination: coordination}
+				lm := newGuardTestLeaseManager(wrapped, 5*time.Second, 10*time.Millisecond)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				t.Log("When work returns or the watchdog cancels it with renewal still blocked")
+				guardDone := make(chan error, 1)
+				proceed := make(chan struct{})
+				go func() {
+					guardDone <- lm.Guard(ctx, 100*time.Millisecond, func(workCtx context.Context) error {
+						select {
+						case <-proceed:
+						case <-workCtx.Done():
+							return workCtx.Err()
+						}
+						if watchdog {
+							<-workCtx.Done()
+							return workCtx.Err()
+						}
+						return errStartupFailed
+					})
+				}()
+
+				t.Log("Then Guard returns before the published lease expires")
+				select {
+				case <-lease.started:
+				case <-time.After(2 * time.Second):
+					t.Fatal("renewal RPC did not start")
+				}
+				published, err := client.CoordinationV1().Leases(testNamespace).Get(ctx, LeaseName, metav1.GetOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				expires := published.Spec.RenewTime.Add(time.Duration(*published.Spec.LeaseDurationSeconds) * time.Second)
+				close(proceed)
+				wait := time.Until(expires)
+				if !watchdog {
+					wait = time.Second
+				}
+				select {
+				case err = <-guardDone:
+				case <-time.After(wait):
+					t.Fatal("Guard did not bound the blocked renewal")
+				}
+				if !time.Now().Before(expires) {
+					t.Error("Guard outlived its lease")
+				}
+				if watchdog {
+					if err == nil || !strings.Contains(err.Error(), "lease renewal did not complete before the shutdown window") {
+						t.Errorf("Guard error = %v, want expiry watchdog failure", err)
+					}
+				} else if !errors.Is(err, errStartupFailed) {
+					t.Errorf("Guard error = %v, want work error", err)
+				}
+
+				t.Log("And Stop cancelled renewal, deleting only after the RPC stopped")
+				select {
+				case <-lease.cancelled:
+				default:
+					t.Error("Stop did not cancel the renewal RPC")
+				}
+				if exists := leaseExists(t, client); exists != ignoreCancel {
+					t.Errorf("lease exists=%v, want %v while ignoreCancel=%v", exists, ignoreCancel, ignoreCancel)
+				}
+			})
+		}
 	}
 }
