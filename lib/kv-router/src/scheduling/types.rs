@@ -116,6 +116,21 @@ pub enum KvSchedulerError {
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
 
+    #[error("request classifier panicked: {0}")]
+    RequestClassifierPanicked(String),
+
+    #[error("request classifier failed: {0}")]
+    RequestClassifierFailed(Arc<super::ClassifierError>),
+
+    #[error("request classifier is already tracking request ID {0:?}")]
+    DuplicateClassificationRequestId(String),
+
+    #[error("invalid request classification metadata: {0}")]
+    InvalidClassificationMetadata(String),
+
+    #[error("request lifecycle for request ID {0:?} ended before classification completed")]
+    ClassificationLifecycleEnded(String),
+
     #[error("request deadline exceeded")]
     DeadlineExceeded,
 
