@@ -547,7 +547,6 @@ pub(super) mod tests {
         let (queue, mut receiver) = queues.remove(0);
         let tap = ShadowTap::new(vec![queue.clone()], ShadowOrigin::Chat);
 
-        // Nothing drains `receiver`. Capacity is 2.
         let serve = async {
             for index in 0..5 {
                 let engine = Engine::new(vec![chunk(vec![9], Some(FinishReason::Stop))]);
@@ -568,7 +567,6 @@ pub(super) mod tests {
         assert_eq!(receiver.try_recv().unwrap().seq, 0);
         assert_eq!(receiver.try_recv().unwrap().seq, 1);
 
-        // The next record shows the gap the drops left.
         let engine = Engine::new(vec![]);
         let _ = run(&tap, engine, "r5").await.unwrap();
         assert_eq!(receiver.try_recv().unwrap().seq, 5);

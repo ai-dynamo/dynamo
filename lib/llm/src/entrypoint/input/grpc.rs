@@ -24,6 +24,10 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    // A dynamic engine builds its pipelines in the background watcher, where a
+    // bad tap config would leave models unregistered behind a running server.
+    crate::shadow::taps(&distributed_runtime).await?;
+
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .metrics_prefix(engine_config.local_model().metrics_prefix())
@@ -243,5 +247,44 @@ mod tests {
                 .await
                 .expect("metrics bind failure must initiate runtime shutdown");
         }
+    }
+
+    #[tokio::test]
+    async fn bad_shadow_tap_config_stops_a_dynamic_frontend_at_startup() {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            "schema_version: 1\ntaps:\n  - {name: t, capture: request, filters: [nope]}\n",
+        )
+        .unwrap();
+        let model = Box::new(
+            LocalModelBuilder::default()
+                .model_name(Some("bad-taps".to_string()))
+                .http_port(0)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let engine_config = EngineConfig::Dynamic {
+            model,
+            chat_engine_factory: None,
+            prefill_load_estimator: None,
+        };
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+
+        let started = crate::shadow::TEST_CONFIG_PATH.scope(
+            Some(config.path().to_path_buf()),
+            tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config)),
+        );
+        let error = started
+            .await
+            .expect("a bad tap config must stop startup, not leave the server running")
+            .expect_err("an unknown filter name is a config error");
+        assert!(format!("{error:#}").contains("nope"), "got {error:#}");
     }
 }

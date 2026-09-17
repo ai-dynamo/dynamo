@@ -328,6 +328,10 @@ pub async fn prepare_engine(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
+    // The dynamic arm builds its pipelines in a background watcher; a bad tap
+    // config must fail here, not there.
+    crate::shadow::taps(&distributed_runtime).await?;
+
     match engine_config {
         EngineConfig::Dynamic {
             model: local_model,

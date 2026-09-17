@@ -90,6 +90,24 @@ impl Registry {
 
 static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default);
 
+// Every pipeline build reads `DYN_SHADOW_TAP_CONFIG`, and tests run in
+// parallel in one process. A test that set the variable would hand its config
+// to every other test, so tests name their config through this task-local.
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_CONFIG_PATH: Option<PathBuf>;
+}
+
+fn config_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Ok(path) = TEST_CONFIG_PATH.try_with(Clone::clone) {
+        return path;
+    }
+    std::env::var_os(DYN_SHADOW_TAP_CONFIG)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The taps of a runtime, started on first use, or `None` when none are
 /// configured and nothing is linked.
 ///
@@ -101,10 +119,10 @@ pub(crate) async fn taps(drt: &DistributedRuntime) -> Result<Option<ShadowTaps>>
     if let Some(taps) = REGISTRY.live(drt.connection_id()) {
         return Ok(Some(taps));
     }
-    let Some(path) = std::env::var_os(DYN_SHADOW_TAP_CONFIG).filter(|path| !path.is_empty()) else {
+    let Some(path) = config_path() else {
         return Ok(None);
     };
-    let config = ShadowConfig::from_path(&PathBuf::from(path))?;
+    let config = ShadowConfig::from_path(&path)?;
     if config.taps.is_empty() {
         return Ok(None);
     }
@@ -273,19 +291,17 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial(shadow_tap_env)]
-    async fn lookup_starts_the_taps_without_a_startup_call() {
-        let config = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            config.path(),
-            "schema_version: 1\ntaps:\n  - {name: t, capture: request}\n",
-        )
-        .unwrap();
+    fn config_file(yaml: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), yaml).unwrap();
+        file
+    }
 
-        temp_env::async_with_vars(
-            [(DYN_SHADOW_TAP_CONFIG, Some(config.path().as_os_str()))],
-            async {
+    #[tokio::test]
+    async fn lookup_starts_the_taps_without_a_startup_call() {
+        let config = config_file("schema_version: 1\ntaps:\n  - {name: t, capture: request}\n");
+        TEST_CONFIG_PATH
+            .scope(Some(config.path().to_path_buf()), async {
                 let drt = process_local_runtime().await;
                 let first = taps(&drt).await.unwrap().expect("config names one tap");
                 let second = taps(&drt).await.unwrap().unwrap();
@@ -294,33 +310,27 @@ mod tests {
                 let other = process_local_runtime().await;
                 let theirs = taps(&other).await.unwrap().unwrap();
                 assert!(!Arc::ptr_eq(&first, &theirs), "each runtime owns its taps");
-            },
-        )
-        .await;
+            })
+            .await;
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial(shadow_tap_env)]
+    #[tokio::test]
     async fn no_config_means_no_taps_and_a_bad_config_is_an_error() {
-        temp_env::async_with_vars([(DYN_SHADOW_TAP_CONFIG, None::<&str>)], async {
-            let drt = process_local_runtime().await;
-            assert!(taps(&drt).await.unwrap().is_none());
-        })
-        .await;
+        TEST_CONFIG_PATH
+            .scope(None, async {
+                let drt = process_local_runtime().await;
+                assert!(taps(&drt).await.unwrap().is_none());
+            })
+            .await;
 
-        let config = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            config.path(),
+        let config = config_file(
             "schema_version: 1\ntaps:\n  - {name: t, capture: request, filters: [nope]}\n",
-        )
-        .unwrap();
-        temp_env::async_with_vars(
-            [(DYN_SHADOW_TAP_CONFIG, Some(config.path().as_os_str()))],
-            async {
+        );
+        TEST_CONFIG_PATH
+            .scope(Some(config.path().to_path_buf()), async {
                 let drt = process_local_runtime().await;
                 assert!(taps(&drt).await.is_err());
-            },
-        )
-        .await;
+            })
+            .await;
     }
 }
