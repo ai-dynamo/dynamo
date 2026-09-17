@@ -447,6 +447,7 @@ impl ReusablePreciseTimer {
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn with_timerfd_for_test() -> Self {
         Self {
+            backend: SleepBackend::Timerfd,
             test_mode: TimerTestMode::TimerFd,
             ..Self::default()
         }
@@ -455,6 +456,7 @@ impl ReusablePreciseTimer {
     #[cfg(all(test, target_os = "linux"))]
     fn with_timerfd_creation_failure() -> Self {
         Self {
+            backend: SleepBackend::Timerfd,
             test_mode: TimerTestMode::FailCreation,
             ..Self::default()
         }
@@ -653,6 +655,12 @@ mod tests {
             SleepBackend::TimeDriver,
             "requested time_driver but the wake was served by {}",
             record.backend.label()
+        );
+        assert!(
+            record.actual >= record.requested,
+            "sleep returned early (actual {:?}, requested {:?})",
+            record.actual,
+            record.requested
         );
         assert!(
             record.drift < Duration::from_millis(200),
