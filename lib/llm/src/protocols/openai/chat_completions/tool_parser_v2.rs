@@ -103,13 +103,12 @@ fn validate_parser_version_for_mode(
                 .collect::<Vec<_>>();
             let qwen3_unified =
                 super::unified_parser::is_v2_configured_family(tool_call_parser, reasoning_parser);
-            if !configured.is_empty()
-                && configured.iter().any(|parser| {
-                    !V2_FAMILIES.contains(parser)
-                        && !UNIFIED_FAMILIES.contains(parser)
-                        && !(qwen3_unified && *parser == "qwen3")
-                })
-            {
+            let tool_parser_is_v2 = tool_call_parser.is_none_or(|parser| {
+                V2_FAMILIES.contains(&parser) || UNIFIED_FAMILIES.contains(&parser) || qwen3_unified
+            });
+            let reasoning_parser_is_v2 =
+                reasoning_parser.is_none_or(|parser| qwen3_unified && parser == "qwen3");
+            if !(configured.is_empty() || tool_parser_is_v2 && reasoning_parser_is_v2) {
                 anyhow::bail!(
                     "{}=v2 was requested, but the configured parser has no compatible v2 implementation",
                     env_llm::DYN_PARSER_VERSION,
