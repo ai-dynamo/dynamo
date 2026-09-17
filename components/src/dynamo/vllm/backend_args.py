@@ -481,6 +481,17 @@ class DynamoVllmArgGroup(ArgGroup):
                     "Legacy values are translated to the new sampling limit."
                 ),
             )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-randomize-kda-state",
+            env_var="DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
+            default=False,
+            help=(
+                "Initialize private KDA/Mamba decode benchmark states with bounded "
+                "random values. Requires decode or agg benchmark mode and the standard "
+                "vLLM GPU worker. These are synthetic states, not real context history."
+            ),
+        )
         add_argument(
             g,
             flag_name="--benchmark-warmup-iterations",
@@ -571,6 +582,7 @@ class DynamoVllmConfig(ConfigBase):
     # Benchmark / self-profiling
     benchmark_mode: Optional[BenchmarkMode] = None
     benchmark_points_file: Optional[str] = None
+    benchmark_randomize_kda_state: bool = False
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
@@ -693,6 +705,13 @@ class DynamoVllmConfig(ConfigBase):
             setattr(self, replacement_name, mapped_value)
 
     def _validate_benchmark_sampling(self) -> None:
+        if self.benchmark_randomize_kda_state and self.benchmark_mode not in (
+            "decode",
+            "agg",
+        ):
+            raise ValueError(
+                "--benchmark-randomize-kda-state requires --benchmark-mode decode or agg"
+            )
         if self.benchmark_mode is None:
             return
         if self._benchmark_points is None:

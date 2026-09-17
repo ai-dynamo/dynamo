@@ -2089,6 +2089,60 @@ def test_explicit_infeasible_point_reports_source_index():
         InstrumentedScheduler._bench_build_grid(stub)
 
 
+@pytest.mark.core
+@pytest.mark.parametrize("kv_read_tokens", [0, 12288])
+def test_prefill_feasibility_uses_native_split_with_local_prefix(kv_read_tokens):
+    stub = _explicit_grid_stub("prefill")
+    stub.need_mamba_block_aligned_split = True
+    stub._mamba_block_aligned_split = MagicMock(return_value=128)
+
+    scheduled = stub._bench_prefill_scheduled_tokens_per_req(
+        kv_read_tokens + 192, kv_read_tokens
+    )
+
+    assert scheduled == 128
+    (request, new_tokens), kwargs = stub._mamba_block_aligned_split.call_args
+    assert new_tokens == 192
+    assert request.num_computed_tokens == 0
+    assert request.num_prompt_tokens == request.num_tokens == kv_read_tokens + 192
+    assert request.shared_prefix_boundary == 0
+    assert kwargs == {"num_new_local_computed_tokens": kv_read_tokens}
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("generated", [False, True])
+def test_prefill_grid_rejects_native_split_before_measurement(generated):
+    # Plenty of capacity isolates the native KDA split from shared-pool
+    # feasibility: four 192-token prompts first schedule four 128-token chunks.
+    stub = _explicit_grid_stub("prefill")
+    stub.cache_config.num_gpu_blocks = 1024
+    stub.cache_config.block_size = 1536
+    stub.need_mamba_block_aligned_split = True
+    stub._mamba_block_aligned_split = MagicMock(return_value=128)
+    candidate = PrefillPointCandidate(
+        total_prefill_tokens=768, total_kv_read_tokens=0, batch_size=4
+    )
+
+    if generated:
+        assert (
+            stub._bench_materialize_prefill_candidate(
+                candidate, "prefill[273]", generated=True
+            )
+            is None
+        )
+    else:
+        with pytest.raises(ValueError, match=r"prefill\[273\].*infeasible"):
+            stub._bench_materialize_prefill_candidate(candidate, "prefill[273]")
+
+    supported = candidate.model_copy(update={"total_prefill_tokens": 512})
+    point = stub._bench_materialize_prefill_candidate(
+        supported, "prefill[272]", generated=generated
+    )
+    assert point is not None
+    assert point.total_prefill_tokens == 512
+    assert point.batch_size == 4
+
+
 def test_explicit_decode_respects_scheduled_token_limit():
     stub = _explicit_grid_stub(
         "decode",
@@ -5065,9 +5119,12 @@ def test_kvwarm_gate_reads_an_empty_dump_as_dataset_empty(monkeypatch, tmp_path)
     assert stub._kvwarm_meta["skip_reason"] == "dataset_empty"
 
 
-def test_kvwarm_seed_regime_vocabulary(monkeypatch):
+@pytest.mark.core
+@pytest.mark.parametrize("random_kda", [False, True])
+def test_kvwarm_seed_regime_vocabulary(monkeypatch, random_kda):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_random_kda = random_kda
     stub._kvwarm_meta = {"warm_eligible": True, "skip_reason": None}
     decode = BenchmarkPoint(point_type="decode", total_kv_read_tokens=64, batch_size=2)
     prefill = BenchmarkPoint(
@@ -5076,10 +5133,11 @@ def test_kvwarm_seed_regime_vocabulary(monkeypatch):
     regime = InstrumentedScheduler._kvwarm_seed_regime
     assert regime(stub, prefill) == "not_applicable"
     assert regime(stub, decode) == "unstamped"
-    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == "real_kv"
-    assert (
-        regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"]))
-        == "fake_fallback"
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == (
+        "real_attention_kv_random_kda" if random_kda else "real_kv"
+    )
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"])) == (
+        "fake_attention_kv_random_kda" if random_kda else "fake_fallback"
     )
     stub._kvwarm_meta = {
         "warm_eligible": False,
@@ -5169,7 +5227,11 @@ def _kvwarm_planner_stub(usable_blocks, groups=1, block_size=16):
     stub.max_model_len = 8192
     stub.cache_config = SimpleNamespace(block_size=block_size)
     stub.kv_cache_manager = SimpleNamespace(
-        coordinator=SimpleNamespace(single_type_managers=[object()] * groups)
+        coordinator=SimpleNamespace(
+            single_type_managers=[
+                SimpleNamespace(block_size=block_size) for _ in range(groups)
+            ]
+        )
     )
     stub._bench_blocks_per_req = lambda depth, **_: groups * -(-depth // block_size)
     stub._bench_usable_blocks = lambda batch, reserve_watermark=False: usable_blocks
@@ -5217,6 +5279,48 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
     # injection instead of crashing the run.
     point = stub._bench_grid[-1]
     assert not InstrumentedScheduler._kvwarm_plan_covers(stub, point)
+
+
+@pytest.mark.core
+@pytest.mark.parametrize("ctx", [2, 1000])
+def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monkeypatch):
+    # Four one-block chains fit, but their two private tail blocks per
+    # request raise the warmup bound to twelve. Reaching depth 8 (or starting
+    # below it) must not mark the short point as covered by real KV.
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_planner_stub(usable_blocks=11)
+    short = BenchmarkPoint(point_type="decode", batch_size=4, total_kv_read_tokens=8)
+    deepest = replace(short, total_kv_read_tokens=4 * ctx)
+    stub._bench_grid = deque([deepest, short] if ctx > 2 else [short])
+    original_points = list(stub._bench_grid)
+
+    stub._kvwarm_prepare("decode")
+
+    assert stub._kvwarm_plan[4] == 0
+    assert not stub._kvwarm_plan_covers(short)
+    assert list(stub._bench_grid) == original_points
+    assert stub._kvwarm_meta_init()["capacity_fallbacks"] == [
+        {
+            "batch": 4,
+            "depth": min(ctx + 4, 8),
+            "required_blocks": 12,
+            "usable_blocks": 11,
+        }
+    ]
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._kvwarm_stage_reported = None
+    stub._bench_soft_timeout_elapsed = lambda: False
+    stub._bench_frees_pending = lambda: False
+    stub._kvwarm_start_stage = MagicMock()
+    assert stub._kvwarm_step_busy() is False
+    stub._kvwarm_start_stage.assert_not_called()
+
+    fitted = _kvwarm_planner_stub(usable_blocks=12)
+    fitted._bench_grid = deque([short])
+    fitted._kvwarm_prepare("decode")
+    assert fitted._kvwarm_plan_covers(short)
+    assert "capacity_fallbacks" not in fitted._kvwarm_meta_init()
 
 
 def test_kvwarm_plan_trims_depth_by_the_negotiated_pool(monkeypatch):
@@ -6321,3 +6425,61 @@ def test_bench_inject_fake_decode_caches_blocks_before_the_request_runs():
     assert output.total_num_scheduled_tokens == 1
     assert stub._bench_active_req_ids == {"__bench_0"}
     assert stub.requests["__bench_0"].status == RequestStatus.RUNNING
+
+
+def test_hybrid_decode_capacity_reserves_state_turnover_and_prefill_checkpoints():
+    """A long-context batch can fit MLA while exhausting the shared state pool."""
+    stub = _grid_stub_with_kv_capacity(num_gpu_blocks=2145, block_size=12288)
+    stub.max_model_len = 1048576
+    stub.max_num_running_reqs = 32
+    managers = [
+        SimpleNamespace(
+            block_size=1536,
+            mamba_cache_mode="align",
+            num_speculative_blocks=0,
+            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+        )
+        for _ in range(3)
+    ]
+    managers.append(SimpleNamespace(block_size=12288))  # already DCP-resolved
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=managers)
+    )
+    context = 1048573
+    assert stub._bench_blocks_per_req(context + 1) == 95  # 86 attention + 9 state
+    assert stub._bench_decode_point_feasible(22, 22 * context)
+    assert not stub._bench_decode_point_feasible(23, 23 * context)
+
+
+@pytest.mark.parametrize("context", [1, 15, 16, 17, 40])
+def test_random_kda_shadow_keeps_attention_prefix_but_owns_sparse_state(context):
+    stub, attention, pool, chain = _shadow_stub(cow=True)
+    stub._bench_random_kda = True
+    state_chain = [_FakeBlock(900)]  # a deep chain retains one current state
+    kda = _FakeManager(state_chain)
+    kda.kv_cache_spec = instrumented_scheduler_module.MambaSpec(
+        block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align"
+    )
+    pool.null_block = _FakeBlock(0)
+    pool.null_block.is_null = True
+    stub.kv_cache_manager.coordinator.single_type_managers.append(kda)
+    table, zero_ids = stub._kvwarm_register_shadow("shadow", "chain", context, 3)
+    first, end = instrumented_scheduler_module.recurrent_shadow_range(context, 3, 16)
+    assert table[1][:first] == [0] * first
+    assert len(table[1]) == end
+    assert table[1][first:] == zero_ids
+    assert all(block_id >= 1000 for block_id in zero_ids)
+    assert 900 not in table[1]
+    assert state_chain[0].ref_cnt == 1
+    assert kda.cows == []
+    assert pool.null_block.ref_cnt == 1
+    assert table[0][: context // 16] == [b.block_id for b in chain[: context // 16]]
+    assert set(table[0]).isdisjoint(zero_ids)
+
+
+def test_random_kda_allows_hybrid_warm_chains_without_expert_parallelism(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec", "MambaSpec"), ep=False)
+    stub._bench_random_kda = True
+    assert stub._kvwarm_warm_eligible()
+    assert stub._kvwarm_meta["skip_reason"] is None
