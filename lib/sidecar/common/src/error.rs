@@ -118,6 +118,13 @@ mod tests {
     fn maps_transport_statuses_to_backend_errors() {
         for (code, expected) in [
             (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
+            (tonic::Code::NotFound, BackendError::InvalidArgument),
+            (tonic::Code::OutOfRange, BackendError::InvalidArgument),
+            (
+                tonic::Code::FailedPrecondition,
+                BackendError::InvalidArgument,
+            ),
+            (tonic::Code::AlreadyExists, BackendError::InvalidArgument),
             (tonic::Code::Unavailable, BackendError::CannotConnect),
             (tonic::Code::Cancelled, BackendError::Cancelled),
             (
@@ -125,9 +132,26 @@ mod tests {
                 BackendError::ConnectionTimeout,
             ),
             (tonic::Code::Internal, BackendError::Unknown),
+            (tonic::Code::Unknown, BackendError::Unknown),
         ] {
-            let error = status_to_dynamo("Test", tonic::Status::new(code, "failure"));
-            assert_eq!(error.error_type(), ErrorType::Backend(expected));
+            let error = status_to_dynamo("Generate", tonic::Status::new(code, "peer failure"));
+            assert_eq!(error.error_type(), ErrorType::Backend(expected), "{code:?}");
+            assert_eq!(
+                error.message(),
+                format!("Generate: peer failure ({code:?})")
+            );
+
+            #[cfg(feature = "tonic-v14")]
+            {
+                let status =
+                    tonic_v14::Status::new(tonic_v14::Code::from_i32(code as i32), "peer failure");
+                let error = super::status_to_dynamo_v14("Generate", status);
+                assert_eq!(error.error_type(), ErrorType::Backend(expected), "{code:?}");
+                assert_eq!(
+                    error.message(),
+                    format!("Generate: peer failure ({code:?})")
+                );
+            }
         }
     }
 }

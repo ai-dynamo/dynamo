@@ -103,6 +103,20 @@ jobs:
             echo 'EOF'
           } >> "${GITHUB_OUTPUT}"
 
+      - name: Run CPU sidecar tests
+        uses: $/.github/actions/docker-remote-build
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.image_uri }}-tests
+          framework: dynamo-sidecar-tests
+          target: sidecar-tests
+          build_target: sidecar-tests
+          dockerfile: ./lib/sidecar/Dockerfile
+          platform: linux/amd64
+          cuda_version: ''
+          push_image: false
+          no_load: true
+          use_sccache: false
+
       # TODO: Align the sidecar with the standard shared-build-image.yml path
       # once it supports this handwritten, CPU-only, multi-binary Dockerfile.
       # That should consolidate tagging, caching, publishing, and compliance

@@ -208,6 +208,11 @@ impl VllmMockerService {
         self.engine.metrics_receiver()
     }
 
+    /// Stop the scheduler and await its background tasks.
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        self.engine.shutdown().await
+    }
+
     async fn start_generation(
         &self,
         request: Request<pb::GenerateRequest>,

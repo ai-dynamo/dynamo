@@ -113,9 +113,10 @@ fn value_to_json(value: prost_types::Value) -> Result<serde_json::Value, DynamoE
 
 #[cfg(test)]
 mod tests {
+    use dynamo_backend_common::{BackendError, ErrorType};
     use serde_json::json;
 
-    use super::{json_to_struct, struct_to_json};
+    use super::{json_to_struct, prost_types, struct_to_json};
 
     #[test]
     fn nested_payload_round_trips_without_shape_changes() {
@@ -125,14 +126,42 @@ mod tests {
             "number": 42,
             "null": null,
             "list": [1, "two", false, {"nested": 3.5}],
+            "integer_boundaries": [-9_007_199_254_740_992_i64, 9_007_199_254_740_992_u64],
         });
         let encoded = json_to_struct(payload.clone()).expect("encode");
         assert_eq!(struct_to_json(encoded).expect("decode"), payload);
     }
 
     #[test]
-    fn rejects_non_objects_and_inexact_integers() {
-        assert!(json_to_struct(json!([1, 2])).is_err());
-        assert!(json_to_struct(json!({"value": 9_007_199_254_740_993_u64})).is_err());
+    fn rejects_invalid_or_lossy_payloads() {
+        for payload in [
+            json!([1, 2]),
+            json!({"value": 9_007_199_254_740_993_u64}),
+            json!({"value": -9_007_199_254_740_993_i64}),
+        ] {
+            let error = json_to_struct(payload).expect_err("invalid outbound payload");
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::InvalidArgument)
+            );
+        }
+
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let payload = prost_types::Struct {
+                fields: [(
+                    "value".to_string(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::NumberValue(value)),
+                    },
+                )]
+                .into(),
+            };
+            let error = struct_to_json(payload).expect_err("non-finite inbound payload");
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::Unknown)
+            );
+            assert!(error.message().contains("NaN or infinity"));
+        }
     }
 }

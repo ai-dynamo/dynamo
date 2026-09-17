@@ -923,6 +923,116 @@ fn request() -> PreprocessedRequest {
 }
 
 #[test]
+fn request_preserves_supported_fields_and_option_presence() {
+    for flag in [None, Some(false), Some(true)] {
+        let count = |value| flag.map(|nonzero| if nonzero { value } else { 0 });
+        let scalar = |value| flag.map(|nonzero| if nonzero { value } else { 0.0 });
+        let mut request = request();
+        request.sampling_options = SamplingOptions {
+            temperature: scalar(0.2),
+            top_p: scalar(0.9),
+            min_p: scalar(0.1),
+            top_k: count(7).map(|value| value as i32),
+            seed: count(123).map(i64::from),
+            presence_penalty: scalar(0.3),
+            frequency_penalty: scalar(0.4),
+            repetition_penalty: scalar(1.1),
+            include_stop_str_in_output: flag,
+            ..Default::default()
+        };
+        request.stop_conditions.max_tokens = count(8);
+        request.stop_conditions.min_tokens = count(2);
+        request.stop_conditions.ignore_eos = flag;
+        request.stop_conditions.stop_token_ids = Some(vec![2, 3, 2]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![3, 4]);
+        request.output_options = OutputOptions {
+            logprobs: count(3),
+            prompt_logprobs: count(4),
+            skip_special_tokens: flag,
+            ..Default::default()
+        };
+
+        let expected_sampling = request.sampling_options.clone();
+        let expected_stopping = request.stop_conditions.clone();
+        let expected_output = request.output_options.clone();
+        let mapped = build_generate_request(
+            request,
+            "rid-fields".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
+        assert_eq!(mapped.request_id, "rid-fields");
+        assert_eq!(
+            mapped.prompt,
+            Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 22, 33]
+            }))
+        );
+        assert_eq!(mapped.temperature, expected_sampling.temperature);
+        assert_eq!(
+            mapped.sampling.unwrap(),
+            pb::RandomSampling {
+                num_sequences: 1,
+                top_k: expected_sampling.top_k.unwrap_or(0) as u32,
+                top_p: expected_sampling.top_p.unwrap_or(0.0),
+                min_p: expected_sampling.min_p.unwrap_or(0.0),
+                seed: expected_sampling.seed,
+            }
+        );
+        let decoding = mapped.decoding.unwrap();
+        assert_eq!(
+            decoding.presence_penalty,
+            expected_sampling.presence_penalty.unwrap_or(0.0)
+        );
+        assert_eq!(
+            decoding.frequency_penalty,
+            expected_sampling.frequency_penalty.unwrap_or(0.0)
+        );
+        assert_eq!(
+            decoding.repetition_penalty,
+            expected_sampling.repetition_penalty.unwrap_or(0.0)
+        );
+        let stopping = mapped.stopping.unwrap();
+        assert_eq!(
+            stopping.max_new_tokens,
+            expected_stopping.max_tokens.unwrap_or(0)
+        );
+        assert_eq!(
+            stopping.min_new_tokens,
+            expected_stopping.min_tokens.unwrap_or(0)
+        );
+        assert_eq!(stopping.stop_strings, ["done"]);
+        assert_eq!(stopping.stop_token_ids, [2, 3, 4]);
+        assert_eq!(stopping.include_stop_strings, flag.unwrap_or(false));
+        assert_eq!(stopping.ignore_eos, flag.unwrap_or(false));
+        let response = mapped.response.unwrap();
+        assert_eq!(response.output_text, Some(true));
+        assert!(response.output_token_ids);
+        assert_eq!(response.skip_special_tokens, flag);
+        assert_eq!(response.output_logprobs, expected_output.logprobs.is_some());
+        assert_eq!(
+            response.prompt_logprobs,
+            expected_output.prompt_logprobs.is_some()
+        );
+        assert_eq!(
+            response.prompt_token_ids,
+            expected_output.prompt_logprobs.is_some()
+        );
+        let candidates = |count| pb::CandidateTokens {
+            select: Some(pb::candidate_tokens::Select::TopN(count)),
+        };
+        assert_eq!(
+            response.output_candidates,
+            expected_output.logprobs.map(candidates)
+        );
+        assert_eq!(
+            response.prompt_candidates,
+            expected_output.prompt_logprobs.map(candidates)
+        );
+    }
+}
+
+#[test]
 fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
     let mut request = request();
     request.output_options.skip_special_tokens = Some(false);
