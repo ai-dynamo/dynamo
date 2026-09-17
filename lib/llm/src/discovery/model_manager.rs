@@ -2721,7 +2721,6 @@ impl ModelManager {
         Some(configs.get(&worker_id)?.data_parallel_size)
     }
 
-    /// Whether a specific worker advertises a runtime capability.
     pub fn worker_supports_runtime_capability(
         &self,
         endpoint_id: &EndpointId,
