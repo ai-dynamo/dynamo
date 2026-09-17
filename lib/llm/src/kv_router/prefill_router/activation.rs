@@ -150,6 +150,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             prefill_load_estimator,
             session_affinity_ttl_secs,
             session_affinity_mode,
+            None,
             model_name,
             namespace,
             load_thresholds,
@@ -175,6 +176,7 @@ where
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
             worker_selector_factory: None,
+            kv_hint_policy: None,
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
@@ -204,6 +206,7 @@ where
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
+        kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
         model_name: String,
         namespace: String,
         load_thresholds: LoadThresholdHandle,
@@ -227,6 +230,7 @@ where
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
             worker_selector_factory: Some(worker_selector_factory),
+            kv_hint_policy,
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,
@@ -403,13 +407,16 @@ where
             )
             .await?;
 
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                push_router,
-                kv_chooser,
-                load_context.clone(),
-                affinity,
-                context.session_affinity_mode,
-            ))
+            Arc::new(
+                RoutingHost::new_with_load_context_coordinator_and_kv_hint_policy(
+                    push_router,
+                    kv_chooser,
+                    load_context.clone(),
+                    affinity,
+                    context.session_affinity_mode,
+                    context.kv_hint_policy.clone(),
+                ),
+            )
         } else {
             let affinity =
                 create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
@@ -535,6 +542,7 @@ where
                     .worker_selector_factory
                     .clone()
                     .expect("enabled prefill router has a worker selector factory"),
+                kv_hint_policy: router_ref.kv_hint_policy.clone(),
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 session_affinity_mode: router_ref.session_affinity_mode,
@@ -906,6 +914,7 @@ mod tests {
             None,
             None,
             SessionAffinityMode::Hard,
+            None,
             "test-model".into(),
             namespace,
             LoadThresholdHandle::new(Default::default()),

@@ -29,7 +29,7 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        KvHintPolicy, KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
         to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -252,6 +252,7 @@ where
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Compatibility construction paths that predate routing load ownership leave this unset.
@@ -383,12 +384,13 @@ where
         affinity: Option<AffinityCoordinator>,
         session_affinity_mode: SessionAffinityMode,
     ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(
+        Self::new_with_optional_load_context_coordinator_and_kv_hint_policy(
             inner,
             kv_router,
             None,
             affinity,
             session_affinity_mode,
+            None,
         )
     }
 
@@ -399,21 +401,41 @@ where
         affinity: Option<AffinityCoordinator>,
         session_affinity_mode: SessionAffinityMode,
     ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(
+        Self::new_with_load_context_coordinator_and_kv_hint_policy(
+            inner,
+            kv_router,
+            load_context,
+            affinity,
+            session_affinity_mode,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_load_context_coordinator_and_kv_hint_policy(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        affinity: Option<AffinityCoordinator>,
+        session_affinity_mode: SessionAffinityMode,
+        kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
+    ) -> Self {
+        Self::new_with_optional_load_context_coordinator_and_kv_hint_policy(
             inner,
             kv_router,
             Some(load_context),
             affinity,
             session_affinity_mode,
+            kv_hint_policy,
         )
     }
 
-    fn new_with_optional_load_context_and_coordinator(
+    fn new_with_optional_load_context_coordinator_and_kv_hint_policy(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
         load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
         session_affinity_mode: SessionAffinityMode,
+        kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -429,6 +451,7 @@ where
             session_affinity_mode,
             hosted_occupancy: None,
             lora: None,
+            kv_hint_policy,
             routing_context: load_context,
         }
     }
@@ -523,6 +546,7 @@ where
                     load_estimator,
                     selector,
                 }),
+            kv_hint_policy: None,
             routing_context: Some(load_context),
         })
     }

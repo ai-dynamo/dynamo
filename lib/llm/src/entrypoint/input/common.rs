@@ -169,6 +169,7 @@ fn preprocessed_backend_engine<Sel>(
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     load_context: Arc<RoutingLoadContext>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
 ) -> anyhow::Result<Arc<RoutingHost<Sel>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -187,13 +188,16 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
-                router,
-                chooser,
-                load_context,
-                affinity,
-                session_affinity_mode,
-            ))
+            Arc::new(
+                RoutingHost::new_with_load_context_coordinator_and_kv_hint_policy(
+                    router,
+                    chooser,
+                    load_context,
+                    affinity,
+                    session_affinity_mode,
+                    kv_hint_policy,
+                ),
+            )
         }
         _ => {
             let lora = model_manager
@@ -235,6 +239,7 @@ pub async fn build_preprocessed_routing(
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
         SessionAffinityMode::Hard,
+        None,
     )
     .await
 }
@@ -251,6 +256,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -319,6 +325,7 @@ where
         affinity,
         session_affinity_mode,
         load_context,
+        kv_hint_policy,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
         prefill_router

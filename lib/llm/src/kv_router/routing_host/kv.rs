@@ -8,6 +8,58 @@ impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    pub(super) fn evaluate_kv_hint_policy(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selected_worker: WorkerWithDpRank,
+    ) -> Option<dynamo_kv_router::kv_hints::KvHint> {
+        let policy = self.kv_hint_policy.as_ref()?;
+        let session_lineage = request
+            .agent_context
+            .as_ref()
+            .and_then(|context| {
+                self.kv_router()
+                    .session_prefix_indexer()
+                    .map(|index| (context, index))
+            })
+            .and_then(|(context, index)| {
+                match index.get_session_block_lineage(&context.session_id, selected_worker, None) {
+                    Ok(lineages) if !lineages.is_empty() => {
+                        Some(crate::kv_router::SessionLineageView::new(lineages))
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %context.session_id,
+                            worker_id = selected_worker.worker_id,
+                            dp_rank = selected_worker.dp_rank,
+                            %error,
+                            "Failed to materialize session lineage for KV hint planning"
+                        );
+                        None
+                    }
+                }
+            });
+        let context = crate::kv_router::KvHintPolicyContext {
+            agent_context: request.agent_context.as_ref(),
+            selected_worker,
+            session_lineage: session_lineage.as_ref(),
+        };
+        match policy.evaluate(&context) {
+            Ok(hint) => hint,
+            Err(error) => {
+                tracing::warn!(
+                    request_id = request.context().id(),
+                    worker_id = selected_worker.worker_id,
+                    dp_rank = selected_worker.dp_rank,
+                    %error,
+                    "KV hint policy failed; preserving the router-selected hint"
+                );
+                None
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
@@ -466,9 +518,16 @@ where
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
+        let planned_kv_hint = self.evaluate_kv_hint_policy(&request, selection.worker);
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
-        backend_input.kv_hint = selection.kv_hint;
+        backend_input.kv_hint = match planned_kv_hint {
+            Some(planned) => {
+                // TODO: Validate and potentially concatenate actions if an envelope already exists.
+                Some(planned)
+            }
+            None => selection.kv_hint,
+        };
         let updated_request = context.map(|_| backend_input);
         guard.record_prefill_start(updated_request.content());
 

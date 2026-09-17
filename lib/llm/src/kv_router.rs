@@ -59,6 +59,7 @@ pub use dynamo_kv_router::selector;
 
 pub mod encoder_router;
 pub mod indexer;
+pub mod kv_hint_policy;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
 pub mod prefill_router;
@@ -76,6 +77,9 @@ pub use dynamo_kv_router::scheduling::{
 };
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
+pub use kv_hint_policy::{
+    KvHintPolicy, KvHintPolicyContext, KvHintPolicyError, NoopKvHintPolicy, SessionLineageView,
+};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
@@ -908,6 +912,10 @@ where
             subscription.set_task_guard(task_guard.clone());
         }
         self.teardown_task_guard = Some(task_guard);
+    }
+
+    pub fn session_prefix_indexer(&self) -> Option<&Arc<SessionPrefixIndexer>> {
+        self.session_prefix_index.as_ref()
     }
 
     /// Get a reference to the client used by this KvRouter

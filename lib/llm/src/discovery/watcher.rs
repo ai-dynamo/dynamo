@@ -213,6 +213,7 @@ where
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
     /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
     require_typed_worker_role: bool,
 }
@@ -337,6 +338,7 @@ where
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            kv_hint_policy: None,
             require_typed_worker_role,
         }
     }
@@ -359,6 +361,13 @@ where
 
     pub(crate) fn set_generate_engine_capabilities(&mut self, capabilities: Vec<&'static str>) {
         self.generate_engine_capabilities = capabilities;
+    }
+
+    pub(crate) fn set_kv_hint_policy(
+        &mut self,
+        policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
+    ) {
+        self.kv_hint_policy = policy;
     }
     /// Compatibility wrapper for callers that enable the vLLM Generate route.
     pub fn set_generate_engine_enabled(&mut self, enabled: bool) {
@@ -658,6 +667,7 @@ where
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,
                     router_config.session_affinity_mode,
+                    self.kv_hint_policy.clone(),
                     model_name.clone(),
                     namespace.clone(),
                     load_thresholds.clone(),
@@ -700,6 +710,7 @@ where
                         uses_multimodal_cache_routing(card),
                         router_config.session_affinity_ttl_secs,
                         router_config.session_affinity_mode,
+                        self.kv_hint_policy.clone(),
                     )
                     .await
                     .context("build_preprocessed_routing")?,

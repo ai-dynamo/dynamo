@@ -13,7 +13,7 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::WorkerSelectorFactory,
+    kv_router::{KvHintPolicy, WorkerSelectorFactory},
     local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
     model_type::ModelType,
     namespace::NamespaceFilter,
@@ -37,6 +37,7 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
+    kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
 }
 
 impl HttpFrontend {
@@ -70,6 +71,15 @@ impl HttpFrontend {
         self
     }
 
+    /// Add post-selection KV hint planning without replacing worker selection.
+    pub fn kv_hint_policy<P>(mut self, policy: P) -> Self
+    where
+        P: KvHintPolicy + 'static,
+    {
+        self.kv_hint_policy = Some(Arc::new(policy));
+        self
+    }
+
     /// Run the frontend until it exits.
     pub async fn run(
         self,
@@ -80,6 +90,10 @@ impl HttpFrontend {
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
         {
             anyhow::bail!("custom worker-selection policies require a dynamic engine");
+        }
+        if self.kv_hint_policy.is_some() && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        {
+            anyhow::bail!("KV hint policies require a dynamic engine");
         }
 
         // Callers that reach the frontend without going through `run_input`
@@ -101,6 +115,7 @@ impl HttpFrontend {
                     self.frontend_route_extensions,
                     true,
                     factory,
+                    self.kv_hint_policy,
                 )
                 .await
             }
@@ -116,6 +131,7 @@ impl HttpFrontend {
                             worker_type.default_selector_label(),
                         )
                     }),
+                    self.kv_hint_policy,
                 )
                 .await
             }
@@ -155,6 +171,7 @@ async fn run_with_worker_selector_factory<Sel>(
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -263,6 +280,7 @@ where
                 generate_engine_capabilities,
                 require_typed_worker_role,
                 worker_selector_factory.clone(),
+                kv_hint_policy,
             )
             .await?;
             http_service
@@ -353,6 +371,7 @@ async fn run_watcher<Sel>(
     generate_engine_capabilities: Vec<&'static str>,
     require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -377,6 +396,7 @@ where
         require_typed_worker_role,
         worker_selector_factory,
     );
+    watch_obj.set_kv_hint_policy(kv_hint_policy);
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
     watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);

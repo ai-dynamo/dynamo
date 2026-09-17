@@ -231,6 +231,7 @@ where
     /// installed after the frontend constructs its one decode `RoutingHost`.
     decode_routing_host: OnceLock<Arc<RoutingHost<Sel>>>,
     worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
     /// Mode of the decode set that owns this router. Governs decode-side
@@ -278,6 +279,7 @@ where
     /// Fallback mode for the prefill hop when the prefill card advertises none.
     decode_router_mode: RouterMode,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
