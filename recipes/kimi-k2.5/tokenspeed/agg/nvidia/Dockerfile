@@ -17,7 +17,7 @@
 #     -t <your-registry>/dynamo-tokenspeed:dev \
 #     .
 #
-#   # 2. Runtime image (keeps CUDA JIT tooling, omits the Rust toolchain):
+#   # 2. Slim runtime image (no compilers / no Rust toolchain):
 #   docker build \
 #     -f recipes/kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile \
 #     --target runtime \
@@ -43,8 +43,6 @@ FROM ${BASE_IMAGE} AS tokenspeed_base
 ARG ARCH
 ARG TOKENSPEED_GIT_REF=886baafaa30f95d9a9e1b781c5906b0a89a64e98
 ARG FLASHINFER_WHEEL_INDEX=https://flashinfer.ai/whl/cu130
-ARG MAX_JOBS=16
-ARG CUDA_ARCH_LIST="9.0a 10.0a"
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -54,11 +52,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         build-essential \
         ca-certificates \
         curl \
-        git \
-        libssl-dev \
-        libopenmpi-dev \
-        libnuma1 \
-        pkg-config; \
+        git; \
     rm -rf /var/lib/apt/lists/*
 
 # Install TokenSpeed from upstream source. The public lightseekorg/tokenspeed-runner
@@ -71,14 +65,12 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     git clone https://github.com/lightseekorg/tokenspeed.git /opt/tokenspeed; \
     cd /opt/tokenspeed; \
     git checkout --detach "${TOKENSPEED_GIT_REF}"; \
+    pip install -e "./python" --no-build-isolation; \
     FLASHINFER_VERSION="$(sed -n 's/^flashinfer-python==//p' tokenspeed-kernel/python/requirements/cuda.txt)"; \
     test -n "${FLASHINFER_VERSION}"; \
     pip install "flashinfer-jit-cache==${FLASHINFER_VERSION}" --index-url "${FLASHINFER_WHEEL_INDEX}"; \
-    MAX_JOBS="${MAX_JOBS}" FLASHINFER_CUDA_ARCH_LIST="${CUDA_ARCH_LIST}" \
-        TOKENSPEED_KERNEL_BACKEND=cuda \
-        pip install -e tokenspeed-kernel/python/ --no-build-isolation; \
-    pip install -e tokenspeed-scheduler/; \
-    pip install -e "./python" --no-build-isolation
+    pip install -e tokenspeed-kernel/python/ --no-build-isolation; \
+    pip install -e tokenspeed-scheduler/
 
 # NOTE: discovery uses the in-cluster Kubernetes API (`--discovery-backend kubernetes`)
 # and the event-plane connects to a separate `nats:2.12.4` Deployment, so the worker
@@ -120,28 +112,20 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     maturin build --release -o /tmp/dynamo-dist
 
 FROM tokenspeed_base AS runtime
-# FlashInfer's grouped FP8 GEMM JIT invokes nvcc through PATH.
-ENV CUDA_HOME=/usr/local/cuda
-ENV PATH="${CUDA_HOME}/bin:${PATH}"
-# Copy the source context, excluding the builder's Cargo target artifacts.
-COPY . /workspace/dynamo
+COPY --from=wheel_builder /workspace/dynamo /workspace/dynamo
 COPY --from=wheel_builder /tmp/dynamo-dist/*.whl /tmp/
 RUN set -eux; \
-    python3 -m pip install --no-cache-dir /tmp/*.whl \
-        "kubernetes>=32.0.1,<33.0.0" "zstandard>=0.23.0,<1.0"; \
+    python3 -m pip install --no-cache-dir /tmp/*.whl; \
     cd /workspace/dynamo; \
     python3 -m pip install --no-cache-dir -e . --no-deps; \
     rm -f /tmp/*.whl
 WORKDIR /workspace/dynamo
 
 FROM build_tools AS dev
-ENV CUDA_HOME=/usr/local/cuda
-ENV PATH="${CUDA_HOME}/bin:${PATH}"
-COPY . /workspace/dynamo
+COPY --from=wheel_builder /workspace/dynamo /workspace/dynamo
 COPY --from=wheel_builder /tmp/dynamo-dist/*.whl /tmp/
 RUN set -eux; \
-    python3 -m pip install --no-cache-dir /tmp/*.whl \
-        "kubernetes>=32.0.1,<33.0.0" "zstandard>=0.23.0,<1.0"; \
+    python3 -m pip install --no-cache-dir /tmp/*.whl; \
     cd /workspace/dynamo; \
     python3 -m pip install --no-cache-dir -e . --no-deps; \
     rm -f /tmp/*.whl
