@@ -26,7 +26,8 @@ use tokio::sync::mpsc;
 
 use super::config::{Capture, ResponseOptions, TapSpec};
 use super::envelope::{
-    ENVELOPE_SCHEMA_VERSION, ShadowEnvelope, ShadowOrigin, ShadowOutcome, ShadowResponse,
+    ENVELOPE_SCHEMA_VERSION, ShadowChoice, ShadowEnvelope, ShadowOrigin, ShadowOutcome,
+    ShadowResponse,
 };
 use super::filter::{Projection, project};
 use crate::protocols::TokenIdType;
@@ -37,6 +38,7 @@ use crate::protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, Prep
 pub(crate) trait ShadowChunk {
     fn token_ids(&self) -> &[TokenIdType];
     fn finish_reason(&self) -> Option<&FinishReason>;
+    fn index(&self) -> u32;
 }
 
 impl ShadowChunk for BackendOutput {
@@ -46,6 +48,9 @@ impl ShadowChunk for BackendOutput {
     fn finish_reason(&self) -> Option<&FinishReason> {
         self.finish_reason.as_ref()
     }
+    fn index(&self) -> u32 {
+        self.index.unwrap_or(0)
+    }
 }
 
 impl ShadowChunk for LLMEngineOutput {
@@ -54,6 +59,9 @@ impl ShadowChunk for LLMEngineOutput {
     }
     fn finish_reason(&self) -> Option<&FinishReason> {
         self.finish_reason.as_ref()
+    }
+    fn index(&self) -> u32 {
+        self.index.unwrap_or(0)
     }
 }
 
@@ -262,11 +270,13 @@ struct Recorder {
     options: ResponseOptions,
     saw_error: bool,
     saw_cancel: bool,
-    /// A chunk carried a finish reason other than error or cancel.
-    finished: bool,
-    finish_reason: Option<String>,
-    output_tokens: u64,
-    token_ids: Vec<TokenIdType>,
+    /// Choices the request asked for. The response is complete when this many
+    /// choices carried a finish reason other than error or cancel.
+    expected_choices: usize,
+    finished_choices: usize,
+    /// Ordered by index. A request rarely has more than a few choices, so a
+    /// sorted `Vec` beats a map.
+    choices: Vec<ShadowChoice>,
     first_token: Option<Duration>,
     last_token: Option<Duration>,
     chunk_offsets_ns: Vec<u64>,
@@ -280,6 +290,12 @@ impl Recorder {
         started: Instant,
         options: ResponseOptions,
     ) -> Self {
+        let expected_choices = pending
+            .request
+            .sampling_options
+            .n
+            .map_or(1, usize::from)
+            .max(1);
         Self {
             tap,
             context,
@@ -288,10 +304,9 @@ impl Recorder {
             options,
             saw_error: false,
             saw_cancel: false,
-            finished: false,
-            finish_reason: None,
-            output_tokens: 0,
-            token_ids: Vec::new(),
+            expected_choices,
+            finished_choices: 0,
+            choices: Vec::new(),
             first_token: None,
             last_token: None,
             chunk_offsets_ns: Vec::new(),
@@ -305,25 +320,47 @@ impl Recorder {
         let Some(data) = &chunk.data else {
             return;
         };
+        let index = data.index();
+        let position = match self
+            .choices
+            .binary_search_by_key(&index, |choice| choice.index)
+        {
+            Ok(position) => position,
+            Err(position) => {
+                self.choices.insert(
+                    position,
+                    ShadowChoice {
+                        index,
+                        finish_reason: None,
+                        output_tokens: 0,
+                        token_ids: Vec::new(),
+                    },
+                );
+                position
+            }
+        };
+        let choice = &mut self.choices[position];
+
         if let Some(reason) = data.finish_reason() {
             match reason {
                 FinishReason::Error(_) => self.saw_error = true,
                 FinishReason::Cancelled => self.saw_cancel = true,
-                _ => self.finished = true,
+                _ if choice.finish_reason.is_none() => self.finished_choices += 1,
+                _ => {}
             }
-            self.finish_reason = Some(reason.to_string());
+            choice.finish_reason = Some(reason.to_string());
         }
         let tokens = data.token_ids();
         if tokens.is_empty() {
             return;
         }
+        choice.output_tokens += tokens.len() as u64;
+        if self.options.tokens {
+            choice.token_ids.extend_from_slice(tokens);
+        }
         let offset = self.started.elapsed();
         self.first_token.get_or_insert(offset);
         self.last_token = Some(offset);
-        self.output_tokens += tokens.len() as u64;
-        if self.options.tokens {
-            self.token_ids.extend_from_slice(tokens);
-        }
         if self.options.chunk_timing {
             self.chunk_offsets_ns.push(offset.as_nanos() as u64);
         }
@@ -337,7 +374,12 @@ impl Recorder {
         // request context tells the two apart: a replay must treat a cancel as
         // load the client gave up on, not as a failure of the primary.
         let cancelled = self.saw_cancel || self.context.is_stopped() || self.context.is_killed();
-        let outcome = if self.finished {
+        // A choice that finished must not hide another that failed, and a
+        // context that is stopped during cleanup must not turn a finished
+        // response into a cancel.
+        let finished =
+            self.finished_choices >= self.expected_choices && !self.saw_error && !self.saw_cancel;
+        let outcome = if finished {
             ShadowOutcome::Complete
         } else if cancelled {
             ShadowOutcome::Cancelled
@@ -351,9 +393,8 @@ impl Recorder {
         let nanos = |offset: Duration| offset.as_nanos() as u64;
         let response = ShadowResponse {
             outcome,
-            finish_reason: self.finish_reason.take(),
-            output_tokens: self.output_tokens,
-            token_ids: std::mem::take(&mut self.token_ids),
+            output_tokens: self.choices.iter().map(|choice| choice.output_tokens).sum(),
+            choices: std::mem::take(&mut self.choices),
             first_token_offset_ns: self.first_token.map(nanos),
             last_token_offset_ns: self.last_token.map(nanos),
             end_offset_ns: nanos(self.started.elapsed()),
@@ -561,8 +602,9 @@ pub(super) mod tests {
         assert_eq!(*envelope.request.token_ids, vec![1, 2, 3]);
         let recorded = envelope.response.unwrap();
         assert_eq!(recorded.outcome, ShadowOutcome::Complete);
-        assert_eq!(recorded.finish_reason.as_deref(), Some("stop"));
-        assert_eq!(recorded.token_ids, vec![10, 11, 12]);
+        assert_eq!(recorded.choices.len(), 1);
+        assert_eq!(recorded.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(recorded.choices[0].token_ids, vec![10, 11, 12]);
         assert_eq!(recorded.output_tokens, 3);
         assert_eq!(recorded.chunk_offsets_ns.len(), 2);
         assert!(recorded.first_token_offset_ns <= recorded.last_token_offset_ns);
@@ -587,7 +629,7 @@ pub(super) mod tests {
 
         let recorded = receiver.try_recv().unwrap().response.unwrap();
         assert_eq!(recorded.outcome, ShadowOutcome::Cancelled);
-        assert_eq!(recorded.token_ids, vec![10]);
+        assert_eq!(recorded.choices[0].token_ids, vec![10]);
     }
 
     #[tokio::test]
@@ -662,6 +704,70 @@ pub(super) mod tests {
 
         let recorded = receiver.try_recv().unwrap().response.unwrap();
         assert_eq!(recorded.outcome, ShadowOutcome::Cancelled);
+    }
+
+    fn choice_chunk(
+        index: u32,
+        tokens: Vec<TokenIdType>,
+        finish: Option<FinishReason>,
+    ) -> Annotated<LLMEngineOutput> {
+        let mut chunk = chunk(tokens, finish);
+        chunk.data.as_mut().unwrap().index = Some(index);
+        chunk
+    }
+
+    #[tokio::test]
+    async fn a_finished_choice_does_not_hide_a_failed_choice() {
+        let mut queues = taps(JOINED_TAP);
+        let (queue, mut receiver) = queues.remove(0);
+        let tap = ShadowTap::new(vec![queue], ShadowOrigin::Chat);
+        let engine = Engine::new(vec![
+            choice_chunk(0, vec![10], None),
+            choice_chunk(1, vec![20], None),
+            choice_chunk(0, vec![11], Some(FinishReason::Stop)),
+            choice_chunk(
+                1,
+                vec![21],
+                Some(FinishReason::Error("worker lost".to_string())),
+            ),
+        ]);
+
+        let _: Vec<_> = run(&tap, engine, "req-n").await.unwrap().collect().await;
+        let recorded = receiver.try_recv().unwrap().response.unwrap();
+        assert_eq!(recorded.outcome, ShadowOutcome::Error);
+        assert_eq!(recorded.output_tokens, 4);
+        assert_eq!(recorded.choices[0].token_ids, vec![10, 11]);
+        assert_eq!(recorded.choices[0].finish_reason.as_deref(), Some("stop"));
+        assert_eq!(recorded.choices[1].token_ids, vec![20, 21]);
+    }
+
+    #[tokio::test]
+    async fn a_response_is_complete_only_when_every_requested_choice_finished() {
+        let mut queues = taps(JOINED_TAP);
+        let (queue, mut receiver) = queues.remove(0);
+        let tap = ShadowTap::new(vec![queue], ShadowOrigin::Chat);
+        let mut two_choices = request("req-n2");
+        two_choices.sampling_options.n = Some(2);
+
+        let engine = Engine::new(vec![
+            choice_chunk(1, vec![20], Some(FinishReason::Stop)),
+            choice_chunk(0, vec![10], None),
+        ]);
+        let mut response = Operator::<_, _, _, ManyOut<Annotated<LLMEngineOutput>>>::generate(
+            &*tap,
+            two_choices,
+            engine,
+        )
+        .await
+        .unwrap();
+        assert!(response.next().await.is_some());
+        assert!(response.next().await.is_some());
+        drop(response);
+
+        let recorded = receiver.try_recv().unwrap().response.unwrap();
+        assert_eq!(recorded.outcome, ShadowOutcome::Cancelled);
+        assert_eq!(recorded.choices[0].index, 0, "choices are ordered by index");
+        assert_eq!(recorded.choices[1].finish_reason.as_deref(), Some("stop"));
     }
 
     /// Fails the first attempt the way an unreachable worker does.
@@ -755,7 +861,7 @@ pub(super) mod tests {
         assert!(requests_rx.try_recv().is_err());
         let recorded = joined_rx.try_recv().unwrap().response.unwrap();
         assert_eq!(recorded.outcome, ShadowOutcome::Complete);
-        assert_eq!(recorded.token_ids, vec![10, 11]);
+        assert_eq!(recorded.choices[0].token_ids, vec![10, 11]);
         assert!(joined_rx.try_recv().is_err());
     }
 
@@ -772,9 +878,13 @@ pub(super) mod tests {
             request: Arc::new(project(&request("id"), Projection::TOKENS_ONLY)),
             response: Some(ShadowResponse {
                 outcome: ShadowOutcome::Complete,
-                finish_reason: Some("stop".to_string()),
+                choices: vec![ShadowChoice {
+                    index: 0,
+                    finish_reason: Some("stop".to_string()),
+                    output_tokens: 1,
+                    token_ids: vec![5],
+                }],
                 output_tokens: 1,
-                token_ids: vec![5],
                 first_token_offset_ns: Some(1),
                 last_token_offset_ns: Some(1),
                 end_offset_ns: 2,

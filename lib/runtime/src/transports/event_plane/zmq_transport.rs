@@ -125,11 +125,14 @@ where
     builder.connect(endpoint).map_err(map_socket_creation_error)
 }
 
-fn configure_publish_builder<T>(builder: SocketBuilder<T>, sndhwm: i32) -> SocketBuilder<T>
+/// ZMQ reads a mark of zero as "no limit", which is the opposite of what a
+/// caller that sets a mark wants.
+fn configure_publish_builder<T>(builder: SocketBuilder<T>, sndhwm: i32) -> Result<SocketBuilder<T>>
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder.set_sndhwm(sndhwm).set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
+    anyhow::ensure!(sndhwm > 0, "ZMQ send HWM must be greater than zero");
+    Ok(builder.set_sndhwm(sndhwm).set_sndtimeo(ZMQ_SNDTIMEOUT_MS))
 }
 
 fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
@@ -196,7 +199,7 @@ impl ZmqPubTransport {
 
         let ctx = shared_zmq_context()?;
         let socket = bind_tmq_socket(
-            configure_publish_builder(publish(&ctx), sndhwm),
+            configure_publish_builder(publish(&ctx), sndhwm)?,
             &bind_endpoint,
         )?;
         let actual_endpoint = socket
@@ -248,7 +251,7 @@ impl ZmqPubTransport {
 
         let ctx = shared_zmq_context()?;
         let socket = connect_tmq_socket(
-            configure_publish_builder(publish(&ctx), sndhwm),
+            configure_publish_builder(publish(&ctx), sndhwm)?,
             first_endpoint,
         )?;
         for endpoint in endpoints {
@@ -968,6 +971,23 @@ mod tests {
                 .get_sndhwm()
                 .unwrap(),
             43
+        );
+
+        // Zero means "no limit" to ZMQ.
+        let unbounded = format!("inproc://dynamo-zmq-send-hwm-zero-{pid}");
+        assert!(
+            ZmqPubTransport::bind_with_sndhwm(&unbounded, topic, 0)
+                .await
+                .is_err()
+        );
+        assert!(
+            ZmqPubTransport::connect_multiple_with_sndhwm(
+                std::slice::from_ref(&endpoint),
+                topic,
+                -1
+            )
+            .await
+            .is_err()
         );
     }
 

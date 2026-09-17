@@ -71,12 +71,12 @@ pub enum ShadowOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowResponse {
     pub outcome: ShadowOutcome,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
+    /// One entry per choice that produced a chunk, ordered by index. A request
+    /// with `n > 1` interleaves the chunks of its choices in one stream, so
+    /// tokens and finish reasons are kept apart by choice.
+    pub choices: Vec<ShadowChoice>,
+    /// Sum over all choices.
     pub output_tokens: u64,
-    /// Empty when the tap sets `response.tokens: false`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub token_ids: Vec<TokenIdType>,
     /// Offsets from arrival, on a monotonic clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_token_offset_ns: Option<u64>,
@@ -87,4 +87,15 @@ pub struct ShadowResponse {
     /// `response.chunk_timing: true`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chunk_offsets_ns: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShadowChoice {
+    pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    pub output_tokens: u64,
+    /// Empty when the tap sets `response.tokens: false`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_ids: Vec<TokenIdType>,
 }

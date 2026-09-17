@@ -32,7 +32,8 @@ use tokio_util::sync::CancellationToken;
 
 pub use config::{Capture, ResponseOptions, ShadowConfig, TapSpec};
 pub use envelope::{
-    ENVELOPE_SCHEMA_VERSION, ShadowEnvelope, ShadowOrigin, ShadowOutcome, ShadowResponse,
+    ENVELOPE_SCHEMA_VERSION, ShadowChoice, ShadowEnvelope, ShadowOrigin, ShadowOutcome,
+    ShadowResponse,
 };
 pub(crate) use tap::ShadowTap;
 use tap::{TapCounters, TapQueue};
@@ -45,19 +46,44 @@ pub(crate) type ShadowTaps = Arc<[Arc<TapQueue>]>;
 /// can hold several runtimes, at once or one after another, so a process-wide
 /// tap set would hand a second runtime queues that nothing drains.
 #[derive(Default)]
-struct Registry(Mutex<HashMap<u64, (ShadowTaps, CancellationToken)>>);
+struct Registry {
+    runtimes: Mutex<HashMap<u64, (ShadowTaps, CancellationToken)>>,
+    /// Held across `get_or_init`. Several inputs can share one runtime and
+    /// start at the same time; a second start would register the same metrics
+    /// again and fail, or open a second set of publishers.
+    starting: tokio::sync::Mutex<()>,
+}
 
 impl Registry {
     fn live(&self, runtime_id: u64) -> Option<ShadowTaps> {
-        let runtimes = self.0.lock().expect("shadow tap registry poisoned");
+        let runtimes = self.runtimes.lock().expect("shadow tap registry poisoned");
         runtimes
             .get(&runtime_id)
             .filter(|(_, shutdown)| !shutdown.is_cancelled())
             .map(|(taps, _)| Arc::clone(taps))
     }
 
+    async fn get_or_init<F, Fut>(
+        &self,
+        runtime_id: u64,
+        shutdown: CancellationToken,
+        start: F,
+    ) -> Result<ShadowTaps>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<ShadowTaps>>,
+    {
+        let _starting = self.starting.lock().await;
+        if let Some(taps) = self.live(runtime_id) {
+            return Ok(taps);
+        }
+        let taps = start().await?;
+        self.insert(runtime_id, Arc::clone(&taps), shutdown);
+        Ok(taps)
+    }
+
     fn insert(&self, runtime_id: u64, taps: ShadowTaps, shutdown: CancellationToken) {
-        let mut runtimes = self.0.lock().expect("shadow tap registry poisoned");
+        let mut runtimes = self.runtimes.lock().expect("shadow tap registry poisoned");
         runtimes.retain(|_, (_, shutdown)| !shutdown.is_cancelled());
         runtimes.insert(runtime_id, (taps, shutdown));
     }
@@ -72,16 +98,19 @@ pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
     let Some(path) = std::env::var_os(DYN_SHADOW_TAP_CONFIG).filter(|path| !path.is_empty()) else {
         return Ok(());
     };
-    // Several inputs can share one runtime.
-    let runtime_id = drt.connection_id();
-    if REGISTRY.live(runtime_id).is_some() {
-        return Ok(());
-    }
     let config = ShadowConfig::from_path(&PathBuf::from(path))?;
     if config.taps.is_empty() {
         return Ok(());
     }
+    REGISTRY
+        .get_or_init(drt.connection_id(), drt.child_token(), || {
+            start_taps(drt, config)
+        })
+        .await?;
+    Ok(())
+}
 
+async fn start_taps(drt: &DistributedRuntime, config: ShadowConfig) -> Result<ShadowTaps> {
     let namespace = drt.namespace(config.namespace.clone())?;
     let metrics = namespace.metrics();
     let counter = |name: &str, help: &str| metrics.create_intcountervec(name, help, &["tap"], &[]);
@@ -137,8 +166,7 @@ pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
         taps.push(queue);
     }
 
-    REGISTRY.insert(runtime_id, taps.into(), drt.child_token());
-    Ok(())
+    Ok(taps.into())
 }
 
 /// The taps of a runtime, or `None` when it has none and nothing is linked.
@@ -152,6 +180,8 @@ pub(crate) fn tap_for(taps: &ShadowTaps, origin: ShadowOrigin) -> Arc<ShadowTap>
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     fn taps() -> ShadowTaps {
@@ -187,9 +217,40 @@ mod tests {
         registry.insert(2, Arc::clone(&second), CancellationToken::new());
         assert!(Arc::ptr_eq(&registry.live(2).unwrap(), &second));
         assert_eq!(
-            registry.0.lock().unwrap().len(),
+            registry.runtimes.lock().unwrap().len(),
             1,
             "stopped runtimes are pruned"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_starts_for_one_runtime_run_once() {
+        let registry = Registry::default();
+        let starts = AtomicUsize::new(0);
+        let start = || async {
+            starts.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(taps())
+        };
+        let shutdown = CancellationToken::new();
+
+        let (first, second) = tokio::join!(
+            registry.get_or_init(7, shutdown.clone(), start),
+            registry.get_or_init(7, shutdown.clone(), start),
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_registers_nothing() {
+        let registry = Registry::default();
+        let failed = registry
+            .get_or_init(7, CancellationToken::new(), || async {
+                anyhow::bail!("no transport")
+            })
+            .await;
+        assert!(failed.is_err());
+        assert!(registry.live(7).is_none());
     }
 }

@@ -426,7 +426,12 @@ pub async fn prepare_engine(
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine, model.card().tokenizer()?)
+            >(
+                model.card(),
+                inner_engine,
+                model.card().tokenizer()?,
+                crate::shadow::taps_for(&distributed_runtime),
+            )
             .await?;
 
             let service_name = model.service_name().to_string();
@@ -441,10 +446,12 @@ pub async fn prepare_engine(
     }
 }
 
+/// `shadow_taps` are the taps of the runtime that serves the pipeline.
 pub async fn build_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     engine: ExecutionContext,
     tokenizer: crate::tokenizers::Tokenizer,
+    shadow_taps: Option<crate::shadow::ShadowTaps>,
 ) -> anyhow::Result<Arc<ServiceFrontend<SingleIn<Req>, ManyOut<Annotated<Resp>>>>>
 where
     Req: Data,
@@ -464,13 +471,26 @@ where
     let backend = Backend::from_tokenizer(tokenizer).into_operator();
     let engine = ServiceBackend::from_engine(engine);
 
-    Ok(frontend
-        .link(preprocessor.forward_edge())?
-        .link(backend.forward_edge())?
-        .link(engine)?
-        .link(backend.backward_edge())?
-        .link(preprocessor.backward_edge())?
-        .link_terminal(frontend)?)
+    let shadow_tap = shadow_taps.as_ref().map(|taps| {
+        crate::shadow::tap_for(taps, shadow_origin::<Req>()).into_operator_for::<BackendOutput>()
+    });
+    let detokenize = backend.forward_edge();
+    let preprocessed = frontend.link(preprocessor.forward_edge())?;
+    match &shadow_tap {
+        Some(tap) => preprocessed
+            .link(tap.forward_edge())?
+            .link(detokenize.clone())?,
+        None => preprocessed.link(detokenize.clone())?,
+    };
+    let generated = detokenize.link(engine)?.link(backend.backward_edge())?;
+    let postprocess = preprocessor.backward_edge();
+    match &shadow_tap {
+        Some(tap) => generated
+            .link(tap.backward_edge())?
+            .link(postprocess.clone())?,
+        None => generated.link(postprocess.clone())?,
+    };
+    Ok(postprocess.link_terminal(frontend)?)
 }
 
 /// The shadow tap sits below the point where the public APIs become one type.
