@@ -25,11 +25,16 @@ import aiohttp
 import pytest
 
 from dynamo.llm import HttpAsyncEngine, HttpError, HttpService
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.runtime import DistributedRuntime
 
 MSG_CONTAINS_ERROR = "This message contains an 400error."
 MSG_CONTAINS_STATUS_ERROR = "This message contains a 415 status error."
 MSG_CONTAINS_INVALID_ARGUMENT = "This message contains an invalid argument."
+MSG_CONTAINS_DYNAMO_INVALID_ARGUMENT = (
+    "This message contains a Dynamo invalid argument."
+)
+PRIVATE_DYNAMO_INVALID_ARGUMENT = "private backend detail containing credentials"
 MSG_CONTAINS_INTERNAL_ERROR = "This message contains an internal server error."
 
 
@@ -75,6 +80,8 @@ class MockHttpEngine:
             raise _StatusLikeError(status=415, message=MSG_CONTAINS_STATUS_ERROR)
         elif MSG_CONTAINS_INVALID_ARGUMENT.lower() in user_message.lower():
             raise ValueError(MSG_CONTAINS_INVALID_ARGUMENT)
+        elif MSG_CONTAINS_DYNAMO_INVALID_ARGUMENT.lower() in user_message.lower():
+            raise InvalidArgument(PRIVATE_DYNAMO_INVALID_ARGUMENT)
         elif MSG_CONTAINS_INTERNAL_ERROR.lower() in user_message.lower():
             raise RuntimeError("Simulated internal error")
 
@@ -239,6 +246,12 @@ HTTP_ERROR_CASES = (
     ),
     (
         MSG_CONTAINS_INVALID_ARGUMENT,
+        400,
+        "Invalid request",
+        "Bad Request",
+    ),
+    (
+        MSG_CONTAINS_DYNAMO_INVALID_ARGUMENT,
         400,
         "Invalid request",
         "Bad Request",
