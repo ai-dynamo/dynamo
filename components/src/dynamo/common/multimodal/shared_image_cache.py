@@ -21,6 +21,7 @@ _TTL_ENV = "DYN_MM_SHARED_IMAGE_CACHE_TTL_SECS"
 _CONNECT_TIMEOUT_ENV = "DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS"
 _IO_TIMEOUT_ENV = "DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS"
 _MAX_PENDING_DURATIONS = 10_000
+_ERROR_WARNING_INTERVAL_SECONDS = 60.0
 # redis-py defines RedisClusterException outside the RedisError hierarchy.
 _REDIS_OPERATION_ERRORS = (RedisError, RedisClusterException)
 
@@ -69,6 +70,30 @@ class SharedImageCacheStats:
             return durations
 
 
+class _RateLimitedErrorWarnings:
+    """Track cache failures and allow one aggregate warning per interval."""
+
+    def __init__(self, interval_seconds: float) -> None:
+        self._interval_seconds = interval_seconds
+        self._lock = threading.Lock()
+        self._last_warning_at: float | None = None
+        self._failures_since_warning = 0
+
+    def record(self, now: float) -> int | None:
+        """Return the failure count when a warning is due, otherwise ``None``."""
+        with self._lock:
+            self._failures_since_warning += 1
+            if (
+                self._last_warning_at is not None
+                and now - self._last_warning_at < self._interval_seconds
+            ):
+                return None
+            failure_count = self._failures_since_warning
+            self._failures_since_warning = 0
+            self._last_warning_at = now
+            return failure_count
+
+
 class SharedImageCache:
     """Fail-open Redis Cluster cache for compressed image payloads."""
 
@@ -76,6 +101,9 @@ class SharedImageCache:
         self._client = client
         self._ttl_seconds = ttl_seconds
         self.stats = SharedImageCacheStats()
+        self._error_warnings = _RateLimitedErrorWarnings(
+            _ERROR_WARNING_INTERVAL_SECONDS
+        )
 
     @classmethod
     def from_env(cls) -> "SharedImageCache | None":
@@ -117,6 +145,20 @@ class SharedImageCache:
         digest = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()
         return f"dynamo:mm:image:{{{digest}}}:bytes"
 
+    def _log_operation_error(self, operation: str, exc: Exception) -> None:
+        """Log each cache failure at debug and rate-limit aggregate warnings."""
+        logger.debug("Shared image cache %s failed: %s", operation, exc)
+        failure_count = self._error_warnings.record(time.monotonic())
+        if failure_count is not None:
+            logger.warning(
+                "Shared image cache unavailable; observed %d operation failure(s) "
+                "since the last warning or startup. Requests continue without "
+                "the shared cache; repeated failures are logged at debug level "
+                "for %.0f seconds.",
+                failure_count,
+                _ERROR_WARNING_INTERVAL_SECONDS,
+            )
+
     async def get(self, cache_identity: str) -> bytes | None:
         """Return cached encoded bytes, or ``None`` on a miss or cache error."""
         key = self._key(cache_identity)
@@ -126,7 +168,7 @@ class SharedImageCache:
         try:
             value = await self._client.get(key)
         except _REDIS_OPERATION_ERRORS as exc:
-            logger.warning("Shared image cache read failed: %s", exc)
+            self._log_operation_error("read", exc)
             return None
         else:
             outcome = "hit" if value is not None else "miss"
@@ -146,7 +188,7 @@ class SharedImageCache:
         try:
             await self._client.set(key, content, ex=self._ttl_seconds)
         except _REDIS_OPERATION_ERRORS as exc:
-            logger.warning("Shared image cache write failed: %s", exc)
+            self._log_operation_error("write", exc)
         else:
             outcome = "success"
         finally:
@@ -160,4 +202,4 @@ class SharedImageCache:
         try:
             await self._client.delete(key)
         except _REDIS_OPERATION_ERRORS as exc:
-            logger.warning("Shared image cache delete failed: %s", exc)
+            self._log_operation_error("delete", exc)
