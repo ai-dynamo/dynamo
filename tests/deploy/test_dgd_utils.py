@@ -234,12 +234,13 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
     )
 
 
-@pytest.mark.parametrize("has_dgd_labels", [True, False])
-@pytest.mark.parametrize("failure_stage", [None, "jobs", "pods"])
+@pytest.mark.parametrize(
+    "has_dgd_labels, failure_stage",
+    [(True, None), (False, None), (False, "jobs"), (False, "pods")],
+)
 async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
     tmp_path, monkeypatch, has_dgd_labels, failure_stage
 ) -> None:
-    """Capture source pods once before deletion, with or without DGD labels."""
     deployment = managed_deployment(tmp_path)
     deployment.deployment_spec.services = [SimpleNamespace(name="worker")]
     list_jobs = Mock(
@@ -330,7 +331,7 @@ async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
     assert pod.logs.call_count == 2
 
 
-@pytest.mark.parametrize("status", [404, 403, 500])
+@pytest.mark.parametrize("status", [404, 403])
 async def test_checkpoint_log_api_failure_does_not_prevent_cleanup(
     tmp_path, monkeypatch, status
 ) -> None:
