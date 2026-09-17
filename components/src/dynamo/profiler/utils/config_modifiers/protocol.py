@@ -150,6 +150,9 @@ class ConfigModifierProtocol(Protocol):
         num_gpus_per_node: int | None = None,
     ) -> dict:
         ...
+    @classmethod
+    def set_config_backend_framework(cls, config: dict, backend: str) -> dict:
+        ...
 
 
 class BaseConfigModifier:
@@ -730,4 +733,12 @@ class BaseConfigModifier:
                 f"could not find worker component for {component_type} to set replicas"
             )
         component.replicas = replicas
+        return cfg.model_dump()
+    @classmethod
+    def set_config_backend_framework(cls, config: dict, backend: str) -> dict:
+        """Sets the top-level spec.backendFramework once per DGD -- unlike
+        set_config_replicas/set_config_model, not a per-component setting.
+        """
+        cfg = Config.model_validate(config)
+        cfg.spec.backendFramework = backend
         return cfg.model_dump()
