@@ -1016,15 +1016,13 @@ pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{DynamoError, ErrorType};
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
     use futures::stream;
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    use crate::error::{BackendError, ErrorType};
 
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
