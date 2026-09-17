@@ -30,6 +30,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            ready: watch::channel(true).1,
         };
 
         publisher.publish_batch(Vec::new()).unwrap();
@@ -70,6 +71,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            ready: watch::channel(true).1,
         };
         drop(rx);
 
@@ -105,6 +107,7 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            ready: watch::channel(true).1,
         };
 
         publisher
@@ -1301,6 +1304,7 @@ mod tests_startup_helpers {
                 next_event_id,
                 None,
                 None,
+                None,
             )
         });
 
@@ -1432,6 +1436,7 @@ mod tests_startup_helpers {
                 Arc::new(AtomicU64::new(0)),
                 None,
                 None,
+                None,
             )
         });
 
@@ -1531,6 +1536,7 @@ mod tests_startup_helpers {
                 Arc::new(AtomicU64::new(0)),
                 None,
                 None,
+                None,
             )
         });
 
@@ -1613,7 +1619,18 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
+            start_zmq_listener(
+                endpoint,
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+                None,
+                None,
+            )
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;

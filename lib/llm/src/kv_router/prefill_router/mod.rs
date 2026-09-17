@@ -285,6 +285,7 @@ where
 
 pub(crate) trait PrefillRouterLifecycle: Send + Sync {
     fn set_target(&self, target: Option<WorkerSetTarget>);
+    fn kv_event_sources_ready(&self) -> bool;
 }
 
 impl<Sel> PrefillRouterLifecycle for PrefillRouter<Sel>
@@ -294,6 +295,41 @@ where
     fn set_target(&self, target: Option<WorkerSetTarget>) {
         self.set_target(target);
     }
+
+    fn kv_event_sources_ready(&self) -> bool {
+        if self.lifecycle_state() == PrefillLifecycleState::Unavailable {
+            return true;
+        }
+        if let Some(binding) = self.binding.load().as_ref() {
+            return binding
+                .router
+                .kv_router_if_enabled()
+                .is_none_or(|router| router.kv_event_sources_ready());
+        }
+        // An opted-in prefill target can be discovered before its chooser has
+        // finished connecting. Keep the decode WorkerSet unready during that gap.
+        self.target_tx
+            .as_ref()
+            .is_none_or(|targets| match targets.borrow().as_ref() {
+                Some(WorkerSetTarget::Committed(target)) => {
+                    !prefill_requires_kv_event_readiness(&target.card, self.decode_router_mode)
+                }
+                _ => true,
+            })
+    }
+}
+
+fn prefill_requires_kv_event_readiness(
+    card: &crate::model_card::ModelDeploymentCard,
+    fallback_mode: RouterMode,
+) -> bool {
+    card.runtime_config.requires_kv_event_source_readiness()
+        && card
+            .router_config
+            .as_ref()
+            .map_or(fallback_mode.is_kv_routing(), |config| {
+                config.router_mode.is_kv_routing() && config.kv_router_config.use_kv_events
+            })
 }
 
 impl<Sel> Drop for PrefillRouter<Sel>

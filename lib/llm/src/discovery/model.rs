@@ -385,7 +385,7 @@ impl Model {
             warn_legacy_readiness_once(&self.name, wsets[0].namespace());
         }
         NamespaceReadinessEval {
-            ready: eval.ready,
+            ready: eval.ready && wsets.iter().all(|ws| ws.kv_event_sources_ready()),
             has_legacy: eval.has_legacy,
             legacy_live_workers: eval.legacy_live_workers,
             present: eval.present,
@@ -406,6 +406,12 @@ impl Model {
     /// serve traffic.
     pub fn has_ready_workers(&self) -> bool {
         self.first_ready_workers().is_some()
+    }
+
+    pub(crate) fn kv_event_sources_ready(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .all(|entry| entry.value().kv_event_sources_ready())
     }
 
     /// Structured per-namespace worker readiness for this model — the data
@@ -471,6 +477,8 @@ impl Model {
                 } else {
                     None
                 }
+            } else if wsets.iter().any(|ws| !ws.kv_event_sources_ready()) {
+                Some("waiting for required KV event feeds".to_string())
             } else if eval.has_legacy {
                 Some("legacy worker(s) present but no live worker".to_string())
             } else if !eval.ambiguous.is_empty() {
@@ -1327,6 +1335,23 @@ mod tests {
         assert!(!model.has_ready_workers());
         assert_eq!(model.first_ready_workers(), None);
         assert!(!model.is_workers_ready("dynamo"));
+    }
+
+    #[test]
+    fn kv_relay_readiness_does_not_withdraw_serving_membership() {
+        let model = Model::new("llama".to_string());
+        let (mut worker_set, _workers) =
+            ws_with_type("dynamo", "mdc", WorkerType::Aggregated, vec![], vec![7]);
+        let (ready_tx, ready_rx) = watch::channel(false);
+        Arc::get_mut(&mut worker_set).unwrap().kv_event_readiness = Some(ready_rx);
+        model.add_worker_set("dynamo".to_string(), worker_set.clone());
+        assert_eq!(worker_set.worker_count(), 1);
+        assert!(!model.is_workers_ready("dynamo"));
+        ready_tx.send(true).unwrap();
+        assert!(model.is_workers_ready("dynamo"));
+        ready_tx.send(false).unwrap();
+        assert!(!model.is_workers_ready("dynamo"));
+        assert_eq!(worker_set.worker_count(), 1);
     }
 
     #[test]

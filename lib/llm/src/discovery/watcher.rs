@@ -317,6 +317,11 @@ where
         require_typed_worker_role: bool,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
     ) -> Self {
+        if router_config.router_mode == RouterMode::KV
+            && router_config.kv_router_config.use_kv_events
+        {
+            model_manager.require_model_readiness();
+        }
         Self {
             manager: model_manager,
             drt: runtime,
@@ -438,6 +443,11 @@ where
         // are process-local, so preserve them when the MDC supplies the base config.
         let router_config =
             effective_router_config(card.router_config.as_ref(), &self.router_config);
+        if router_config.router_mode == RouterMode::KV
+            && router_config.kv_router_config.use_kv_events
+        {
+            self.manager.require_model_readiness();
+        }
 
         let component = self
             .drt
@@ -611,6 +621,7 @@ where
                     Arc::get_mut(&mut chooser)
                         .expect("new KV chooser must have one owner")
                         .set_teardown_task_guard(allocator_trim.clone());
+                    worker_set.kv_event_readiness = chooser.kv_event_readiness();
                     Some(chooser)
                 } else {
                     None

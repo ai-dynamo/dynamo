@@ -234,6 +234,9 @@ pub struct WorkerSet {
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
 
+    /// Frontend-local KV subscription readiness, independent of serving registration.
+    pub(crate) kv_event_readiness: Option<watch::Receiver<bool>>,
+
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
 
@@ -266,6 +269,7 @@ impl WorkerSet {
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
+            kv_event_readiness: None,
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,
@@ -433,6 +437,16 @@ impl WorkerSet {
         }
     }
 
+    pub(crate) fn kv_event_sources_ready(&self) -> bool {
+        self.kv_event_readiness
+            .as_ref()
+            .is_none_or(|ready| *ready.borrow())
+            && self
+                .prefill_router
+                .as_ref()
+                .is_none_or(|router| router.kv_event_sources_ready())
+    }
+
     /// Store the instance watcher from the Client's discovery system.
     /// Must be called before the WorkerSet is wrapped in Arc.
     pub fn set_instance_watcher(&mut self, rx: watch::Receiver<Vec<u64>>) {
@@ -510,6 +524,7 @@ impl WorkerSet {
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
+            kv_event_readiness: self.kv_event_readiness.clone(),
             lifecycle_cancellation: None,
             allocator_trim: None,
             allocator_trim_wrapped: false,

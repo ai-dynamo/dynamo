@@ -135,7 +135,12 @@ impl HeadlessSidecar {
             wait_for_leader(&mut configs, group_id, &shutdown)).await
             .context("timed out waiting for SGLang leader; check namespace, component, endpoint, and dist_init_addr")??;
         let leader = validate_leader(metadata, &config)?;
-        let _publishers = start_publishers(&endpoint, metadata, worker_id, &config, &leader)?;
+        let _publishers = tokio::time::timeout(
+            self.transport.startup_deadline,
+            start_publishers(&endpoint, metadata, worker_id, &config, &leader),
+        )
+        .await
+        .context("timed out connecting local SGLang KV feeds")??;
         tracing::info!(node_rank = metadata.node_rank, worker_id, group = group_id,
             local_ranks = ?metadata.kv_event_sources.iter().map(|source| source.dp_rank).collect::<Vec<_>>(),
             "SGLang headless sidecar publishing local KV events");
@@ -280,7 +285,7 @@ fn validate_leader(context: &NodeMetadata, config: &ModelRuntimeConfig) -> Resul
     Ok(leader)
 }
 
-fn start_publishers(
+async fn start_publishers(
     endpoint: &Endpoint,
     context: &NodeMetadata,
     worker_id: u64,
@@ -309,8 +314,12 @@ fn start_publishers(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    // There is no serving worker to mark this process ready. Publish readiness
-    // only after all local publishers have been created.
+    for publisher in &publishers {
+        publisher.wait_ready().await?;
+    }
+    // There is no serving worker to mark this process ready. Local health
+    // requires connected ingress and publication; frontend readiness separately
+    // requires subscriptions to every DP rank in the leader's configuration.
     endpoint
         .drt()
         .system_health()
@@ -584,9 +593,13 @@ mod tests {
     #[tokio::test]
     async fn local_zmq_events_keep_global_rank_and_leader_identity_without_serving() {
         use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
-        use dynamo_runtime::discovery::{DiscoveryQuery, EventSourceQuery};
-        use dynamo_runtime::transports::event_plane::EventSubscriber;
-        use futures::SinkExt;
+        use dynamo_runtime::discovery::{
+            DiscoveryInstance, DiscoveryQuery, EventChannelQuery, EventSourceQuery, EventTransport,
+        };
+        use dynamo_runtime::transports::event_plane::{
+            Codec, Frame, zmq_transport::connect_subscriber_with_readiness,
+        };
+        use futures::{SinkExt, StreamExt};
 
         let runtime = Runtime::from_current().unwrap();
         let drt = DistributedRuntime::new(runtime, DistributedConfig::process_local())
@@ -610,36 +623,53 @@ mod tests {
         let (context, _) = follower_metadata(&raw).unwrap();
         let config = leader("A");
         let metadata = validate_leader(&context, &config).unwrap();
-        let mut subscriber = EventSubscriber::for_endpoint(&endpoint, KV_EVENT_SUBJECT)
-            .await
-            .unwrap()
-            .typed::<Vec<RouterEvent>>();
         assert!(!drt.system_health().lock().get_health_status().0);
-        let publishers = start_publishers(&endpoint, &context, 42, &config, &metadata).unwrap();
+        let publishers = start_publishers(&endpoint, &context, 42, &config, &metadata)
+            .await
+            .unwrap();
         assert!(drt.system_health().lock().get_health_status().0);
 
-        // Repeat until the real ZMQ subscriptions are connected; no fixed sleep.
-        let received = tokio::time::timeout(Duration::from_secs(5), async {
-            let mut ticks = tokio::time::interval(Duration::from_millis(50));
-            let mut seq = 0_u64;
-            loop {
-                tokio::select! {
-                    batch = subscriber.next() => {
-                        let (envelope, events) = batch.unwrap().unwrap();
-                        if let Some(event) = events.first() {
-                            break (envelope, event.clone());
-                        }
-                    }
-                    _ = ticks.tick() => {
-                        seq += 1;
-                        let payload = rmp_serde::to_vec_named(&json!([
-                            0.0, [{"type":"BlockRemoved", "block_hashes":[42]}], 4
-                        ])).unwrap();
-                        source.send(vec![Vec::new(), seq.to_be_bytes().to_vec(), payload]).await.unwrap();
-                    }
-                }
-            }
-        }).await.expect("headless relay should forward local events");
+        let channels = drt
+            .discovery()
+            .list(DiscoveryQuery::EventChannels(
+                EventChannelQuery::endpoint_topic(endpoint.id(), KV_EVENT_SUBJECT),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(channels.len(), 1);
+        let DiscoveryInstance::EventChannel {
+            transport: EventTransport::Zmq { endpoint: address },
+            ..
+        } = &channels[0]
+        else {
+            panic!("expected the relay's direct ZMQ channel");
+        };
+        let (mut subscriber, connection) =
+            connect_subscriber_with_readiness(address, KV_EVENT_SUBJECT, 1000).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), connection.wait_connected(address))
+            .await
+            .unwrap()
+            .unwrap();
+        let payload = rmp_serde::to_vec_named(&json!([
+            0.0, [{"type":"BlockRemoved", "block_hashes":[42]}], 4
+        ]))
+        .unwrap();
+        source
+            .send(vec![Vec::new(), 1_u64.to_be_bytes().to_vec(), payload])
+            .await
+            .unwrap();
+        let frames = tokio::time::timeout(Duration::from_secs(5), subscriber.next())
+            .await
+            .expect("headless relay should forward its first local event")
+            .unwrap()
+            .unwrap();
+        assert_eq!(frames.len(), 4);
+        let frame = Frame::decode(frames[3].as_ref()).unwrap();
+        let envelope = Codec::default().decode_envelope(&frame.payload).unwrap();
+        let mut events: Vec<RouterEvent> =
+            Codec::default().decode_payload(&envelope.payload).unwrap();
+        assert_eq!(events.len(), 1);
+        let received = (envelope, events.remove(0));
         assert_eq!(received.1.worker_id, 42);
         assert_eq!(received.1.event.dp_rank, 4);
         assert_ne!(received.0.publisher_id, 42);

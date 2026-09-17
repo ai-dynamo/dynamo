@@ -684,6 +684,39 @@ mod tests {
     }
 
     #[test]
+    fn pending_prefill_requires_feeds_only_for_opted_in_kv_routing() {
+        use super::super::prefill_requires_kv_event_readiness;
+        let mut selected = card(None);
+        assert!(!prefill_requires_kv_event_readiness(
+            &selected,
+            RouterMode::KV
+        ));
+        selected
+            .runtime_config
+            .set_engine_specific("require_kv_event_source_readiness", true)
+            .unwrap();
+        assert!(prefill_requires_kv_event_readiness(
+            &selected,
+            RouterMode::KV
+        ));
+        assert!(!prefill_requires_kv_event_readiness(
+            &selected,
+            RouterMode::RoundRobin
+        ));
+        selected.router_config = Some(RouterConfig::new(
+            RouterMode::KV,
+            KvRouterConfig {
+                use_kv_events: false,
+                ..Default::default()
+            },
+        ));
+        assert!(!prefill_requires_kv_event_readiness(
+            &selected,
+            RouterMode::KV
+        ));
+    }
+
+    #[test]
     fn inherits_decode_mode_when_card_advertises_nothing() {
         // The pre-override behavior: a prefill worker that says nothing is
         // routed exactly as the decode set is. Every deployment predating this

@@ -108,6 +108,8 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
     /// Immutable publisher binding and rank slot lookup performed once per event envelope.
     publisher_bindings: DashMap<PublisherId, ActivePublisherBinding>,
+    /// Sources activated behind an established event subscription.
+    ready_sources: watch::Sender<HashSet<KvSourceId>>,
     recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
@@ -149,6 +151,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
+            ready_sources: watch::channel(HashSet::new()).0,
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
@@ -188,6 +191,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
+            ready_sources: watch::channel(HashSet::new()).0,
             recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
@@ -202,6 +206,23 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         let view = self.membership_rx.borrow().clone();
         self.reconcile_view(view.clone()).await;
         view
+    }
+
+    pub(crate) fn ready_sources(&self) -> watch::Receiver<HashSet<KvSourceId>> {
+        self.ready_sources.subscribe()
+    }
+
+    pub(crate) fn clear_transport_readiness(&self) {
+        self.ready_sources.send_replace(HashSet::new());
+    }
+
+    pub(crate) fn publish_ready_sources(&self) {
+        self.ready_sources.send_replace(
+            self.publisher_bindings
+                .iter()
+                .map(|binding| binding.binding.source_id.clone())
+                .collect(),
+        );
     }
 
     /// Apply membership only for source incarnations whose direct transport is preconnected.
@@ -225,6 +246,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             }
         }
         self.reconcile_view(effective).await;
+        self.publish_ready_sources();
         view
     }
 
@@ -406,6 +428,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     }
 
     pub(crate) async fn shutdown(self: &Arc<Self>) {
+        self.clear_transport_readiness();
         self.cancellation_token.cancel();
         self.deactivate_all().await;
     }
@@ -523,6 +546,9 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     /// Unlike a protocol rejection, the same source may reactivate after a replacement socket is
     /// preconnected. The reset barrier makes any already-enqueued old event visible first.
     pub(crate) async fn fence_transport(self: &Arc<Self>, publisher_id: PublisherId) -> bool {
+        self.ready_sources.send_modify(|sources| {
+            sources.retain(|source| source.publisher_id != publisher_id);
+        });
         let _sync = self.membership_sync.lock().await;
         let Some(active) = self
             .publisher_bindings

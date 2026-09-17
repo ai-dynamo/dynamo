@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_kv_router::indexer::{KvIndexerMetrics, LocalKvIndexer};
@@ -120,6 +120,7 @@ async fn supervise_zmq_listener(
 }
 
 impl KvEventSource {
+    #[allow(clippy::too_many_arguments)]
     fn start(
         component: Component,
         worker_id: WorkerId,
@@ -128,6 +129,7 @@ impl KvEventSource {
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
         next_event_id: Arc<AtomicU64>,
+        ready: oneshot::Sender<()>,
     ) -> Result<Self> {
         match source_config {
             KvEventSourceConfig::Zmq {
@@ -151,6 +153,7 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            Some(ready),
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =
@@ -207,6 +210,8 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<Vec<PlacementEvent>>,
     /// Internal monotonic event ID counter. Shared with the ZMQ listener if present.
     next_event_id: Arc<AtomicU64>,
+    /// Local ingress and outbound publication have been established.
+    ready: watch::Receiver<bool>,
 }
 
 impl KvEventPublisher {
@@ -333,8 +338,12 @@ impl KvEventPublisher {
 
         let next_event_id = Arc::new(AtomicU64::new(0));
 
+        let (ready_tx, ready) = watch::channel(false);
+        let mut input_ready = None;
         let mut source = None;
         if let Some(config) = source_config {
+            let (input_ready_tx, input_ready_rx) = oneshot::channel();
+            input_ready = Some(input_ready_rx);
             source = Some(KvEventSource::start(
                 component.clone(),
                 worker_id,
@@ -343,6 +352,7 @@ impl KvEventPublisher {
                 cancellation_token.clone(),
                 tx.clone(),
                 next_event_id.clone(),
+                input_ready_tx,
             )?);
         }
 
@@ -379,6 +389,31 @@ impl KvEventPublisher {
                     }
                 };
             let publisher_id = event_publisher.publisher_id();
+
+            tokio::select! {
+                _ = cancellation_token_clone.cancelled() => return,
+                result = event_publisher.wait_ready() => {
+                    if let Err(error) = result {
+                        tracing::error!(%error, worker_id, dp_rank, "KV event publication failed to connect");
+                        return;
+                    }
+                }
+            }
+
+            // A source advertisement is the relay's readiness contract. Do not
+            // advertise while the engine SUB socket is still connecting. The
+            // serving worker registers independently so followers can find it.
+            if let Some(input_ready) = input_ready {
+                tokio::select! {
+                    _ = cancellation_token_clone.cancelled() => return,
+                    result = input_ready => {
+                        if result.is_err() {
+                            tracing::error!(worker_id, dp_rank, "KV source closed before connecting");
+                            return;
+                        }
+                    }
+                }
+            }
 
             let recovery_endpoint = if let Some(local_indexer) = local_indexer_clone.as_ref() {
                 match start_worker_kv_query_endpoint(
@@ -449,6 +484,8 @@ impl KvEventPublisher {
                 }
             };
 
+            ready_tx.send_replace(true);
+
             start_event_processor(
                 EventPlanePublisher(event_publisher),
                 worker_id,
@@ -458,6 +495,8 @@ impl KvEventPublisher {
                 batching_timeout_ms,
             )
             .await;
+
+            ready_tx.send_replace(false);
 
             if let Err(error) = component
                 .drt()
@@ -481,7 +520,25 @@ impl KvEventPublisher {
             worker_id,
             tx,
             next_event_id,
+            ready,
         })
+    }
+
+    /// Wait for local ingress and outbound publication to be established.
+    ///
+    /// This does not wait for frontend subscribers. Frontend KV readiness also
+    /// requires its subscriptions to every advertised DP-rank source.
+    pub async fn wait_ready(&self) -> Result<()> {
+        let mut ready = self.ready.clone();
+        tokio::select! {
+            biased;
+            _ = self.cancellation_token.cancelled() => {
+                anyhow::bail!("KV event publisher stopped before becoming ready")
+            }
+            result = ready.wait_for(|ready| *ready) => {
+                result.map(|_| ()).map_err(|_| anyhow::anyhow!("KV event publisher failed to become ready"))
+            }
+        }
     }
 
     pub fn publish(&self, event: KvCacheEvent) -> Result<(), mpsc::error::SendError<KvCacheEvent>> {

@@ -812,6 +812,8 @@ where
                     endpoint.clone(),
                     indexer.clone(),
                     membership_watch,
+                    workers_with_configs.clone(),
+                    client.instance_avail_watcher(),
                     block_size,
                     model_name.clone().unwrap_or_else(|| "unknown".to_string()),
                     worker_role,
@@ -900,6 +902,19 @@ where
 
     pub fn indexer(&self) -> &Indexer {
         &self.indexer
+    }
+
+    pub(crate) fn kv_event_readiness(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.kv_event_subscription
+            .as_ref()
+            .map(|subscription| subscription.readiness())
+    }
+
+    /// Whether every opted-in worker's required KV feeds are connected to this router.
+    pub fn kv_event_sources_ready(&self) -> bool {
+        self.kv_event_subscription
+            .as_ref()
+            .is_none_or(|subscription| subscription.is_ready())
     }
 
     pub fn kv_router_config(&self) -> &KvRouterConfig {

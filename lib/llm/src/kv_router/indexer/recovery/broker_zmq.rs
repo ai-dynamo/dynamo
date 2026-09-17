@@ -271,6 +271,7 @@ pub(super) async fn run_broker_zmq_supervisor(
     let mut retry_delay = INITIAL_BACKOFF;
 
     loop {
+        client.clear_transport_readiness();
         let view = membership_watch.borrow_and_update().clone();
         update_mismatch_metric(
             &status_metrics,
@@ -282,7 +283,7 @@ pub(super) async fn run_broker_zmq_supervisor(
         );
 
         let subscriber = if let Some(kv_state_endpoint) = view.resolved_kv_state_endpoint() {
-            match EventSubscriber::for_endpoint_id_with_transport(
+            match EventSubscriber::for_endpoint_id_with_transport_ready(
                 component.drt(),
                 kv_state_endpoint,
                 KV_EVENT_SUBJECT,
@@ -365,6 +366,7 @@ pub(super) async fn run_broker_zmq_supervisor(
             ScopeExit::Rebind => retry_delay = INITIAL_BACKOFF,
             ScopeExit::Retry => {
                 ingress_metrics.increment_lifecycle("reconnect");
+                client.clear_transport_readiness();
                 let view = client.sync_membership().await;
                 update_subscription_failure_metric(
                     &status_metrics,
@@ -423,6 +425,7 @@ async fn consume_scope<T: RecoveryTarget>(
         membership_tx,
         membership_cancel.clone(),
     ));
+    client.publish_ready_sources();
     let exit = loop {
         tokio::select! {
             _ = cancellation_token.cancelled() => break ScopeExit::Stop,
@@ -442,6 +445,7 @@ async fn consume_scope<T: RecoveryTarget>(
                         );
                         active_publishers = self::active_publishers(&view);
                         lanes.reconcile(&active_publishers);
+                        client.publish_ready_sources();
                     }
                     Some(MembershipUpdate::Rebind) => break ScopeExit::Rebind,
                     Some(MembershipUpdate::Stop) => break ScopeExit::Stop,
@@ -468,6 +472,7 @@ async fn consume_scope<T: RecoveryTarget>(
         }
     };
     membership_cancel.cancel();
+    client.clear_transport_readiness();
     drop(membership_rx);
     if let Err(error) = membership_handle.await
         && !error.is_cancelled()
