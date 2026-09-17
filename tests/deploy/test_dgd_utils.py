@@ -17,6 +17,7 @@ from kubernetes_asyncio.client import exceptions
 
 from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
+from tests.deploy.vcluster_utils import VCLUSTER_CONNECTION_RETRY_LIMIT
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
@@ -295,15 +296,14 @@ async def test_discovery_capture_and_cleanup(
     assert events == expected_events
 
 
+@pytest.mark.parametrize("has_dgd_labels", [True, False])
+@pytest.mark.parametrize("failure_stage", [None, "jobs", "pods"])
 async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, has_dgd_labels, failure_stage
 ) -> None:
-    """Capture a source pod without DGD labels before cascading deletion."""
-    deployment = ManagedDeployment(
-        log_dir=str(tmp_path),
-        deployment_spec=SimpleNamespace(name="test-dgd", services=[]),
-        namespace="default",
-    )
+    """Capture source pods once before deletion, with or without DGD labels."""
+    deployment = managed_deployment(tmp_path)
+    deployment.deployment_spec.services = [SimpleNamespace(name="worker")]
     deployment._custom_api = SimpleNamespace(
         list_namespaced_custom_object=AsyncMock(
             return_value={
@@ -323,17 +323,43 @@ async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
         },
         "spec": {"containers": [{"name": "main"}]},
     }
+    if has_dgd_labels:
+        pod.raw["metadata"]["labels"].update(
+            {
+                "nvidia.com/dynamo-graph-deployment-name": "test-deployment",
+                "nvidia.com/dynamo-component": "worker",
+            }
+        )
     pod.to_yaml.return_value = yaml.safe_dump(pod.raw)
     pod.logs.side_effect = lambda **kwargs: [
         "previous instance" if kwargs.get("previous") else "source startup error"
     ]
 
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", Mock())
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", AsyncMock())
+    list_jobs = deployment._custom_api.list_namespaced_custom_object
+    if failure_stage == "jobs":
+        list_jobs.side_effect = [
+            aiohttp.ClientConnectionError("tunnel dropped"),
+            list_jobs.return_value,
+        ]
+    pod_attempts = 0
+
     def get_pods(kind, *, namespace, label_selector):
+        nonlocal pod_attempts
         assert kind == "pods"
         assert namespace == "default"
         if label_selector == (
             "nvidia.com/snapshot-job=checkpoint-test,"
             "nvidia.com/snapshot-job-uid=job-uid"
+        ):
+            pod_attempts += 1
+            if failure_stage == "pods" and pod_attempts == 1:
+                raise httpx.ConnectError("tunnel dropped")
+            return [pod]
+        if has_dgd_labels and label_selector == (
+            "nvidia.com/dynamo-graph-deployment-name=test-deployment,"
+            "nvidia.com/dynamo-component=worker"
         ):
             return [pod]
         return []
@@ -355,27 +381,26 @@ async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
     delete = AsyncMock(side_effect=delete_deployment)
     monkeypatch.setattr(deployment, "_delete_deployment", delete)
     await deployment._cleanup()
-    deployment._custom_api.list_namespaced_custom_object.assert_awaited_once_with(
+    assert list_jobs.await_count == (2 if failure_stage == "jobs" else 1)
+    assert pod_attempts == (2 if failure_stage == "pods" else 1)
+    list_jobs.assert_awaited_with(
         group="nvidia.com",
         version="v1alpha1",
         namespace="default",
         plural="snapshotjobs",
-        label_selector="nvidia.com/dynamo-graph-deployment-name=test-dgd",
+        label_selector="nvidia.com/dynamo-graph-deployment-name=test-deployment",
         _request_timeout=30,
     )
     delete.assert_awaited_once()
     metrics.assert_not_called()
+    assert pod.logs.call_count == 2
 
 
 @pytest.mark.parametrize("status", [404, 403, 500])
 async def test_checkpoint_log_api_failure_does_not_prevent_cleanup(
     tmp_path, monkeypatch, status
 ) -> None:
-    deployment = ManagedDeployment(
-        log_dir=str(tmp_path),
-        deployment_spec=SimpleNamespace(name="test-dgd", services=[]),
-        namespace="default",
-    )
+    deployment = managed_deployment(tmp_path)
     deployment._custom_api = SimpleNamespace(
         list_namespaced_custom_object=AsyncMock(
             side_effect=exceptions.ApiException(status=status)
@@ -385,3 +410,66 @@ async def test_checkpoint_log_api_failure_does_not_prevent_cleanup(
     monkeypatch.setattr(deployment, "_delete_deployment", delete)
     await deployment._cleanup()
     delete.assert_awaited_once()
+    deployment._custom_api.list_namespaced_custom_object.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "failure_stage, error",
+    [
+        ("jobs", aiohttp.ClientConnectionError("tunnel dropped")),
+        ("jobs", TimeoutError("API stalled")),
+        ("pods", httpx.ConnectError("tunnel dropped")),
+        ("pods", kr8s.APITimeoutError("API stalled")),
+    ],
+)
+async def test_checkpoint_query_retry_exhaustion_preserves_cleanup(
+    tmp_path, monkeypatch, failure_stage, error
+) -> None:
+    deployment = managed_deployment(tmp_path)
+    list_jobs = AsyncMock(
+        return_value={"items": [{"metadata": {"name": "checkpoint", "uid": "uid"}}]}
+    )
+    deployment._custom_api = SimpleNamespace(list_namespaced_custom_object=list_jobs)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", Mock())
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", AsyncMock())
+
+    def stalled_pods(*args, **kwargs):
+        raise error
+
+    list_pods = Mock(side_effect=stalled_pods)
+    monkeypatch.setattr("tests.deploy.dgd_utils.kr8s.get", list_pods)
+    if failure_stage == "jobs":
+        list_jobs.side_effect = error
+    collect = Mock()
+    monkeypatch.setattr(deployment, "get_pod_manifest_logs_metrics", collect)
+    service_logs = Mock()
+    monkeypatch.setattr(deployment, "_get_service_logs", service_logs)
+    delete = AsyncMock()
+    monkeypatch.setattr(deployment, "_delete_deployment", delete)
+    port_forward = Mock()
+    deployment._active_port_forwards.append(port_forward)
+
+    await deployment._cleanup()
+
+    attempts = VCLUSTER_CONNECTION_RETRY_LIMIT + 1
+    assert list_jobs.await_count == (attempts if failure_stage == "jobs" else 1)
+    assert list_pods.call_count == (attempts if failure_stage == "pods" else 0)
+    collect.assert_not_called()
+    service_logs.assert_called_once_with(exclude_pods=set())
+    port_forward.stop.assert_called_once()
+    delete.assert_awaited_once()
+
+
+def test_service_logs_excludes_only_collected_checkpoint_pods(tmp_path, monkeypatch):
+    deployment = managed_deployment(tmp_path)
+    source = SimpleNamespace(name="source")
+    worker = SimpleNamespace(name="worker")
+    monkeypatch.setattr(
+        deployment, "get_pods", Mock(return_value={"worker": [source, worker]})
+    )
+    collect = Mock()
+    monkeypatch.setattr(deployment, "get_pod_manifest_logs_metrics", collect)
+
+    deployment._get_service_logs(exclude_pods={source.name})
+
+    collect.assert_called_once_with("worker", worker, "")

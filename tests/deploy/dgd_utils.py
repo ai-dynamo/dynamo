@@ -1610,31 +1610,57 @@ class ManagedDeployment:
         if collect_metrics:
             self._get_pod_metrics(pod, service_name, suffix)
 
-    async def _get_checkpoint_pod_logs(self) -> None:
-        """Preserve source pod diagnostics before DGD cleanup deletes their Jobs."""
+    def _get_checkpoint_pods(self, name: str, uid: str) -> list[Pod]:
+        # Match the SnapshotJob incarnation, not just its reusable name.
+        # Include source pods even when they lack the usual DGD labels.
+        return retry_vcluster_api(
+            f"listing pods for checkpoint job {name}",
+            lambda: list(
+                kr8s.get(
+                    "pods",
+                    namespace=self.namespace,
+                    label_selector=(
+                        f"nvidia.com/snapshot-job={name},"
+                        f"nvidia.com/snapshot-job-uid={uid}"
+                    ),
+                )
+            ),
+            _KR8S_VCLUSTER_CONNECTION_ERRORS,
+            self._logger,
+        )
+
+    async def _get_checkpoint_pod_logs(self) -> set[str]:
+        """Preserve source pod diagnostics and return pods handled by this path."""
+        collected_pods: set[str] = set()
         if self._custom_api is None:
-            return
+            return collected_pods
 
         try:
-            jobs = await self._custom_api.list_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.namespace,
-                plural="snapshotjobs",
-                label_selector=(
-                    "nvidia.com/dynamo-graph-deployment-name="
-                    f"{self._deployment_name}"
+            jobs = await retry_vcluster_api_async(
+                "listing checkpoint jobs",
+                partial(
+                    self._custom_api.list_namespaced_custom_object,
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="snapshotjobs",
+                    label_selector=(
+                        "nvidia.com/dynamo-graph-deployment-name="
+                        f"{self._deployment_name}"
+                    ),
+                    _request_timeout=30,
                 ),
-                _request_timeout=30,
+                (aiohttp.ClientConnectionError, TimeoutError),
+                self._logger,
             )
         except exceptions.ApiException as exc:
             # Non-checkpoint deployments may run without the SnapshotJob CRD.
             if exc.status != 404:
                 self._logger.warning("Failed to list checkpoint jobs: %s", exc)
-            return
+            return collected_pods
         except (aiohttp.ClientError, TimeoutError) as exc:
             self._logger.warning("Failed to list checkpoint jobs: %s", exc)
-            return
+            return collected_pods
 
         for job in jobs.get("items", []):
             metadata = job.get("metadata", {})
@@ -1642,18 +1668,7 @@ class ManagedDeployment:
             if not name or not uid:
                 continue
             try:
-                # Source pods need not carry the DGD label used by get_pods().
-                # Match the SnapshotJob incarnation, not just its reusable name.
-                pods = list(
-                    kr8s.get(
-                        "pods",
-                        namespace=self.namespace,
-                        label_selector=(
-                            f"nvidia.com/snapshot-job={name},"
-                            f"nvidia.com/snapshot-job-uid={uid}"
-                        ),
-                    )
-                )
+                pods = self._get_checkpoint_pods(name, uid)
             except (
                 kr8s.ServerError,
                 kr8s.APITimeoutError,
@@ -1671,6 +1686,7 @@ class ManagedDeployment:
                     self.get_pod_manifest_logs_metrics(
                         "CheckpointSource", pod, collect_metrics=False
                     )
+                    collected_pods.add(pod.name)
                 except OSError as exc:
                     self._logger.warning(
                         "Failed to save checkpoint pod %s diagnostics: %s",
@@ -1678,7 +1694,11 @@ class ManagedDeployment:
                         exc,
                     )
 
-    def _get_service_logs(self, service_name=None, suffix=""):
+        return collected_pods
+
+    def _get_service_logs(
+        self, service_name=None, suffix="", *, exclude_pods: set[str] | None = None
+    ):
         service_names = None
         if service_name:
             service_names = [service_name]
@@ -1687,6 +1707,8 @@ class ManagedDeployment:
 
         for service, pods in service_pods.items():
             for pod in pods:
+                if exclude_pods and pod.name in exclude_pods:
+                    continue
                 self.get_pod_manifest_logs_metrics(service, pod, suffix)
 
     def _get_pod_metrics(self, pod: Pod, service_name: str, suffix=""):
@@ -1951,9 +1973,9 @@ class ManagedDeployment:
                     self._logger.warning(
                         "Discovery snapshot failed; continuing cleanup: %s", error
                     )
-            await self._get_checkpoint_pod_logs()
+            checkpoint_pods = await self._get_checkpoint_pod_logs()
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
-            self._get_service_logs()
+            self._get_service_logs(exclude_pods=checkpoint_pods)
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
