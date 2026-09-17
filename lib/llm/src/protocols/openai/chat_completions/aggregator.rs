@@ -674,7 +674,7 @@ impl DeltaAggregator {
                             Err(guided_error) => {
                                 match super::tool_parser_v2::parse_complete_unified(
                                     &choice.text,
-                                    None,
+                                    Some(&parsing_options.tools),
                                     family,
                                 ) {
                                     Ok((calls, reasoning, content)) => {
@@ -709,7 +709,11 @@ impl DeltaAggregator {
                             }
                         }
                     } else {
-                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                        super::tool_parser_v2::parse_complete_unified(
+                            &choice.text,
+                            Some(&parsing_options.tools),
+                            family,
+                        )
                     };
                     match parse_result {
                         Ok((calls, reasoning, content)) => {
