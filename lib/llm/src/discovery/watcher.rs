@@ -33,8 +33,7 @@ use crate::{
         EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
     },
     local_model::runtime_config::{
-        DISAGG_PREFILL_CANCEL_ANYTIME_V1, TokenizerBackend,
-        VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        DISAGG_PREFILL_CANCEL_ANYTIME_V1, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
