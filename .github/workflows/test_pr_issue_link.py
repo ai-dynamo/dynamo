@@ -432,25 +432,33 @@ def test_fork_linear_overflow_does_not_mask_a_github_outage(
 
 
 # ------------------------------------------------------------------
-# The blocking date, which lives in two files a human edits
+# The blocking date, which lives in three files a human edits
 # ------------------------------------------------------------------
 
 
 def test_the_template_and_the_workflow_name_the_same_blocking_date() -> None:
-    """Nothing else keeps the two copies in step.
+    """Nothing else keeps the three copies in step.
 
     `BLOCKING_DATE` drives the message a contributor sees when the check
     fails. The pull request template carries the same date so they read it
-    before it fails. A date set deliberately far out is the kind that slips,
-    and bumping one without the other leaves the template telling people the
-    old one.
+    before it fails, and the script repeats it as a default for any run that
+    does not set the variable. Bumping one without the others leaves the
+    template telling people the old date, or the script announcing one the
+    workflow never chose.
     """
     workflows = Path(__file__).parent
     workflow = (workflows / "pr-issue-link.yml").read_text()
     template = (workflows.parent / "pull_request_template.md").read_text()
+    script = (workflows / "pr_issue_link.py").read_text()
     match = re.search(r'BLOCKING_DATE:\s*"(\d{4}-\d{2}-\d{2})"', workflow)
     assert match, "the workflow does not set BLOCKING_DATE"
-    assert f"becomes required on {match.group(1)}" in template
+    date = match.group(1)
+    assert f"becomes required on {date}" in template
+    default = re.search(
+        r'os\.environ\.get\(\s*"BLOCKING_DATE",\s*"(\d{4}-\d{2}-\d{2})"', script
+    )
+    assert default, "the script does not default BLOCKING_DATE"
+    assert default.group(1) == date
 
 
 # ------------------------------------------------------------------

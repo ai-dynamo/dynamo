@@ -35,16 +35,20 @@ on:
 env:
   # Referenced in the failure message; on this date the check is added to the
   # required status checks in branch protection after the announced notice.
-  # Deliberately more than a month out. A shorter runway would make the check
-  # required before contributors have had a full cycle of advisory failures to
-  # adjust to, and the cost of that lands on people who did nothing wrong.
-  # It falls after the v1.6.0 code freeze on 2026-10-07, so this check is
-  # advisory for all of 1.6 and first governs what lands in 1.7.
+  # Two weeks of advisory failures is the whole runway, so the announcement
+  # has to reach contributors rather than rely on them meeting the check by
+  # accident.
   #
-  # The pull request template names this date too, so that a contributor reads
-  # it before the check fails rather than after. Bump both together; the unit
-  # tests below fail when they disagree.
-  BLOCKING_DATE: "2026-10-15"
+  # It falls before the v1.6.0 code freeze on 2026-10-07, so the check first
+  # governs the freeze week. A cherry-pick PR that cites only the pull request
+  # it picks does not satisfy the check, because a PR number is not an issue.
+  # Add the check to branch protection on `main` first and watch a freeze week
+  # before doing the same on any release branch.
+  #
+  # The pull request template and the script default name this date too, so
+  # that a contributor reads it before the check fails rather than after. Bump
+  # all three together; the unit tests below fail when they disagree.
+  BLOCKING_DATE: "2026-10-01"
 
 jobs:
   check-issue-link:

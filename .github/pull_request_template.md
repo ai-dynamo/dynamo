@@ -27,7 +27,7 @@
 
      No issue yet? Create one first and start the work from it. The
      `PR Issue Link` check verifies this reference. It is advisory today and
-     becomes required on 2026-10-15.
+     becomes required on 2026-10-01.
 -->
 
 - Closes #XXXX
