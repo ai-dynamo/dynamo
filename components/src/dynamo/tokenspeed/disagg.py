@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 import socket
 from typing import Any
 
@@ -84,11 +85,22 @@ def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
 
 
 def bootstrap_kwargs(
-    request: dict[str, Any], mode: DisaggregationMode
+    request: dict[str, Any],
+    mode: DisaggregationMode,
+    prefill_endpoint: tuple[str, int] | None = None,
 ) -> dict[str, Any]:
+    """Validate the handoff, creating a room for synchronous prefill if needed."""
     if mode == DisaggregationMode.AGGREGATED:
         return {}
     info = request.get("bootstrap_info")
+    if info is None and mode == DisaggregationMode.PREFILL and prefill_endpoint:
+        host, port = prefill_endpoint
+        info = {
+            "bootstrap_host": host,
+            "bootstrap_port": port,
+            # Match the router's signed-64-bit room range and attention DP=1.
+            "bootstrap_room": secrets.randbits(63),
+        }
     if not isinstance(info, dict):
         raise InvalidArgument(
             f"TokenSpeed {mode.value} worker requires bootstrap_info from "

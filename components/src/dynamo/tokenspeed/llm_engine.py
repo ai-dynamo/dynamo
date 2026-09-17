@@ -50,6 +50,7 @@ class TokenspeedLLMEngine(LLMEngine):
     def __init__(self, server_args: Any):
         self.server_args = server_args
         self.disaggregation_mode = resolve_disaggregation_mode(server_args)
+        self._bootstrap_endpoint: tuple[str, int] | None = None
         self._kv_source: ZmqSource | None = None
         self._kv_event_dir: tempfile.TemporaryDirectory | None = None
         self.engine = None
@@ -75,9 +76,8 @@ class TokenspeedLLMEngine(LLMEngine):
         validate_disagg_compatibility(self.disaggregation_mode, self.server_args)
         bootstrap_host, bootstrap_port = None, None
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            bootstrap_host, bootstrap_port = runtime_disaggregated_endpoint(
-                self.server_args
-            )
+            self._bootstrap_endpoint = runtime_disaggregated_endpoint(self.server_args)
+            bootstrap_host, bootstrap_port = self._bootstrap_endpoint
         self._configure_kv_events()
         # The Dynamo response layer expects per-chunk token deltas.
         self.server_args.stream_output = True
@@ -130,9 +130,13 @@ class TokenspeedLLMEngine(LLMEngine):
         config = kv_events_config_dict(
             getattr(self.server_args, "kv_events_config", None)
         )
-        if not kv_events_enabled(config) or not getattr(
-            self.server_args, "enable_prefix_caching", True
-        ):
+        if not kv_events_enabled(config):
+            return
+        if not getattr(self.server_args, "enable_prefix_caching", True):
+            logger.warning(
+                "TokenSpeed KV events were requested but enable_prefix_caching=False "
+                "(--disable-prefix-caching); no KV events will be published"
+            )
             return
         if attention_dp_size(self.server_args) != 1:
             raise ValueError(
@@ -157,9 +161,12 @@ class TokenspeedLLMEngine(LLMEngine):
     async def generate(
         self, request: GenerateRequest, context: Context
     ) -> AsyncGenerator[GenerateChunk, None]:
-        assert self.engine is not None, "Engine not initialized"
+        if self.engine is None:
+            raise RuntimeError("Engine not initialized")
 
-        bootstrap = bootstrap_kwargs(request, self.disaggregation_mode)
+        bootstrap = bootstrap_kwargs(
+            request, self.disaggregation_mode, self._bootstrap_endpoint
+        )
         _validate_single_choice_sampling(request)
         sampling_params = build_sampling_params(request, self._model_max_len)
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -180,6 +187,14 @@ class TokenspeedLLMEngine(LLMEngine):
 
         emitted_completion_tokens = 0
         try:
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                # The router needs a handoff even when it supplied the bootstrap
+                # address. Preserve its trace identity; fallback rooms use the
+                # same validated parameters passed to the native prefill engine.
+                yield {
+                    "token_ids": [],
+                    "disaggregated_params": request.get("bootstrap_info") or bootstrap,
+                }
             async for out in self.engine.tokenizer_manager.generate_request(obj):
                 delta_out, emitted_completion_tokens = _completion_delta_output(
                     out, emitted_completion_tokens
@@ -206,6 +221,7 @@ class TokenspeedLLMEngine(LLMEngine):
                 engine.shutdown()
                 logger.info("TokenSpeed engine shutdown")
         finally:
+            self._bootstrap_endpoint = None
             self._kv_source = None
             if self._kv_event_dir is not None:
                 self._kv_event_dir.cleanup()

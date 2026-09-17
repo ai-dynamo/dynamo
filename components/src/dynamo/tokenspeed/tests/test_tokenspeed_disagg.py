@@ -142,16 +142,25 @@ async def test_generate_forwards_handoff_and_preserves_decode_budget(
             "bootstrap_host": "selected-prefill.example",
             "bootstrap_port": 9010,
             "bootstrap_room": 0,
+            "handoff_id": "1cfe6c6e-d8c8-4bea-a0a6-ccde2bd97c54",
         },
     }
     context = SimpleNamespace(id=lambda: "request-1")
     try:
         chunks = [chunk async for chunk in engine.generate(request, context)]
-        assert chunks[0]["token_ids"] == [20]
+        if mode == "prefill":
+            assert chunks[0] == {
+                "token_ids": [],
+                "disaggregated_params": request["bootstrap_info"],
+            }
+            assert chunks[1]["token_ids"] == [20]
+        else:
+            assert chunks[0]["token_ids"] == [20]
         assert inputs[0].rid == "request-1"
         assert inputs[0].bootstrap_host == "selected-prefill.example"
         assert inputs[0].bootstrap_port == 9010
         assert inputs[0].bootstrap_room == 0
+        assert not hasattr(inputs[0], "handoff_id")
         if mode == "prefill":
             assert inputs[0].sampling_params["max_new_tokens"] == 1
             assert "min_new_tokens" not in inputs[0].sampling_params
@@ -257,6 +266,7 @@ async def test_kv_source_matches_native_bind_and_topic(
         [source] = await engine.kv_event_sources()
         assert source.endpoint == expected
         assert source.topic == "kv"
+        assert json.loads(engine.server_args.kv_events_config) == native_config
     finally:
         await engine.cleanup()
 
@@ -273,11 +283,16 @@ async def test_kv_source_matches_native_bind_and_topic(
         },
     ],
 )
-async def test_disabled_kv_events_have_no_source(native_engine, overrides):
+async def test_disabled_kv_events_have_no_source(native_engine, overrides, caplog):
     engine = TokenspeedLLMEngine(server_args(**overrides))
     try:
         await engine.start(worker_id=1)
         assert await engine.kv_event_sources() == []
+        if overrides.get("enable_prefix_caching") is False:
+            assert "enable_prefix_caching=False" in caplog.text
+            assert "KV events" in caplog.text
+        else:
+            assert caplog.text == ""
     finally:
         await engine.cleanup()
 
@@ -358,5 +373,56 @@ async def test_explicit_loopback_prefill_allowed_for_single_host(
     try:
         config = await engine.start(worker_id=1)
         assert config.llm.bootstrap_host == "127.0.0.1"
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+async def test_prefill_creates_handoff_when_router_has_no_bootstrap_endpoint(
+    monkeypatch, native_engine, explicit_null
+):
+    """The synchronous path supplies the same fresh room to prefill and decode."""
+    native, _ = native_engine
+    inputs = []
+    rooms = Mock(side_effect=[17, 23])
+    monkeypatch.setattr(disagg, "secrets", SimpleNamespace(randbits=rooms), raising=False)
+
+    async def generate(obj):
+        inputs.append(obj)
+        yield {"output_ids": [20], "meta_info": {"completion_tokens": 1}}
+
+    native.tokenizer_manager.generate_request = generate
+    engine = TokenspeedLLMEngine(
+        server_args(disaggregation_mode="prefill", host="prefill.example")
+    )
+    registration = await engine.start(worker_id=1)
+    try:
+        for index, room in enumerate([17, 23]):
+            request = {"token_ids": [10, 11], "stop_conditions": {"max_tokens": 30}}
+            if explicit_null:
+                request["bootstrap_info"] = None
+            stream = engine.generate(request, SimpleNamespace(id=lambda: "fallback"))
+            try:
+                first = await anext(stream)
+                assert first["token_ids"] == []
+                handoff = first["disaggregated_params"]
+                assert handoff == {
+                    "bootstrap_host": registration.llm.bootstrap_host,
+                    "bootstrap_port": registration.llm.bootstrap_port,
+                    "bootstrap_room": room,
+                }
+                assert len(inputs) == index
+                chunks = [chunk async for chunk in stream]
+                assert chunks[0]["token_ids"] == [20]
+                for key, value in handoff.items():
+                    assert getattr(inputs[index], key) == value
+                assert disagg.bootstrap_kwargs(
+                    {"bootstrap_info": handoff}, DisaggregationMode.DECODE
+                ) == handoff
+                assert engine._active_rids_by_context == {}
+            finally:
+                await stream.aclose()
+        assert rooms.call_count == 2
+        rooms.assert_called_with(63)
     finally:
         await engine.cleanup()
