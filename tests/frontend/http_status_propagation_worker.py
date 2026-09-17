@@ -20,11 +20,11 @@ from __future__ import annotations
 import asyncio
 
 import uvloop
+
 from dynamo.common.multimodal.image_loader import ImageLoader
 from dynamo.frontend.utils import extract_mm_urls
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
-
 from tests.frontend.test_http_status_propagation import (
     BACKEND_MESSAGE,
     ENDPOINT_PATH,
