@@ -13,8 +13,10 @@ follows redirects manually and revalidates each hop against the policy.
 and uses aiohttp. aiohttp scales well under fan-out and exposes a
 ``TCPConnector(resolver=...)`` hook. The default client wires a
 ``BlocklistResolver`` (``_ssrf_resolver.py``) into it that pins validated DNS
-answers at connect time — the SSRF backstop against DNS rebinding, keyed to the
-``DYN_MM_ALLOW_INTERNAL`` env baseline. It governs **direct** connections: with
+answers at connect time — the SSRF backstop against DNS rebinding. The
+connector may return private addresses only when the ``DYN_MM_ALLOW_INTERNAL``
+deployment baseline and the request policy both allow it. It governs
+**direct** connections: with
 an egress proxy configured the proxy resolves the origin, so the configured
 proxy is exempt from filtering and enforcement for proxied fetches belongs at
 the proxy or network layer. IP literals never reach a resolver in aiohttp and

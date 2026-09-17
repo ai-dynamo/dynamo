@@ -46,7 +46,13 @@ class AiohttpClient(HttpClient):
 
     def __init__(self, config=None) -> None:
         super().__init__(config)
-        self._session: Optional[aiohttp.ClientSession] = None
+        # Keyed by whether the connector may return private addresses. At most
+        # two entries, so a request that asks for a stricter policy than the
+        # deployment baseline gets a connector that actually enforces it.
+        self._sessions: dict[bool, aiohttp.ClientSession] = {}
+        # aiohttp marks an injected resolver as externally owned, so closing a
+        # session never closes it. Hold each one and close it ourselves.
+        self._resolvers: dict[bool, BlocklistResolver] = {}
 
     def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
         # The override caps ``total`` (whole request). ``sock_connect``
@@ -62,7 +68,24 @@ class AiohttpClient(HttpClient):
             total=total, sock_connect=self._config.connect_timeout
         )
 
-    def _build_session(self) -> aiohttp.ClientSession:
+    @staticmethod
+    def _connect_allows_private(policy: Optional[UrlValidationPolicy]) -> bool:
+        """Whether the connector may return private addresses for this fetch.
+
+        The intersection of the deployment baseline and the request policy.
+        Taking the baseline alone lets ``DYN_MM_ALLOW_INTERNAL=1`` override a
+        caller that explicitly asked for ``allow_private_ips=False``, and
+        taking the request alone lets any caller opt out of the deployment
+        setting. Only when both allow it does the backstop stand down.
+        """
+        env_allows = UrlValidationPolicy.from_env().allow_private_ips
+        if policy is None:
+            return env_allows
+        return env_allows and policy.allow_private_ips
+
+    def _build_session(self, allow_private_ips: bool) -> aiohttp.ClientSession:
+        resolver = BlocklistResolver(allow_private_ips=allow_private_ips)
+        self._resolvers[allow_private_ips] = resolver
         connector = aiohttp.TCPConnector(
             limit=self._config.max_connections,
             # Single-origin fan-out is the whole point; capping per-host
@@ -70,20 +93,19 @@ class AiohttpClient(HttpClient):
             limit_per_host=0,
             keepalive_timeout=self._config.keepalive_timeout,
             enable_cleanup_closed=True,
-            # Connect-time SSRF backstop against DNS rebinding (see _ssrf_resolver).
-            # Deliberately keyed to the env baseline, not the per-call fetch policy:
-            # this shared connector must not let a per-request allow_private_ips=True
-            # loosen the SSRF backstop. DYN_MM_ALLOW_INTERNAL is the deployment knob.
-            resolver=BlocklistResolver(
-                allow_private_ips=UrlValidationPolicy.from_env().allow_private_ips
-            ),
+            # Connect-time SSRF backstop against DNS rebinding (see
+            # _ssrf_resolver). See _connect_allows_private for how the flag is
+            # derived. DYN_MM_ALLOW_INTERNAL is the deployment knob.
+            resolver=resolver,
         )
         return aiohttp.ClientSession(connector=connector, trust_env=True)
 
-    async def _get_session(self) -> aiohttp.ClientSession:
+    async def _get_session(self, allow_private_ips: bool) -> aiohttp.ClientSession:
         async with self._lock:
-            if self._session is None or self._session.closed:
-                self._session = self._build_session()
+            session = self._sessions.get(allow_private_ips)
+            if session is None or session.closed:
+                session = self._build_session(allow_private_ips)
+                self._sessions[allow_private_ips] = session
                 logger.info(
                     "aiohttp backend initialized: limit=%d, limit_per_host=0, "
                     "keepalive_timeout=%.1fs%s",
@@ -93,12 +115,17 @@ class AiohttpClient(HttpClient):
                     if self._config.per_call_timeout_override is not None
                     else "; total timeout set per-request",
                 )
-        return self._session
+        return session
 
     async def _fetch_simple(
-        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: Optional[int] = None,
+        policy: Optional[UrlValidationPolicy] = None,
     ) -> bytes:
-        session = await self._get_session()
+        session = await self._get_session(self._connect_allows_private(policy))
         client_timeout = self._effective_timeout(timeout)
         try:
             async with session.get(
@@ -128,9 +155,14 @@ class AiohttpClient(HttpClient):
             ) from e
 
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: Optional[int] = None,
+        policy: Optional[UrlValidationPolicy] = None,
     ) -> tuple[bytes | None, str | None]:
-        session = await self._get_session()
+        session = await self._get_session(self._connect_allows_private(policy))
         client_timeout = self._effective_timeout(timeout)
         try:
             async with session.get(
@@ -177,6 +209,13 @@ class AiohttpClient(HttpClient):
 
     async def close(self) -> None:
         async with self._lock:
-            if self._session is not None and not self._session.closed:
-                await self._session.close()
-            self._session = None
+            for session in self._sessions.values():
+                if not session.closed:
+                    await session.close()
+            self._sessions = {}
+            # TCPConnector sets _resolver_owner=False for an injected resolver
+            # and only closes the one it made itself, so closing the session
+            # above leaves ours open.
+            for resolver in self._resolvers.values():
+                await resolver.close()
+            self._resolvers = {}

@@ -119,7 +119,9 @@ def _cm_raising(exc_factory):
 
 def _make_client_with_session(session) -> AiohttpClient:
     client = AiohttpClient()
-    client._session = session
+    # Both strictness keys map to the same double, so a test does not have to
+    # care which session the policy under test selects.
+    client._sessions = {True: session, False: session}
     return client
 
 
@@ -201,39 +203,85 @@ async def test_redirect_resolved_through_policy_path() -> None:
 async def test_build_session_installs_the_connect_time_resolver() -> None:
     """The shared connector carries the connect-time resolver.
 
-    Every fetch goes through this one connector, so losing the ``resolver=``
-    wiring silently drops the connect-time check for the whole process while
-    the resolver's own unit tests stay green.
+    Every fetch goes through a connector built here, so losing the
+    ``resolver=`` wiring silently drops the connect-time check for the whole
+    process while the resolver's own unit tests stay green.
     """
     client = AiohttpClient()
-    session = client._build_session()
+    session = client._build_session(False)
     try:
         assert isinstance(session.connector._resolver, BlocklistResolver)
     finally:
-        await session.close()
+        await client.close()
 
 
 @_allows_cleanup_closed_notice
-async def test_connector_resolver_ignores_a_permissive_per_call_policy(
-    monkeypatch,
-) -> None:
-    """A per-request ``allow_private_ips=True`` must not loosen the connector.
+async def test_connect_policy_is_the_intersection(monkeypatch) -> None:
+    """Neither side alone decides whether the connector may return private IPs.
 
-    The connector is shared across every caller, so it is keyed to the
-    deployment-wide env baseline instead. ``_PERMISSIVE`` above is a per-call
-    policy and deliberately has no bearing here.
+    A permissive request must not loosen a strict deployment, and a permissive
+    deployment must not override a request that explicitly asked for strict.
+    """
+    strict = UrlValidationPolicy(allow_http=True, allow_private_ips=False)
+
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    client = AiohttpClient()
+    assert client._connect_allows_private(None) is False
+    assert client._connect_allows_private(_PERMISSIVE) is False
+    assert client._connect_allows_private(strict) is False
+
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    assert client._connect_allows_private(None) is True
+    assert client._connect_allows_private(_PERMISSIVE) is True
+    # The case that regressed: the deployment allows private, the caller does
+    # not, and the caller wins.
+    assert client._connect_allows_private(strict) is False
+
+
+@_allows_cleanup_closed_notice
+async def test_a_strict_request_gets_a_filtering_connector(monkeypatch) -> None:
+    """The intersection reaches the connector, not just the helper."""
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    strict = UrlValidationPolicy(allow_http=True, allow_private_ips=False)
+    client = AiohttpClient()
+    try:
+        permissive_session = await client._get_session(
+            client._connect_allows_private(_PERMISSIVE)
+        )
+        strict_session = await client._get_session(
+            client._connect_allows_private(strict)
+        )
+        assert permissive_session is not strict_session
+        assert permissive_session.connector._resolver._allow_private_ips is True
+        assert strict_session.connector._resolver._allow_private_ips is False
+    finally:
+        await client.close()
+
+
+@_allows_cleanup_closed_notice
+async def test_close_closes_every_resolver(monkeypatch) -> None:
+    """aiohttp will not close an injected resolver, so the client must.
+
+    ``TCPConnector`` sets ``_resolver_owner=False`` for a resolver it did not
+    create, and only closes its own. Without this the optional aiodns resolver
+    stays registered for the loop after the session is gone.
     """
     monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
     client = AiohttpClient()
-    session = client._build_session()
-    try:
-        assert session.connector._resolver._allow_private_ips is False
-    finally:
-        await session.close()
+    session = await client._get_session(False)
+    resolver = session.connector._resolver
+    assert session.connector._resolver_owner is False
 
-    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
-    session = client._build_session()
-    try:
-        assert session.connector._resolver._allow_private_ips is True
-    finally:
-        await session.close()
+    closed = []
+    original = resolver._inner.close
+
+    async def _spy() -> None:
+        closed.append(1)
+        await original()
+
+    resolver._inner.close = _spy
+    await client.close()
+
+    assert closed, "the injected resolver was never closed"
+    assert client._sessions == {}
+    assert client._resolvers == {}

@@ -14,7 +14,11 @@ rate when one request fans out to many URLs (e.g. 100 image fetches),
 and it exposes a `TCPConnector(resolver=...)` DNS hook that pins the
 validated DNS answers as a connect-time SSRF backstop against DNS
 rebinding — the default client wires a `BlocklistResolver` (see
-`_ssrf_resolver.py`) keyed to the `DYN_MM_ALLOW_INTERNAL` env baseline.
+`_ssrf_resolver.py`). The connector may return private addresses only when the
+`DYN_MM_ALLOW_INTERNAL` deployment baseline **and** the request policy both
+allow it, so neither side alone can weaken the other. The client keeps one
+session per outcome and closes each resolver itself, because aiohttp closes
+only a resolver it created.
 
 > [!IMPORTANT]
 > The backstop governs **direct** connections only. With an egress proxy
