@@ -476,6 +476,7 @@ fn invalid_argument_error_frame<T>() -> Annotated<T> {
             DynamoError::builder()
                 .error_type(DynErrorType::Backend(BackendError::InvalidArgument))
                 .message(INVALID_ARGUMENT_MESSAGE)
+                .public_message(INVALID_ARGUMENT_MESSAGE)
                 .build(),
         ),
     }
@@ -542,6 +543,7 @@ impl
         Err(DynamoError::builder()
             .error_type(DynamoErrorType::InvalidArgument)
             .message("request exceeds strict token budget")
+            .public_message("request exceeds strict token budget")
             .build()
             .into())
     }
@@ -2870,6 +2872,7 @@ impl
                             "ValidationError: 1 validation error for NvCreateAudioSpeechRequest \
                              task_type Input should be 'CustomVoice', 'VoiceDesign', 'Base'",
                         )
+                        .public_message("Invalid task_type")
                         .build(),
                 ),
             };
