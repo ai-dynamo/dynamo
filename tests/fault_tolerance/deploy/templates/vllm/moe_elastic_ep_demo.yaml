@@ -3,18 +3,43 @@
 #
 # Elastic EP Scaling Demo Deployment
 #
-# Demonstrates dynamic expert parallelism scaling via the /scale_elastic_ep API.
-# Pod requests 4 GPUs up front. Starts with data-parallel-size=2 (2 active DP workers,
-# 2 GPUs used). Scale up to dp=4 activates the remaining 2 GPUs without pod restart.
+# ONE POD PER DATA-PARALLEL RANK. You declare a single worker component; the operator
+# derives the rest. --data-parallel-size 2 renders TWO pods: this component as the leader
+# (rank 0, and the Ray head), plus one synthesized follower named "<leader>-flw" that runs
+# a bare `ray start` and lends the leader its GPU. The leader spawns the real rank onto it
+# as a Ray actor.
+#
+# This fixture previously reserved 4 GPUs in ONE pod and grew data-parallel-size into them
+# in place. That is a standby-capacity shape, not an elastic one: it pre-buys the peak and
+# never returns a GPU when it shrinks. It also renders differently now -- on a non-Grove
+# cluster the operator derives a follower from it, so the deep-copied 4-GPU request is made
+# twice and the deployment holds 8 GPUs to use 2.
+#
+# One GPU per pod, so the declaration and the cost agree: dp=2 is 2 pods, 2 GPUs, 2 ranks,
+# nothing idle. Shrinking removes a pod and gives the GPU back.
 #
 # Requirements:
-#   - 4 GPUs available on a single node (tp=1 per DP rank, no cross-node needed)
+#   - 2 nodes with 1 free GPU each. The follower carries an anti-affinity that keeps it off
+#     the leader's node, and a pod affinity that keeps it in the leader's NVLink partition.
 #   - data-parallel-backend=ray (required for elastic EP)
-#   - Model: deepseek-ai/DeepSeek-V2-Lite (small MoE, ~16B, fits in 4×A100/H100)
+#   - Model: deepseek-ai/DeepSeek-V2-Lite (small MoE, ~16B)
+#   - The data-parallel size must divide the model's expert count (64 here), so dp=3 is
+#     invalid for this model.
 #
-# Scaling endpoint: POST /scale_elastic_ep {"new_data_parallel_size": <int>}
-#   - Scale up:   {"new_data_parallel_size": 4}
-#   - Scale down: {"new_data_parallel_size": 2}
+# CHANGING THE WIDTH TAKES TWO STEPS, in opposite order for grow and shrink, because
+# Kubernetes owns whether a pod exists and vLLM owns whether its GPU is used. Nothing in
+# the operator calls scale_elastic_ep yet (Phase 6/7), so both steps are manual today:
+#
+#   grow    kubectl patch dcd <leader>-flw --type=merge -p '{"spec":{"replicas":3}}'
+#           wait for the new pods to join Ray
+#           POST /scale_elastic_ep {"new_data_parallel_size": 4}
+#
+#   shrink  POST /scale_elastic_ep {"new_data_parallel_size": 2}   # drain the ranks FIRST
+#           kubectl patch dcd <leader>-flw --type=merge -p '{"spec":{"replicas":1}}'
+#
+# Deleting a follower pod that still holds a live rank leaves the engine committed to a
+# data-parallel size whose members are gone (DYN-3838, DYN-2660), which is why the drain
+# comes first on the way down.
 
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -32,16 +57,21 @@ spec:
     worker:
       envFromSecret: hf-token-secret
       componentType: worker
-      # Single pod with 4 GPUs — elastic EP scales DP workers within this pod via Ray
+      # replicas is the number of LEADERS and must stay 1: the leader is the Ray head, and
+      # width is added with followers, not more leaders. Admission rejects replicas > 1 for
+      # an elastic-EP component when the feature gate is on.
       replicas: 1
       resources:
         requests:
           memory: "60Gi"
-          # Reserve all 4 GPUs upfront so scale-up can activate them without rescheduling
-          gpu: "4"
+          # One rank per pod at tp=1, so one GPU per pod. The follower is a deep copy of
+          # this component, so whatever is requested here is requested again for every
+          # follower -- asking for 4 here would hold 8 GPUs across the two pods to run
+          # two ranks.
+          gpu: "1"
         limits:
           memory: "120Gi"
-          gpu: "4"
+          gpu: "1"
       envs:
         - name: DYN_SYSTEM_ENABLED
           value: "true"
@@ -55,9 +85,10 @@ spec:
           value: "1"
         - name: VLLM_WORKER_MULTIPROC_METHOD
           value: "spawn"
-        # Expose all 4 GPUs to the process — Ray will schedule DP workers on them
+        # One GPU per pod, so one visible device. Ray places this pod's single rank on it;
+        # the other ranks live in their own pods.
         - name: CUDA_VISIBLE_DEVICES
-          value: "0,1,2,3"
+          value: "0"
         - name: VLLM_LOGGING_LEVEL
           value: "INFO"
         # Speed up HF downloads and improve 429 rate-limit resilience
@@ -88,11 +119,15 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
-            # tp=1: each DP rank uses 1 GPU. With dp=2 → 2 GPUs active at start.
-            # After scale to dp=4 → all 4 GPUs active.
+            # tp=1: one GPU per rank. With one rank per pod, that is one GPU per pod.
             - --tensor-parallel-size
             - "1"
-            # Initial DP size = 2. Scale up to 4 via /scale_elastic_ep API.
+            # The declared width. The operator reads this to derive the follower count
+            # (dp - 1, since the leader holds rank 0) and to make the leader wait for that
+            # many Ray nodes before starting -- vLLM reads the cluster once at engine start
+            # and never retries, so without the wait the launch is a race.
+            # The operator also injects --data-parallel-size-local 1 to pin the leader to
+            # its own single rank; set it yourself only if you mean to override that.
             - --data-parallel-size
             - "2"
             # REQUIRED for elastic EP — Ray backend manages dynamic worker lifecycle
