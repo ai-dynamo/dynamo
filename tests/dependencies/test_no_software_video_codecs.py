@@ -23,8 +23,8 @@ This module is the PERMANENT half of the codec work. The removal logic in the
 image templates is not: purging wheels the vLLM and SGLang base images preinstall,
 and pinning DALI past its own cleanup, are all workarounds for upstreams that had
 not yet trimmed their own builds. Each is expected to disappear as those upstreams
-catch up -- the DALI pin already fails the build with instructions when its base
-image passes it. What must survive every one of those removals is this file: it
+catch up -- the DALI pin was retired once the base included its codec cleanup.
+What must survive every one of those removals is this file: it
 states what the shipped images may contain, independently of which upstream
 currently needs help meeting it. Delete the workarounds as they become redundant;
 do not delete the assertions with them.
@@ -236,8 +236,8 @@ def _assert_bundled_libavcodecs_carry_no_software_codecs() -> None:
     The TensorRT-LLM base image ships DALI, which vendors its own ffmpeg for its
     video reader. DALI 2.1.0 registered h264, hevc and the aac family; upstream
     restricted that build (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352) from 2.1.1,
-    and the image pins past it. This keeps that pin honest: a base-image bump
-    that reverted to an older DALI, or a new dependency vendoring its own ffmpeg,
+    and the base image now includes that cleanup. A base-image bump that
+    reverted to an older DALI, or a new dependency vendoring its own ffmpeg,
     fails here rather than shipping.
 
     The libraries cannot simply be deleted — they are DT_NEEDED by libdali.so, so
