@@ -528,7 +528,8 @@ def test_text_session_rejects_unsupported_modalities(session_update, item, code)
     assert errors[0]["error"]["code"] == code
 
 
-def test_response_cancel_aborts_generation():
+@pytest.mark.parametrize("after_first_delta", [False, True])
+def test_response_cancel_aborts_generation(after_first_delta):
     async def scenario():
         started = asyncio.Event()
 
@@ -552,7 +553,8 @@ def test_response_cancel_aborts_generation():
             yield {"type": "session.update", "session": _text_session()}
             yield _text_item("Wait")
             yield {"type": "response.create"}
-            await started.wait()
+            if after_first_delta:
+                await started.wait()
             yield {"type": "response.cancel"}
 
         return [event async for event in handler.generate(request_stream(), _Context())]
@@ -573,16 +575,16 @@ def test_response_cancel_aborts_generation():
         "response.created",
         "response.output_item.added",
         "response.content_part.added",
-        "response.output_text.delta",
+        *(["response.output_text.delta"] if after_first_delta else []),
         "response.output_text.done",
         "response.content_part.done",
         "response.output_item.done",
         "response.done",
     ]
     assert done[0]["response"]["output"][0]["status"] == "incomplete"
-    assert done[0]["response"]["output"][0]["content"] == [
-        {"type": "output_text", "text": "partial"}
-    ]
+    assert done[0]["response"]["output"][0]["content"] == (
+        [{"type": "output_text", "text": "partial"}] if after_first_delta else []
+    )
 
 
 def test_generation_failure_closes_announced_response_item():

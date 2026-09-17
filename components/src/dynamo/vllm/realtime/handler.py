@@ -203,6 +203,28 @@ class _TextTurn(RealtimeTurn):
         self.text = ""
         self.finished = False
 
+        # Announce the turn even if generation is cancelled before its task starts.
+        pending_item = self.item("in_progress")
+        started = [
+            response_created_event(
+                self.response_id,
+                output_modalities=["text"],
+                max_output_tokens=self.wire_max_output_tokens,
+            ),
+            response_output_item_added_event(self.response_id, pending_item),
+        ]
+        if self.add_to_conversation:
+            started.append(
+                conversation_item_added_event(pending_item, self.previous_item_id)
+            )
+        started.append(
+            response_content_part_event(
+                "response.content_part.added", self.response_id, self.item_id, ""
+            )
+        )
+        for event in started:
+            self.events.put_nowait(event)
+
     def item(self, status: str) -> dict[str, Any]:
         return {
             "id": self.item_id,
@@ -391,26 +413,6 @@ class RealtimeTextHandler:
         )
 
     async def _run_turn(self, turn: _TextTurn, context: Context) -> None:
-        pending_item = turn.item("in_progress")
-        started = [
-            response_created_event(
-                turn.response_id,
-                output_modalities=["text"],
-                max_output_tokens=turn.wire_max_output_tokens,
-            ),
-            response_output_item_added_event(turn.response_id, pending_item),
-        ]
-        if turn.add_to_conversation:
-            started.append(
-                conversation_item_added_event(pending_item, turn.previous_item_id)
-            )
-        started.append(
-            response_content_part_event(
-                "response.content_part.added", turn.response_id, turn.item_id, ""
-            )
-        )
-        await _emit_events(turn, *started)
-
         usage = None
         finish_reason = None
         try:
