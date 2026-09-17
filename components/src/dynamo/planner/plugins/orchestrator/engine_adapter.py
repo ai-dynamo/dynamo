@@ -98,6 +98,7 @@ from dynamo.planner.plugins.builtins.observe import (
 from dynamo.planner.plugins.clock import Clock, VirtualClock, WallClock
 from dynamo.planner.plugins.merge.types import ComponentKey
 from dynamo.planner.plugins.orchestrator.orchestrator import LocalPlannerOrchestrator
+from dynamo.planner.plugins.orchestrator.pipeline import PipelineOutcome
 from dynamo.planner.plugins.registry.auth import AllowUnauthenticatedAuth
 from dynamo.planner.plugins.registry.circuit_breaker import CircuitBreaker
 from dynamo.planner.plugins.registry.config import build_auth_validator
@@ -105,8 +106,11 @@ from dynamo.planner.plugins.registry.server import PluginRegistryServer
 from dynamo.planner.plugins.scheduler import PluginScheduler
 from dynamo.planner.plugins.transport.config import make_transport_for_endpoint
 from dynamo.planner.plugins.types import (
+    ComponentTarget,
     FpmData,
     ObservationData,
+    OverrideResult,
+    OverrideType,
     PipelineContext,
     TrafficMetrics,
     WorkerState,
@@ -153,6 +157,14 @@ class OrchestratorEngineAdapter:
         # time) would leave plugins with execution_interval >> 10s
         # never re-firing after the first tick.
         self._clock: Clock = clock if clock is not None else WallClock()
+        self._startup_down_candidate: Optional[
+            tuple[Optional[int], Optional[int]]
+        ] = None
+        self._startup_down_inventory: Optional[
+            tuple[Optional[int], Optional[int], int, int]
+        ] = None
+        self._startup_down_since = 0.0
+        self._startup_down_sources: frozenset[str] = frozenset()
 
         # Scale_interval cadence model — pipeline fires once per
         # ``scale_interval_seconds`` regardless of individual plugin
@@ -911,6 +923,207 @@ class OrchestratorEngineAdapter:
             out[ComponentKey(sub_component_type="decode")] = counts.ready_num_decode
         return out
 
+    @staticmethod
+    def _startup_reduction_sources(
+        outcome: PipelineOutcome, role: str, ready: int
+    ) -> frozenset[str]:
+        # Hand-authored outcomes predating provenance metadata retain their
+        # explicit-component contract. Production pipelines always supply it.
+        if outcome.propose_results is None:
+            return (
+                frozenset({"explicit_proposal"})
+                if ComponentKey(sub_component_type=role) in outcome.proposed_components
+                else frozenset()
+            )
+        sources: set[str] = set()
+        for merged, results in (
+            (outcome.propose_outcome, outcome.propose_results),
+            (outcome.reconcile_outcome, outcome.reconcile_results or []),
+        ):
+            if merged is None or merged.proposal is None:
+                continue
+            merged_target = next(
+                (
+                    t.replicas
+                    for t in merged.proposal.targets
+                    if t.sub_component_type == role
+                ),
+                None,
+            )
+            if merged_target is None or merged_target > ready:
+                continue
+            for result in results:
+                if not isinstance(result.result, OverrideResult):
+                    continue
+                if any(
+                    t.sub_component_type == role
+                    and t.replicas is not None
+                    and t.replicas <= ready
+                    and t.type in (OverrideType.SET, OverrideType.AT_MOST)
+                    for t in result.result.targets
+                ):
+                    sources.add(result.plugin_id)
+        return frozenset(sources)
+
+    def _project_startup_scale_down(
+        self, outcome: PipelineOutcome, counts: WorkerCounts
+    ) -> Optional[ScalingDecision]:
+        """Only explicit, sustained reductions may interrupt a verified startup.
+
+        Keep all pending capacity in budget accounting. A merged ready-count
+        baseline is not a request to cancel that capacity. No up-proposal is
+        clamped into a down-proposal, and drain/rollout snapshots never enter
+        this path. The connector rechecks that invariant before writing.
+        """
+        assert outcome.final_proposal is not None
+        proposed = {
+            t.sub_component_type: t.replicas for t in outcome.final_proposal.targets
+        }
+        targets: dict[str, int] = {}
+        sources: set[str] = set()
+        gpu_total = 0
+        power_total = 0
+        mode = self._config.mode
+        roles = (
+            ("prefill", "decode")
+            if mode == "disagg"
+            else (("prefill",) if mode == "prefill" else ("decode",))
+        )
+        for role, ready, pending, caps in (
+            (
+                "prefill",
+                counts.ready_num_prefill,
+                counts.pending_num_prefill,
+                self._capabilities.prefill,
+            ),
+            (
+                "decode",
+                counts.ready_num_decode,
+                counts.pending_num_decode,
+                self._capabilities.decode,
+            ),
+        ):
+            if role not in roles:
+                continue
+            if ready is None:
+                self._startup_down_candidate = None
+                return None
+            desired = ready + pending
+            target = proposed.get(role)
+            role_sources = self._startup_reduction_sources(outcome, role, ready)
+            if not role_sources:
+                target = None
+            if target is not None:
+                target = max(
+                    target,
+                    resolve_min_endpoint(
+                        self._config, "prefill" if role == "prefill" else "decode"
+                    ),
+                )
+                if target <= ready and target < desired:
+                    targets[role] = target
+                    sources.update(role_sources)
+            effective = targets.get(role, desired)
+            gpu_cost = caps.resolved_gpu_cost_per_replica if caps else None
+            if gpu_cost is None and (
+                self._config.min_gpu_budget >= 0 or self._config.max_gpu_budget >= 0
+            ):
+                self._startup_down_candidate = None
+                return None
+            gpu_total += effective * (gpu_cost or 0)
+            watts = caps.power_watts_per_replica if caps else None
+            if self._config.enable_power_awareness and watts is None:
+                self._startup_down_candidate = None
+                return None
+            power_total += effective * (watts or 0)
+
+        inventory = (
+            counts.ready_num_prefill,
+            counts.ready_num_decode,
+            counts.pending_num_prefill,
+            counts.pending_num_decode,
+        )
+        if not targets:
+            evaluated = outcome.evaluated_proposal_plugins
+            saved_targets = dict(
+                zip(("prefill", "decode"), self._startup_down_candidate or (None, None))
+            )
+
+            def conflicts(target: ComponentTarget) -> bool:
+                saved = saved_targets.get(target.sub_component_type)
+                return (
+                    saved is not None
+                    and target.replicas is not None
+                    and target.replicas > saved
+                    and target.type in (OverrideType.SET, OverrideType.AT_LEAST)
+                )
+
+            conflicts_with_candidate = any(
+                conflicts(target)
+                for result in (outcome.propose_results or [])
+                + (outcome.reconcile_results or [])
+                + (outcome.constrain_results or [])
+                if isinstance(result.result, OverrideResult)
+                for target in result.result.targets
+            )
+            # A plugin throttled between observations has made no new claim.
+            # Preserve its timer, but never execute without a fresh proposal.
+            # A fresh ACCEPT (including missing FPM), error, or up signal
+            # invalidates the previous recommendation.
+            if (
+                evaluated is None
+                or self._startup_down_sources.intersection(evaluated)
+                or conflicts_with_candidate
+                or inventory != self._startup_down_inventory
+            ):
+                self._startup_down_candidate = None
+            return None
+
+        min_gpu, max_gpu = self._config.min_gpu_budget, self._config.max_gpu_budget
+        power_limit = self._config.total_gpu_power_limit
+        if (
+            (min_gpu >= 0 and gpu_total < min_gpu)
+            or (max_gpu >= 0 and gpu_total > max_gpu)
+            or (
+                self._config.enable_power_awareness
+                and power_limit is not None
+                and power_total > power_limit
+            )
+        ):
+            self._startup_down_candidate = None
+            return None
+        candidate = (targets.get("prefill"), targets.get("decode"))
+        now = self._clock.monotonic()
+        # HOLD_LAST cache replay cannot count as a second observation.
+        if outcome.evaluated_proposal_plugins is not None and not sources.issubset(
+            outcome.evaluated_proposal_plugins
+        ):
+            if (
+                candidate != self._startup_down_candidate
+                or inventory != self._startup_down_inventory
+                or sources != self._startup_down_sources
+            ):
+                self._startup_down_candidate = None
+            return None
+        if (
+            candidate != self._startup_down_candidate
+            or inventory != self._startup_down_inventory
+            or sources != self._startup_down_sources
+        ):
+            self._startup_down_candidate = candidate
+            self._startup_down_inventory = inventory
+            self._startup_down_since = now
+            self._startup_down_sources = frozenset(sources)
+            return None
+        # Require a full load observation interval with the same recommendation
+        # before reversing a scale-up. Faster plugin ticks cannot bypass this.
+        if (
+            now - self._startup_down_since
+            < self._config.load_adjustment_interval_seconds
+        ):
+            return None
+        return ScalingDecision(num_prefill=candidate[0], num_decode=candidate[1])
+
     def _project_scale_to(self, outcome, worker_counts: WorkerCounts):
         """Project the pipeline outcome onto ``PlannerEffects.scale_to``
         with planner "no change -> None" detection.
@@ -921,7 +1134,11 @@ class OrchestratorEngineAdapter:
         baseline peers without treating them as adjustable targets.
         """
         if outcome.execute_action != "apply" or outcome.final_proposal is None:
+            self._startup_down_candidate = None
             return None
+        if worker_counts.startup_in_progress:
+            return self._project_startup_scale_down(outcome, worker_counts)
+        self._startup_down_candidate = None
 
         by_comp = {
             t.sub_component_type: t.replicas for t in outcome.final_proposal.targets

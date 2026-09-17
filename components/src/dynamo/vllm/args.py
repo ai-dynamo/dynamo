@@ -30,6 +30,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
 
 from . import envs
@@ -120,9 +121,6 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # Consume the router flags before the engine parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
 
-    # Validate arguments
-    dynamo_config.validate()
-
     vllm_args = vllm_parser.parse_args(unknown)
     # Set the model name from the command line arguments
     # model is defined in AsyncEngineArgs, but when AsyncEngineArgs.from_cli_args is called,
@@ -132,11 +130,19 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     engine_config = AsyncEngineArgs.from_cli_args(vllm_args)
 
+    # Attach engine_args before validate(): the --enable-lora exclusivity rules
+    # in DynamoVllmConfig.validate() read it, and are dead code without it.
+    dynamo_config.engine_args = engine_config
+
+    # Validate arguments
+    dynamo_config.validate()
+
+    # These run after validate() because they consume what it resolves --
+    # notably the DisaggregationMode enum and the benchmark sampling fields.
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
     update_engine_config_with_dynamo(dynamo_config, engine_config)
 
-    dynamo_config.engine_args = engine_config
     from .state_agent import validate_state_agent_worker
 
     validate_state_agent_worker(dynamo_config)
@@ -413,8 +419,22 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
+        if dynamo_config.benchmark_randomize_kda_state:
+            if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
+                raise ValueError(
+                    "Random KDA benchmarking requires the standard --worker-cls auto"
+                )
+            if (
+                engine_config.load_format == "gms"
+                or os.environ.get("DYN_GMS_USE_V1") == "true"
+            ):
+                raise ValueError(
+                    "Random KDA benchmarking does not support the GMS worker"
+                )
+            defaults["worker_cls"] = RANDOM_KDA_WORKER
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
+            "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,

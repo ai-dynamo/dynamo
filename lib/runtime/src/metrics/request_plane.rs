@@ -8,7 +8,6 @@ use once_cell::sync::{Lazy, OnceCell};
 use prometheus::{Gauge, Histogram, HistogramOpts};
 
 use super::prometheus_names::{name_prefix, request_plane};
-use crate::MetricsRegistry;
 
 fn request_plane_metric_name(suffix: &str) -> String {
     format!("{}_{}", name_prefix::REQUEST_PLANE, suffix)
@@ -65,35 +64,8 @@ pub static REQUEST_PLANE_INFLIGHT: Lazy<Gauge> = Lazy::new(|| {
     .expect("request_plane_inflight gauge")
 });
 
-/// Guards idempotency for the `MetricsRegistry` registration path.
-static METRICS_REGISTERED: OnceCell<()> = OnceCell::new();
-
 /// Guards idempotency for the raw `prometheus::Registry` registration path.
-/// Kept separate from `METRICS_REGISTERED` so that calling `ensure_request_plane_metrics_registered`
-/// first does not silently prevent the metrics from being registered in the prometheus registry.
 static PROMETHEUS_REGISTERED: OnceCell<Result<(), String>> = OnceCell::new();
-
-/// Register request-plane metrics with the given registry. Idempotent; only the first call registers.
-pub fn ensure_request_plane_metrics_registered(registry: &MetricsRegistry) {
-    let _ = METRICS_REGISTERED.get_or_init(|| {
-        registry.add_metric_or_warn(
-            Box::new(REQUEST_PLANE_QUEUE_SECONDS.clone()),
-            "request_plane_queue_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(REQUEST_PLANE_SEND_SECONDS.clone()),
-            "request_plane_send_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.clone()),
-            "request_plane_roundtrip_ttft_seconds",
-        );
-        registry.add_metric_or_warn(
-            Box::new(REQUEST_PLANE_INFLIGHT.clone()),
-            "request_plane_inflight",
-        );
-    });
-}
 
 /// Register request-plane metrics with a raw Prometheus registry (e.g. for LLM HTTP service /metrics).
 /// Idempotent; only the first call registers. Call this when the service exposes /metrics from its own registry.

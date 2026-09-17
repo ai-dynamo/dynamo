@@ -17,6 +17,7 @@ If the compiled extension hasn't been built (e.g. fresh checkout without
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from unittest.mock import MagicMock
 
 import pytest
@@ -34,6 +35,8 @@ backend = pytest.importorskip(
     "dynamo._core.backend",
     reason="dynamo._core.backend not built — run `maturin develop` first",
 )
+
+from dynamo.common.backend.engine import LlmRegistration  # noqa: E402
 
 
 def test_module_exposes_expected_classes():
@@ -71,6 +74,7 @@ def test_engine_config_required_model_only():
     assert cfg.llm is None
 
 
+@pytest.mark.unified
 def test_engine_config_full_kwargs_round_trip_through_getters():
     cfg = backend.EngineConfig(
         model="m2",
@@ -83,6 +87,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             total_kv_blocks=1000,
             max_num_seqs=64,
             max_num_batched_tokens=2048,
+            enable_eagle=True,
         ),
     )
     assert cfg.model == "m2"
@@ -95,6 +100,26 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.total_kv_blocks == 1000
     assert llm.max_num_seqs == 64
     assert llm.max_num_batched_tokens == 2048
+    assert llm.enable_eagle is True
+
+
+@pytest.mark.unified
+def test_llm_registration_preserves_legacy_positional_arguments():
+    llm = backend.LlmRegistration(2048, 16, 1000, 64, 2048, 2, 1, "host", 9000)
+    assert llm.bootstrap_host == "host"
+    assert llm.bootstrap_port == 9000
+    assert llm.enable_eagle is False
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"enable_eagle": True}])
+@pytest.mark.unified
+def test_llm_registration_dataclass_matches_binding(kwargs):
+    registration = LlmRegistration(**kwargs)
+    cfg = backend.EngineConfig(
+        model="eagle-model",
+        llm=backend.LlmRegistration(**asdict(registration)),
+    )
+    assert cfg.llm.enable_eagle is kwargs.get("enable_eagle", False)
 
 
 def test_worker_config_minimum_args():

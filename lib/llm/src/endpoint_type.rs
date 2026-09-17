@@ -24,6 +24,8 @@ pub enum EndpointType {
     Classify,
     /// Pooling API (raw pooler output: token embeddings, logits, rewards)
     Pooling,
+    /// Cross-encoder reranking API
+    Rerank,
     /// Responses API
     Responses,
     /// Anthropic Messages API
@@ -46,6 +48,7 @@ impl EndpointType {
             Self::Realtime => "realtime",
             Self::Classify => "classify",
             Self::Pooling => "pooling",
+            Self::Rerank => "rerank",
             Self::Responses => "responses",
             Self::AnthropicMessages => "anthropic_messages",
             Self::Generate => "generate",
@@ -64,6 +67,7 @@ impl EndpointType {
             Self::Realtime,
             Self::Classify,
             Self::Pooling,
+            Self::Rerank,
             Self::Responses,
             Self::AnthropicMessages,
             Self::Generate,
