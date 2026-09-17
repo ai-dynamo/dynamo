@@ -517,7 +517,6 @@ mod tests {
     use super::*;
     use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
     use dynamo_kv_router::WorkerType;
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
@@ -620,7 +619,6 @@ mod tests {
         assert_eq!(authority("fd00::1", 9092), "[fd00::1]:9092");
     }
 
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_reconciles_initial_list_and_watch_update() {
         use axum::extract::Request;
@@ -658,9 +656,9 @@ mod tests {
         let peer_a = "10.0.0.2";
         let peer_b = "10.0.0.3";
         let sync_port = 9192;
-        let mut initial = slice_with(&[self_ip, peer_a], None, "IPv4");
+        let mut initial = slice_with(&[self_ip, peer_a], false, "IPv4");
         initial.metadata.name = Some("epp-peers".to_string());
-        let mut updated = slice_with(&[self_ip, peer_b], None, "IPv4");
+        let mut updated = slice_with(&[self_ip, peer_b], false, "IPv4");
         updated.metadata.name = Some("epp-peers".to_string());
         updated.metadata.resource_version = Some("2".to_string());
         let list = serde_json::json!({
@@ -857,7 +855,7 @@ mod tests {
             SelectionServiceBuilder::new(
                 KvRouterConfig::default(),
                 WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                dynamo_custom_policy_builtin::default_registry(),
             )
             .indexer_threads(1)
             .build()
@@ -1425,7 +1423,7 @@ mod tests {
         let service = SelectionServiceBuilder::new(
             KvRouterConfig::default(),
             WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default(),
+            dynamo_custom_policy_builtin::default_registry(),
         )
         .indexer_threads(1)
         .replica_sync(free_tcp_port(), Vec::new())
@@ -1501,7 +1499,7 @@ mod tests {
             SelectionServiceBuilder::new(
                 kv_router_config_from_dynamo_env(),
                 WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                dynamo_custom_policy_builtin::default_registry(),
             )
             .indexer_threads(1)
             .replica_sync(free_tcp_port(), Vec::new())

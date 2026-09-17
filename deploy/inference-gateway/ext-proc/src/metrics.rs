@@ -114,8 +114,8 @@ static KV_RECOVERY_STATE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
             "dynamo_epp_kv_recovery_state",
             "Startup KV-index peer-recovery outcome for this EPP replica: \
              recovered (restored from a peer dump), empty_bootstrap (no eligible \
-             serving peer), or recovery_disabled (peer Service lacks the \
-             selection-http port). Exactly one label is 1.",
+             serving peer), or recovery_disabled (the peer recovery HTTP port \
+             is not configured). Exactly one label is 1.",
         ),
         &["state"],
     )
