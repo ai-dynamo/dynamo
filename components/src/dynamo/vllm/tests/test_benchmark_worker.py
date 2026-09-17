@@ -10,7 +10,7 @@ import pytest
 import torch
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from dynamo.vllm.benchmark_state import RANDOM_KDA_BOUND, RANDOM_KDA_REQUEST_PREFIX
+from dynamo.vllm.benchmark_points import RANDOM_KDA_BOUND, RANDOM_KDA_REQUEST_PREFIX
 from dynamo.vllm.benchmark_worker import BenchmarkWorker, Worker, fill_recurrent_states
 
 pytestmark = [

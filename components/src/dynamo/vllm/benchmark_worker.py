@@ -20,7 +20,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
 
-from dynamo.vllm.benchmark_state import RANDOM_KDA_BOUND, RANDOM_KDA_REQUEST_PREFIX
+from dynamo.vllm.benchmark_points import RANDOM_KDA_BOUND, RANDOM_KDA_REQUEST_PREFIX
 
 
 def fill_recurrent_states(

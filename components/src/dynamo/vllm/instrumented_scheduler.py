@@ -119,17 +119,14 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
-    BenchmarkMode,
-    BenchmarkPoints,
-    DecodePointCandidate,
-    PrefillPointCandidate,
-)
-from dynamo.vllm.benchmark_state import (
     RANDOM_KDA_BOUND,
     RANDOM_KDA_POLICY,
     RANDOM_KDA_REQUEST_PREFIX,
     RANDOM_KDA_WORKER,
-    recurrent_shadow_range,
+    BenchmarkMode,
+    BenchmarkPoints,
+    DecodePointCandidate,
+    PrefillPointCandidate,
 )
 
 if TYPE_CHECKING:
@@ -150,6 +147,19 @@ ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
 
 def _utc_now_rfc3339() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def recurrent_shadow_range(
+    context: int, headroom: int, block_size: int
+) -> tuple[int, int]:
+    """State-table positions read/written by admission and its steady steps.
+
+    Keep the state preceding the first query as well as every write position.
+    Earlier entries are null placeholders, not allocated token-history pages.
+    """
+    first = max(0, (context - 1) // block_size)
+    end = (context + 1 + headroom + block_size - 1) // block_size
+    return first, end
 
 
 # ---------------------------------------------------------------------------
