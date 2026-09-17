@@ -23,12 +23,11 @@ use aiperf_steppable_abi::{
     StepResultV1, U32SliceV1,
 };
 use aisimulate_core::replay::loadgen::{
-    BatchSubmissionError, CompactDirectRequest, CompactHashIdsLease, DynPlacement, SteppableAgg,
-    SteppableReplay,
+    CompactDirectRequest, CompactHashIdsLease, DynPlacement, SteppableAgg, SteppableReplay,
 };
 use aisimulate_core::replay::{
-    DirectRequest, ReplayEngineConfig, ReplayEngineFactory, ReplayPromptTokenSource,
-    ReplayRequestContext, ReplayTerminalStatus, SlaThresholds,
+    DirectRequest, PlacementBatchError, ReplayEngineConfig, ReplayEngineFactory,
+    ReplayPromptTokenSource, ReplayRequestContext, ReplayTerminalStatus, SlaThresholds,
 };
 use dynamo_mocker::placement::{
     KvReplayMetadata, KvRouterConfig, KvRouterPlacement, MockEngineArgs, MockEngineArgsBuilder,
@@ -344,7 +343,7 @@ fn checked_slice_len<T>(len: u64) -> Option<usize> {
         .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<T>())
 }
 
-fn batch_error_status(error: &BatchSubmissionError) -> StatusV1 {
+fn batch_error_status(error: &PlacementBatchError) -> StatusV1 {
     if error.is_poisoned() {
         StatusV1::INTERNAL
     } else {
@@ -1540,19 +1539,15 @@ mod tests {
     #[test]
     fn poisoned_batch_errors_map_to_internal_without_changing_rejections() {
         assert_eq!(
-            batch_error_status(
-                &aisimulate_core::replay::loadgen::BatchSubmissionError::poisoned(anyhow::anyhow!(
-                    "poisoned"
-                ),)
-            ),
+            batch_error_status(&aisimulate_core::replay::PlacementBatchError::poisoned(
+                anyhow::anyhow!("poisoned"),
+            )),
             StatusV1::INTERNAL
         );
         assert_eq!(
-            batch_error_status(
-                &aisimulate_core::replay::loadgen::BatchSubmissionError::unchanged(
-                    anyhow::anyhow!("rejected"),
-                )
-            ),
+            batch_error_status(&aisimulate_core::replay::PlacementBatchError::unchanged(
+                anyhow::anyhow!("rejected"),
+            )),
             StatusV1::REJECTED
         );
     }

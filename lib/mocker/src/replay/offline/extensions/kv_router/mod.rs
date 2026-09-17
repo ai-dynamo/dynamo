@@ -47,8 +47,9 @@ use crate::replay::router_shared::{
 };
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
-    Placement, PlacementCacheSample, PlacementDecision, PlacementEffects, PlacementPolicy,
-    ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
+    Placement, PlacementBatchEffects, PlacementBatchError, PlacementBatchRequest,
+    PlacementCacheSample, PlacementDecision, PlacementEffects, PlacementPolicy, ProviderSpec,
+    ReplayAdmissionMetadata, WorkerTopology,
 };
 
 pub(crate) mod composition;
@@ -538,17 +539,48 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(PlacementEffects { decision, released })
     }
 
-    fn preflight_batch_request(&self, request: &Request) -> Result<()> {
-        let request = request.metadata();
-        request
-            .uuid
-            .ok_or_else(|| anyhow!("KV placement requires a request UUID"))?;
-        if !request.prompt_tokens_are_placement_safe() {
-            return Err(placement_safety_error());
+    fn place_batch(
+        &mut self,
+        requests: Vec<PlacementBatchRequest<'_, Request, KvReplayMetadata>>,
+        now_ms: f64,
+    ) -> std::result::Result<PlacementBatchEffects, PlacementBatchError> {
+        // Validate the complete batch before touching the router. This keeps
+        // ordinary malformed-input failures unchanged and retryable even when
+        // a later request is invalid.
+        for batch_request in &requests {
+            let request = batch_request.request.metadata();
+            request.uuid.ok_or_else(|| {
+                PlacementBatchError::unchanged(anyhow!("KV placement requires a request UUID"))
+            })?;
+            if !request.prompt_tokens_are_placement_safe() {
+                return Err(PlacementBatchError::unchanged(placement_safety_error()));
+            }
+            u32::try_from(request.effective_max_output_tokens()).map_err(|_| {
+                PlacementBatchError::unchanged(anyhow!("max_output_tokens does not fit into u32"))
+            })?;
         }
-        u32::try_from(request.effective_max_output_tokens())
-            .context("max_output_tokens does not fit into u32")?;
-        Ok(())
+
+        let mut decisions = Vec::with_capacity(requests.len());
+        let mut released = Vec::new();
+        for batch_request in requests {
+            let effects = self
+                .place(
+                    batch_request.request,
+                    batch_request.metadata,
+                    batch_request.session_id,
+                    now_ms,
+                )
+                // `place` may have crossed a provider/stateful boundary before
+                // reporting an error. Once the batch starts, fail closed so a
+                // caller never retries against potentially divergent state.
+                .map_err(PlacementBatchError::poisoned)?;
+            decisions.push(effects.decision);
+            released.extend(effects.released);
+        }
+        Ok(PlacementBatchEffects {
+            decisions,
+            released,
+        })
     }
 
     fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
@@ -1347,12 +1379,13 @@ mod tests {
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
-    // `KvRouterPlacement` is only reachable from the `cfg(not(replay-bench))` refusal test.
-    #[cfg(not(feature = "replay-bench"))]
-    use super::KvRouterPlacement;
-    use super::{OfflineReplayRouter, ReplayRequestHashes, SyncReplayIndexer, WorkerAdmission};
+    use super::{
+        KvReplayMetadata, KvRouterPlacement, OfflineReplayRouter, ReplayRequestHashes,
+        SyncReplayIndexer, WorkerAdmission,
+    };
     use crate::common::protocols::{DirectRequest, MockEngineArgs};
     use crate::replay::ReplayPrefillLoadEstimator;
+    use aisimulate_core::replay::{PlacementBatchRequest, PlacementDecision, PlacementPolicy};
     use aisimulate_core::replay::{ReplayPromptTokenSource, ReplayRequestContext};
 
     struct FixedPrefillLoadEstimator {
@@ -1503,6 +1536,46 @@ mod tests {
             policy_class: None,
             replay_context: None,
         }
+    }
+
+    #[test]
+    fn batch_preflights_later_placement_failure_without_committing_earlier_request() {
+        let mut placement = KvRouterPlacement::new(&replay_args(), None, None, 1, None).unwrap();
+        let first = request(701, 7);
+        let mut later = request(702, 8);
+        later.replay_context = Some(ReplayRequestContext {
+            authored_id: "length-only".into(),
+            session_id: None,
+            turn_index: None,
+            metadata: serde_json::Value::Null,
+            prompt_token_source: ReplayPromptTokenSource::LengthOnlySynthetic,
+        });
+
+        let error = match placement.place_batch(
+            vec![
+                PlacementBatchRequest {
+                    request: &first,
+                    metadata: KvReplayMetadata::default(),
+                    session_id: None,
+                },
+                PlacementBatchRequest {
+                    request: &later,
+                    metadata: KvReplayMetadata::default(),
+                    session_id: None,
+                },
+            ],
+            0.0,
+        ) {
+            Ok(_) => panic!("later invalid request must reject the complete batch"),
+            Err(error) => error,
+        };
+        assert!(!error.is_poisoned());
+        assert!(error.to_string().contains("authored prompt token IDs"));
+
+        let effects = placement
+            .place(&first, KvReplayMetadata::default(), None, 0.0)
+            .expect("the earlier request was not committed by the failed batch");
+        assert!(matches!(effects.decision, PlacementDecision::Immediate(_)));
     }
 
     /// A completion signal for a request the router never admitted (e.g. a
