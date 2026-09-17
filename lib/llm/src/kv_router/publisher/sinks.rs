@@ -84,9 +84,10 @@ impl RouterEventBatchSink for EventPlanePublisher {
             MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
             MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
         ) {
+            let first_event_id = batch.first().map(|event| event.event.event_id);
+            let last_event_id = batch.last().map(|event| event.event.event_id);
+            let worker_id = batch.first().map(|event| event.worker_id);
             if let Err(error) = self.0.publish(&batch).await {
-                let first_event_id = batch.first().map(|event| event.event.event_id);
-                let last_event_id = batch.last().map(|event| event.event.event_id);
                 tracing::error!(
                     transport = ?self.0.transport_kind(),
                     event_count = batch.len(),
@@ -96,6 +97,15 @@ impl RouterEventBatchSink for EventPlanePublisher {
                     "Failed to publish KV event batch"
                 );
                 failures.record(batch.len(), error);
+            } else {
+                tracing::trace!(
+                    transport = ?self.0.transport_kind(),
+                    ?worker_id,
+                    event_count = batch.len(),
+                    ?first_event_id,
+                    ?last_event_id,
+                    "Forwarded KV event batch to router event plane"
+                );
             }
         }
         failures.into_result()
@@ -161,10 +171,12 @@ pub(super) async fn emit(
     storage_tier: StorageTier,
     residency_domain: ResidencyDomain,
     event: KvCacheEvent,
+    session_id: Option<String>,
     output: &mut Vec<RouterEvent>,
 ) -> bool {
-    let router_event =
+    let mut router_event =
         RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
+    router_event.session_id = session_id;
     let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
         Ok(()) => true,
         Err(error) => {

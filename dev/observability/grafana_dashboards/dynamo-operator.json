@@ -39,7 +39,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Rate of reconciliations per second by resource type",
+      "description": "Cluster-wide reconciliation rate by controller and result; the Namespace filter does not apply",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -117,8 +117,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (resource_type, result) (rate(dynamo_operator_reconcile_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m]))",
-          "legendFormat": "{{resource_type}} - {{result}}",
+          "expr": "sum by (controller, result) (rate(controller_runtime_reconcile_total{controller=~\"$resource_type\"}[5m]))",
+          "legendFormat": "{{controller}} - {{result}}",
           "range": true,
           "refId": "A"
         }
@@ -131,7 +131,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "P95 reconciliation duration by resource type",
+      "description": "Cluster-wide P95 reconciliation duration by controller; the Namespace filter does not apply",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -209,8 +209,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (resource_type, le) (rate(dynamo_operator_reconcile_duration_seconds_bucket{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m])))",
-          "legendFormat": "{{resource_type}} p95",
+          "expr": "histogram_quantile(0.95, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{controller=~\"$resource_type\"}[5m])))",
+          "legendFormat": "{{controller}} p95",
           "range": true,
           "refId": "A"
         }
@@ -223,7 +223,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Rate of reconciliation errors by resource type and error type",
+      "description": "Cluster-wide reconciliation error rate by controller; the Namespace filter does not apply",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -305,8 +305,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (resource_type, error_type) (rate(dynamo_operator_reconcile_errors_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m]))",
-          "legendFormat": "{{resource_type}} - {{error_type}}",
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{controller=~\"$resource_type\"}[5m]))",
+          "legendFormat": "{{controller}}",
           "range": true,
           "refId": "A"
         }
@@ -791,7 +791,7 @@
         "type": "prometheus",
         "uid": "${datasource}"
       },
-      "description": "Success rate of reconciliations by resource type",
+      "description": "Cluster-wide reconciliation success rate by controller; the Namespace filter does not apply",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -849,8 +849,8 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum by (resource_type) (rate(dynamo_operator_reconcile_total{resource_type=~\"$resource_type\", result=\"success\", namespace=~\"$namespace\"}[5m])) / sum by (resource_type) (rate(dynamo_operator_reconcile_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m]))",
-          "legendFormat": "{{resource_type}}",
+          "expr": "100 * sum by (controller) (rate(controller_runtime_reconcile_total{controller=~\"$resource_type\", result=\"success\"}[5m])) / sum by (controller) (rate(controller_runtime_reconcile_total{controller=~\"$resource_type\"}[5m]))",
+          "legendFormat": "{{controller}}",
           "range": true,
           "refId": "A"
         }
@@ -966,7 +966,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(dynamo_operator_reconcile_total, namespace)",
+        "definition": "label_values(dynamo_operator_resources_total, namespace)",
         "hide": 0,
         "includeAll": true,
         "label": "Namespace",
@@ -975,7 +975,7 @@
         "options": [],
         "query": {
           "qryType": 1,
-          "query": "label_values(dynamo_operator_reconcile_total, namespace)",
+          "query": "label_values(dynamo_operator_resources_total, namespace)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

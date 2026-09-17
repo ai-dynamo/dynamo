@@ -50,7 +50,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.router_hints import enable_router_hint_support
+from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.worker_factory import WorkerFactory
 
 from . import envs
@@ -78,6 +78,9 @@ from .kv_connector_protocols import (
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
+from .multimodal_utils.models.nemotron_video_routing import (
+    publish_vllm_nemotron_video_processor_contract,
+)
 from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
@@ -226,6 +229,7 @@ async def worker(argv: list[str] | None = None) -> None:
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     if snapshot_controller is not None:
@@ -389,7 +393,7 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
 
     Resolved via the SAME Rust logic the frontend uses
     (`dynamo._core.resolve_routing_image_token_id` ->
-    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
+    `mm_routing::image::resolve_routing_tokens`), returning `chat_placeholder_token_id`
     so the KV-event normalizer keys on the identical token the frontend
     substitutes `pad_value` over — no per-family drift between the two.
 
@@ -759,7 +763,7 @@ def setup_vllm_engine(
     if component_gauges is not None:
         component_gauges.set_model_load_time(load_time)
 
-    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+    logger.info(f"worker for {config.served_model_name} has been initialized")
 
     embedding_cleanup_resource: EmbeddingEngineCleanupResource | None = None
     if embedding_process_group is not None:
@@ -836,10 +840,11 @@ async def register_vllm_model(
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+    publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
     state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)
-    enable_router_hint_support(
+    publish_kv_hint_capabilities(
         runtime_config,
         config.engine_args,
         worker_type,

@@ -43,16 +43,10 @@ func HasGroveTopologyOverrides(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool
 		if overrideWritesGroveTopology(component.ProviderOverride) {
 			return true
 		}
-		if component.Multinode == nil {
-			continue
-		}
-		if component.Multinode.Leader != nil &&
-			overrideWritesGroveTopology(component.Multinode.Leader.ProviderOverride) {
-			return true
-		}
-		if component.Multinode.Worker != nil &&
-			overrideWritesGroveTopology(component.Multinode.Worker.ProviderOverride) {
-			return true
+		for roleIndex := range component.Roles {
+			if overrideWritesGroveTopology(component.Roles[roleIndex].ProviderOverride) {
+				return true
+			}
 		}
 	}
 	return false
@@ -92,27 +86,17 @@ func ComposeGroveOverrides(
 		if err := applyGroveComponentOverride(result, component, component.ProviderOverride); err != nil {
 			return nil, fmt.Errorf("%s.providerOverride: %w", componentPath, err)
 		}
-		if component.Multinode == nil {
-			continue
-		}
-		if component.Multinode.Leader != nil {
-			if err := applyGroveRoleOverride(
-				result,
-				component,
-				ScopeMultinodeLeader,
-				component.Multinode.Leader.ProviderOverride,
-			); err != nil {
-				return nil, fmt.Errorf("%s.multinode.leader.providerOverride: %w", componentPath, err)
+		for roleIndex := range component.Roles {
+			role := &component.Roles[roleIndex]
+			if role.ProviderOverride == nil {
+				continue
 			}
-		}
-		if component.Multinode.Worker != nil {
-			if err := applyGroveRoleOverride(
-				result,
-				component,
-				ScopeMultinodeWorker,
-				component.Multinode.Worker.ProviderOverride,
-			); err != nil {
-				return nil, fmt.Errorf("%s.multinode.worker.providerOverride: %w", componentPath, err)
+			scope, ok := ScopeForComponentRole(role.Name)
+			if !ok {
+				return nil, fmt.Errorf("%s.roles[%d].providerOverride: unsupported component role %q", componentPath, roleIndex, role.Name)
+			}
+			if err := applyGroveRoleOverride(result, component, scope, role.ProviderOverride); err != nil {
+				return nil, fmt.Errorf("%s.roles[%d].providerOverride: %w", componentPath, roleIndex, err)
 			}
 		}
 	}
@@ -203,7 +187,7 @@ func applyGroveRoleOverride(
 		return err
 	}
 	suffix := consts.GroveRoleSuffixLeader
-	if scope == ScopeMultinodeWorker {
+	if scope == ScopeRoleWorker {
 		suffix = consts.GroveRoleSuffixWorker
 	}
 

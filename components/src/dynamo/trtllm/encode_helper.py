@@ -245,7 +245,7 @@ class EncodeHelper:
             Response with NIXL metadata, shape, dtype, and auxiliary data
         """
         logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
-        loaded_data = multimodal_processor.load_tensor_from_path_or_url(
+        loaded_data = await multimodal_processor.load_tensor_from_path_or_url(
             embedding_paths[0]
         )
 
@@ -409,15 +409,11 @@ class EncodeHelper:
             yield {"error": "No multimodal_processor configured on encode worker"}
             return
 
-        # Extract messages and determine which flow to use
-        messages = request.get("extra_args", {}).get(
-            "messages", request.get("messages", [])
-        )
         (
             _,
             image_urls,
             embedding_paths,
-        ) = multimodal_processor.extract_prompt_and_media(messages)
+        ) = multimodal_processor.extract_prompt_and_media_from_request(request)
 
         # Flow 1: Embedding-path flow (pre-computed embeddings via NIXL)
         if embedding_paths:
