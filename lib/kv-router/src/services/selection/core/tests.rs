@@ -1174,9 +1174,9 @@ async fn shutdown_reports_not_ready_and_rejects_new_work() {
 
     assert_eq!(core.list_workers(None, None).len(), 1);
     assert_eq!(core.loads(None, None).len(), 1);
-    let deleted = core
-        .delete_worker(1)
+    let deleted = tokio::time::timeout(Duration::from_secs(5), core.delete_worker(1))
         .await
+        .expect("delete must not wait for a stopped config monitor")
         .expect("delete should remain available after shutdown");
     assert_eq!(deleted.lifecycle, WorkerLifecycle::Unschedulable);
 }
@@ -3326,25 +3326,6 @@ async fn deleting_worker_releases_booking_before_same_id_returns() {
     })
     .await
     .expect("worker deletion deadline");
-}
-
-#[tokio::test]
-async fn deleting_worker_after_scheduler_shutdown_does_not_hang() {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let core = local_core(test_config(false));
-        core.upsert_worker(worker(1)).await.unwrap();
-        core.select_and_reserve(reserve_request("live"))
-            .await
-            .unwrap();
-        core.shutdown();
-        core.delete_worker(1)
-            .await
-            .expect("deletion remains available after shutdown");
-        assert!(core.list_workers(None, None).is_empty());
-        assert!(core.upsert_worker(worker(1)).await.is_err());
-    })
-    .await
-    .expect("shutdown must close removal barrier");
 }
 
 #[tokio::test]
