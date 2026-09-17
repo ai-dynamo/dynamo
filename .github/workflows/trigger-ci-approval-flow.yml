@@ -79,13 +79,14 @@ jobs:
         id: request
         env:
           GH_TOKEN: ${{ github.token }}
+          GLAMR_USER_ID: "282374502"
         run: |
           pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
           [[ $(jq -r '.state == "open" and .head.repo.fork == true' <<< "$pr") == true ]] || exit 0
           head=$(jq -r '.head.sha' <<< "$pr")
           if [[ "$GITHUB_EVENT_NAME" == issue_comment ]]; then
-            [[ $(jq -r '.user.id' <<< "$pr") == 282374502 ]] || exit 0
-            [[ $(jq -r '.head.repo.owner.id' <<< "$pr") == 282374502 ]] || exit 0
+            [[ $(jq -r '.user.id' <<< "$pr") == "$GLAMR_USER_ID" ]] || exit 0
+            [[ $(jq -r '.head.repo.owner.id' <<< "$pr") == "$GLAMR_USER_ID" ]] || exit 0
             body=$(jq -r '.comment.body' "$GITHUB_EVENT_PATH")
             pattern='^([^[:space:]]+:[[:blank:]]+)?@dynamo-ops please run full CI for ([0-9a-f]{40})[[:space:]]*$'
             [[ "$body" =~ $pattern ]] || exit 0
