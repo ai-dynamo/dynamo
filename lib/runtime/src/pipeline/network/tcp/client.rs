@@ -460,7 +460,14 @@ async fn handle_request_reader(
                                 }
                             }
                             TwoPartMessageType::DataOnly(data) => {
-                                if bytes_tx.send(data).await.is_err() {
+                                // Local cancellation must also interrupt a full input channel.
+                                let sent = tokio::select! {
+                                    biased;
+                                    _ = &mut killed => break,
+                                    _ = &mut stopped => break,
+                                    sent = bytes_tx.send(data) => sent,
+                                };
+                                if sent.is_err() {
                                     tracing::debug!("downstream consumer dropped; exiting request-stream reader");
                                     break;
                                 }
@@ -1814,6 +1821,184 @@ mod tests {
             bytes_rx,
             controller,
         }
+    }
+
+    // The read notification is sent only once a whole encoded frame has reached
+    // FramedRead. On the current-thread test runtime, the reader then polls the
+    // full channel send before the waiting test task can resume.
+    struct FrameReadProbe {
+        inner: BoxRead,
+        remaining: usize,
+        read: Option<oneshot::Sender<()>>,
+    }
+
+    impl tokio::io::AsyncRead for FrameReadProbe {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let before = buf.filled().len();
+            let result = std::pin::Pin::new(&mut self.inner).poll_read(cx, buf);
+            if matches!(result, std::task::Poll::Ready(Ok(()))) {
+                self.remaining = self.remaining.saturating_sub(buf.filled().len() - before);
+                if self.remaining == 0
+                    && let Some(read) = self.read.take()
+                {
+                    let _ = read.send(());
+                }
+            }
+            result
+        }
+    }
+
+    enum FullRequestChannelAction {
+        Kill,
+        Stop,
+        Drop,
+        Drain,
+        RemoteKill,
+        RemoteStop,
+    }
+
+    async fn full_request_channel(action: FullRequestChannelAction) {
+        use tokio_util::codec::Encoder;
+        let RequestReaderHarness {
+            mut framed_server,
+            framed_reader,
+            controller,
+            ..
+        } = request_reader_harness().await;
+        let (bytes_tx, mut bytes_rx) = mpsc::channel(1);
+        bytes_tx.send(Bytes::from_static(b"first")).await.unwrap();
+        let message = TwoPartMessage::from_data(Bytes::from_static(b"second"));
+        let mut encoded = bytes::BytesMut::new();
+        TwoPartCodec::default()
+            .encode(message, &mut encoded)
+            .unwrap();
+        let (read_tx, read_rx) = oneshot::channel();
+        let reader = FramedRead::new(
+            Box::new(FrameReadProbe {
+                inner: framed_reader.into_inner(),
+                remaining: encoded.len(),
+                read: Some(read_tx),
+            }) as BoxRead,
+            TwoPartCodec::default(),
+        );
+        let counter =
+            IntCounter::new("full_request_channel_cancellations", "test counter").unwrap();
+        let mut task = tokio::spawn(handle_request_reader(
+            reader,
+            bytes_tx,
+            controller.clone(),
+            Some(counter.clone()),
+        ));
+        framed_server
+            .send(TwoPartMessage::from_data(Bytes::from_static(b"second")))
+            .await
+            .unwrap();
+        time::timeout(Duration::from_secs(1), read_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes_rx.len(), 1);
+        assert!(!task.is_finished());
+
+        match action {
+            FullRequestChannelAction::Kill | FullRequestChannelAction::Stop => {
+                if matches!(action, FullRequestChannelAction::Kill) {
+                    controller.kill();
+                } else {
+                    controller.stop();
+                }
+                time::timeout(Duration::from_secs(1), &mut task)
+                    .await
+                    .expect("local cancellation must interrupt a full request channel")
+                    .unwrap();
+                assert!(
+                    bytes_rx.is_closed(),
+                    "all reader-owned senders must be dropped"
+                );
+                assert_eq!(bytes_rx.recv().await.unwrap(), Bytes::from_static(b"first"));
+                assert!(
+                    bytes_rx.recv().await.is_none(),
+                    "pending frame must not be forwarded"
+                );
+                assert_eq!(
+                    counter.get(),
+                    0,
+                    "local cancellation is not upstream cancellation"
+                );
+                assert_eq!(
+                    controller.is_killed(),
+                    matches!(action, FullRequestChannelAction::Kill)
+                );
+            }
+            FullRequestChannelAction::Drop => {
+                drop(bytes_rx);
+                time::timeout(Duration::from_secs(1), &mut task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!controller.is_stopped());
+                assert_eq!(counter.get(), 0);
+            }
+            FullRequestChannelAction::Drain
+            | FullRequestChannelAction::RemoteKill
+            | FullRequestChannelAction::RemoteStop => {
+                let control = match action {
+                    FullRequestChannelAction::RemoteKill => ControlMessage::Kill,
+                    FullRequestChannelAction::RemoteStop => ControlMessage::Stop,
+                    _ => ControlMessage::Sentinel,
+                };
+                // A wire control frame follows the blocked data frame. It is not
+                // equivalent to a local context signal and cannot bypass FIFO.
+                framed_server.send(control_message(&control)).await.unwrap();
+                assert!(!controller.is_stopped());
+                assert_eq!(bytes_rx.recv().await.unwrap(), Bytes::from_static(b"first"));
+                time::timeout(Duration::from_secs(1), &mut task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    bytes_rx.recv().await.unwrap(),
+                    Bytes::from_static(b"second")
+                );
+                assert!(bytes_rx.recv().await.is_none());
+                let remote = !matches!(action, FullRequestChannelAction::Drain);
+                assert_eq!(controller.is_stopped(), remote);
+                assert_eq!(
+                    controller.is_killed(),
+                    matches!(action, FullRequestChannelAction::RemoteKill)
+                );
+                assert_eq!(counter.get(), u64::from(remote));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_request_channel_kill() {
+        full_request_channel(FullRequestChannelAction::Kill).await;
+    }
+    #[tokio::test]
+    async fn test_full_request_channel_stop() {
+        full_request_channel(FullRequestChannelAction::Stop).await;
+    }
+    #[tokio::test]
+    async fn test_full_request_channel_drop() {
+        full_request_channel(FullRequestChannelAction::Drop).await;
+    }
+    #[tokio::test]
+    async fn test_full_request_channel_drain() {
+        full_request_channel(FullRequestChannelAction::Drain).await;
+    }
+    #[tokio::test]
+    async fn test_full_request_channel_remote_kill() {
+        full_request_channel(FullRequestChannelAction::RemoteKill).await;
+    }
+    #[tokio::test]
+    async fn test_full_request_channel_remote_stop() {
+        full_request_channel(FullRequestChannelAction::RemoteStop).await;
     }
 
     /// Receiving Stop calls context.stop(), increments the counter, and exits.
