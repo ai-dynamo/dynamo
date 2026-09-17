@@ -5309,7 +5309,7 @@ def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monke
     ]
     stub._bench_active_req_ids = set()
     stub._bench_current_point = None
-    stub._kvwarm_stage_reported = None
+    stub._bench_synchronizer = None
     stub._bench_soft_timeout_elapsed = lambda: False
     stub._bench_frees_pending = lambda: False
     stub._kvwarm_start_stage = MagicMock()
