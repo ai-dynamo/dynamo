@@ -299,6 +299,12 @@ pub mod frontend_service {
     /// Gauge metric tracking current queued prefill tokens for each worker
     pub const WORKER_ACTIVE_PREFILL_TOKENS: &str = "worker_active_prefill_tokens";
 
+    /// Requests waiting for external KV transfer completion per worker
+    pub const WORKER_REMOTE_KV_WAITING_REQUESTS: &str = "worker_remote_kv_waiting_requests";
+
+    /// KV context tokens waiting for external transfer completion per worker
+    pub const WORKER_REMOTE_KV_WAITING_TOKENS: &str = "worker_remote_kv_waiting_tokens";
+
     /// Last observed time to first token per worker (in seconds)
     /// Gauge metric tracking the most recent TTFT for each worker
     pub const WORKER_LAST_TIME_TO_FIRST_TOKEN_SECONDS: &str =
