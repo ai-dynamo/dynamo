@@ -167,6 +167,7 @@ launch_joiner() {
       --elastic-ep-backend mooncake --mooncake-ib-device $IB_DEVICE \
       --enable-eplb --ep-num-redundant-experts 24 \
       --elastic-ep-initial-size 4 --max-ep-size 8 \
+      --cuda-graph-backend-decode disabled --cuda-graph-backend-prefill disabled \
       --elastic-ep-join-mode scale --elastic-ep-join-rank-offset $rank_offset \
       --dist-init-addr $DIST_INIT_ADDR \
       --host 127.0.0.1 --port $((30000 + rank_offset)) \

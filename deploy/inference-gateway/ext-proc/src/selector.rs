@@ -54,6 +54,7 @@ pub struct SelectRequest {
     pub strict_priority: Option<u32>,
     pub expected_output_tokens: Option<u32>,
     pub policy_class: Option<String>,
+    pub cache_namespace: Option<String>,
 }
 
 /// Observability overlap summary (matched token counts).
@@ -286,6 +287,7 @@ impl Selector {
             selection_id: Some(reservation_id.clone()),
             prompt: PromptRequest {
                 token_ids: Some(req.token_ids),
+                cache_namespace: req.cache_namespace,
                 ..Default::default()
             },
             router_config_override: None,
@@ -509,6 +511,7 @@ models:
             strict_priority: None,
             expected_output_tokens: None,
             policy_class: None,
+            cache_namespace: None,
         }
     }
 
