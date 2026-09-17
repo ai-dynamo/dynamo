@@ -729,7 +729,6 @@ func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string
 		return nil
 	}
 
-	// Query the credential index with the normalized registry host.
 	names, err := retriever.GetSecrets(namespace, reference.Domain(named))
 	if err != nil {
 		return nil
