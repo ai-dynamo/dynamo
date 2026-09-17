@@ -265,6 +265,11 @@ pub trait SequenceSubscriber: Send {
     ) -> Poll<Option<anyhow::Result<ActiveSequenceEvent>>> {
         Poll::Pending
     }
+
+    /// Called once after each drain batch is applied and flushed, with the
+    /// number of events in the batch. Implementations may sample their own
+    /// backlog here; the default records nothing.
+    fn record_drain(&mut self, _applied: usize) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -281,9 +286,9 @@ pub enum ReplicaWorkerPolicy {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SequenceTrackerOptions {
-    replica_worker_policy: ReplicaWorkerPolicy,
-    expiry_duration: Option<Duration>,
+pub(crate) struct SequenceTrackerOptions {
+    pub(crate) replica_worker_policy: ReplicaWorkerPolicy,
+    pub(crate) expiry_duration: Option<Duration>,
 }
 
 /// Errors that can occur during sequence management operations.
@@ -381,14 +386,17 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         router_id: u64,
         worker_type: &'static str,
     ) -> Self {
-        Self::new_with_replica_worker_policy(
+        Self::new_with_options(
             publisher,
             block_size,
             dp_range,
             replica_sync,
             router_id,
             worker_type,
-            ReplicaWorkerPolicy::LazyRegister,
+            SequenceTrackerOptions {
+                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
+                expiry_duration: Some(active_request_expiry_duration()),
+            },
         )
     }
 
@@ -411,38 +419,6 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             SequenceTrackerOptions {
                 replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
                 expiry_duration: None,
-            },
-        )
-    }
-
-    /// Create a tracker with an explicit stale active-request cleanup guard.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `expiry_duration` or `block_size` is zero.
-    pub fn new_with_expiry_duration(
-        publisher: P,
-        block_size: usize,
-        dp_range: HashMap<u64, (u32, u32)>,
-        replica_sync: bool,
-        router_id: u64,
-        worker_type: &'static str,
-        expiry_duration: Duration,
-    ) -> Self {
-        assert!(
-            !expiry_duration.is_zero(),
-            "expiry_duration must be greater than zero"
-        );
-        Self::new_with_options(
-            publisher,
-            block_size,
-            dp_range,
-            replica_sync,
-            router_id,
-            worker_type,
-            SequenceTrackerOptions {
-                replica_worker_policy: ReplicaWorkerPolicy::LazyRegister,
-                expiry_duration: Some(expiry_duration),
             },
         )
     }
@@ -472,7 +448,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     }
 
     /// Builds a tracker from resolved replica-admission and expiry policies.
-    fn new_with_options(
+    pub(crate) fn new_with_options(
         publisher: P,
         block_size: usize,
         dp_range: HashMap<u64, (u32, u32)>,
@@ -483,12 +459,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     ) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let (remote_state_updates, _) = watch::channel(());
-        let workers = match options.expiry_duration {
-            Some(duration) => {
-                WorkerTable::new_with_expiry_duration(block_size, &dp_range, duration)
-            }
-            None => WorkerTable::new_without_expiry(block_size, &dp_range),
-        };
+        let workers = WorkerTable::new_with_expiry(block_size, &dp_range, options.expiry_duration);
         let initial_workers: Vec<_> = workers.workers().collect();
         let prompt_registry = PromptRegistry::new(initial_workers.iter().copied());
         let publisher = Arc::new(publisher);
@@ -821,7 +792,16 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         req: SequenceRequest,
         decay_now: Instant,
     ) -> Result<(), SequenceError> {
-        self.add_request_impl(req, decay_now, false).map(|_| ())
+        self.add_request_if_registered_admitted(req, decay_now)
+            .map(|_| ())
+    }
+
+    pub fn add_request_if_registered_admitted(
+        &self,
+        req: SequenceRequest,
+        decay_now: Instant,
+    ) -> Result<AttemptId, SequenceError> {
+        self.add_request_impl(req, decay_now, false)
     }
 
     fn add_request_impl(
@@ -849,8 +829,41 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
         Ok(attempt_id)
     }
 
-    pub(crate) fn request_worker(&self, request_id: &RequestId) -> Option<WorkerWithDpRank> {
+    pub(crate) fn request_worker(&self, request_id: &str) -> Option<WorkerWithDpRank> {
         self.request_index.worker_for(request_id)
+    }
+
+    pub(crate) fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        self.request_index.booking_for(&booking.request_id)
+            == Some(RequestBooking {
+                worker: booking.worker,
+                attempt_id: booking.attempt_id,
+            })
+    }
+
+    /// Republish the ordered completion event for `booking` while it is still
+    /// the live booking; serialized with free/rebook through the worker's
+    /// sequence lock.
+    pub(crate) fn publish_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> bool {
+        let table = self.workers.read();
+        let Some(&idx) = table.index.get(&booking.worker) else {
+            return false;
+        };
+        let _seq = table.slots[idx].sequences.write();
+        if !self.has_booking(booking) {
+            return false;
+        }
+        self.enqueue_publish_event(ActiveSequenceEvent {
+            request_id: booking.request_id.clone(),
+            worker: booking.worker,
+            data: ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: self.router_id,
+            lora_name: self.request_index.lora_for(&booking.request_id),
+        });
+        true
     }
 
     /// Free all blocks associated with a request.
@@ -1622,21 +1635,6 @@ mod tests {
                 DEFAULT_ACTIVE_REQUEST_EXPIRY_DURATION
             );
         }
-    }
-
-    /// Verifies that zero duration is rejected before worker-table construction.
-    #[test]
-    #[should_panic(expected = "expiry_duration must be greater than zero")]
-    fn custom_expiry_rejects_zero_duration_at_multi_worker_boundary() {
-        let _ = ActiveSequencesMultiWorker::new_with_expiry_duration(
-            NoopSequencePublisher,
-            4,
-            HashMap::new(),
-            false,
-            0,
-            "test",
-            Duration::ZERO,
-        );
     }
 
     fn make_sequences() -> ActiveSequencesMultiWorker<NoopSequencePublisher> {
@@ -2498,10 +2496,7 @@ mod tests {
         );
         assert_eq!(active_request_count(&sequences, worker_a), 1);
         assert_eq!(active_request_count(&sequences, worker_b), 0);
-        assert_eq!(
-            sequences.request_worker(&"req-1".to_string()),
-            Some(worker_a)
-        );
+        assert_eq!(sequences.request_worker("req-1"), Some(worker_a));
     }
 
     #[tokio::test]
@@ -2530,10 +2525,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(active_request_count(&sequences, booked_worker), 1);
-        assert_eq!(
-            sequences.request_worker(&"req-1".to_string()),
-            Some(booked_worker)
-        );
+        assert_eq!(sequences.request_worker("req-1"), Some(booked_worker));
     }
 
     #[test]
@@ -3085,14 +3077,8 @@ mod tests {
         assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-2".to_string()),
-            Some(worker)
-        );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-2"), Some(worker));
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
         assert_eq!(
             sequences.active_request_counts().get(&worker).copied(),
             Some(1)
@@ -3119,14 +3105,8 @@ mod tests {
         assert_eq!(batches[0][0].active_prefill_tokens, 0);
         assert_eq!(sequences.remote_state_update_count(), 1);
         assert_eq!(sequences.prompt_registry.cleanup_attempts(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-2".to_string()),
-            Some(worker)
-        );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-2"), Some(worker));
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[test]
@@ -3189,11 +3169,11 @@ mod tests {
             "source B should apply while source A remains blocked"
         );
         assert_eq!(
-            sequences.request_index.worker_for(&"source-a".to_string()),
+            sequences.request_index.worker_for("source-a"),
             Some(worker_a)
         );
         assert_eq!(
-            sequences.request_index.worker_for(&"source-b".to_string()),
+            sequences.request_index.worker_for("source-b"),
             Some(worker_b)
         );
     }
@@ -3246,10 +3226,7 @@ mod tests {
 
         sequences.apply_replica_batch(vec![replica_add("req-1", worker_b, vec![4, 5, 6])]);
 
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker_a)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker_a));
         assert_eq!(sequences.active_blocks()[&worker_a], 3);
         assert!(!sequences.active_blocks().contains_key(&worker_b));
         assert_eq!(sequences.num_workers(), 1);
@@ -3300,10 +3277,7 @@ mod tests {
             sequences.prompt_registry.cleanup_attempts(),
             cleanup_count + 1
         );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3339,10 +3313,7 @@ mod tests {
                 .copied(),
             Some(0)
         );
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3421,10 +3392,7 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3446,10 +3414,7 @@ mod tests {
         let batches = publisher.load_batches();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
     }
 
     #[tokio::test]
@@ -3710,10 +3675,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 1);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            Some(worker)
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), Some(worker));
         assert!(!sequences.prompt_registry.is_block_index_empty());
         assert_eq!(sequences.active_blocks().get(&worker).copied(), Some(3));
     }
@@ -3742,10 +3704,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 0);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
         assert!(sequences.prompt_registry.is_block_index_empty());
     }
 
@@ -3774,10 +3733,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(sequences.num_workers(), 0);
-        assert_eq!(
-            sequences.request_index.worker_for(&"req-1".to_string()),
-            None
-        );
+        assert_eq!(sequences.request_index.worker_for("req-1"), None);
     }
 
     #[test]

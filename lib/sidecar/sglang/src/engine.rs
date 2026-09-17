@@ -277,7 +277,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
                 .as_ref()
@@ -285,7 +285,7 @@ impl LLMEngine for SglangSidecarEngine {
         } else {
             None
         };
-        let cancel = self.cancel.clone();
+        let cancel = self.cancel.child_token();
         let is_prefill = self.disaggregation_mode.is_prefill();
 
         Ok(Box::pin(async_stream::stream! {
@@ -312,6 +312,20 @@ impl LLMEngine for SglangSidecarEngine {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after the gRPC transport opens the
+                // response stream so decode can rendezvous while prefill runs.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
@@ -364,7 +378,7 @@ impl LLMEngine for SglangSidecarEngine {
 
                         if is_prefill {
                             if response.finished {
-                                let mut terminal = match terminal_from_meta(
+                                let terminal = match terminal_from_meta(
                                     &response.meta_info,
                                     observed_prompt_tokens,
                                     0,
@@ -375,7 +389,6 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                 };
-                                terminal.disaggregated_params = prefill_handoff.clone();
                                 yield Ok(terminal);
                                 break;
                             }
@@ -769,6 +782,107 @@ fn kv_event_connect_host(
     Ok(bare_host.to_string())
 }
 
+/// Same predicate as SGLang's `SpeculativeAlgorithm.is_eagle()`, which is
+/// what switches its radix cache (and so its KV events) to bigram keys.
+/// `NEXTN` covers older builds that don't normalize it to `EAGLE`.
+fn sglang_eagle_enabled(server_info: &Value) -> bool {
+    server_info
+        .get("speculative_algorithm")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|algorithm| {
+            matches!(
+                algorithm.to_ascii_uppercase().as_str(),
+                "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
+            )
+        })
+}
+
+fn is_deepseek_v4_arch(model_info: &Value) -> bool {
+    model_info
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|architectures| {
+            architectures.iter().any(|architecture| {
+                matches!(
+                    architecture.as_str(),
+                    Some(
+                        "DeepseekV4ForCausalLM"
+                            | "DeepseekV4ForCausalLMNextN"
+                            | "DeepseekV4ForCausalLMDSpark"
+                    )
+                )
+            })
+        })
+}
+
+fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -> Option<u64> {
+    let device_tokens = server_info
+        .get("max_total_num_tokens")?
+        .as_u64()
+        .filter(|tokens| *tokens > 0)?;
+    let policy = server_info.get("hicache_write_policy")?.as_str()?;
+    if !matches!(policy, "write_back" | "write_through") {
+        return None;
+    }
+
+    let host_tokens = match server_info.get("hicache_host_total_tokens") {
+        Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
+        None => {
+            if server_info
+                .get("enable_hierarchical_cache")
+                .and_then(Value::as_bool)
+                != Some(true)
+                || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
+                || client::json_u64(server_info, "dcp_size")
+                    .unwrap_or(1)
+                    .max(1)
+                    > 1
+            {
+                return None;
+            }
+
+            let page_size = client::json_u64(server_info, "page_size").filter(|size| *size > 0)?;
+            let ratio = server_info
+                .get("hicache_ratio")?
+                .as_f64()
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
+            if is_deepseek_v4_arch(model_info) {
+                // Compatibility with SGLang's current DSV4 host allocator. Prefer the
+                // authoritative field above once SGLang exposes realized capacity.
+                let device_pages = device_tokens
+                    .checked_add(page_size.checked_sub(1)?)?
+                    .checked_div(page_size)?;
+                let host_pages = device_pages as f64 * ratio;
+                if !host_pages.is_finite() || host_pages >= u64::MAX as f64 {
+                    return None;
+                }
+                (host_pages as u64).checked_mul(page_size)?
+            } else {
+                let unaligned_tokens = device_tokens as f64 * ratio;
+                if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
+                    return None;
+                }
+                (unaligned_tokens as u64)
+                    .checked_div(page_size)?
+                    .checked_add(1)?
+                    .checked_mul(page_size)?
+            }
+        }
+    };
+    if host_tokens == 0 {
+        return None;
+    }
+
+    match policy {
+        "write_back" => Some(host_tokens),
+        "write_through" => host_tokens
+            .checked_sub(device_tokens)
+            .filter(|tokens| *tokens > 0),
+        _ => None,
+    }
+}
+
 fn build_engine_config(
     discovery: &Discovery,
     mode: DisaggregationMode,
@@ -817,11 +931,21 @@ fn build_engine_config(
         ));
     }
 
+    let enable_eagle = sglang_eagle_enabled(&discovery.server_info);
+
     let mut runtime_data = HashMap::new();
     runtime_data.insert(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
+    if let Some(total_tokens) =
+        hicache_native_offloading_capacity(&discovery.server_info, &discovery.model_info)
+    {
+        runtime_data.insert(
+            "native_offloading_capacity".to_string(),
+            serde_json::json!({"total_tokens": total_tokens}),
+        );
+    }
 
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
@@ -836,6 +960,7 @@ fn build_engine_config(
             max_num_batched_tokens,
             data_parallel_size,
             data_parallel_start_rank,
+            enable_eagle,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
             bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
         }),
@@ -849,7 +974,8 @@ mod tests {
 
     use super::{
         DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
-        discover_kv_event_sources, resolve_bootstrap_host_with_local,
+        discover_kv_event_sources, hicache_native_offloading_capacity,
+        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -861,6 +987,57 @@ mod tests {
             model_info: json!({}),
             server_info,
         }
+    }
+
+    #[test]
+    fn eagle_enabled_tracks_sglang_is_eagle_predicate() {
+        for algorithm in [
+            "EAGLE",
+            "eagle",
+            "EAGLE3",
+            "FROZEN_KV_MTP",
+            "NEXTN",
+            " Eagle ",
+        ] {
+            assert!(
+                sglang_eagle_enabled(&json!({"speculative_algorithm": algorithm})),
+                "{algorithm:?} keys the radix cache by bigrams and must advertise enable_eagle"
+            );
+        }
+        for server_info in [
+            json!({}),
+            json!({"speculative_algorithm": null}),
+            json!({"speculative_algorithm": "NONE"}),
+            json!({"speculative_algorithm": "NGRAM"}),
+            json!({"speculative_algorithm": "STANDALONE"}),
+            json!({"speculative_algorithm": 3}),
+        ] {
+            assert!(
+                !sglang_eagle_enabled(&server_info),
+                "{server_info} must not advertise enable_eagle"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_advertises_enable_eagle_for_eagle_servers() {
+        let eagle = build_engine_config(
+            &discovery(json!({"speculative_algorithm": "EAGLE", "page_size": 256})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(eagle.llm.unwrap().enable_eagle);
+
+        let plain = build_engine_config(
+            &discovery(json!({"page_size": 256})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!plain.llm.unwrap().enable_eagle);
     }
 
     #[test]
@@ -1003,6 +1180,63 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+    }
+
+    #[test]
+    fn publishes_hicache_capacity() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_through",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime_data.get("native_offloading_capacity"),
+            Some(&json!({"total_tokens": 204}))
+        );
+    }
+
+    #[test]
+    fn supports_deepseek_v4_hicache_capacity() {
+        let mut server_info = json!({
+            "enable_hierarchical_cache": true,
+            "hicache_size": 0,
+            "hicache_ratio": 2.0,
+            "hicache_write_policy": "write_back",
+            "page_size": 256,
+            "max_total_num_tokens": 8192,
+        });
+        for architecture in [
+            "DeepseekV4ForCausalLM",
+            "DeepseekV4ForCausalLMNextN",
+            "DeepseekV4ForCausalLMDSpark",
+        ] {
+            assert_eq!(
+                hicache_native_offloading_capacity(
+                    &server_info,
+                    &json!({"architectures": [architecture]}),
+                ),
+                Some(16384)
+            );
+        }
+
+        server_info["hicache_host_total_tokens"] = json!(16640);
+        assert_eq!(
+            hicache_native_offloading_capacity(
+                &server_info,
+                &json!({"architectures": ["DeepseekV4ForCausalLM"]}),
+            ),
+            Some(16640)
+        );
     }
 
     #[test]

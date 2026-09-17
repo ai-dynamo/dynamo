@@ -65,6 +65,7 @@ impl GrpcTuningConfig {
     }
 }
 
+use crate::grpc::service::dispatch_error_status;
 use crate::grpc::service::openai::completion_response_stream;
 use crate::grpc::service::tensor::{ExtendedNvCreateTensorResponse, tensor_response_stream};
 use std::convert::{TryFrom, TryInto};
@@ -434,7 +435,7 @@ impl InferRequest {
                         .await
                         .map_err(|e| {
                             tracing::error!("Failed to fold completions stream: {:?}", e);
-                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                            dispatch_error_status(e.as_ref(), "Failed to fold completions stream")
                         })?,
                     set_raw_output_contents,
                 };
@@ -455,7 +456,7 @@ impl InferRequest {
                         .await
                         .map_err(|e| {
                             tracing::error!("Failed to fold completions stream: {:?}", e);
-                            Status::internal(format!("Failed to fold completions stream: {}", e))
+                            dispatch_error_status(&e, "Failed to fold completions stream")
                         })?;
                 completion_response.try_into().map_err(|e| {
                     Status::invalid_argument(format!("Failed to parse response: {}", e))
@@ -560,7 +561,7 @@ impl InferRequest {
                                     "Failed to fold completions stream: {:?}",
                                     e
                                 );
-                                Status::internal(format!("Failed to fold completions stream: {}", e))
+                                dispatch_error_status(&e, "Failed to fold completions stream")
                             })?;
 
                         let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
@@ -680,10 +681,11 @@ impl GrpcInferenceService for KserveService {
                                 .iter()
                                 .map(|input| inference::model_metadata_response::TensorMetadata {
                                     name: input.name.clone(),
-                                    datatype: match inference::DataType::try_from(input.data_type) {
-                                        Ok(dt) => dt.as_str_name().to_string(),
-                                        Err(_) => "TYPE_INVALID".to_string(),
-                                    },
+                                    datatype: inference::DataType::try_from(input.data_type)
+                                        .ok()
+                                        .and_then(|dt| dt.oip_name())
+                                        .unwrap_or("TYPE_INVALID")
+                                        .to_string(),
                                     shape: input.dims.clone(),
                                 })
                                 .collect(),
@@ -693,12 +695,11 @@ impl GrpcInferenceService for KserveService {
                                 .map(
                                     |output| inference::model_metadata_response::TensorMetadata {
                                         name: output.name.clone(),
-                                        datatype: match inference::DataType::try_from(
-                                            output.data_type,
-                                        ) {
-                                            Ok(dt) => dt.as_str_name().to_string(),
-                                            Err(_) => "TYPE_INVALID".to_string(),
-                                        },
+                                        datatype: inference::DataType::try_from(output.data_type)
+                                            .ok()
+                                            .and_then(|dt| dt.oip_name())
+                                            .unwrap_or("TYPE_INVALID")
+                                            .to_string(),
                                         shape: output.dims.clone(),
                                     },
                                 )

@@ -14,17 +14,15 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use anyhow::Result;
+use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
-use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
+use dynamo_llm::kv_router::prefill_router::PrefillReservation;
+use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{
-    HEADER_TENANT_ID, NvExt, last_non_empty_trimmed_value, request_cache_salt,
-    routing_constraints_to_kv,
-};
+use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
@@ -32,24 +30,31 @@ use dynamo_runtime::discovery::{
 };
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use uuid::Uuid;
 
-use crate::epp_router::endpoint_in_subset;
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
+use crate::epp_router::{endpoint_in_subset, requested_policy_class};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    ResponseUsage, resolve_cache_namespace,
+};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
-/// `(token_ids, cache_namespace, priority_jump, strict_priority,
-/// routing_constraints, tokens_safe_to_inject)`, as returned by
-/// [`Router::tokenize`] and its chat/completion helpers.
-///
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
 /// [`OpenAIPreprocessor::gather_tokens`]'s own refusal to trust `token_data`
 /// for a `TextInput::Batch` of more than one prompt) — injecting them as
 /// `nvext.token_data` would apply prompt 1's tokens to every split of the
 /// batch. Chat and single/pre-tokenized completion requests are always safe.
-type TokenizeResult = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints, bool);
+struct TokenizeResult {
+    tokens: Vec<u32>,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    routing_constraints: RoutingConstraints,
+    tokens_safe_to_inject: bool,
+}
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
 /// is in effect. Read once at startup and threaded down to the pod reflector
@@ -85,18 +90,17 @@ fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigO
     })
 }
 
-fn cache_namespace_with_header_override(
+/// Resolve a typed request's body inputs together with the HTTP headers.
+fn cache_namespace_from_request<R: NvExtProvider>(
+    request: &R,
     headers: &[(String, String)],
-    body_cache_namespace: Option<String>,
 ) -> Option<String> {
-    last_non_empty_trimmed_value(
-        headers
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(HEADER_TENANT_ID))
-            .map(|(_, value)| value.as_str()),
-    )
-    .map(str::to_owned)
-    .or(body_cache_namespace)
+    let nvext_cache_salt = request.nvext().and_then(|n| n.cache_salt.as_deref());
+    let top_level_cache_salt = request
+        .unsupported_fields()
+        .and_then(|fields| fields.get("cache_salt"))
+        .and_then(|value| value.as_str());
+    resolve_cache_namespace(headers, nvext_cache_salt, top_level_cache_salt)
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -108,6 +112,7 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
+    prefill_bookings: DashMap<String, PrefillReservation>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
@@ -116,6 +121,23 @@ pub struct Router {
     served_model: String,
 }
 
+/// Remove and release a booking once. Both response lifecycle callbacks use
+/// this helper so terminal completion before first output and duplicate signals
+/// have identical behavior.
+async fn release_prefill_booking(
+    prefill_bookings: &DashMap<String, PrefillReservation>,
+    booking_id: &str,
+) {
+    if let Some((_, reservation)) = prefill_bookings.remove(booking_id)
+        && let Err(error) = reservation.release().await
+    {
+        tracing::debug!(
+            reservation_id = booking_id,
+            %error,
+            "Failed to release native EPP prefill reservation"
+        );
+    }
+}
 impl Router {
     /// Initialize the router from discovery.
     ///
@@ -218,6 +240,7 @@ impl Router {
         // does not tear down any background work.
         Ok(Self {
             prefill_router,
+            prefill_bookings: DashMap::new(),
             decode_router,
             preprocessor: bootstrap.preprocessor,
             runtime,
@@ -238,12 +261,16 @@ impl Router {
     /// Tokenize a JSON request body and extract router queue priorities and
     /// routing constraints.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority,
-    /// routing_constraints)`. Priorities default to zero and constraints
-    /// default to empty when absent. Supports both `/v1/chat/completions` and
-    /// `/v1/completions` bodies; the request kind is discriminated by a
-    /// non-empty `messages` array (chat) versus a `prompt` (completions).
-    pub async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
+    /// Returns the routing inputs, including the cache namespace resolved from
+    /// the headers and body. Priorities default to zero and constraints default
+    /// to empty when absent. Supports both `/v1/chat/completions` and
+    /// `/v1/completions` bodies, discriminated by a non-empty `messages` array
+    /// (chat) versus a `prompt` (completions).
+    async fn tokenize(
+        &self,
+        request_json: &str,
+        headers: &[(String, String)],
+    ) -> Result<TokenizeResult> {
         // Discriminating on a borrowed `Value` costs one scan plus the tree it
         // allocates; `from_value` then consumes that tree rather than re-reading
         // the body.
@@ -273,17 +300,18 @@ impl Router {
             .is_some_and(|messages| !messages.is_empty());
         if !has_messages && value.get("prompt").is_some() {
             let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
-            return self.tokenize_completion(request).await;
+            return self.tokenize_completion(request, headers).await;
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(value)?;
-        self.tokenize_chat(&request)
+        self.tokenize_chat(&request, headers)
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
     fn tokenize_chat(
         &self,
         request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+        headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
@@ -291,20 +319,20 @@ impl Router {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let cache_namespace = request_cache_salt(request).map(str::to_owned);
+        let cache_namespace = cache_namespace_from_request(request, headers);
 
         let encoding = match self.preprocessor.apply_template(request)? {
             Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
             None => self.preprocessor.tokenize("")?,
         };
-        Ok((
-            encoding.token_ids().to_vec(),
+        Ok(TokenizeResult {
+            tokens: encoding.token_ids().to_vec(),
             cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
-            true,
-        ))
+            tokens_safe_to_inject: true,
+        })
     }
 
     /// Tokenize a `/v1/completions` body.
@@ -323,11 +351,12 @@ impl Router {
     async fn tokenize_completion(
         &self,
         request: NvCreateCompletionRequest,
+        headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+        let cache_namespace = cache_namespace_from_request(&request, headers);
 
         let pre_tokenized = completion_prompt_token_ids(&request.inner.prompt);
         let (tokens, tokens_safe_to_inject) = match pre_tokenized {
@@ -339,14 +368,14 @@ impl Router {
             }
         };
 
-        Ok((
+        Ok(TokenizeResult {
             tokens,
             cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
-        ))
+        })
     }
 
     /// Tokenize `text` as a raw `/v1/completions` prompt — no chat template —
@@ -434,63 +463,54 @@ impl Router {
             .collect()
     }
 
-    /// Route a prefill request. Returns (worker_id, dp_rank).
+    /// Atomically select and reserve a prefill worker.
     ///
     /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary
-    /// tier. `routing_constraints` carries the request's required/preferred
-    /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
-    /// mismatch excludes a worker from selection.
+    /// tier. `policy_class` names the scheduling policy class the reservation
+    /// queues under. `routing_constraints` carries the request's
+    /// required/preferred taints (lifted from `nvext.routing_constraints`); a
+    /// hard `required_taints` mismatch excludes a worker from selection.
+    #[expect(clippy::too_many_arguments)]
     pub async fn route_prefill(
         &self,
+        reservation_id: &str,
         tokens: &[u32],
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(u64, Option<u32>)> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.prefill_router.register_workers(ids);
-        }
-
-        // TODO(epp-prefill-booking): Atomically reserve the selected prefill worker
-        // and release it on first output, cancellation, or routing failure.
-        let outcome = self
-            .prefill_router
-            .query_prefill_worker(
+    ) -> Result<PrefillReservation> {
+        self.prefill_router
+            .reserve_prefill_worker(
+                reservation_id,
                 tokens,
                 None,
                 None,
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
                 allowed_worker_ids,
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
-
-        match outcome {
-            // Advisory only: the gateway owns dispatch and lifecycle state.
-            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
-                "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
-                rejection.policy_class,
-                rejection.limit_kind,
-                rejection.current,
-                rejection.limit
-            )),
-        }
+            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
     ///
     /// Queue priorities are forwarded to the decode scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary
-    /// tier. `routing_constraints` carries the request's required/preferred
+    /// tier. `policy_class` names the scheduling policy class the request queues
+    /// under. `routing_constraints` carries the request's required/preferred
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
+    ///
+    /// A per-class queue limit rejection surfaces as an error here, the same as
+    /// it does for the integrated frontend.
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
@@ -499,32 +519,45 @@ impl Router {
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
+        policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<(WorkerWithDpRank, u32)> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.decode_router.register_workers(ids);
-        }
-
         let config_override = decode_router_config_override(is_disaggregated);
 
-        self.decode_router
-            .find_best_match(
+        let outcome = self
+            .decode_router
+            .find_best_match_details_with_policy_class(
                 None,
                 tokens,
                 None,
                 config_override.as_ref(),
                 false,
+                false,
                 None,
                 cache_namespace,
                 priority_jump,
                 strict_priority,
+                policy_class,
+                None,
+                None,
                 None,
                 allowed_worker_ids,
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
+            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+
+        match outcome {
+            FindBestMatchOutcome::Routed {
+                worker,
+                overlap_blocks,
+                ..
+            } => Ok((worker, overlap_blocks)),
+            FindBestMatchOutcome::QueueRejected { rejection } => {
+                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+            }
+        }
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -875,12 +908,9 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
 /// An externally supplied [`Endpoint`] rendered the way [`WorkerEndpointIndex`]
 /// stores addresses, so the two can be compared.
 ///
-/// [`Endpoint::address_port`] builds its string with `format!("{ip}:{port}")`,
-/// which leaves an IPv6 literal unbracketed (`fd00::2:8000`), while the index
-/// stores `SocketAddr`-rendered addresses (`[fd00::2]:8000`). Comparing the two
-/// forms directly matches on IPv4 and silently never matches on IPv6, so both
-/// sides go through `SocketAddr` here. Returns `None` for an address or port
-/// that does not parse, which is not a routable endpoint either way.
+/// [`Endpoint::address_port`] and the index both bracket IPv6 addresses. This
+/// helper additionally validates the address and port before comparing an
+/// externally supplied endpoint with the index.
 fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
     let ip: IpAddr = endpoint.address.parse().ok()?;
     let port: u16 = endpoint.port.parse().ok()?;
@@ -896,8 +926,9 @@ fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
 /// The mode is exclusive, and so are the identities. A worker process picks one
 /// `KubeDiscoveryTarget` from its own mode, so under container discovery
 /// nothing registers under the bare pod identity — emitting it there would
-/// invent a worker that `register_workers` upserts at zero load and zero KV
-/// overlap, making it the most attractive candidate the scheduler sees.
+/// put a worker id in `allowed_worker_ids` that no backend registered. The
+/// scheduler filters unknown ids out, so the pod contributes nothing, and a
+/// subset made only of such ids selects no worker at all.
 /// `"main"` hashes to the pod identity (`hash_container_name`), so a pod whose
 /// main container is Ready still contributes that id through the container
 /// path; one whose main container is *not* Ready correctly contributes nothing
@@ -1354,11 +1385,9 @@ impl EndpointPicker for Router {
             // Only pod discovery registers a worker under its pod identity.
             // Under container discovery each engine container registers under
             // its own (`KubeDiscoveryTarget::Container`), so a hand-built pod
-            // hash names a worker present in no registry: `register_workers`
-            // would upsert it at zero load and zero KV overlap, making it the
-            // scheduler's most attractive candidate, and the reverse lookup
-            // below would then fail to match and silently forward to
-            // `endpoints[0]`. The index is the one place that knows which
+            // hash names a worker present in no registry, which the scheduler
+            // filters out, leaving the subset short one candidate or empty.
+            // The index is the one place that knows which
             // identity scheme is in effect (see `pod_worker_ids`), so ask it.
             let wm: Vec<(u64, &Endpoint)> = {
                 let index = read_index(&self.worker_index);
@@ -1404,38 +1433,40 @@ impl EndpointPicker for Router {
         }
 
         let body_str = std::str::from_utf8(&req.body)
-            .map_err(|e| PickError::TokenizationFailed(format!("Invalid UTF-8: {e}")))?;
+            .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
-        let (
+        let TokenizeResult {
             tokens,
-            body_cache_namespace,
+            cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
-        ) = self
-            .tokenize(body_str)
+        } = self
+            .tokenize(body_str, &req.headers)
             .await
-            .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
-        let cache_namespace =
-            cache_namespace_with_header_override(&req.headers, body_cache_namespace);
+            .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
+        let policy_class = requested_policy_class(&req.headers)?;
+        let reservation_id = Uuid::new_v4().to_string();
 
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
-        let prefill_result = self
+        let prefill_booking = self
             .route_prefill(
+                &format!("epp-prefill/{reservation_id}"),
                 &tokens,
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                policy_class.clone(),
                 allowed_worker_ids.clone(),
                 routing_constraints.clone(),
             )
             .await;
 
-        let is_disaggregated = match &prefill_result {
+        let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
             Err(e) => {
                 tracing::debug!(
@@ -1446,10 +1477,6 @@ impl EndpointPicker for Router {
             }
         };
 
-        // TODO(epp-atomic-admission): Replace query-only selection plus add_request
-        // with one tracked operation. Propagate booking failures, use an internal
-        // booking ID independent of x-request-id, handle cancellation races, roll
-        // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
             .route_decode(
                 &tokens,
@@ -1457,6 +1484,7 @@ impl EndpointPicker for Router {
                 cache_namespace.clone(),
                 priority_jump,
                 strict_priority,
+                policy_class,
                 allowed_worker_ids,
                 routing_constraints,
             )
@@ -1489,23 +1517,31 @@ impl EndpointPicker for Router {
         };
 
         // Register the request with the router for bookkeeping (load tracking).
-        if !req.request_id.is_empty()
-            && let Err(e) = self
-                .add_request(
-                    &req.request_id,
-                    &tokens,
-                    decode_worker.worker_id,
-                    decode_worker.dp_rank,
-                    is_disaggregated,
-                    cache_namespace,
-                )
-                .await
+        if let Err(e) = self
+            .add_request(
+                &reservation_id,
+                &tokens,
+                decode_worker.worker_id,
+                decode_worker.dp_rank,
+                is_disaggregated,
+                cache_namespace.clone(),
+            )
+            .await
         {
             tracing::warn!(
                 request_id = %req.request_id,
                 error = %e,
                 "Failed to register request with router bookkeeping"
             );
+        }
+
+        let prefill_worker = prefill_booking
+            .as_ref()
+            .ok()
+            .map(|booking| (booking.worker_id(), booking.dp_rank()));
+        if let Ok(booking) = prefill_booking {
+            self.prefill_bookings
+                .insert(reservation_id.clone(), booking);
         }
 
         // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
@@ -1521,7 +1557,7 @@ impl EndpointPicker for Router {
             ),
         ];
 
-        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
+        if let Some((prefill_worker_id, prefill_dp_rank)) = prefill_worker {
             headers.push((
                 "x-dynamo-routing-mode".to_string(),
                 "disaggregated".to_string(),
@@ -1530,8 +1566,11 @@ impl EndpointPicker for Router {
                 "x-dynamo-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
-            if let Some(rank) = prefill_dp_rank {
-                headers.push(("x-dynamo-prefill-dp-rank".to_string(), rank.to_string()));
+            if let Some(prefill_dp_rank) = prefill_dp_rank {
+                headers.push((
+                    "x-dynamo-prefill-dp-rank".to_string(),
+                    prefill_dp_rank.to_string(),
+                ));
             }
         } else {
             headers.push((
@@ -1567,31 +1606,38 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
+            // TODO(epp-prefill-endpoint): #13407 will resolve the selected prefill
+            // worker to a callable endpoint for authoritative sidecar injection.
+            selected_prefill_endpoint: None,
             token_ids,
-            reservation_id: None,
+            cache_namespace,
+            // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
+            cache_salt_forwarding: CacheSaltForwarding::Preserve,
+            reservation_id: Some(reservation_id),
         })
     }
 
-    async fn on_prefill_complete(&self, request_id: &str) {
-        if request_id.is_empty() {
+    async fn on_prefill_complete(&self, booking_id: &str) {
+        if booking_id.is_empty() {
             return;
         }
-        if let Err(e) = self.mark_prefill_complete(request_id).await {
+        release_prefill_booking(&self.prefill_bookings, booking_id).await;
+        if let Err(e) = self.mark_prefill_complete(booking_id).await {
             tracing::debug!(
-                request_id,
+                reservation_id = booking_id,
                 error = %e,
                 "Failed to mark prefill complete in router bookkeeping"
             );
         }
     }
 
-    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
-        if request_id.is_empty() {
+    async fn on_request_complete_with_usage(&self, booking_id: &str, usage: Option<ResponseUsage>) {
+        if booking_id.is_empty() {
             return;
         }
         if let Some(usage) = usage {
             tracing::debug!(
-                request_id,
+                reservation_id = booking_id,
                 prompt_tokens = ?usage.prompt_tokens,
                 completion_tokens = ?usage.completion_tokens,
                 total_tokens = ?usage.total_tokens,
@@ -1599,9 +1645,10 @@ impl EndpointPicker for Router {
                 "Request complete with usage"
             );
         }
-        if let Err(e) = self.free_request(request_id).await {
+        release_prefill_booking(&self.prefill_bookings, booking_id).await;
+        if let Err(e) = self.free_request(booking_id).await {
             tracing::debug!(
-                request_id,
+                reservation_id = booking_id,
                 error = %e,
                 "Failed to free request from router bookkeeping"
             );
@@ -1614,50 +1661,7 @@ mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
 
-    #[test]
-    fn tenant_header_overrides_body_cache_namespace() {
-        let headers = vec![("X-Tenant-ID".to_string(), "tenant-header".to_string())];
-
-        assert_eq!(
-            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
-                .as_deref(),
-            Some("tenant-header")
-        );
-    }
-
-    #[test]
-    fn empty_tenant_header_falls_back_to_body_cache_namespace() {
-        let headers = vec![
-            (HEADER_TENANT_ID.to_string(), String::new()),
-            ("X-Tenant-ID".to_string(), "   ".to_string()),
-        ];
-
-        assert_eq!(
-            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
-                .as_deref(),
-            Some("tenant-body")
-        );
-    }
-
-    #[test]
-    fn absent_cache_namespace_stays_absent() {
-        assert_eq!(cache_namespace_with_header_override(&[], None), None);
-    }
-
-    #[test]
-    fn last_non_empty_trimmed_tenant_header_wins() {
-        let headers = vec![
-            (HEADER_TENANT_ID.to_string(), "tenant-client".to_string()),
-            ("X-Tenant-ID".to_string(), "   ".to_string()),
-            (HEADER_TENANT_ID.to_string(), " tenant-gateway ".to_string()),
-        ];
-
-        assert_eq!(
-            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
-                .as_deref(),
-            Some("tenant-gateway")
-        );
-    }
+    use std::sync::{Arc, atomic::Ordering};
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this
@@ -2133,10 +2137,7 @@ mod tests {
     }
 
     /// Under pod discovery a worker registers under its pod identity alone, so
-    /// a pod's ready sidecars must contribute no worker ids. Emitting them
-    /// would invent workers no backend registered under: they miss
-    /// `register_workers`' discovery lookup, default to `(0, 1)` with no load
-    /// and no KV overlap, and so look maximally attractive to the scheduler.
+    /// a pod's ready sidecars must contribute no worker ids.
     #[test]
     fn pod_worker_ids_ignores_containers_under_pod_discovery() {
         let pod = pod_mode_worker_pod();
@@ -2202,7 +2203,7 @@ mod tests {
     }
 
     /// End of the chain that made this matter: the index feeds
-    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> `register_workers`,
+    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> the scheduler,
     /// so one backend pod must contribute exactly one worker id under pod
     /// discovery rather than one per ready container.
     #[test]
@@ -2437,8 +2438,7 @@ mod tests {
     /// An externally supplied endpoint must resolve to the identity the
     /// reflector actually holds. Under container discovery that is the engine
     /// container's id, never `hash_pod_name` -- deriving the latter names a
-    /// worker no registry contains, which `register_workers` then upserts at
-    /// zero load as the scheduler's most attractive candidate.
+    /// worker no registry contains.
     #[test]
     fn external_endpoint_resolves_to_the_indexed_container_identity() {
         let mut index = WorkerEndpointIndex::new(true);
@@ -2466,12 +2466,10 @@ mod tests {
         );
     }
 
-    /// `Endpoint::address_port` does not bracket IPv6, while the index stores
-    /// `SocketAddr`-rendered addresses. Comparing the raw forms matches on
-    /// IPv4 and silently never matches on IPv6, so the normalization has to
-    /// agree with what the index stores.
+    /// External endpoints and indexed pod endpoints must use the same
+    /// bracketed IPv6 representation.
     #[test]
-    fn indexed_endpoint_address_brackets_ipv6_to_match_the_index() {
+    fn indexed_endpoint_address_matches_endpoint_and_index_for_ipv6() {
         let endpoint = Endpoint {
             pod_name: "worker-0".to_string(),
             address: "fd00::2".to_string(),
@@ -2483,10 +2481,10 @@ mod tests {
             indexed_endpoint_address(&endpoint).as_deref(),
             Some("[fd00::2]:8000")
         );
-        assert_ne!(
+        assert_eq!(
             endpoint.address_port(),
             "[fd00::2]:8000",
-            "guards the reason this helper exists: the raw form is unbracketed"
+            "the public endpoint formatter must bracket IPv6"
         );
 
         let mut index = WorkerEndpointIndex::default();
