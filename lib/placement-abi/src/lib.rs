@@ -345,14 +345,15 @@ impl KvEventV1 {
         // Safety: `kind` selects this union member and the caller keeps the
         // borrowed packet and nested slice valid for the ABI call.
         let stored = unsafe { self.payload.stored };
-        let len = checked_slice_len::<KvStoredBlockV1>(stored.blocks.len)?;
-        if stored.blocks.data.is_null() && len != 0 {
+        if !valid_slice(stored.blocks.data, stored.blocks.len) {
             return None;
         }
+        let len = checked_slice_len::<KvStoredBlockV1>(stored.blocks.len)?;
         Some(if len == 0 {
             &[]
         } else {
-            // Safety: non-empty ABI slices require a valid non-null pointer.
+            // Safety: non-empty ABI slices require a valid, correctly aligned
+            // non-null pointer, checked by `valid_slice` above.
             unsafe { std::slice::from_raw_parts(stored.blocks.data, len) }
         })
     }
@@ -365,14 +366,15 @@ impl KvEventV1 {
         // Safety: `kind` selects this union member and the caller keeps the
         // borrowed packet and nested slice valid for the ABI call.
         let removed = unsafe { self.payload.removed };
-        let len = checked_slice_len::<u64>(removed.len)?;
-        if removed.data.is_null() && len != 0 {
+        if !valid_slice(removed.data, removed.len) {
             return None;
         }
+        let len = checked_slice_len::<u64>(removed.len)?;
         Some(if len == 0 {
             &[]
         } else {
-            // Safety: non-empty ABI slices require a valid non-null pointer.
+            // Safety: non-empty ABI slices require a valid, correctly aligned
+            // non-null pointer, checked by `valid_slice` above.
             unsafe { std::slice::from_raw_parts(removed.data, len) }
         })
     }
@@ -1233,7 +1235,7 @@ pub unsafe fn validate_mutation_batch_v1(batch: PlacementMutationSliceV1) -> Res
         return Ok(());
     }
     // Safety: required by this function's contract and guarded by the null
-    // check above.
+    // check above, including the typed-pointer alignment check.
     let batch_len =
         checked_slice_len::<PlacementMutationV1>(batch.len).ok_or(StatusV1::INVALID_ARGUMENT)?;
     let mutations = unsafe { std::slice::from_raw_parts(batch.data, batch_len) };
@@ -1269,7 +1271,7 @@ pub unsafe fn validate_kv_event_batch_v1(batch: KvEventSliceV1) -> Result<(), St
         return Ok(());
     }
     // Safety: required by this function's contract and guarded by the null
-    // check above.
+    // check above, including the typed-pointer alignment check.
     let batch_len = checked_slice_len::<KvEventV1>(batch.len).ok_or(StatusV1::INVALID_ARGUMENT)?;
     let events = unsafe { std::slice::from_raw_parts(batch.data, batch_len) };
     for event in events {
@@ -1381,7 +1383,9 @@ fn valid_optional_identity_slice<T>(
 }
 
 fn valid_slice<T>(data: *const T, len: u64) -> bool {
-    checked_slice_len::<T>(len).is_some() && (len == 0 || !data.is_null())
+    checked_slice_len::<T>(len).is_some()
+        && (len == 0
+            || (!data.is_null() && (data as usize).is_multiple_of(std::mem::align_of::<T>())))
 }
 
 fn checked_slice_len<T>(len: u64) -> Option<usize> {
@@ -1401,6 +1405,113 @@ mod tests {
 
         assert!(valid_slice(data, limit));
         assert!(!valid_slice(data, limit + 1));
+    }
+
+    #[test]
+    fn valid_slice_rejects_misaligned_typed_pointers() {
+        let value = 1_u64;
+        let misaligned = (&value as *const u64)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<u64>();
+
+        assert!(!valid_slice(misaligned, 1));
+    }
+
+    #[test]
+    fn mutation_validation_rejects_misaligned_records() {
+        let mutation = PlacementMutationV1::topology_settled(1.0);
+        let misaligned = (&mutation as *const PlacementMutationV1)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<PlacementMutationV1>();
+
+        assert_eq!(
+            unsafe {
+                validate_mutation_batch_v1(PlacementMutationSliceV1 {
+                    data: misaligned,
+                    len: 1,
+                })
+            },
+            Err(StatusV1::INVALID_ARGUMENT)
+        );
+    }
+
+    #[test]
+    fn kv_validation_rejects_misaligned_records_and_nested_blocks() {
+        let blocks = [KvStoredBlockV1 {
+            sequence_hash: 1,
+            token_hash: 2,
+        }];
+        let mut event = KvEventV1::stored(1, 0, KvStorageTierV1::DEVICE, 1, None, None, &blocks);
+        let misaligned_event = (&event as *const KvEventV1)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<KvEventV1>();
+        assert_eq!(
+            unsafe {
+                validate_kv_event_batch_v1(KvEventSliceV1 {
+                    data: misaligned_event,
+                    len: 1,
+                })
+            },
+            Err(StatusV1::INVALID_ARGUMENT)
+        );
+
+        let misaligned_blocks = (&blocks as *const [KvStoredBlockV1; 1])
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<KvStoredBlockV1>();
+        // Validation must reject the nested typed pointer before any slice is
+        // constructed.
+        event.payload.stored.blocks.data = misaligned_blocks;
+        assert_eq!(
+            unsafe {
+                validate_kv_event_batch_v1(KvEventSliceV1 {
+                    data: &event,
+                    len: 1,
+                })
+            },
+            Err(StatusV1::INVALID_ARGUMENT)
+        );
+        assert!(event.stored_blocks().is_none());
+    }
+
+    #[test]
+    fn create_validation_rejects_misaligned_worker_topology() {
+        let worker = WorkerTopologyV1 {
+            worker_id: 1,
+            scheduler_ids: SchedulerIdSliceV1::default(),
+        };
+        let misaligned_worker = (&worker as *const WorkerTopologyV1)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<WorkerTopologyV1>();
+        let request = PlacementCreateRequestV1 {
+            struct_size: std::mem::size_of::<PlacementCreateRequestV1>() as u32,
+            payload_version: PLACEMENT_CREATE_PAYLOAD_VERSION_V1,
+            flags: 0,
+            reserved: 0,
+            selector_seed: [0; 32],
+            workers: WorkerTopologySliceV1 {
+                data: misaligned_worker,
+                len: 1,
+            },
+            capacities: WorkerCapacitySliceV1::default(),
+            options_namespace: ByteSliceV1::EMPTY,
+            provider_options: ByteSliceV1::EMPTY,
+            limits: PlacementLimitsV1 {
+                max_mutations: 1,
+                max_admission_results: 1,
+                max_released: 1,
+                max_diagnostic_bytes: 1,
+            },
+        };
+
+        assert_eq!(
+            validate_create_request_v1(&request),
+            Err(CreateRequestValidationError::NullSlice)
+        );
     }
 
     #[test]

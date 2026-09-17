@@ -45,6 +45,9 @@ use uuid::Uuid;
 static FORCE_FFI_PANIC: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
+static FORCE_BATCH_PANIC_AFTER_MUTATION: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
 fn panic_when_test_requested() {
     if FORCE_FFI_PANIC.swap(false, Ordering::SeqCst) {
         panic!("test-only FFI boundary panic");
@@ -53,6 +56,13 @@ fn panic_when_test_requested() {
 
 #[cfg(not(test))]
 fn panic_when_test_requested() {}
+
+#[cfg(test)]
+fn panic_after_batch_mutation_when_test_requested() {
+    if FORCE_BATCH_PANIC_AFTER_MUTATION.swap(false, Ordering::SeqCst) {
+        panic!("test-only panic after batch replay mutation");
+    }
+}
 
 /// Topology built by the backend for one steppable replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -239,6 +249,7 @@ fn release_hash_buffer(callbacks: HashBufferLeaseCallbacksV1, buffer_id: HashBuf
 
 struct BackendReplay {
     engine: Box<dyn SteppableReplay>,
+    poisoned: bool,
     /// Explicit UUIDs accepted in the current report epoch. Keeping this in
     /// lock-step with the engine lets `submit_batch` reject duplicate input
     /// before it mutates the first request in the batch.
@@ -311,13 +322,23 @@ fn allocated_bytes(value: String) -> ByteSliceV1 {
     ByteSliceV1 { data, len }
 }
 
-unsafe fn backend_mut(handle: ReplayHandleV1) -> Result<&'static mut BackendReplay, StatusV1> {
+unsafe fn backend_mut_even_if_poisoned(
+    handle: ReplayHandleV1,
+) -> Result<&'static mut BackendReplay, StatusV1> {
     if handle.0.is_null() {
         return Err(StatusV1::INVALID_ARGUMENT);
     }
     // Safety: every non-null handle comes from `create`, and ownership stays
     // with the caller until `destroy` consumes it.
     Ok(unsafe { &mut *handle.0.cast::<BackendReplay>() })
+}
+
+unsafe fn backend_mut(handle: ReplayHandleV1) -> Result<&'static mut BackendReplay, StatusV1> {
+    let replay = unsafe { backend_mut_even_if_poisoned(handle) }?;
+    if replay.poisoned {
+        return Err(StatusV1::INTERNAL);
+    }
+    Ok(replay)
 }
 
 unsafe fn borrowed_tokens(slice: U32SliceV1) -> Result<&'static [u32], StatusV1> {
@@ -545,6 +566,7 @@ unsafe fn create_impl(
         Ok(engine) => {
             let replay = Box::new(BackendReplay {
                 engine,
+                poisoned: false,
                 submitted_ids: HashSet::new(),
                 lease_callbacks,
                 registered_hash_buffers: HashMap::new(),
@@ -763,6 +785,8 @@ unsafe fn submit_batch_impl(
     };
     if request_ids.len != requests.len
         || (requests.data.is_null() && requests.len != 0)
+        || (requests.len != 0
+            && !(requests.data as usize).is_multiple_of(std::mem::align_of::<DirectRequestV1>()))
         || (request_ids.data.is_null() && request_ids.len != 0)
     {
         return StatusV1::INVALID_ARGUMENT;
@@ -806,6 +830,8 @@ unsafe fn submit_batch_impl(
     }
     match replay.engine.submit_batch(converted) {
         Ok(uuids) => {
+            #[cfg(test)]
+            panic_after_batch_mutation_when_test_requested();
             debug_assert_eq!(uuids.len(), output.len());
             for (uuid, request_id) in uuids.into_iter().zip(output.iter_mut()) {
                 replay.submitted_ids.insert(uuid);
@@ -1200,7 +1226,7 @@ unsafe fn last_error_impl(handle: ReplayHandleV1, error: *mut ByteSliceV1) -> St
     if error.is_null() {
         return StatusV1::INVALID_ARGUMENT;
     }
-    let replay = match unsafe { backend_mut(handle) } {
+    let replay = match unsafe { backend_mut_even_if_poisoned(handle) } {
         Ok(replay) => replay,
         Err(status) => return status,
     };
@@ -1228,8 +1254,23 @@ fn panic_status(handle: ReplayHandleV1) -> StatusV1 {
     // containment. Keep an error in a valid replay when possible, but never
     // risk a second unwind while handling the first one.
     let _ = catch_unwind(AssertUnwindSafe(|| {
-        if let Ok(replay) = unsafe { backend_mut(handle) } {
+        if let Ok(replay) = unsafe { backend_mut_even_if_poisoned(handle) } {
             replay.last_error = "panic contained at Dynamo steppable ABI boundary".to_owned();
+        }
+    }));
+    StatusV1::INTERNAL
+}
+
+fn batch_panic_status(handle: ReplayHandleV1) -> StatusV1 {
+    // A batch unwind can follow a stateful placement or replay mutation. The
+    // outer provider therefore owns a fail-stop latch independent of whether
+    // the inner replay had an opportunity to return its poisoned error type.
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Ok(replay) = unsafe { backend_mut_even_if_poisoned(handle) } {
+            replay.poisoned = true;
+            replay.last_error =
+                "panic contained after Dynamo steppable batch mutation; replay is poisoned"
+                    .to_owned();
         }
     }));
     StatusV1::INTERNAL
@@ -1361,10 +1402,12 @@ unsafe extern "C" fn submit_batch(
         };
         output.fill([0; 16]);
     }
-    catch_status(
-        || unsafe { submit_batch_impl(handle, requests, request_ids) },
-        handle,
-    )
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        submit_batch_impl(handle, requests, request_ids)
+    })) {
+        Ok(status) => status,
+        Err(_) => batch_panic_status(handle),
+    }
 }
 
 unsafe extern "C" fn cancel(
@@ -1719,6 +1762,7 @@ mod tests {
         let config = BackendConfig::one_worker();
         let replay = Box::new(BackendReplay {
             engine: build_engine(&config).expect("test engine"),
+            poisoned: false,
             submitted_ids: HashSet::new(),
             lease_callbacks: None,
             registered_hash_buffers: HashMap::new(),
@@ -1739,6 +1783,207 @@ mod tests {
         assert_eq!(output.now_ms, 0.0);
         assert_eq!(output.in_flight, 0);
         assert_eq!(output.is_idle, ReplayStateV1::EMPTY.is_idle);
+
+        unsafe { destroy(handle) };
+    }
+
+    #[test]
+    fn contained_batch_panic_poison_rejects_every_later_operation() {
+        let config = BackendConfig::one_worker();
+        let replay = Box::new(BackendReplay {
+            engine: build_engine(&config).expect("test engine"),
+            poisoned: false,
+            submitted_ids: HashSet::new(),
+            lease_callbacks: None,
+            registered_hash_buffers: HashMap::new(),
+            next_hash_buffer_id: 1,
+            last_error: String::new(),
+        });
+        let handle = ReplayHandleV1(Box::into_raw(replay).cast());
+        let tokens = [1_u32];
+        let direct = DirectRequestV1 {
+            struct_size: std::mem::size_of::<DirectRequestV1>() as u32,
+            flags: REQUEST_FLAG_UUID,
+            tokens: U32SliceV1 {
+                data: tokens.as_ptr(),
+                len: 1,
+            },
+            output_token_ids: U32SliceV1::EMPTY,
+            max_output_tokens: 1,
+            uuid: [61; 16],
+            dp_rank: 0,
+            preferred_dp_rank: 0,
+            preferred_prefill_dp_rank: 0,
+            arrival_timestamp_ms: 0.0,
+            priority: 0,
+            strict_priority: 0,
+            policy_class: ByteSliceV1::EMPTY,
+            replay_context: aiperf_steppable_abi::ReplayContextV1::EMPTY,
+        };
+        let requests = [direct];
+        let mut request_ids = [[99; 16]];
+        FORCE_BATCH_PANIC_AFTER_MUTATION.store(true, Ordering::SeqCst);
+
+        assert_eq!(
+            unsafe {
+                submit_batch(
+                    handle,
+                    DirectRequestSliceV1 {
+                        data: requests.as_ptr(),
+                        len: 1,
+                    },
+                    RequestIdMutSliceV1 {
+                        data: request_ids.as_mut_ptr(),
+                        len: 1,
+                    },
+                )
+            },
+            StatusV1::INTERNAL
+        );
+        assert_eq!(request_ids, [[0; 16]]);
+        assert_eq!(
+            unsafe { backend_mut_even_if_poisoned(handle) }
+                .expect("handle remains owned by test")
+                .engine
+                .in_flight(),
+            1,
+            "the injected unwind follows a real replay mutation"
+        );
+
+        let mut request_id = [0; 16];
+        assert_eq!(
+            unsafe { submit(handle, direct, &raw mut request_id) },
+            StatusV1::INTERNAL
+        );
+        let compact_hashes = [7_u32];
+        let compact = CompactRequestV1 {
+            struct_size: std::mem::size_of::<CompactRequestV1>() as u32,
+            flags: 0,
+            input_token_count: 1,
+            trace_block_size: 1,
+            reserved: 0,
+            hash_ids: U32SliceV1 {
+                data: compact_hashes.as_ptr(),
+                len: 1,
+            },
+            request: DirectRequestV1 {
+                tokens: U32SliceV1::EMPTY,
+                uuid: [62; 16],
+                ..direct
+            },
+        };
+        assert_eq!(
+            unsafe { submit_compact(handle, compact, &raw mut request_id) },
+            StatusV1::INTERNAL
+        );
+        assert_eq!(
+            unsafe {
+                submit_batch(
+                    handle,
+                    DirectRequestSliceV1 {
+                        data: requests.as_ptr(),
+                        len: 1,
+                    },
+                    RequestIdMutSliceV1 {
+                        data: request_ids.as_mut_ptr(),
+                        len: 1,
+                    },
+                )
+            },
+            StatusV1::INTERNAL
+        );
+
+        let mut event = unsafe { std::mem::zeroed() };
+        let mut canceled = 0;
+        assert_eq!(
+            unsafe { cancel(handle, &direct.uuid, &raw mut event, &raw mut canceled) },
+            StatusV1::INTERNAL
+        );
+        let mut events = EngineEventSliceV1 {
+            data: std::ptr::null(),
+            len: 0,
+        };
+        assert_eq!(
+            unsafe {
+                cancel_batch(
+                    handle,
+                    RequestIdSliceV1 {
+                        data: std::ptr::null(),
+                        len: 0,
+                    },
+                    &raw mut events,
+                )
+            },
+            StatusV1::INTERNAL
+        );
+        let mut step_result = StepResultV1::EMPTY;
+        assert_eq!(
+            unsafe {
+                step(
+                    handle,
+                    StepRequestV1 {
+                        struct_size: std::mem::size_of::<StepRequestV1>() as u32,
+                        flags: 0,
+                        until_ms: f64::INFINITY,
+                    },
+                    &raw mut step_result,
+                )
+            },
+            StatusV1::INTERNAL
+        );
+        let mut report = ByteSliceV1::EMPTY;
+        assert_eq!(
+            unsafe { take_report(handle, 1.0, &raw mut report) },
+            StatusV1::INTERNAL
+        );
+        let mut replay_state = ReplayStateV1::EMPTY;
+        assert_eq!(
+            unsafe { state(handle, &raw mut replay_state) },
+            StatusV1::INTERNAL
+        );
+        assert_eq!(unsafe { advance_now_ms(handle, 1.0) }, StatusV1::INTERNAL);
+        assert_eq!(
+            unsafe { set_capture_per_request(handle, 1) },
+            StatusV1::INTERNAL
+        );
+        assert_eq!(
+            unsafe { set_sla_thresholds(handle, SlaThresholdsV1::EMPTY) },
+            StatusV1::INTERNAL
+        );
+
+        let mut buffer_id = HashBufferIdV1::INVALID;
+        assert_eq!(
+            unsafe {
+                register_hash_buffer(
+                    handle,
+                    U32SliceV1 {
+                        data: compact_hashes.as_ptr(),
+                        len: 1,
+                    },
+                    &raw mut buffer_id,
+                )
+            },
+            StatusV1::INTERNAL
+        );
+        let leased_compact = CompactRequestV1 {
+            hash_ids: U32SliceV1::EMPTY,
+            ..compact
+        };
+        assert_eq!(
+            unsafe {
+                submit_compact_hash_buffer_range(
+                    handle,
+                    leased_compact,
+                    HashBufferRangeV1 {
+                        buffer_id: HashBufferIdV1(1),
+                        offset: 0,
+                        len: 1,
+                    },
+                    &raw mut request_id,
+                )
+            },
+            StatusV1::INTERNAL
+        );
 
         unsafe { destroy(handle) };
     }

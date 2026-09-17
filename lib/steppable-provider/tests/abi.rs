@@ -1116,6 +1116,47 @@ fn rejected_later_duplicate_batch_has_no_prior_commitment() {
     unsafe { table.destroy.expect("destroy")(handle) };
 }
 
+#[test]
+fn submit_batch_rejects_misaligned_direct_request_records() {
+    let (table, handle) = create_replay();
+    let prompt = [7_u32, 8];
+    let request = request(&prompt, [45; 16]);
+    let record_size = std::mem::size_of::<DirectRequestV1>();
+    let alignment = std::mem::align_of::<DirectRequestV1>();
+    let mut bytes = vec![0_u8; record_size + 1];
+    let offset = if (bytes.as_ptr() as usize).is_multiple_of(alignment) {
+        1
+    } else {
+        0
+    };
+    // Copy the record as bytes so the deliberately offset pointer is never
+    // dereferenced as a typed value by the test itself.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            (&request as *const DirectRequestV1).cast::<u8>(),
+            bytes.as_mut_ptr().add(offset),
+            record_size,
+        );
+    }
+    let mut output = [[99_u8; 16]; 1];
+    let status = unsafe {
+        table.submit_batch.expect("submit batch")(
+            handle,
+            DirectRequestSliceV1 {
+                data: bytes.as_ptr().add(offset).cast::<DirectRequestV1>(),
+                len: 1,
+            },
+            RequestIdMutSliceV1 {
+                data: output.as_mut_ptr(),
+                len: 1,
+            },
+        )
+    };
+    assert_eq!(status, StatusV1::INVALID_ARGUMENT);
+    assert_eq!(output, [[0; 16]; 1]);
+    unsafe { table.destroy.expect("destroy")(handle) };
+}
+
 const RTLD_NOW: c_int = 2;
 
 unsafe extern "C" {
