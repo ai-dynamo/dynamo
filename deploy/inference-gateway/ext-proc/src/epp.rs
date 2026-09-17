@@ -510,8 +510,10 @@ impl Router {
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
     ///
-    /// A per-class queue limit rejection surfaces as an error here, the same as
-    /// it does for the integrated frontend.
+    /// Every refusal is classified into a [`PickError`] whose status class
+    /// follows the router's own mapping; nothing here is stringified, so the
+    /// reason survives to the ext_proc boundary and the router's internal text
+    /// never reaches the client.
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,

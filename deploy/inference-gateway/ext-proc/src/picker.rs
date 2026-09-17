@@ -211,9 +211,10 @@ pub enum PickError {
     /// router → 429.
     ///
     /// 429 rather than 503 to match the router's own mapping in
-    /// `lib/kv-router/src/services/selection/error.rs`, so the same rejection
-    /// means the same thing whether it reached the client through the EPP or
-    /// through the Dynamo Frontend.
+    /// `lib/kv-router/src/services/selection/error.rs`. Note that the
+    /// integrated Frontend still answers this family with
+    /// `overload_status_code()` (529 by default), so the two hosts do not agree
+    /// yet; see the module docs on `admission`.
     #[error("all eligible workers are overloaded")]
     RouterOverloaded,
     /// A router policy-class queue-depth limit refused the request → 503.

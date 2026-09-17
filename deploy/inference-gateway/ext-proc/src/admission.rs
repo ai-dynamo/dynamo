@@ -24,9 +24,16 @@
 //! did exactly that, and every routing failure became a 503 whose body carried
 //! the router's internal `Debug` text.
 //!
-//! The status classes below match the Dynamo selection service's own mapping in
-//! `lib/kv-router/src/services/selection/error.rs`, so a rejection means the
-//! same thing to a client whichever host produced it.
+//! The status classes below match the router's own statement of what each
+//! rejection means: `scheduler_error_status` in
+//! `lib/kv-router/src/services/selection/error.rs`.
+//!
+//! That is parity with one other host, not with all of them. The integrated
+//! Frontend answers both the overload family and a queue rejection with
+//! `overload_status_code()` (`lib/llm/src/http/service/error.rs`) — 529 by
+//! default and configurable — rather than the 429/503 split used here. Making
+//! all three hosts agree is a wider decision than this module; until it is
+//! taken, the EPP follows the router's mapping.
 
 use dynamo_kv_router::scheduling::KvSchedulerError;
 use dynamo_runtime::error::{DynamoError, ErrorType};
@@ -97,7 +104,7 @@ impl RouterRejection {
 pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
     for cause in error.chain() {
         if let Some(dynamo_error) = cause.downcast_ref::<DynamoError>()
-            && let Some(rejection) = classify_error_type(dynamo_error.error_type())
+            && let Some(rejection) = classify_error_class(dynamo_error.class())
         {
             return rejection;
         }
@@ -112,28 +119,40 @@ pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
     RouterRejection::Unavailable
 }
 
-/// `None` when the error type carries no routing meaning, so the caller keeps
+/// `None` when the class carries no routing meaning, so the caller keeps
 /// walking the chain.
-fn classify_error_type(error_type: ErrorType) -> Option<RouterRejection> {
-    match error_type {
-        // Set by `map_scheduler_error` for AllEligibleWorkersOverloaded and
-        // PinnedWorkerOverloaded respectively.
-        ErrorType::ResourceExhausted | ErrorType::WorkerOverloaded => {
-            Some(RouterRejection::Overloaded)
-        }
-        ErrorType::Unavailable | ErrorType::WorkerUnavailable => Some(RouterRejection::Unavailable),
-        ErrorType::InvalidArgument => Some(RouterRejection::BadRequest),
-        // TODO(epp-deadline-429): ai-dynamo/dynamo#14176 adds
-        // `KvSchedulerError::DeadlineExceeded` and maps it to
-        // `ErrorType::DeadlineExceeded`, which that PR classifies as 429
-        // alongside the overload family. `ErrorType` has no such variant on
-        // main, so a deadline rejection currently falls through to
-        // `Unavailable` (503) — the same status it gets today, so this is not a
-        // regression. When #14176 merges, add:
+///
+/// Matches the *canonical* classes, because the caller reads
+/// [`DynamoError::class`] — the entry point `ErrorClass` documents for
+/// consumers — rather than the raw stored variant. `map_scheduler_error` still
+/// builds the legacy `ResourceExhausted` and `WorkerOverloaded` variants, and
+/// `ErrorClass::normalized` folds both into `CapacityExhausted` before they
+/// arrive here. Matching those legacy names directly would work today and then
+/// break silently the day that producer moves to canonical classes: every
+/// overload would quietly become a 503, with no test failing.
+fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
+    match class {
+        // Where `map_scheduler_error` lands both overload cases,
+        // AllEligibleWorkersOverloaded and PinnedWorkerOverloaded.
+        ErrorType::CapacityExhausted => Some(RouterRejection::Overloaded),
+        ErrorType::Unavailable => Some(RouterRejection::Unavailable),
+        ErrorType::InvalidRequest => Some(RouterRejection::BadRequest),
+        // TODO(epp-deadline-429): `ErrorType::DeadlineExceeded` is left unmapped
+        // deliberately, not because it is unreachable.
         //
-        //     ErrorType::DeadlineExceeded => Some(RouterRejection::Overloaded),
+        // It already arrives today, because `ErrorClass::normalize` folds
+        // `ConnectionTimeout` and `ResponseTimeout` into it — a transport
+        // timeout, which this crate answers elsewhere with 504
+        // (`PickError::TokenizerTimeout`). ai-dynamo/dynamo#14176 adds a second,
+        // unrelated producer: `KvSchedulerError::DeadlineExceeded` for a request
+        // that outlived its queue deadline, which that PR answers with 429.
         //
-        // and extend `deadline_rejection_is_not_yet_429` below.
+        // One `ErrorType` for both means a blanket arm here would give one of
+        // them the wrong status. Until the two are distinguishable, both fall
+        // through to `Unavailable` (503) — unchanged from today, so no
+        // regression — and picking the right split is deferred to when #14176
+        // lands. `deadline_exceeded_is_not_yet_a_429` below pins the current
+        // answer so that change cannot happen silently.
         _ => None,
     }
 }
@@ -193,7 +212,9 @@ mod tests {
     #[test]
     fn dynamo_error_types_classify_without_a_scheduler_error() {
         // `map_scheduler_error` converts the overload family into this form, so
-        // the scheduler error is no longer in the chain at all.
+        // the scheduler error is no longer in the chain at all. These are the
+        // legacy variants it builds today; they classify only because
+        // `DynamoError::class` normalizes them first.
         assert_eq!(
             classify_router_error(&dynamo_error(ErrorType::ResourceExhausted)),
             RouterRejection::Overloaded
@@ -205,6 +226,30 @@ mod tests {
         assert_eq!(
             classify_router_error(&dynamo_error(ErrorType::Unavailable)),
             RouterRejection::Unavailable
+        );
+    }
+
+    /// The other half of the pair above: a producer that constructs canonical
+    /// classes directly, as `ErrorClass` tells new producers to do, must
+    /// classify identically. Without this, migrating `map_scheduler_error`
+    /// would turn every 429 into a 503 with no test failing.
+    #[test]
+    fn canonical_error_classes_classify_the_same_as_legacy_ones() {
+        assert_eq!(
+            classify_router_error(&dynamo_error(ErrorType::CapacityExhausted)),
+            RouterRejection::Overloaded
+        );
+        assert_eq!(
+            classify_router_error(&dynamo_error(ErrorType::WorkerUnavailable)),
+            RouterRejection::Unavailable
+        );
+        assert_eq!(
+            classify_router_error(&dynamo_error(ErrorType::InvalidRequest)),
+            RouterRejection::BadRequest
+        );
+        assert_eq!(
+            classify_router_error(&dynamo_error(ErrorType::InvalidArgument)),
+            RouterRejection::BadRequest
         );
     }
 
@@ -254,15 +299,13 @@ mod tests {
         assert_eq!(classify_router_error(&opaque), RouterRejection::Unavailable);
     }
 
+    /// Pins the `TODO(epp-deadline-429)` seam: a deadline is reachable today
+    /// and deliberately unmapped, so this must fail if someone adds the arm
+    /// without splitting transport timeouts from queue deadlines first.
     #[test]
-    fn deadline_rejection_is_not_yet_429() {
-        // Documents the TODO(epp-deadline-429) seam. `ErrorType` gains a
-        // `DeadlineExceeded` variant in ai-dynamo/dynamo#14176; until then a
-        // deadline rejection is indistinguishable from any other unmapped
-        // error and stays 503, exactly as it is today. When that PR lands this
-        // test should assert `RouterRejection::Overloaded`.
+    fn deadline_exceeded_is_not_yet_a_429() {
         assert_eq!(
-            classify_router_error(&dynamo_error(ErrorType::Cancelled)),
+            classify_router_error(&dynamo_error(ErrorType::DeadlineExceeded)),
             RouterRejection::Unavailable
         );
     }
