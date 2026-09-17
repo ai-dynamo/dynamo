@@ -61,8 +61,13 @@ pub enum ShadowOutcome {
     Error,
 }
 
-/// What the primary deployment answered. One type for both pipelines, which
-/// carry `BackendOutput` and `LLMEngineOutput`.
+/// What the primary deployment answered, as one consolidated object. One type
+/// for both pipelines, which carry `BackendOutput` and `LLMEngineOutput`.
+///
+/// Inside the pipeline a response is always a stream of chunks, whether or not
+/// the client asked for streaming. The tap never forwards chunks to a shadow:
+/// it accumulates them and publishes this object one time, when the stream
+/// ends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShadowResponse {
     pub outcome: ShadowOutcome,

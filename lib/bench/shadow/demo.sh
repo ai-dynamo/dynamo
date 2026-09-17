@@ -10,6 +10,9 @@
 #
 #   lib/bench/shadow/demo.sh [request-count] [concurrency] [isl] [osl]
 #
+# STREAMING= sends non-streaming requests. The taps publish one record per
+# request in both cases.
+#
 # AIPERF_EXTRA adds AIPerf flags, for example a cancellation run:
 #   AIPERF_EXTRA='--request-cancellation-rate 25 --request-cancellation-delay 0.05'
 set -euo pipefail
@@ -61,7 +64,7 @@ curl -sf "localhost:$PORT/v1/models" | grep -q "$MODEL" || { echo "model never r
 # Subscribers find the tap publishers through discovery; give them a moment.
 sleep 3
 
-aiperf profile --model "$MODEL" --url "localhost:$PORT" --endpoint-type chat --streaming \
+aiperf profile --model "$MODEL" --url "localhost:$PORT" --endpoint-type chat ${STREAMING---streaming} \
   --request-count "$REQUESTS" --concurrency "$CONCURRENCY" \
   --synthetic-input-tokens-mean "$ISL" --synthetic-input-tokens-stddev 0 \
   --output-tokens-mean "$OSL" --extra-inputs ignore_eos:true \
