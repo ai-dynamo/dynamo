@@ -9,7 +9,6 @@ use crate::client;
 use crate::proto as pb;
 
 const SUPPORTED_API_VERSION: &str = "vllm";
-const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -18,6 +17,8 @@ struct ModelIdentity {
     aliases: Vec<String>,
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
+    supports_lora: bool,
+    max_loras: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -62,12 +63,16 @@ impl DiscoveredModel {
         }
         let reasoning_parser = nonempty(model.reasoning_parser);
         let tool_call_parser = nonempty(model.tool_call_parser);
+        let supports_lora = model.supports_lora;
+        let max_loras = server.max_loras;
         let identity = ModelIdentity {
             source: source.clone(),
             served_name: served_name.clone(),
             aliases: model.served_model_aliases,
             reasoning_parser: reasoning_parser.clone(),
             tool_call_parser: tool_call_parser.clone(),
+            supports_lora,
+            max_loras,
         };
         Ok(Self {
             source,
@@ -107,6 +112,7 @@ impl DiscoveredModel {
     pub(crate) fn rl_worker_metadata(
         &self,
         admin_base_url: Option<RlAdminBaseUrl>,
+        configured_world_size: Option<u32>,
     ) -> Result<RlWorkerMetadata, DynamoError> {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
@@ -117,48 +123,71 @@ impl DiscoveredModel {
             nonzero(parallelism.pipeline_parallel_size).ok_or_else(|| {
                 client::protocol_error("vLLM reports a pipeline-parallel size of zero")
             })?;
-        let engine_world_size = u32::try_from(parallelism.world_size)
-            .ok()
-            .and_then(nonzero)
-            .ok_or_else(|| client::protocol_error("vLLM reports an invalid engine world size"))?;
+        let data_parallel_size = nonzero(parallelism.data_parallel_size)
+            .ok_or_else(|| client::protocol_error("vLLM reports a data-parallel size of zero"))?;
         let expected_minimum_world_size = tensor_parallel_size
             .checked_mul(pipeline_parallel_size)
             .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
-        if engine_world_size % expected_minimum_world_size != 0 {
-            return Err(client::protocol_error(
-                "vLLM reports an engine world size that is not divisible by TP * PP",
-            ));
-        }
-        let world_size = engine_world_size
-            .checked_mul(parallelism.data_parallel_size)
-            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        let world_size = match u32::try_from(parallelism.world_size).ok().and_then(nonzero) {
+            Some(engine_world_size) => {
+                if engine_world_size % expected_minimum_world_size != 0 {
+                    return Err(client::protocol_error(
+                        "vLLM reports an engine world size that is not divisible by TP * PP",
+                    ));
+                }
+                engine_world_size
+                    .checked_mul(data_parallel_size)
+                    .ok_or_else(|| {
+                        client::protocol_error("vLLM reports an invalid RL world size")
+                    })?
+            }
+            None if parallelism.world_size == 0 => {
+                let world_size = configured_world_size.ok_or_else(|| {
+                    client::invalid_argument(
+                        "--vllm-rl-world-size is required when vLLM omits engine world size from gRPC metadata",
+                    )
+                })?;
+                let expected_total_world_size = expected_minimum_world_size
+                    .checked_mul(data_parallel_size)
+                    .ok_or_else(|| {
+                        client::protocol_error("vLLM reports an invalid RL world size")
+                    })?;
+                if world_size % expected_total_world_size != 0 {
+                    return Err(client::invalid_argument(
+                        "--vllm-rl-world-size must be divisible by TP * PP * DP",
+                    ));
+                }
+                world_size
+            }
+            None => {
+                return Err(client::protocol_error(
+                    "vLLM reports an invalid engine world size",
+                ));
+            }
+        };
         RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
     pub(crate) fn engine_config(&self) -> EngineConfig {
         let parallelism = self.server.parallelism.as_ref();
-        let runtime_data = if self.server.supports_native_sampling_params_json {
-            [(
-                VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
-                serde_json::Value::Bool(true),
-            )]
-            .into_iter()
-            .collect()
-        } else {
-            Default::default()
-        };
         EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            runtime_data,
+            runtime_data: [(
+                dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into_iter()
+            .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),
                 total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
+                max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
                 data_parallel_size: parallelism
                     .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
                 data_parallel_start_rank: parallelism.map(|_| 0),
@@ -172,6 +201,14 @@ impl DiscoveredModel {
             .parallelism
             .as_ref()
             .map_or(1, |parallelism| parallelism.data_parallel_size)
+    }
+
+    pub(crate) fn supports_lora(&self) -> bool {
+        self.identity.supports_lora && self.identity.max_loras > 0
+    }
+
+    pub(crate) fn max_loras(&self) -> u32 {
+        self.identity.max_loras
     }
 
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {

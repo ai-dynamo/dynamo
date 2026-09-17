@@ -58,6 +58,16 @@ class AudioAggregateState:
     emitted_chunks: int = 0
     num_channels: int | None = None
     channel_axis: int | None = None
+    cumulative: bool = False
+    """Each payload is a snapshot of the whole waveform decoded so far.
+
+    Set from the output kind the engine was actually given, not from the model:
+    ``RequestOutputKind.CUMULATIVE`` consolidates the accumulated audio on every
+    step and drains nothing, so the snapshots must be de-duplicated to the
+    longest one rather than concatenated, while ``DELTA`` drains what it emits
+    and yields disjoint pieces that must all be kept. See
+    ``utils.audio_output_is_cumulative``, which the handler uses to fill this in.
+    """
 
 
 class TextFormatter:
@@ -325,11 +335,19 @@ class AudioFormatter:
 
         try:
             start_time = time.time()
+            # A cumulative payload already carries the earlier frames, so it is
+            # taken whole and de-duplicated in _append_audio_chunk; tracking the
+            # newly appended entries would keep only the first snapshot.
+            chunk_state: AudioStreamState | AudioAggregateState | None
+            if stream_state is not None:
+                chunk_state = stream_state
+            elif aggregate_state is not None and not aggregate_state.cumulative:
+                chunk_state = aggregate_state
+            else:
+                chunk_state = None
+
             audio_np, sample_rate = self._extract_audio_tensor(
-                mm_output,
-                chunk_state=(
-                    stream_state if stream_state is not None else aggregate_state
-                ),
+                mm_output, chunk_state=chunk_state
             )
             if audio_np.size == 0:
                 return None
@@ -420,7 +438,15 @@ class AudioFormatter:
             expected_channel_axis=state.channel_axis,
         )
         self._validate_audio_metadata(state, sample_rate, num_channels, channel_axis)
-        state.chunks.append(audio_np)
+        if not state.cumulative:
+            state.chunks.append(audio_np)
+            return
+
+        # Snapshots only grow, but keep the longest rather than the latest so a
+        # truncated trailing payload cannot drop already-decoded audio.
+        if state.chunks and state.chunks[0].shape[-1] >= audio_np.shape[-1]:
+            return
+        state.chunks = [audio_np]
 
     @staticmethod
     def _validate_audio_metadata(
@@ -461,6 +487,13 @@ class AudioFormatter:
 
         if isinstance(audio_val, list):
             if chunk_state is not None:
+                # Slicing by a running count assumes each list *extends* the
+                # previous one. That holds only while the engine does not drain
+                # what it emits: a draining (``DELTA``) stage restarts its list
+                # at index 0, and this would then keep just the tail. Audex
+                # takes the delta path but yields bare tensors, which skip this
+                # branch entirely. If a stage ever emits multi-entry lists under
+                # DELTA, the count has to be per-payload rather than running.
                 new_audio = audio_val[chunk_state.emitted_chunks :]
                 chunk_state.emitted_chunks = len(audio_val)
                 audio_val = new_audio

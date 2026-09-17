@@ -300,7 +300,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
                 .as_ref()
@@ -335,6 +335,20 @@ impl LLMEngine for SglangSidecarEngine {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after the gRPC transport opens the
+                // response stream so decode can rendezvous while prefill runs.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
@@ -387,7 +401,7 @@ impl LLMEngine for SglangSidecarEngine {
 
                         if is_prefill {
                             if response.finished {
-                                let mut terminal = match terminal_from_meta(
+                                let terminal = match terminal_from_meta(
                                     &response.meta_info,
                                     observed_prompt_tokens,
                                     0,
@@ -398,7 +412,6 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                 };
-                                terminal.disaggregated_params = prefill_handoff.clone();
                                 yield Ok(terminal);
                                 break;
                             }
@@ -968,6 +981,7 @@ fn build_engine_config(
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
+            max_gpu_lora_count: None,
             data_parallel_size,
             data_parallel_start_rank,
             enable_eagle,

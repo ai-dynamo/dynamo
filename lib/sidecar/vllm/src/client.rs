@@ -1,19 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
-use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
-};
+use dynamo_sidecar_common::v14::GrpcChannelPool;
+use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::v14::status_to_dynamo;
+pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument};
 
 use crate::proto as pb;
 
