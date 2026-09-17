@@ -420,6 +420,10 @@ pub trait LLMEngine: Send + Sync + 'static {
     ) -> Result<(), DynamoError> {
         Ok(())
     }
+
+    /// Stop engine-owned serving lifecycle tasks before the worker removes
+    /// its endpoint from discovery. Implementations must make this idempotent.
+    async fn begin_shutdown(&self) {}
 }
 
 /// Raw media-generation engine trait — the non-token sibling of [`LLMEngine`].

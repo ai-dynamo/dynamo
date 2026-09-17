@@ -387,6 +387,12 @@ impl EngineKind {
         }
     }
 
+    async fn begin_shutdown(&self) {
+        if let EngineKind::Llm(engine) = self {
+            engine.begin_shutdown().await;
+        }
+    }
+
     /// Raw media engines (image/video/audio) register name-only — the engine
     /// loads the model itself and the model has no LLM artifacts (tokenizer /
     /// chat template / config.json) for Dynamo to fetch.
@@ -843,6 +849,8 @@ impl Worker {
         let _mutation = self.engine_route_mutation.lock().await;
         let mut lifecycle = self.engine_route_lifecycle.write().await;
         *lifecycle = EngineRouteLifecycle::ShuttingDown;
+        drop(lifecycle);
+        self.engine.begin_shutdown().await;
     }
 
     /// Register the Dynamo-owned model taint update on the runtime system server.

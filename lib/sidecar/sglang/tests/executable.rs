@@ -27,6 +27,8 @@ fn executable_exposes_sglang_and_shared_sidecar_contracts() {
         "DYN_SIDECAR_GRPC_RETRY_INTERVAL_SECS",
         "--grpc-startup-deadline-secs",
         "DYN_SIDECAR_GRPC_STARTUP_DEADLINE_SECS",
+        "--unregister-on-pause",
+        "DYN_SGLANG_UNREGISTER_ON_PAUSE",
     ] {
         assert!(stdout.contains(expected), "help omits {expected}");
     }
