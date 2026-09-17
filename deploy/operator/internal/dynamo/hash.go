@@ -91,9 +91,17 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 			if _, exists := workerDCDs[componentName]; exists {
 				return "", fmt.Errorf("duplicate generated worker DCD component name %q", componentName)
 			}
+			// The follower count reaches the hash by two routes, and both must be stripped
+			// or the strip is a no-op: workerHashSpec covers spec.podTemplate.annotations,
+			// and GetDCDKubeAnnotations copies the pod-template annotations into this
+			// separate Annotations field (v1beta1_helpers.go). See workerHashSpec for why
+			// this value must not create a worker generation.
+			annotations := GetDCDKubeAnnotations(dcd)
+			delete(annotations, commonconsts.KubeAnnotationElasticEPFollowerReplicas)
+
 			workerDCDs[componentName] = workerTemplate{
 				Labels:         GetDCDKubeLabels(dcd),
-				Annotations:    GetDCDKubeAnnotations(dcd),
+				Annotations:    annotations,
 				RuntimeVersion: resolvedRuntimeVersionForHash(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
 				Spec:           workerHashSpec(dcd),
 			}
@@ -121,6 +129,26 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
 	spec.RuntimeVersionOverride = ""
+
+	// The synthesized-follower count is derived from --data-parallel-size, which is already
+	// hashed as part of the container's args. Hashing the derived annotation too would make
+	// the same declaration produce a new worker generation purely because this operator
+	// records a number the previous one did not.
+	//
+	// That matters most where the annotation does nothing. The Grove pathway never
+	// synthesizes a follower and never reads this value, but ComputeDGDWorkersSpecHash
+	// computes the hash by RUNNING generation, which stamps it regardless of pathway, and
+	// dgd_grove_workload_renderer.go stamps the resulting hash onto every worker pod. Without
+	// this strip, upgrading the operator restarts a Grove user's GPU workers to record a
+	// value their deployment cannot use -- measured: an unchanged Grove dp=2 component moved
+	// b61319fa -> 9761526a.
+	//
+	// The leader still picks up the annotation: it lands in the DCD's pod template, so the
+	// Deployment rolls its own pods in place. What this avoids is a new worker GENERATION --
+	// a renamed DCD -- which additionally renames the follower and loses its replica count.
+	if spec.PodTemplate != nil {
+		delete(spec.PodTemplate.Annotations, commonconsts.KubeAnnotationElasticEPFollowerReplicas)
+	}
 
 	// Roles are a Kubernetes map-list keyed by name. Canonicalize the copied
 	// slice so declaration order does not create a new worker generation. Role

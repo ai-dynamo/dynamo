@@ -277,6 +277,74 @@ func TestComputeBetaDGDWorkersSpecHash_ExcludesSynthesizedElasticEPFollower(t *t
 	}
 }
 
+// The DERIVED follower count must not reach the worker-spec hash either.
+//
+// Excluding the follower DCD (above) is not enough: generation also stamps
+// KubeAnnotationElasticEPFollowerReplicas onto the LEADER's pod template, and
+// ComputeDGDWorkersSpecHash computes the hash by running generation. Hashing that stamp
+// made the same declaration produce a new worker generation purely because a newer operator
+// records a number the older one did not, so an operator upgrade restarted GPU workers whose
+// rendered spec was unchanged.
+//
+// It bit the Grove pathway hardest, where the value does nothing whatsoever: Grove never
+// synthesizes a follower and never reads it, but the Grove renderer stamps the resulting
+// hash onto every worker pod. Measured before the fix -- an unchanged Grove dp=2 component
+// moved b61319fa -> 9761526a.
+//
+// The stamp reaches the hash by TWO routes, and dropping either strip alone fails this test:
+// workerHashSpec covers spec.podTemplate.annotations, and GetDCDKubeAnnotations copies the
+// pod-template annotations into the separate Annotations field of the hashed struct.
+func TestComputeBetaDGDWorkersSpecHash_DerivedFollowerCountDoesNotRoll(t *testing.T) {
+	// A PLAIN worker, deliberately not elastic-EP. Generation therefore never stamps this
+	// component, so a hand-set annotation survives into both hashed routes and the test can
+	// observe whether they are stripped.
+	//
+	// An elastic-EP fixture cannot test this: generation OVERWRITES any hand-set value with
+	// the derived one, so both sides hash identically whether or not the strip is present.
+	// That version of this test passed with the strip disabled -- it proved nothing.
+	build := func(annotations map[string]string) *v1beta1.DynamoGraphDeployment {
+		dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+			"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
+		}))
+		dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:    commonconsts.MainContainerName,
+					Command: []string{"/bin/sh", "-c"},
+					Args:    []string{"python3 -m dynamo.vllm --model m"},
+				}},
+			},
+		}
+		return dgd
+	}
+
+	t.Log("confirm generation leaves this component's annotation alone, or the test is vacuous")
+	dcds, err := GenerateDynamoComponentsDeployments(
+		build(map[string]string{commonconsts.KubeAnnotationElasticEPFollowerReplicas: "7"}),
+		nil, nil, RollingUpdateContext{})
+	if err != nil {
+		t.Fatalf("GenerateDynamoComponentsDeployments: %v", err)
+	}
+	leader := dcds["decode"]
+	if leader == nil || leader.Spec.PodTemplate == nil {
+		t.Fatal("no leader DCD generated")
+	}
+	if got := leader.Spec.PodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas]; got != "7" {
+		t.Fatalf("generation rewrote the annotation to %q; this fixture cannot observe the strip", got)
+	}
+
+	t.Log("the annotation must not contribute to the worker hash by either route")
+	assert.Equal(t,
+		mustComputeBetaDGDWorkersSpecHash(t, build(nil)),
+		mustComputeBetaDGDWorkersSpecHash(t, build(map[string]string{
+			commonconsts.KubeAnnotationElasticEPFollowerReplicas: "7",
+		})),
+		"the derived follower count must not contribute to the worker hash; if it does, an "+
+			"operator upgrade restarts every elastic-EP worker -- Grove included, where the "+
+			"value is never even read -- for a spec that renders identically")
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresGeneratedDCDObjectIdentity(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
