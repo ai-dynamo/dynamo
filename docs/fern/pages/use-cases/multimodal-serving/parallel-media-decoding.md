@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Parallel Media Decoding
-subtitle: Decode image inputs concurrently in the Rust frontend and transfer pixels to inference backends
+subtitle: Decode media inputs concurrently in the Rust frontend and transfer pixels to inference backends
 ---
 
-Parallel media decoding moves image fetching, base64 decoding, and image
-decompression from the inference backend to the NVIDIA Dynamo Rust frontend.
-The frontend decodes images concurrently on a CPU worker pool and transfers
-the decoded pixel buffers to the backend through NIXL.
+Parallel media decoding moves media fetching and decoding from the inference
+backend to the NVIDIA Dynamo Rust frontend. The frontend decodes supported
+images and videos on a CPU worker pool and transfers the decoded pixel buffers
+to the backend through NIXL.
 
 The backend still runs its model-specific multimodal processor and vision
 encoder. This feature changes where image input is decoded; it does not skip
@@ -19,7 +19,7 @@ vision encoding.
 | Input modality | vLLM | SGLang | TensorRT-LLM |
 | --- | --- | --- | --- |
 | Image | Agg | Agg | Agg |
-| Video | Not supported | Not supported | Not supported |
+| Video | Agg (VP8/VP9) | Agg (VP8/VP9) | Not supported |
 | Audio | Not supported | Not supported | Not supported |
 
 `Agg` refers to an aggregated worker. The entries in this matrix represent the
@@ -48,8 +48,8 @@ work, while the embedding cache can skip vision encoding for repeated images.
 
 For each request, the frontend:
 
-1. Fetches the image URL or decodes the base64 data URL.
-2. Decodes images concurrently on a CPU worker pool.
+1. Fetches the media URL or decodes the base64 data URL.
+2. Decodes supported images or VP8/VP9 videos on a CPU worker pool.
 3. Registers the decoded pixel buffer with NIXL.
 4. Sends the buffer descriptor to the selected backend worker.
 

@@ -36,11 +36,39 @@ pub(crate) enum QwenVideoResizeMode {
     RoundTiesEven,
 }
 
+/// How the worker hashes a block that intersects a video expansion but has no
+/// video placeholder run. vLLM carries MM metadata in its KV event for these
+/// boundary blocks; SGLang emits only the block's token IDs.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum QwenVideoRunlessBoundaryHash {
+    #[default]
+    MmMetadata,
+    TokensOnly,
+}
+
 /// Worker-reported Qwen video prompt-expansion behavior.
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
 pub(crate) struct QwenVideoProcessorContract {
     pub placeholder_target: QwenVideoPlaceholderTarget,
     pub resize_mode: QwenVideoResizeMode,
+    #[serde(default)]
+    pub runless_boundary_hash: QwenVideoRunlessBoundaryHash,
+    #[serde(default)]
+    pub sglang_preprocess: Option<SglangQwenVideoPreprocessContract>,
+}
+
+/// SGLang's Qwen video preprocessing stage before Transformers runs.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+pub(crate) struct SglangQwenVideoPreprocessContract {
+    pub image_factor: usize,
+    pub video_min_pixels: usize,
+    pub video_max_pixels: usize,
+    pub video_total_pixels: usize,
+    pub frame_factor: usize,
+    pub fps: f64,
+    pub min_frames: usize,
+    pub max_frames: usize,
 }
 
 /// Worker-reported Nemotron video prompt-expansion behavior.
@@ -73,6 +101,9 @@ pub(crate) struct VideoRoutingReplacement {
     /// Exact chat-template token sequence replaced by the model processor.
     pub target_tokens: Vec<TokenIdType>,
     pub replacement_tokens: Vec<TokenIdType>,
+    /// Whether runless boundary blocks carry the media hash separately from
+    /// their token sequence in the worker's KV event.
+    pub runless_boundary_uses_mm_metadata: bool,
 }
 
 enum SupportedVideoModel {

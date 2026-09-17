@@ -57,6 +57,7 @@ from tests.utils.payload_builder import (
     router_selection_chat_payload_default,
 )
 from tests.utils.payloads import (
+    CachedTokensChatPayload,
     ChatPayload,
     HttpErrorPayload,
     ImageGenerationPayload,
@@ -690,44 +691,63 @@ sglang_configs = {
     "video_agg_fd_qwen": SGLangConfig(
         name="video_agg_fd_qwen",
         directory=sglang_dir,
-        script_name="agg_vision.sh",
+        script_name="agg_multimodal_router.sh",
         marks=[
             pytest.mark.multimodal,
             pytest.mark.gpu_1,
-            pytest.mark.profiled_vram_gib(10.0),
+            pytest.mark.profiled_vram_gib(18.7),
             pytest.mark.requested_sglang_kv_tokens(8736),
-            pytest.mark.timeout(390),
+            pytest.mark.timeout(500),
             pytest.mark.pre_merge,
-            # TODO: Enable media-ffmpeg in the SGLang container build, then
-            # remove this skip. Frontend video decoding requires the Dynamo
-            # binding to be built with media-ffmpeg support.
-            pytest.mark.skip(reason="SGLang container lacks media-ffmpeg support"),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         script_args=[
-            "--model-path",
+            "--model",
             "Qwen/Qwen3-VL-2B-Instruct",
-            "--frontend-decoding",
+            "--num-workers",
+            "2",
+            "--single-gpu",
         ],
         env={
             "DYN_MM_ALLOW_INTERNAL": "1",
-            "DYN_MM_VIDEO_NUM_FRAMES": "4",
+            # Keep enough video tokens to make the routing sequence materially
+            # larger than the shared text prefix (the fixture decodes 10 frames).
+            "DYN_MM_VIDEO_NUM_FRAMES": "32",
         },
-        timeout=360,
+        timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
-            chat_payload(
-                [
-                    {"type": "text", "text": "Describe the video in detail"},
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": MULTIMODAL_VIDEO_URL},
-                    },
-                ],
-                repeat_count=1,
+            CachedTokensChatPayload(
+                body={
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Describe the video in detail",
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": MULTIMODAL_VIDEO_URL},
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 100,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                repeat_count=3,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                temperature=0.0,
-                max_tokens=100,
+                min_cached_tokens=128,
+                require_rust_processor_init=True,
+                min_routing_total_blocks=10,
+                # A text-only hit is at most a small fraction of this video
+                # request. Requiring high router-side overlap proves the media
+                # hashes matched the worker KV events instead of accepting a
+                # cached text prefix as a false positive.
+                min_avg_kv_hit_rate=0.9,
             )
         ],
     ),

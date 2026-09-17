@@ -9,10 +9,13 @@ Dynamo's runtime images ship a deliberately small media stack. The in-tree FFmpe
 
 Two input classes are already covered without installing anything:
 
-- **VP8 and VP9 video** decode through the in-tree FFmpeg.
+- **VP8 and VP9 video** decode through the in-tree FFmpeg when frontend
+  decoding is enabled on a CUDA vLLM or SGLang runtime.
 - **H.264 and H.265 video** decode on the GPU through NVDEC, which every backend uses by default. NVDEC needs a GPU with a video decode engine and a container granted the `video` driver capability. See [Video Decode GPU Requirements](video-decode-gpu-requirements.md) for the hardware and capability matrix.
 
-Installing an additional decoder package covers what remains:
+Without frontend decoding, the backend worker owns VP8/VP9 decoding and needs
+the corresponding package from the table below. Installing an additional
+decoder package also covers:
 
 - **AAC and other compressed audio**, which NVDEC does not decode at all.
 - **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.

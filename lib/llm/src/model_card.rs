@@ -19,7 +19,8 @@ use std::sync::{Arc, OnceLock};
 use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
-    ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+    ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY, TokenizerBackend,
+    VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
@@ -1266,6 +1267,7 @@ impl ModelDeploymentCard {
                 // worker uses the same model-visible prompt expansion.
                 for key in [
                     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                    SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 ] {
                     append_runtime_contract_checksum(
@@ -3257,6 +3259,7 @@ mod ownership_tests {
     #[test]
     fn video_processor_runtime_contracts_isolate_worker_sets() {
         use crate::local_model::runtime_config::{
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
         };
@@ -3291,6 +3294,23 @@ mod ownership_tests {
                 "resize_mode": "round_ties_even"
             }),
         );
+        let sglang_qwen = card_with_contract(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+                "sglang_preprocess": {
+                    "image_factor": 28,
+                    "video_min_pixels": 100352,
+                    "video_max_pixels": 602112,
+                    "video_total_pixels": 90316800,
+                    "frame_factor": 2,
+                    "fps": 2.0,
+                    "min_frames": 4,
+                    "max_frames": 768
+                }
+            }),
+        );
         let nemotron = card_with_contract(
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             serde_json::json!({"video_pruning_rate": 0.5}),
@@ -3303,6 +3323,8 @@ mod ownership_tests {
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
         assert_ne!(missing.mdcsum(), qwen.mdcsum());
+        assert_ne!(missing.mdcsum(), sglang_qwen.mdcsum());
+        assert_ne!(qwen.mdcsum(), sglang_qwen.mdcsum());
         assert_eq!(qwen.mdcsum(), same_qwen.mdcsum());
         assert_ne!(qwen.mdcsum(), different_qwen.mdcsum());
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());

@@ -478,6 +478,7 @@ impl NemotronVideoRoutingSpec {
             event_video_token_id: None,
             target_tokens: self.video_target_tokens.clone(),
             replacement_tokens,
+            runless_boundary_uses_mm_metadata: true,
         })
     }
 

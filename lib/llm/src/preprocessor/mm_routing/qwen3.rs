@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{
-    QwenVideoPlaceholderTarget, QwenVideoProcessorContract, QwenVideoResizeMode, VideoRoutingInput,
+    QwenVideoPlaceholderTarget, QwenVideoProcessorContract, QwenVideoResizeMode,
+    QwenVideoRunlessBoundaryHash, SglangQwenVideoPreprocessContract, VideoRoutingInput,
     VideoRoutingReplacement,
     config::{read_json, read_model_config, required_token_id, required_usize},
 };
@@ -40,7 +41,35 @@ pub(super) struct Qwen3VideoRoutingSpec {
     vision_end_token_id: TokenIdType,
     placeholder_target: QwenVideoPlaceholderTarget,
     resize_mode: QwenVideoResizeMode,
+    runless_boundary_hash: QwenVideoRunlessBoundaryHash,
+    sglang_preprocess: Option<SglangQwenVideoPreprocessContract>,
     tokenizer: Arc<dyn Tokenizer>,
+}
+
+struct PreparedVideoInput {
+    frame_count: usize,
+    width: u32,
+    height: u32,
+    source_fps: f64,
+    sampled_timestamps: Vec<f64>,
+}
+
+impl SglangQwenVideoPreprocessContract {
+    fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.image_factor > 0
+                && self.video_min_pixels > 0
+                && self.video_max_pixels >= self.video_min_pixels
+                && self.video_total_pixels > 0
+                && self.frame_factor > 0
+                && self.min_frames > 0
+                && self.max_frames >= self.min_frames
+                && self.fps.is_finite()
+                && self.fps > 0.0,
+            "mm-routing: invalid SGLang Qwen video preprocessing contract"
+        );
+        Ok(())
+    }
 }
 
 impl Qwen3VideoRoutingSpec {
@@ -128,6 +157,8 @@ impl Qwen3VideoRoutingSpec {
             vision_end_token_id: required_token_id(&model_config, "vision_end_token_id", "Qwen")?,
             placeholder_target: processor_contract.placeholder_target,
             resize_mode: processor_contract.resize_mode,
+            runless_boundary_hash: processor_contract.runless_boundary_hash,
+            sglang_preprocess: processor_contract.sglang_preprocess,
             tokenizer,
         })
     }
@@ -137,7 +168,15 @@ impl Qwen3VideoRoutingSpec {
         input: &VideoRoutingInput<'_>,
     ) -> Result<VideoRoutingReplacement> {
         self.validate_input(input)?;
-        let (grid_t, grid_h, grid_w) = self.video_grid(input)?;
+        let prepared = self.prepare_input(input)?;
+        let prepared_input = VideoRoutingInput {
+            frame_count: prepared.frame_count,
+            width: prepared.width,
+            height: prepared.height,
+            source_fps: prepared.source_fps,
+            sampled_timestamps: &prepared.sampled_timestamps,
+        };
+        let (grid_t, grid_h, grid_w) = self.video_grid(&prepared_input)?;
         let merge_area = self
             .spatial_merge_size
             .checked_mul(self.spatial_merge_size)
@@ -154,7 +193,7 @@ impl Qwen3VideoRoutingSpec {
             .checked_mul(tokens_per_grid)
             .context("mm-routing: Qwen video token count overflow")?;
 
-        let grid_timestamps = self.grid_timestamps(input, grid_t)?;
+        let grid_timestamps = self.grid_timestamps(&prepared_input, grid_t)?;
         let mut replacement_tokens = Vec::with_capacity(
             base_video_tokens
                 .checked_add(grid_t.saturating_mul(8))
@@ -185,6 +224,105 @@ impl Qwen3VideoRoutingSpec {
             event_video_token_id: Some(self.video_token_id),
             target_tokens,
             replacement_tokens,
+            runless_boundary_uses_mm_metadata: matches!(
+                self.runless_boundary_hash,
+                QwenVideoRunlessBoundaryHash::MmMetadata
+            ),
+        })
+    }
+
+    fn prepare_input(&self, input: &VideoRoutingInput<'_>) -> Result<PreparedVideoInput> {
+        let Some(contract) = self.sglang_preprocess else {
+            return Ok(PreparedVideoInput {
+                frame_count: input.frame_count,
+                width: input.width,
+                height: input.height,
+                source_fps: input.source_fps,
+                sampled_timestamps: input.sampled_timestamps.to_vec(),
+            });
+        };
+
+        contract.validate()?;
+        anyhow::ensure!(
+            input.frame_count >= contract.frame_factor,
+            "mm-routing: SGLang Qwen video frame count is below frame_factor"
+        );
+
+        let first_frame = (input.sampled_timestamps[0] * input.source_fps).round_ties_even();
+        let last_frame =
+            (input.sampled_timestamps[input.frame_count - 1] * input.source_fps).round_ties_even();
+        let span_frames = last_frame - first_frame;
+        anyhow::ensure!(
+            input.frame_count == 1 || span_frames > 0.0,
+            "mm-routing: SGLang Qwen sampled video has no positive frame span"
+        );
+        let effective_fps = if input.frame_count > 1 {
+            (input.frame_count - 1) as f64 * input.source_fps / span_frames
+        } else {
+            input.source_fps
+        };
+        anyhow::ensure!(
+            effective_fps.is_finite() && effective_fps > 0.0,
+            "mm-routing: SGLang Qwen effective fps is invalid"
+        );
+
+        let min_frames = ceil_to_factor(contract.min_frames, contract.frame_factor)?;
+        let max_frames = floor_to_factor(
+            contract.max_frames.min(input.frame_count),
+            contract.frame_factor,
+        )?;
+        anyhow::ensure!(
+            max_frames >= min_frames,
+            "mm-routing: SGLang Qwen frontend supplied too few frames"
+        );
+        let requested_frames = input.frame_count as f64 / effective_fps * contract.fps;
+        let requested_frames = requested_frames
+            .max(min_frames as f64)
+            .min(max_frames as f64)
+            .min(input.frame_count as f64);
+        let frame_count = floor_to_factor(requested_frames as usize, contract.frame_factor)?;
+        anyhow::ensure!(
+            frame_count >= contract.frame_factor && frame_count <= input.frame_count,
+            "mm-routing: SGLang Qwen selected frame count is invalid"
+        );
+
+        // Match np.linspace(0, total_frames - 1, num=frame_count, dtype=int64).
+        let sampled_timestamps = (0..frame_count)
+            .map(|index| {
+                let source_index = if frame_count == 1 {
+                    0
+                } else {
+                    index
+                        .checked_mul(input.frame_count - 1)
+                        .context("mm-routing: SGLang Qwen frame index overflow")?
+                        / (frame_count - 1)
+                };
+                Ok(source_index as f64 / effective_fps)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let min_pixels = contract.video_min_pixels as f64;
+        let max_pixels = (contract.video_max_pixels as f64)
+            .min(
+                contract.video_total_pixels as f64 / frame_count as f64
+                    * contract.frame_factor as f64,
+            )
+            .max((min_pixels * 1.05) as usize as f64);
+        let (height, width) = sglang_smart_resize(
+            usize::try_from(input.height).context("mm-routing: video height exceeds usize")?,
+            usize::try_from(input.width).context("mm-routing: video width exceeds usize")?,
+            contract.image_factor,
+            contract.video_min_pixels as f64,
+            max_pixels,
+        )?;
+
+        Ok(PreparedVideoInput {
+            frame_count,
+            width: u32::try_from(width).context("mm-routing: resized video width exceeds u32")?,
+            height: u32::try_from(height)
+                .context("mm-routing: resized video height exceeds u32")?,
+            source_fps: effective_fps,
+            sampled_timestamps,
         })
     }
 
@@ -351,6 +489,64 @@ fn ensure_matching_value(config: &Value, field: &str, expected: usize) -> Result
     Ok(())
 }
 
+fn ceil_to_factor(value: usize, factor: usize) -> Result<usize> {
+    value
+        .checked_add(factor - 1)
+        .map(|value| value / factor * factor)
+        .context("mm-routing: SGLang Qwen frame rounding overflow")
+}
+
+fn floor_to_factor(value: usize, factor: usize) -> Result<usize> {
+    anyhow::ensure!(factor > 0, "mm-routing: SGLang Qwen frame_factor is zero");
+    Ok(value / factor * factor)
+}
+
+fn sglang_smart_resize(
+    height: usize,
+    width: usize,
+    factor: usize,
+    min_pixels: f64,
+    max_pixels: f64,
+) -> Result<(usize, usize)> {
+    anyhow::ensure!(
+        height > 0 && width > 0,
+        "mm-routing: video dimensions are zero"
+    );
+    let aspect_ratio = height.max(width) as f64 / height.min(width) as f64;
+    anyhow::ensure!(
+        aspect_ratio <= 200.0,
+        "mm-routing: SGLang Qwen video aspect ratio exceeds 200:1"
+    );
+
+    let mut resized_height =
+        ((height as f64 / factor as f64).round_ties_even() as usize * factor).max(factor);
+    let mut resized_width =
+        ((width as f64 / factor as f64).round_ties_even() as usize * factor).max(factor);
+    let resized_pixels = resized_height
+        .checked_mul(resized_width)
+        .context("mm-routing: SGLang Qwen resized area overflow")? as f64;
+    let source_pixels = height
+        .checked_mul(width)
+        .context("mm-routing: SGLang Qwen source area overflow")? as f64;
+
+    if resized_pixels > max_pixels {
+        let beta = (source_pixels / max_pixels).sqrt();
+        resized_height = (height as f64 / beta / factor as f64).floor() as usize * factor;
+        resized_width = (width as f64 / beta / factor as f64).floor() as usize * factor;
+    } else if resized_pixels < min_pixels {
+        let beta = (min_pixels / source_pixels).sqrt();
+        resized_height = (height as f64 * beta / factor as f64).ceil() as usize * factor;
+        resized_width = (width as f64 * beta / factor as f64).ceil() as usize * factor;
+    }
+
+    anyhow::ensure!(
+        resized_height > 0 && resized_width > 0,
+        "mm-routing: SGLang Qwen smart resize produced a zero dimension"
+    );
+
+    Ok((resized_height, resized_width))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tokenizers::{Encoding, traits::DecodeResult};
@@ -399,6 +595,8 @@ mod tests {
             vision_end_token_id: 151653,
             placeholder_target: QwenVideoPlaceholderTarget::VisionWrappedVideoToken,
             resize_mode: QwenVideoResizeMode::LegacyCeil,
+            runless_boundary_hash: QwenVideoRunlessBoundaryHash::MmMetadata,
+            sglang_preprocess: None,
             tokenizer: Arc::new(TimestampTokenizer),
         }
     }
@@ -415,8 +613,49 @@ mod tests {
             vision_end_token_id: 151653,
             placeholder_target: QwenVideoPlaceholderTarget::VisionWrappedVideoToken,
             resize_mode,
+            runless_boundary_hash: QwenVideoRunlessBoundaryHash::MmMetadata,
+            sglang_preprocess: None,
             tokenizer: Arc::new(TimestampTokenizer),
         }
+    }
+
+    #[test]
+    fn reproduces_sglang_frame_sampling_and_pre_resize() {
+        let timestamps: Vec<_> = (0..32).map(|index| index as f64 * 10.0 / 31.0).collect();
+        let input = VideoRoutingInput {
+            frame_count: 32,
+            width: 320,
+            height: 240,
+            source_fps: 30.0,
+            sampled_timestamps: &timestamps,
+        };
+        let mut spec = production_geometry_spec(QwenVideoResizeMode::LegacyCeil);
+        spec.sglang_preprocess = Some(SglangQwenVideoPreprocessContract {
+            image_factor: 28,
+            video_min_pixels: 128 * 28 * 28,
+            video_max_pixels: 768 * 28 * 28,
+            video_total_pixels: (128000.0 * 28.0 * 28.0 * 0.9) as usize,
+            frame_factor: 2,
+            fps: 2.0,
+            min_frames: 4,
+            max_frames: 768,
+        });
+
+        let prepared = spec.prepare_input(&input).unwrap();
+
+        assert_eq!(prepared.frame_count, 20);
+        assert_eq!((prepared.width, prepared.height), (392, 280));
+        assert!((prepared.source_fps - 3.1).abs() < 1e-9);
+        assert_eq!(prepared.sampled_timestamps.first(), Some(&0.0));
+        assert!((prepared.sampled_timestamps.last().unwrap() - 10.0).abs() < 1e-9);
+        let prepared_input = VideoRoutingInput {
+            frame_count: prepared.frame_count,
+            width: prepared.width,
+            height: prepared.height,
+            source_fps: prepared.source_fps,
+            sampled_timestamps: &prepared.sampled_timestamps,
+        };
+        assert_eq!(spec.video_grid(&prepared_input).unwrap(), (10, 18, 24));
     }
 
     #[test]
@@ -535,6 +774,8 @@ mod tests {
             vision_end_token_id: 151653,
             placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
             resize_mode: QwenVideoResizeMode::LegacyCeil,
+            runless_boundary_hash: QwenVideoRunlessBoundaryHash::MmMetadata,
+            sglang_preprocess: None,
             tokenizer: Arc::new(CheckpointTimestampTokenizer {
                 seconds_token_id: 6486,
             }),
@@ -746,6 +987,8 @@ mod tests {
             QwenVideoProcessorContract {
                 placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
                 resize_mode: QwenVideoResizeMode::LegacyCeil,
+                runless_boundary_hash: QwenVideoRunlessBoundaryHash::MmMetadata,
+                sglang_preprocess: None,
             },
         )
         .unwrap();
@@ -797,6 +1040,8 @@ mod tests {
                 QwenVideoProcessorContract {
                     placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
                     resize_mode: QwenVideoResizeMode::LegacyCeil,
+                    runless_boundary_hash: QwenVideoRunlessBoundaryHash::MmMetadata,
+                    sglang_preprocess: None,
                 },
             )
             .is_err()
@@ -844,6 +1089,8 @@ mod tests {
             QwenVideoProcessorContract {
                 placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
                 resize_mode: QwenVideoResizeMode::LegacyCeil,
+                runless_boundary_hash: QwenVideoRunlessBoundaryHash::MmMetadata,
+                sglang_preprocess: None,
             },
         )
         .err()

@@ -53,12 +53,13 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing;
 
-use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
+    SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
+use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -751,10 +752,9 @@ pub struct MmImageEntry {
 }
 
 /// One replacement tracked in both the worker-visible and canonical routing
-/// token spaces. vLLM includes MM metadata on every block intersecting a
-/// feature span, including timestamp/delimiter-only boundary blocks. Those
-/// blocks need the worker token form plus `block_mm_infos`; blocks with an
-/// exact placeholder/object mapping use the canonical pad-value form.
+/// token spaces. Blocks with an exact placeholder/object mapping use the
+/// canonical pad-value form. For a timestamp/delimiter-only boundary block,
+/// the worker contract determines whether the hash also includes MM metadata.
 #[cfg(feature = "mm-routing")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedMmRoutingReplacement {
@@ -762,6 +762,7 @@ struct TrackedMmRoutingReplacement {
     target_tokens: Vec<TokenIdType>,
     worker_tokens: Vec<TokenIdType>,
     routing_tokens: Vec<TokenIdType>,
+    runless_boundary_uses_mm_metadata: bool,
 }
 
 /// Modality-aware routing payload accumulated in original message order.
@@ -789,6 +790,7 @@ enum MmRoutingEntry {
         event_video_token_id: Option<TokenIdType>,
         target_tokens: Vec<TokenIdType>,
         replacement_tokens: Vec<TokenIdType>,
+        runless_boundary_uses_mm_metadata: bool,
     },
 }
 
@@ -1018,10 +1020,9 @@ fn append_mm_routing_replacement_with_fill(
 /// normalizer block by block.
 ///
 /// Most blocks use canonical pad-value tokens. If a feature-span boundary
-/// does not contain an exact ordered placeholder/object mapping, vLLM keeps
-/// the worker tokens and hashes the block's MM metadata instead. Reproducing
-/// that fallback here keeps both sides identical without discarding the media
-/// identity carried by an ambiguous boundary block.
+/// does not contain an exact ordered placeholder/object mapping, the frontend
+/// keeps the worker tokens. It adds MM metadata only when the worker's KV-event
+/// contract does the same; SGLang's Qwen events are token-only in this case.
 #[cfg(feature = "mm-routing")]
 fn apply_tracked_mm_replacements(
     routing_prepend_bos: Option<TokenIdType>,
@@ -1088,7 +1089,12 @@ fn apply_tracked_mm_replacements(
             let start = worker_tokens.len();
             worker_tokens.extend_from_slice(&replacement.worker_tokens);
             routing_tokens.extend_from_slice(&replacement.routing_tokens);
-            spans.push((start, worker_tokens.len(), replacement.mm_hash));
+            spans.push((
+                start,
+                worker_tokens.len(),
+                replacement.mm_hash,
+                replacement.runless_boundary_uses_mm_metadata,
+            ));
             token_index += replacement.target_tokens.len();
             replacement_index += 1;
             continue;
@@ -1119,8 +1125,8 @@ fn apply_tracked_mm_replacements(
         let block_end = block_start + block_size;
         let mm_hashes: Vec<u64> = spans
             .iter()
-            .filter(|(start, end, _)| *start < block_end && *end > block_start)
-            .map(|(_, _, mm_hash)| *mm_hash)
+            .filter(|(start, end, _, _)| *start < block_end && *end > block_start)
+            .map(|(_, _, mm_hash, _)| *mm_hash)
             .collect();
         if mm_hashes.is_empty() {
             continue;
@@ -1150,15 +1156,24 @@ fn apply_tracked_mm_replacements(
             }
             None => {
                 routing_block.copy_from_slice(worker_block);
-                block_mm_infos[block_index] = Some(BlockExtraInfo {
-                    mm_objects: mm_hashes
-                        .into_iter()
-                        .map(|mm_hash| BlockMmObjectInfo {
-                            mm_hash,
-                            offsets: Vec::new(),
-                        })
-                        .collect(),
-                });
+                let metadata_hashes = spans
+                    .iter()
+                    .filter(|(start, end, _, uses_metadata)| {
+                        *uses_metadata && *start < block_end && *end > block_start
+                    })
+                    .map(|(_, _, mm_hash, _)| *mm_hash)
+                    .collect::<Vec<_>>();
+                if !metadata_hashes.is_empty() {
+                    block_mm_infos[block_index] = Some(BlockExtraInfo {
+                        mm_objects: metadata_hashes
+                            .into_iter()
+                            .map(|mm_hash| BlockMmObjectInfo {
+                                mm_hash,
+                                offsets: Vec::new(),
+                            })
+                            .collect(),
+                    });
+                }
             }
         }
     }
@@ -2534,7 +2549,7 @@ impl OpenAIPreprocessor {
 
         #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
         let video_routing_processor = {
-            let qwen_contract = match runtime_config
+            let vllm_qwen_contract = match runtime_config
                 .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
                     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 ) {
@@ -2548,6 +2563,31 @@ impl OpenAIPreprocessor {
                     );
                     None
                 }
+            };
+            let sglang_qwen_contract = match runtime_config
+                .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
+                    SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                ) {
+                Ok(target) => target,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        %error,
+                        key = SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                        "invalid SGLang Qwen video processor runtime metadata; exact video routing disabled"
+                    );
+                    None
+                }
+            };
+            let qwen_contract = match (vllm_qwen_contract, sglang_qwen_contract) {
+                (Some(_), Some(_)) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        "multiple Qwen video processor contracts were published; exact video routing disabled"
+                    );
+                    None
+                }
+                (contract, None) | (None, contract) => contract,
             };
             let nemotron_contract = match runtime_config
                 .get_engine_specific::<mm_routing::NemotronVideoProcessorContract>(
@@ -3551,6 +3591,8 @@ impl OpenAIPreprocessor {
                                 event_video_token_id: routing.event_video_token_id,
                                 target_tokens: routing.target_tokens,
                                 replacement_tokens: routing.replacement_tokens,
+                                runless_boundary_uses_mm_metadata: routing
+                                    .runless_boundary_uses_mm_metadata,
                             })
                         })();
                         match video_entry {
@@ -4073,6 +4115,7 @@ impl OpenAIPreprocessor {
                             target_tokens: vec![image_token_id],
                             worker_tokens,
                             routing_tokens,
+                            runless_boundary_uses_mm_metadata: true,
                         }
                     }
                     MmRoutingEntry::Video {
@@ -4081,6 +4124,7 @@ impl OpenAIPreprocessor {
                         event_video_token_id: _,
                         target_tokens,
                         replacement_tokens,
+                        runless_boundary_uses_mm_metadata,
                     } => {
                         let fill_token =
                             dynamo_kv_router::protocols::pad_value_for_mm_hash(*mm_hash);
@@ -4098,6 +4142,7 @@ impl OpenAIPreprocessor {
                                     }
                                 })
                                 .collect(),
+                            runless_boundary_uses_mm_metadata: *runless_boundary_uses_mm_metadata,
                         }
                     }
                 };
@@ -11951,6 +11996,7 @@ mod tests {
             target_tokens: vec![9],
             worker_tokens: vec![3, 4, 5, 6, video_token_id, video_token_id],
             routing_tokens: vec![3, 4, 5, 6, video_pad, video_pad],
+            runless_boundary_uses_mm_metadata: true,
         };
 
         let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
@@ -11972,6 +12018,38 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
+    fn tracked_video_boundary_matches_token_only_worker_contract() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let video_token_id = 100;
+        let mm_hash = 41;
+        let video_pad = pad_value_for_mm_hash(mm_hash);
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![9],
+            worker_tokens: vec![3, 4, 5, 6, video_token_id, video_token_id],
+            routing_tokens: vec![3, 4, 5, 6, video_pad, video_pad],
+            runless_boundary_uses_mm_metadata: false,
+        };
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[1, 9, 2],
+            4,
+            Some(99),
+            Some(video_token_id),
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 8);
+        assert_eq!(&tokens[..4], &[1, 3, 4, 5]);
+        assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
+        assert!(infos.iter().all(Option::is_none));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
     fn tracked_mixed_boundary_preserves_worker_hash_fallback() {
         use dynamo_kv_router::protocols::pad_value_for_mm_hash;
 
@@ -11989,6 +12067,7 @@ mod tests {
                     pad_value_for_mm_hash(image_hash),
                     7,
                 ],
+                runless_boundary_uses_mm_metadata: true,
             },
             TrackedMmRoutingReplacement {
                 mm_hash: video_hash,
@@ -12000,6 +12079,7 @@ mod tests {
                     pad_value_for_mm_hash(video_hash),
                     9,
                 ],
+                runless_boundary_uses_mm_metadata: true,
             },
         ];
 
@@ -12052,6 +12132,7 @@ mod tests {
                 pad_value_for_mm_hash(mm_hash),
                 pad_value_for_mm_hash(mm_hash),
             ],
+            runless_boundary_uses_mm_metadata: true,
         };
         let replacements = [
             replacement(41, image_token_id),
@@ -12096,6 +12177,7 @@ mod tests {
             target_tokens: vec![target],
             worker_tokens: vec![target],
             routing_tokens: vec![target],
+            runless_boundary_uses_mm_metadata: true,
         };
         let replacements = [replacement(41, 10), replacement(42, 20)];
 
@@ -12127,6 +12209,7 @@ mod tests {
             target_tokens: vec![7],
             worker_tokens: vec![100, 19, 18, 18, 20, 101, 19, 18, 20],
             routing_tokens: vec![100, 19, pad, pad, 20, 101, 19, pad, 20],
+            runless_boundary_uses_mm_metadata: true,
         };
 
         let (tokens, prompt_len, block_infos) =
@@ -12166,6 +12249,7 @@ mod tests {
             event_video_token_id: Some(3),
             target_tokens: vec![3],
             replacement_tokens: vec![3],
+            runless_boundary_uses_mm_metadata: true,
         };
         let image = MmRoutingEntry::Image {
             mm_hash: 2,

@@ -319,6 +319,10 @@ RUN set -eu; \
         echo "ERROR: shipped ffmpeg ($ff) exposes an H.264/H.265/AAC/NVENC encoder" >&2; \
         exit 1; \
     fi
+
+# Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
+# image build if the runtime wheel was accidentally compiled without it.
+RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
 {% else %}
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}

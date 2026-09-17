@@ -8,6 +8,7 @@ import pytest
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
+    extract_mm_hashes,
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
@@ -77,6 +78,41 @@ def test_extract_media_urls_rejects_malformed_payloads():
 
     with pytest.raises(ValueError, match="must be a list"):
         extract_media_urls({"image_url": ""}, "image_url")
+
+
+def test_extract_mm_hashes_preserves_legacy_image_protocol():
+    request = {"extra_args": {"mm_hashes": ["image-a", "image-b"]}}
+
+    assert extract_mm_hashes(request) == ["image-a", "image-b"]
+
+
+def test_extract_mm_hashes_flattens_in_sglang_item_order():
+    request = {
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                "video": ["video-a"],
+                "image": ["image-a", "image-b"],
+            }
+        }
+    }
+
+    assert extract_mm_hashes(request) == ["image-a", "image-b", "video-a"]
+
+
+@pytest.mark.parametrize(
+    "grouped",
+    [
+        ["not-an-object"],
+        {"video": "not-a-list"},
+        {"video": ["ok", 1]},
+        {"future_modality": ["hash"]},
+    ],
+)
+def test_extract_mm_hashes_rejects_malformed_grouped_protocol(grouped):
+    assert (
+        extract_mm_hashes({"extra_args": {"mm_hashes_by_modality": grouped}})
+        is None
+    )
 
 
 class TestMultimodalGuard:
