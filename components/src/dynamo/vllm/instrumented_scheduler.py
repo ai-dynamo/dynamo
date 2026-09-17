@@ -95,6 +95,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec.structs
@@ -105,6 +106,7 @@ from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.request import Request, RequestStatus
 
 from dynamo.common.forward_pass_metrics import (
@@ -117,6 +119,10 @@ from dynamo.common.forward_pass_metrics import (
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.benchmark_points import (
     BENCHMARK_MODES,
+    RANDOM_KDA_BOUND,
+    RANDOM_KDA_POLICY,
+    RANDOM_KDA_REQUEST_PREFIX,
+    RANDOM_KDA_WORKER,
     BenchmarkMode,
     BenchmarkPoints,
     DecodePointCandidate,
@@ -143,6 +149,19 @@ def _utc_now_rfc3339() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def recurrent_shadow_range(
+    context: int, headroom: int, block_size: int
+) -> tuple[int, int]:
+    """State-table positions read/written by admission and its steady steps.
+
+    Keep the state preceding the first query as well as every write position.
+    Earlier entries are null placeholders, not allocated token-history pages.
+    """
+    first = max(0, (context - 1) // block_size)
+    end = (context + 1 + headroom + block_size - 1) // block_size
+    return first, end
+
+
 # ---------------------------------------------------------------------------
 # Benchmark mode dataclasses
 # ---------------------------------------------------------------------------
@@ -151,6 +170,7 @@ def _utc_now_rfc3339() -> str:
 @dataclass
 class BenchmarkConfig:
     mode: BenchmarkMode = "agg"
+    randomize_kda_state: bool = False
     warmup_iterations: int = 5
     output_path: str = "/tmp/benchmark_results.json"
     timeout: int = 900
@@ -2189,6 +2209,8 @@ class InstrumentedScheduler(AsyncScheduler):
     # Benchmark mode
     # ------------------------------------------------------------------
 
+    _bench_random_kda: bool = False
+
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -2235,6 +2257,16 @@ class InstrumentedScheduler(AsyncScheduler):
         config_values = {k: v for k, v in cfg.items() if k in known}
         config_values["mode"] = mode
         self._bench_config = BenchmarkConfig(**config_values)
+        if not isinstance(self._bench_config.randomize_kda_state, bool):
+            raise ValueError("benchmark randomize_kda_state must be a boolean")
+        self._bench_random_kda = self._bench_config.randomize_kda_state
+        if (
+            self._bench_random_kda
+            and vllm_config.parallel_config.worker_cls != RANDOM_KDA_WORKER
+        ):
+            raise ValueError(
+                "Random KDA benchmarking requires BenchmarkWorker on every rank"
+            )
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
         uniform_sample_limits = {
@@ -2487,6 +2519,11 @@ class InstrumentedScheduler(AsyncScheduler):
                         manager, "_max_admission_blocks_per_request", None
                     ),
                     "mamba_cache_mode": getattr(manager, "mamba_cache_mode", None),
+                    "num_prefill_checkpoint_blocks": getattr(
+                        getattr(manager, "kv_cache_spec", None),
+                        "num_prefill_checkpoint_blocks",
+                        0,
+                    ),
                     "num_speculative_blocks": getattr(
                         manager, "num_speculative_blocks", 0
                     ),
@@ -3007,20 +3044,25 @@ class InstrumentedScheduler(AsyncScheduler):
             scheduled_tokens = uncached_tokens
 
         if getattr(self, "need_mamba_block_aligned_split", False):
-            # Mirror vLLM's initial waiting-request branch in
-            # _mamba_block_aligned_split. Hybrid align-mode prefills may round
-            # an otherwise feasible chunk down to a cache-block boundary.
-            block_size = (
-                getattr(self.cache_config, "block_size", None) or self.block_size
+            # Use the installed engine's waiting-request split rule. A copied
+            # block-only rule misses finer KDA prefix checkpoints (e.g. a
+            # 192-token prompt with a 128-token prefix-match unit runs 128+64).
+            # Only lengths are read here: avoid allocating/tokenizing a prompt
+            # for every candidate, including million-token contexts.
+            request = cast(
+                Request,
+                SimpleNamespace(
+                    num_computed_tokens=0,
+                    num_prompt_tokens=isl,
+                    num_tokens=isl,
+                    shared_prefix_boundary=0,
+                ),
             )
-            last_cache_position = isl - isl % block_size
-            if getattr(self.kv_cache_manager, "use_eagle", False):
-                last_cache_position = max(last_cache_position - block_size, 0)
-            computed_after_schedule = kv_read_tokens + scheduled_tokens
-            if computed_after_schedule < last_cache_position:
-                scheduled_tokens = scheduled_tokens // block_size * block_size
-            elif kv_read_tokens < last_cache_position < computed_after_schedule:
-                scheduled_tokens = last_cache_position - kv_read_tokens
+            scheduled_tokens = self._mamba_block_aligned_split(
+                request,
+                scheduled_tokens,
+                num_new_local_computed_tokens=kv_read_tokens,
+            )
 
         return scheduled_tokens
 
@@ -3216,9 +3258,15 @@ class InstrumentedScheduler(AsyncScheduler):
             if not isinstance(speculative_blocks, int):
                 speculative_blocks = 0
             if mamba_cache_mode == "align":
-                # Align-mode Mamba keeps one running-state block rather than a
-                # dense sequence. A cache hit also pins one cached state block.
-                blocks = 1 + speculative_blocks + int(has_cache_hit)
+                # Bound the full state transition, not just the steady state:
+                # old/new states can coexist, and FlashKDA reserves an extra
+                # prefill checkpoint even without speculative decoding.
+                checkpoint_blocks = getattr(
+                    getattr(manager, "kv_cache_spec", None),
+                    "num_prefill_checkpoint_blocks",
+                    0,
+                )
+                blocks = 2 + speculative_blocks + checkpoint_blocks
             elif mamba_cache_mode is not None:
                 blocks += speculative_blocks
 
@@ -3874,7 +3922,7 @@ class InstrumentedScheduler(AsyncScheduler):
         num_scheduled_tokens: dict[str, int] = {}
 
         for ctx_len in context_lengths:
-            req_id = f"__bench_{self._bench_seq}"
+            req_id = f"{RANDOM_KDA_REQUEST_PREFIX if self._bench_random_kda else '__bench_'}{self._bench_seq}"
             padded_len = ctx_len + 1
             prompt = self._bench_synthetic_token_ids(req_id, padded_len)
             req = Request(
@@ -4715,10 +4763,11 @@ class InstrumentedScheduler(AsyncScheduler):
         return meta
 
     def _kvwarm_state_layer_groups(self) -> list[str]:
-        """Names of KV-cache groups backed by recurrent state (Mamba/linear
-        attention). Their per-request state is updated in place, so a borrowed
-        shadow write would corrupt the chain; the warm-up must not run on them
-        until scratch state blocks exist."""
+        """Recurrent groups whose state must never be borrowed from a chain.
+
+        Random-state mode gives shadows private slots; without that mode,
+        these groups remain ineligible for the real-KV warm-up.
+        """
         manager = getattr(self, "kv_cache_manager", None)
         config = getattr(manager, "kv_cache_config", None)
         groups = getattr(config, "kv_cache_groups", None) or []
@@ -4749,9 +4798,15 @@ class InstrumentedScheduler(AsyncScheduler):
                 return "fake_prefix"
             return "not_applicable"
         if "kvwarm_real_kv" in reasons:
-            return "real_kv"
+            return (
+                "real_attention_kv_random_kda" if self._bench_random_kda else "real_kv"
+            )
         if "kvwarm_fake_fallback" in reasons:
-            return "fake_fallback"
+            return (
+                "fake_attention_kv_random_kda"
+                if self._bench_random_kda
+                else "fake_fallback"
+            )
         if not self._kvwarm_flag_on():
             return "legacy"
         meta = getattr(self, "_kvwarm_meta", None) or {}
@@ -4779,8 +4834,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 setattr(self, attr, None)
 
     def _kvwarm_warm_eligible(self) -> bool:
-        """Warmup only matters to first order for EP-sharded MoE; dense and
-        moe_tp topologies are physically immune -- skip.
+        """Select real attention-KV warm-up for EP MoE or explicit random-state mode.
+
+        Random-state mode also admits hybrid MoE without EP: its attention
+        prefixes are real, while recurrent states remain private and synthetic.
 
         The verdict travels in the capacity envelope (see
         ``_bench_make_local_capacity``), so every host-local input the stage
@@ -4824,14 +4881,14 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             if not has_experts:
                 reason = "dense_model_content_insensitive"
-            elif not ep_enabled:
+            elif not ep_enabled and not self._bench_random_kda:
                 reason = "moe_tp_balanced_by_construction"
             elif not prefix_on:
                 # The batch rungs rely on prefix-cache generational extension
                 # to deepen incrementally; with prefix cache off a full chain
                 # rebuild is prohibitively expensive -- prefer skipping.
                 reason = "prefix_caching_disabled"
-            elif self._kvwarm_state_layer_groups():
+            elif self._kvwarm_state_layer_groups() and not self._bench_random_kda:
                 reason = "hybrid_state_layers_unsupported"
             else:
                 reason = self._kvwarm_probe_content()
@@ -5117,6 +5174,29 @@ class InstrumentedScheduler(AsyncScheduler):
                 > usable
             ):
                 depth -= 1
+            required = (self._bench_blocks_per_req(depth) + shadow_tail_blocks) * batch
+            if required > usable:
+                # Reaching the depth floor does not prove the fleet fits.
+                # This also covers an initially short chain below the floor.
+                # Preserve the points with explicit fake-KV provenance, but
+                # do not build a stage that violates the warmup pool budget.
+                meta.setdefault("capacity_fallbacks", []).append(
+                    {
+                        "batch": batch,
+                        "depth": depth,
+                        "required_blocks": required,
+                        "usable_blocks": usable,
+                    }
+                )
+                logger.warning(
+                    "KVWARM: batch=%d depth=%d needs %d blocks including "
+                    "shadow reserves, pool has %d; using fake-KV fallback",
+                    batch,
+                    depth,
+                    required,
+                    usable,
+                )
+                depth = 0
             plan[batch] = depth
         self._kvwarm_plan = plan
         # Second reordering: all warmed points first, fake fallbacks last --
@@ -5142,22 +5222,29 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # ------- Warmup state machine (intercepts before phase dispatch) -------
 
+    def _kvwarm_random_state_manager(self, manager) -> bool:
+        return self._bench_random_kda and isinstance(
+            getattr(manager, "kv_cache_spec", None), MambaSpec
+        )
+
     def _kvwarm_shadow_tail_blocks(self, repeats: int) -> int:
-        """Worst-case private tail blocks one measurement shadow draws from
-        the pool on top of the chain prefix it shares (see
-        ``_kvwarm_register_shadow``): ``ceil((ctx + 1 + headroom) / bs) -
-        ctx // bs`` peaks at ``1 + ceil(headroom / bs)`` when ``ctx`` ends one
-        slot short of a block boundary; the headroom is the giant repeat
-        count (at least 2). Every KV-cache group draws its own tail."""
+        """Bound private attention tails and recurrent-state write positions."""
         coordinator = getattr(
             getattr(self, "kv_cache_manager", None), "coordinator", None
         )
-        n_groups = max(1, len(getattr(coordinator, "single_type_managers", ()) or ()))
-        block_size = int(
-            getattr(getattr(self, "cache_config", None), "block_size", 16) or 16
-        )
+        managers = getattr(coordinator, "single_type_managers", ())
         headroom = max(2, int(repeats))
-        return n_groups * (1 + -(-headroom // block_size))
+        if not managers:
+            block_size = int(getattr(self.cache_config, "block_size", 16) or 16)
+            return 1 + -(-headroom // block_size)
+        return sum(
+            1
+            + -(
+                -(headroom + int(self._kvwarm_random_state_manager(manager)))
+                // manager.block_size
+            )
+            for manager in managers
+        )
 
     def _kvwarm_plan_covers(self, point) -> bool:
         """Plan-level coverage decision (independent of live chains): the shared
@@ -5505,6 +5592,9 @@ class InstrumentedScheduler(AsyncScheduler):
         is a copy-on-write fork of the chain's blocks when the manager offers
         CoW; otherwise it is zero-filled (the few sub-block slots below
         ``ctx_len`` then read zeros -- measurement-local, timing-neutral).
+        With random KDA enabled, recurrent groups use private sparse state
+        tables instead of chain blocks. The GPU worker initializes those slots
+        after zeroing, before executing admission.
         Returns the shadow's block table per group and the block ids to zero.
 
         Registration is all-or-nothing across KV-cache groups. Every group's
@@ -5525,14 +5615,30 @@ class InstrumentedScheduler(AsyncScheduler):
         staged: list[tuple[Any, int, list, list, list]] = []
         try:
             for mgr in managers:
-                chain_blocks = list(mgr.req_to_blocks[chain_id])
                 bs = int(
                     getattr(
                         mgr, "block_size", getattr(self.cache_config, "block_size", 16)
                     )
                 )
+                if self._kvwarm_random_state_manager(mgr):
+                    # Recurrent state at a deep chain position cannot be
+                    # truncated to this point's context. Allocate private
+                    # states instead; the worker initializes their values.
+                    # TODO: Support real KDA by checkpointing recurrent and
+                    # conv state at each admission prefix (measured context
+                    # minus one), then copying into private slots after native
+                    # zeroing and outside timed steps. Advance warmup contexts
+                    # in ascending order and bound snapshot residency; validate
+                    # against normal prefill/decode and preserve source state.
+                    first, end = recurrent_shadow_range(ctx_len, headroom, bs)
+                    fresh = block_pool.get_new_blocks(end - first)
+                    staged.append(
+                        (mgr, first, [block_pool.null_block] * first, [], fresh)
+                    )
+                    continue
                 n_shared = ctx_len // bs
                 n_total = -(-(ctx_len + 1 + headroom) // bs)
+                chain_blocks = list(mgr.req_to_blocks[chain_id])
                 if n_total > len(chain_blocks):
                     raise RuntimeError(
                         f"KVWARM: chain {chain_id} too shallow for shadow {req_id}: "
@@ -5548,9 +5654,11 @@ class InstrumentedScheduler(AsyncScheduler):
         table: list[list[int]] = []
         zero_ids: list[int] = []
         for mgr, n_shared, shared, tail_src, fresh in staged:
-            block_pool.touch(shared)
+            random_state = self._kvwarm_random_state_manager(mgr)
+            if not random_state:
+                block_pool.touch(shared)
             apply_cow = getattr(mgr, "_apply_cow", None)
-            if callable(apply_cow):
+            if not random_state and callable(apply_cow):
                 # Production redirects a *prefix-cache hit* to a CoW block, so
                 # the source carries the request's hit-ref and the retained
                 # release after the copy consumes exactly that ref. Give the
@@ -5586,7 +5694,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
             )
             for ctx_len in context_lengths:
-                need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
+                if self._kvwarm_random_state_manager(mgr):
+                    first, end = recurrent_shadow_range(ctx_len, headroom, bs)
+                    need += end - first
+                else:
+                    need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return max(0, need - int(free_fn()))
 
     def _kvwarm_take_cow_copies(self) -> list:
@@ -5647,7 +5759,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 chain_id = self._kvwarm_chain_ids[index]
                 chain_req = self.requests[chain_id]
                 chain_tokens = self._kvwarm_chain_prompts[chain_id]
-                req_id = f"__bench_{self._bench_seq}"
+                req_id = f"{RANDOM_KDA_REQUEST_PREFIX if self._bench_random_kda else '__bench_'}{self._bench_seq}"
                 self._bench_seq += 1
                 block_ids, req_zero_ids = self._kvwarm_register_shadow(
                     req_id, chain_id, ctx_len, headroom
@@ -6226,6 +6338,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 "feasible_max_batch_size": getattr(
                     self, "_bench_feasible_max_decode_batch_size", 0
                 ),
+            },
+            "recurrent_state": {
+                "initialization": "random" if self._bench_random_kda else "unchanged",
+                "policy": RANDOM_KDA_POLICY if self._bench_random_kda else None,
+                "uniform_bound": RANDOM_KDA_BOUND if self._bench_random_kda else None,
             },
             "measurement_policy": {
                 "decode": "steady_state_second_step",

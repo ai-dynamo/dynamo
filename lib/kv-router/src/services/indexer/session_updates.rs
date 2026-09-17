@@ -9,12 +9,12 @@ use std::{
     },
 };
 
-use dashmap::{DashMap, mapref::entry::Entry};
-use dynamo_kv_router::{
+use crate::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     indexer::{KvIndexer, KvRouterError, ThreadPoolIndexer},
     protocols::{ExternalSequenceBlockHash, KvCacheEventData, RouterEvent, WorkerWithDpRank},
 };
+use dashmap::{DashMap, mapref::entry::Entry};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
@@ -198,11 +198,11 @@ impl PrimaryBarrier {
 }
 
 impl SessionUpdateSender {
-    pub(super) fn for_legacy(index: Arc<SessionPrefixIndexer>, primary: KvIndexer) -> Self {
+    pub fn for_legacy(index: Arc<SessionPrefixIndexer>, primary: KvIndexer) -> Self {
         Self::spawn(index, PrimaryBarrier::Legacy(primary))
     }
 
-    pub(super) fn for_concurrent(
+    pub fn for_concurrent(
         index: Arc<SessionPrefixIndexer>,
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
     ) -> Self {
