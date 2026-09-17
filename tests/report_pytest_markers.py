@@ -159,6 +159,7 @@ STUB_MODULES = [
     "fsspec",
     "fsspec.implementations",
     "fsspec.implementations.dirfs",
+    "zstandard",
     "sglang",
     "sglang.srt",
     "sglang.srt.entrypoints",
