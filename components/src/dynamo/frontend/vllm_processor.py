@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -250,6 +251,15 @@ def _ensure_reasoning_parser_output_capable(
     # request with a 500 (issue #14936).
     probe = parser_class(tokenizer)
     try:
+        inspect.signature(probe.extract_reasoning_streaming).bind(
+            "", "", "", [], [], []
+        )
+    except TypeError as e:
+        raise RuntimeError(
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) has an "
+            f"extract_reasoning_streaming signature this processor cannot call: {e}"
+        ) from e
+    try:
         probe.extract_reasoning_streaming("", "", "", [], [], [])
     except NotImplementedError as e:
         raise RuntimeError(
@@ -258,10 +268,14 @@ def _ensure_reasoning_parser_output_capable(
             "processor; gpt-oss output parsing requires HarmonyParser, which "
             "this processor does not support yet (issue #14936)"
         ) from e
-    except Exception:
-        # The probe only cares about NotImplementedError; any other failure on
-        # empty input still proves the method is implemented.
-        pass
+    except Exception as e:
+        # Parsers are not contracted to accept empty input; the probe only
+        # proves the method is implemented, so log and accept.
+        logger.debug(
+            "reasoning_parser %r probe raised %r on empty input; accepting",
+            parser_name,
+            e,
+        )
 
 
 def _build_reasoning_parser_metadata(

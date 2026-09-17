@@ -1057,6 +1057,23 @@ class TestReasoningParserOutputCapability:
 
         _ensure_reasoning_parser_output_capable("fake", PickyParser, object())
 
+    def test_incompatible_signature_rejected(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class WrongSignatureParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, delta_text):
+                return None
+
+        with pytest.raises(RuntimeError, match="signature"):
+            _ensure_reasoning_parser_output_capable(
+                "fake", WrongSignatureParser, object()
+            )
+
     def test_real_gptoss_parser_rejected(self):
         pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
         from vllm.reasoning import ReasoningParserManager
