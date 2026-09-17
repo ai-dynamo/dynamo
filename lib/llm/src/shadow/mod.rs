@@ -90,23 +90,30 @@ impl Registry {
 
 static REGISTRY: LazyLock<Registry> = LazyLock::new(Registry::default);
 
-/// Read the tap config and start one publisher task per tap. A frontend whose
-/// config is wrong must not start: a typo in a filter name would otherwise
-/// mirror more data than the operator intended.
-pub(crate) async fn init_from_env(drt: &DistributedRuntime) -> Result<()> {
+/// The taps of a runtime, started on first use, or `None` when none are
+/// configured and nothing is linked.
+///
+/// Startup calls this so that a wrong config stops the frontend: a typo in a
+/// filter name must not mirror more data than the operator intended. Every
+/// pipeline builder calls it too, so an entry point that skips the startup
+/// call still gets its taps, and a set config is never silently ignored.
+pub(crate) async fn taps(drt: &DistributedRuntime) -> Result<Option<ShadowTaps>> {
+    if let Some(taps) = REGISTRY.live(drt.connection_id()) {
+        return Ok(Some(taps));
+    }
     let Some(path) = std::env::var_os(DYN_SHADOW_TAP_CONFIG).filter(|path| !path.is_empty()) else {
-        return Ok(());
+        return Ok(None);
     };
     let config = ShadowConfig::from_path(&PathBuf::from(path))?;
     if config.taps.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     REGISTRY
         .get_or_init(drt.connection_id(), drt.child_token(), || {
             start_taps(drt, config)
         })
-        .await?;
-    Ok(())
+        .await
+        .map(Some)
 }
 
 /// Every step that can fail for a transient reason runs before anything that
@@ -177,11 +184,6 @@ async fn start_taps(drt: &DistributedRuntime, config: ShadowConfig) -> Result<Sh
     Ok(taps.into())
 }
 
-/// The taps of a runtime, or `None` when it has none and nothing is linked.
-pub(crate) fn taps_for(drt: &DistributedRuntime) -> Option<ShadowTaps> {
-    REGISTRY.live(drt.connection_id())
-}
-
 pub(crate) fn tap_for(taps: &ShadowTaps, origin: ShadowOrigin) -> Arc<ShadowTap> {
     ShadowTap::new(taps.to_vec(), origin)
 }
@@ -192,7 +194,7 @@ mod tests {
 
     use super::*;
 
-    fn taps() -> ShadowTaps {
+    fn queue_set() -> ShadowTaps {
         let config =
             ShadowConfig::from_yaml("schema_version: 1\ntaps:\n  - {name: t, capture: request}\n")
                 .unwrap();
@@ -207,7 +209,7 @@ mod tests {
     fn taps_belong_to_one_runtime_and_end_with_it() {
         let registry = Registry::default();
         let first = CancellationToken::new();
-        registry.insert(1, taps(), first.clone());
+        registry.insert(1, queue_set(), first.clone());
 
         assert!(registry.live(1).is_some());
         assert!(
@@ -221,7 +223,7 @@ mod tests {
             "a stopped runtime has no live taps"
         );
 
-        let second = taps();
+        let second = queue_set();
         registry.insert(2, Arc::clone(&second), CancellationToken::new());
         assert!(Arc::ptr_eq(&registry.live(2).unwrap(), &second));
         assert_eq!(
@@ -238,7 +240,7 @@ mod tests {
         let start = || async {
             starts.fetch_add(1, Ordering::SeqCst);
             tokio::task::yield_now().await;
-            Ok(taps())
+            Ok(queue_set())
         };
         let shutdown = CancellationToken::new();
 
@@ -260,5 +262,65 @@ mod tests {
             .await;
         assert!(failed.is_err());
         assert!(registry.live(7).is_none());
+    }
+
+    async fn process_local_runtime() -> DistributedRuntime {
+        DistributedRuntime::new(
+            dynamo_runtime::Runtime::from_current().unwrap(),
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(shadow_tap_env)]
+    async fn lookup_starts_the_taps_without_a_startup_call() {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            "schema_version: 1\ntaps:\n  - {name: t, capture: request}\n",
+        )
+        .unwrap();
+
+        temp_env::async_with_vars(
+            [(DYN_SHADOW_TAP_CONFIG, Some(config.path().as_os_str()))],
+            async {
+                let drt = process_local_runtime().await;
+                let first = taps(&drt).await.unwrap().expect("config names one tap");
+                let second = taps(&drt).await.unwrap().unwrap();
+                assert!(Arc::ptr_eq(&first, &second), "one tap set per runtime");
+
+                let other = process_local_runtime().await;
+                let theirs = taps(&other).await.unwrap().unwrap();
+                assert!(!Arc::ptr_eq(&first, &theirs), "each runtime owns its taps");
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial(shadow_tap_env)]
+    async fn no_config_means_no_taps_and_a_bad_config_is_an_error() {
+        temp_env::async_with_vars([(DYN_SHADOW_TAP_CONFIG, None::<&str>)], async {
+            let drt = process_local_runtime().await;
+            assert!(taps(&drt).await.unwrap().is_none());
+        })
+        .await;
+
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            "schema_version: 1\ntaps:\n  - {name: t, capture: request, filters: [nope]}\n",
+        )
+        .unwrap();
+        temp_env::async_with_vars(
+            [(DYN_SHADOW_TAP_CONFIG, Some(config.path().as_os_str()))],
+            async {
+                let drt = process_local_runtime().await;
+                assert!(taps(&drt).await.is_err());
+            },
+        )
+        .await;
     }
 }

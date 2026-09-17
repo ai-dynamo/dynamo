@@ -159,7 +159,7 @@ pub(crate) async fn initialize_input(
 ) -> anyhow::Result<()> {
     // Unlike the trace sinks below, a bad shadow tap config stops the
     // frontend: a mistyped filter must not mirror more than was intended.
-    crate::shadow::init_from_env(drt).await?;
+    crate::shadow::taps(drt).await?;
 
     if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {
         tracing::warn!(error = %e, "Request trace initialization failed; continuing without trace sink");

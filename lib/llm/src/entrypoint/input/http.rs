@@ -277,7 +277,7 @@ async fn run_with_selection_policy(
                 model.card(),
                 inner_engine.clone(),
                 tokenizer.clone(),
-                crate::shadow::taps_for(&distributed_runtime),
+                crate::shadow::taps(&distributed_runtime).await?,
             )
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
@@ -287,7 +287,7 @@ async fn run_with_selection_policy(
                     model.card(),
                     inner_engine,
                     tokenizer,
-                    crate::shadow::taps_for(&distributed_runtime),
+                    crate::shadow::taps(&distributed_runtime).await?,
                 )
                 .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;

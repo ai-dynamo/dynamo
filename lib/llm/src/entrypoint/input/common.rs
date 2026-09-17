@@ -318,7 +318,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         encoder_router,
         shadow_taps: {
             use dynamo_runtime::traits::DistributedRuntimeProvider;
-            crate::shadow::taps_for(client.endpoint.component().drt())
+            crate::shadow::taps(client.endpoint.component().drt()).await?
         },
     })
 }
@@ -430,7 +430,7 @@ pub async fn prepare_engine(
                 model.card(),
                 inner_engine,
                 model.card().tokenizer()?,
-                crate::shadow::taps_for(&distributed_runtime),
+                crate::shadow::taps(&distributed_runtime).await?,
             )
             .await?;
 
