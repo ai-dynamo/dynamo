@@ -1029,6 +1029,29 @@ class TestReasoningParserOutputCapability:
                 "openai_gptoss", BoundaryOnlyParser, object(), {}, None
             )
 
+    def test_harmony_note_only_for_gptoss(self):
+        from dynamo.frontend.vllm_processor import (
+            _ensure_reasoning_parser_output_capable,
+        )
+
+        class BoundaryOnlyParser:
+            def __init__(self, tokenizer, *args, **kwargs):
+                pass
+
+            def extract_reasoning_streaming(self, *args):
+                raise NotImplementedError("boundary detection only")
+
+        with pytest.raises(RuntimeError, match="boundary detection") as exc_info:
+            _ensure_reasoning_parser_output_capable(
+                "future_parser", BoundaryOnlyParser, object(), {}, None
+            )
+        assert "HarmonyParser" not in str(exc_info.value)
+
+        with pytest.raises(RuntimeError, match="HarmonyParser"):
+            _ensure_reasoning_parser_output_capable(
+                "openai_gptoss", BoundaryOnlyParser, object(), {}, None
+            )
+
     def test_output_capable_parser_accepted(self):
         from dynamo.frontend.vllm_processor import (
             _ensure_reasoning_parser_output_capable,

@@ -269,12 +269,17 @@ def _ensure_reasoning_parser_output_capable(
     try:
         probe.extract_reasoning_streaming("", "", "", [], [], [])
     except NotImplementedError as e:
-        raise RuntimeError(
+        msg = (
             f"reasoning_parser {parser_name!r} ({parser_class.__name__}) only "
-            "provides boundary detection and cannot serve the vLLM chat "
-            "processor; gpt-oss output parsing requires HarmonyParser, which "
-            "this processor does not support yet (issue #14936)"
-        ) from e
+            "provides boundary detection; this processor needs a parser that "
+            "implements extract_reasoning_streaming (issue #14936)"
+        )
+        if parser_name == "openai_gptoss":
+            msg += (
+                "; gpt-oss output parsing requires HarmonyParser, which this "
+                "processor does not support yet"
+            )
+        raise RuntimeError(msg) from e
     except Exception as e:
         # Parsers are not contracted to accept empty input; the probe only
         # proves the method is implemented, so log and accept.
