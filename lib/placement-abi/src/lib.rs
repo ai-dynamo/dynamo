@@ -1201,6 +1201,9 @@ pub fn validate_create_request_v1(
     {
         return Err(CreateRequestValidationError::NullSlice);
     }
+    if !valid_worker_topology_slice(request.workers) {
+        return Err(CreateRequestValidationError::NullSlice);
+    }
     if request.workers.len > MAX_CREATE_WORKERS_V1 || request.capacities.len > MAX_CREATE_WORKERS_V1
     {
         return Err(CreateRequestValidationError::TooManyWorkers);
@@ -1249,6 +1252,17 @@ pub unsafe fn validate_mutation_batch_v1(batch: PlacementMutationSliceV1) -> Res
             // Safety: `admission` is the active union member for an ADMIT mutation.
             let admission = unsafe { mutation.payload.admission };
             if !valid_admission(&admission) {
+                return Err(StatusV1::INVALID_ARGUMENT);
+            }
+        } else if matches!(
+            mutation.kind,
+            PlacementMutationKindV1::WORKER_READY
+                | PlacementMutationKindV1::WORKER_DRAINING
+                | PlacementMutationKindV1::WORKER_REMOVED
+        ) {
+            // Safety: `worker` is the active union member for worker lifecycle mutations.
+            let worker = unsafe { mutation.payload.worker };
+            if !valid_worker_topology(&worker) {
                 return Err(StatusV1::INVALID_ARGUMENT);
             }
         }
@@ -1367,6 +1381,23 @@ fn valid_admission(admission: &PlacementAdmissionV1) -> bool {
         }
         _ => false,
     }
+}
+
+fn valid_worker_topology(worker: &WorkerTopologyV1) -> bool {
+    valid_slice(worker.scheduler_ids.data, worker.scheduler_ids.len)
+}
+
+fn valid_worker_topology_slice(workers: WorkerTopologySliceV1) -> bool {
+    let Some(worker_len) = checked_slice_len::<WorkerTopologyV1>(workers.len) else {
+        return false;
+    };
+    if worker_len == 0 {
+        return true;
+    }
+    // Safety: the outer slice has been checked by the caller before this helper
+    // is invoked; this helper is only used during bounded ABI validation.
+    let workers = unsafe { std::slice::from_raw_parts(workers.data, worker_len) };
+    workers.iter().all(valid_worker_topology)
 }
 
 fn valid_optional_identity_slice<T>(
@@ -1512,6 +1543,85 @@ mod tests {
             validate_create_request_v1(&request),
             Err(CreateRequestValidationError::NullSlice)
         );
+    }
+
+    #[test]
+    fn create_validation_rejects_misaligned_nested_scheduler_ids() {
+        let scheduler = 7_u64;
+        let misaligned_scheduler = (&scheduler as *const u64)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<u64>();
+        let worker = WorkerTopologyV1 {
+            worker_id: 1,
+            scheduler_ids: SchedulerIdSliceV1 {
+                data: misaligned_scheduler,
+                len: 1,
+            },
+        };
+        let request = PlacementCreateRequestV1 {
+            struct_size: std::mem::size_of::<PlacementCreateRequestV1>() as u32,
+            payload_version: PLACEMENT_CREATE_PAYLOAD_VERSION_V1,
+            flags: 0,
+            reserved: 0,
+            selector_seed: [0; 32],
+            workers: WorkerTopologySliceV1::from(&worker),
+            capacities: WorkerCapacitySliceV1::default(),
+            options_namespace: ByteSliceV1::EMPTY,
+            provider_options: ByteSliceV1::EMPTY,
+            limits: PlacementLimitsV1 {
+                max_mutations: 1,
+                max_admission_results: 1,
+                max_released: 1,
+                max_diagnostic_bytes: 1,
+            },
+        };
+
+        assert_eq!(
+            validate_create_request_v1(&request),
+            Err(CreateRequestValidationError::NullSlice)
+        );
+    }
+
+    #[test]
+    fn mutation_validation_rejects_misaligned_nested_scheduler_ids_for_worker_lifecycle() {
+        let scheduler = 7_u64;
+        let misaligned_scheduler = (&scheduler as *const u64)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<u64>();
+        let worker = WorkerTopologyV1 {
+            worker_id: 1,
+            scheduler_ids: SchedulerIdSliceV1 {
+                data: misaligned_scheduler,
+                len: 1,
+            },
+        };
+        for kind in [
+            PlacementMutationKindV1::WORKER_READY,
+            PlacementMutationKindV1::WORKER_DRAINING,
+            PlacementMutationKindV1::WORKER_REMOVED,
+        ] {
+            let mutation = PlacementMutationV1 {
+                struct_size: std::mem::size_of::<PlacementMutationV1>() as u32,
+                kind,
+                flags: 0,
+                sequence: 0,
+                now_ms: 1.0,
+                payload: PlacementMutationPayloadV1 { worker },
+            };
+            assert_eq!(
+                unsafe {
+                    validate_mutation_batch_v1(PlacementMutationSliceV1 {
+                        data: &mutation,
+                        len: 1,
+                    })
+                },
+                Err(StatusV1::INVALID_ARGUMENT),
+                "worker lifecycle kind {}",
+                kind.0
+            );
+        }
     }
 
     #[test]
