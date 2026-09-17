@@ -778,26 +778,36 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        request_ids: set[str] = set()
         first_output_seen = False
         async with self._cancellation_monitor(
-            request_id_future, context, submitted_request_id
+            request_id_future,
+            context,
+            submitted_request_id,
+            request_ids=request_ids,
         ) as cancellation_task:
             async for chunk in self._stream_until_cancelled(
                 stream_source, cancellation_task
             ):
                 native_response = chunk["engine_data"]["sglang_response"]
                 output = chunk
-                if not request_id_future.done():
-                    sglang_request_id = native_response.get("meta_info", {}).get("id")
-                    if sglang_request_id:
+                meta_info = native_response.get("meta_info", {})
+                sglang_request_id = meta_info.get("id")
+                if sglang_request_id:
+                    request_ids.add(sglang_request_id)
+                    if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                    if meta_info.get("finish_reason"):
+                        request_ids.discard(sglang_request_id)
+                if context.is_stopped() and submitted_request_id is None:
+                    self._abort_requests(request_ids, context)
+                    continue
                 if not first_output_seen and (
                     native_response.get("output_ids") or native_response.get("text")
                 ):
                     first_output_seen = True
                     context.notify_first_token()
-                meta_info = native_response.get("meta_info")
                 if response_request_id is not None and isinstance(meta_info, dict):
                     engine_response_id = meta_info.get("id")
                     public_response_id = _public_native_response_id(
@@ -847,7 +857,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_ids: set[str] = set()
         first_output_seen = False
         async with self._cancellation_monitor(
-            request_id_future, context, submitted_request_id
+            request_id_future,
+            context,
+            submitted_request_id,
+            request_ids=request_ids,
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(
                 stream_source, cancellation_task
@@ -861,7 +874,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
-                if context.is_stopped():
+                if context.is_stopped() and submitted_request_id is None:
                     # A choice's first chunk can arrive after the monitor fired.
                     self._abort_requests(request_ids, context)
                     continue
@@ -991,7 +1004,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_ids: set[str] = set()
         first_output_seen = False
         async with self._cancellation_monitor(
-            request_id_future, context, submitted_request_id
+            request_id_future,
+            context,
+            submitted_request_id,
+            request_ids=request_ids,
         ) as cancellation_task:
             async for res in self._stream_until_cancelled(
                 stream_source, cancellation_task
@@ -1005,7 +1021,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
-                if context.is_stopped():
+                if context.is_stopped() and submitted_request_id is None:
                     self._abort_requests(request_ids, context)
                     continue
 

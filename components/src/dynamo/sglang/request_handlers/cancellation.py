@@ -90,6 +90,18 @@ class CancellationMixin:
         for task in tuple(self._abort_tasks):
             task.cancel()
 
+    def _abort_requests(self, request_ids: set[str], context: Context) -> None:
+        if not request_ids:
+            return
+        tokenizer_manager = getattr(self.engine, "tokenizer_manager", None)
+        if tokenizer_manager is None:
+            logging.error("SGLang tokenizer_manager not found for abort requests")
+            return
+        for request_id in request_ids:
+            tokenizer_manager.abort_request(rid=request_id, abort_all=False)
+        request_ids.clear()
+        logging.info("Aborted Request ID: %s", context.id())
+
     async def _stream_until_cancelled(
         self,
         stream_source: AsyncIterator[Any],
@@ -233,6 +245,7 @@ class CancellationMixin:
         request_id_future: asyncio.Future,
         context: Context,
         submitted_request_id: str | None = None,
+        request_ids: set[str] | None = None,
     ) -> asyncio.Task[Any] | None:
         """Wait for cancellation, then order an exact SGLang abort."""
         logging.debug("Cancellation monitor started for Context: %s", context.id())
@@ -264,6 +277,8 @@ class CancellationMixin:
                         registry,
                         context.id(),
                     )
+                elif request_ids is not None:
+                    self._abort_requests(request_ids, context)
                 else:
                     try:
                         await self._abort_sglang_request(
@@ -395,13 +410,19 @@ class CancellationMixin:
         request_id_future: asyncio.Future,
         context: Context,
         submitted_request_id: str | None = None,
+        request_ids: set[str] | None = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
         """Own the cancellation monitor task for one response stream."""
         logging.debug(
             "Creating cancellation monitor task for Context: %s", context.id()
         )
         cancellation_task = asyncio.create_task(
-            self._handle_cancellation(request_id_future, context, submitted_request_id)
+            self._handle_cancellation(
+                request_id_future,
+                context,
+                submitted_request_id,
+                request_ids,
+            )
         )
 
         try:
@@ -426,6 +447,10 @@ class CancellationMixin:
             finally:
                 if not request_id_future.done() and ordered_abort_task is None:
                     request_id_future.cancel()
+            if request_ids is not None:
+                if ordered_abort_task is not None and submitted_request_id is not None:
+                    request_ids.discard(submitted_request_id)
+                self._abort_requests(request_ids, context)
 
             if self.shutdown_event and self.shutdown_event.is_set():
                 raise EngineShutdown("Engine was shut down during token generation")
