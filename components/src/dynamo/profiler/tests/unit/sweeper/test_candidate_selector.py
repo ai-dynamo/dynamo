@@ -34,16 +34,21 @@ def test_scalar_first_candidate_is_selected() -> None:
     assert selection[0].score == 1.0
 
 
-def test_scalar_higher_score_replaces_current_best() -> None:
+def test_scalar_higher_score_new_candidate_is_ranked_first() -> None:
+    """Both survive (within the default bound) -- the new, better
+    candidate takes list position 0, the old one moves to position 1.
+    Confirmed real behavior is a ranked list, not a single replaced
+    winner: "candidates = sweeper.run(config); best = candidates[0]" --
+    Sweeper itself returns the full best-first list."""
     current = [_Candidate(score=1.0, name="old")]
     selection = update_selection(current, _Candidate(score=2.0, name="new"), goal=ScalarGoal())
-    assert selection == [_Candidate(score=2.0, name="new")]
+    assert [c.name for c in selection] == ["new", "old"]
 
 
-def test_scalar_lower_score_does_not_replace_current_best() -> None:
+def test_scalar_lower_score_new_candidate_is_ranked_last() -> None:
     current = [_Candidate(score=2.0, name="old")]
     selection = update_selection(current, _Candidate(score=1.0, name="new"), goal=ScalarGoal())
-    assert selection == [_Candidate(score=2.0, name="old")]
+    assert [c.name for c in selection] == ["old", "new"]
 
 
 def test_scalar_tied_score_breaks_to_fewer_gpus() -> None:
@@ -51,13 +56,42 @@ def test_scalar_tied_score_breaks_to_fewer_gpus() -> None:
     fewer GPUs) for every scalar goal.\""""
     current = [_Candidate(score=1.0, used_gpus=8, name="old")]
     new = _Candidate(score=1.0, used_gpus=4, name="new")
-    assert update_selection(current, new, goal=ScalarGoal()) == [new]
+    selection = update_selection(current, new, goal=ScalarGoal())
+    assert [c.name for c in selection] == ["new", "old"]
 
 
-def test_scalar_tied_score_more_gpus_does_not_replace() -> None:
+def test_scalar_tied_score_more_gpus_ranks_after_fewer_gpus() -> None:
     current = [_Candidate(score=1.0, used_gpus=4, name="old")]
     new = _Candidate(score=1.0, used_gpus=8, name="new")
-    assert update_selection(current, new, goal=ScalarGoal()) == [current[0]]
+    selection = update_selection(current, new, goal=ScalarGoal())
+    assert [c.name for c in selection] == ["old", "new"]
+
+
+def test_scalar_bounded_top_n_evicts_the_worst_ranked_candidate() -> None:
+    goal = ScalarGoal(max_candidates=2)
+    current = [
+        _Candidate(score=3.0, name="best"),
+        _Candidate(score=2.0, name="middle"),
+    ]
+    new = _Candidate(score=1.0, name="worst")
+
+    selection = update_selection(current, new, goal=goal)
+
+    assert [c.name for c in selection] == ["best", "middle"]
+
+
+def test_scalar_new_candidate_displacing_the_worst_is_kept() -> None:
+    goal = ScalarGoal(max_candidates=2)
+    current = [
+        _Candidate(score=3.0, name="best"),
+        _Candidate(score=2.0, name="middle"),
+    ]
+    new = _Candidate(score=2.5, name="better_than_middle")
+
+    selection = update_selection(current, new, goal=goal)
+
+    assert [c.name for c in selection] == ["best", "better_than_middle"]
+
 
 
 _MAXIMIZE_THROUGHPUT = (ObjectiveSpec(name="throughput", maximize=True),)

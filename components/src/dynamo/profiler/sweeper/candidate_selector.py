@@ -37,7 +37,21 @@ class ObjectiveSpec:
 
 @dataclass(frozen=True)
 class ScalarGoal:
-    """Selection is bounded to exactly one candidate."""
+    """Selection is a bounded, ranked top-N list, not a single winner.
+
+    Confirmed against the real Sweeper Results docs, not the earlier,
+    wrong assumption: `candidates = sweeper.run(config); best =
+    candidates[0]` -- Sweeper itself returns a full best-first LIST for a
+    scalar goal; the caller picks [0] themselves. Corroborated
+    independently by Spica's run_smart_search, which "returns a
+    list[Candidate]: best-first for a scalar goal, or the non-dominated
+    set for a pareto goal" -- the same shape, described in different
+    words by an unrelated system. Status.Rank's real comment ("the
+    one-based scalar ordering and is absent for Pareto searches") reads
+    correctly as "1..N ordering used for scalar", not "1, exactly once".
+    """
+
+    max_candidates: int = 5  # matches RecommendationSpec.MaxCandidates -- general, not Pareto-only
 
 
 @dataclass(frozen=True)
@@ -115,9 +129,12 @@ def update_selection(
 ) -> list[CandidateLike]:
     """Return the updated selection after observing one new candidate.
 
-    ScalarGoal: keeps whichever of current/new has the better score;
-    ties break to fewer used_gpus (both confirmed against the real
-    Sweeper docs). Selection is always 0 or 1 candidates.
+    ScalarGoal: returns a best-first list, sorted by score descending,
+    ties broken to fewer used_gpus (both confirmed against the real
+    Sweeper docs), truncated to max_candidates. Rank is the caller's to
+    assign from list position (1-indexed) -- this function only orders
+    and bounds, matching how ParetoGoal already leaves rank assignment
+    to the caller.
 
     ParetoGoal: standard incremental non-dominated-set update. A new
     candidate dominated by anything already selected is discarded
@@ -129,14 +146,9 @@ def update_selection(
     rather than trimming the front's own extremes.
     """
     if isinstance(goal, ScalarGoal):
-        if not current:
-            return [new_candidate]
-        (best,) = current
-        if new_candidate.score > best.score:
-            return [new_candidate]
-        if new_candidate.score == best.score and new_candidate.used_gpus < best.used_gpus:
-            return [new_candidate]
-        return list(current)
+        combined = list(current) + [new_candidate]
+        combined.sort(key=lambda c: (-c.score, c.used_gpus))
+        return combined[: goal.max_candidates]
 
     if any(_dominates(existing, new_candidate, goal.objectives) for existing in current):
         return list(current)
