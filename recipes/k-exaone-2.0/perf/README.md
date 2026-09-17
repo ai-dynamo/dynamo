@@ -34,9 +34,12 @@ The benchmark replays a
 `--custom-dataset-type mooncake_trace`. Each JSONL line describes one request
 with `input_length`, `output_length`, and `hash_ids`.
 
-This recipe benchmarks the same 64K-ISL / 400-OSL / 90%-KV-reuse chat trace
-shared across the chat recipes, so rather than duplicate the Git-LFS blob it
-is shared with the Kimi-K2.6 recipe and referenced via a symlink under [`traces`](traces):
+This recipe benchmarks the **8K-ISL / 1K-OSL chat trace**, designed for ~70% prefix
+reuse. (The 64K / 400 / 90% shape is the *agentic* trace used by other recipes -- not
+this one.) On this topology the achieved reuse is ~8.8%, because the working set is
+~42x oversubscribed against TP4's KV capacity. The Git-LFS blob is shared with the
+Kimi-K2.6 recipe rather than duplicated, and referenced via a symlink under
+[`traces`](traces):
 
 ```text
 traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
@@ -154,7 +157,7 @@ Results are written to:
 ```text
 /model-cache/perf/<epoch>_<job-name>/
   warmup/
-  K-EXAONE 2.0_trace_c<concurrency>_<timestamp>/
+  K-EXAONE-2.0-750B-A37B-NVFP4_trace_c<concurrency>_<timestamp>/
     profile_export_aiperf.json
     inputs.json
     ...
