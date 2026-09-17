@@ -918,10 +918,7 @@ mod tests {
         }
     }
 
-    /// Regression test for issue #13874: `stop_reflector_tasks` must actually
-    /// wait for both tasks to finish, not just request cancellation. A handle
-    /// that is aborted but never awaited, or dropped instead of joined, would
-    /// leave this hanging past the timeout instead of returning.
+    /// Regression test for issue #13874.
     #[tokio::test]
     async fn stop_reflector_tasks_awaits_both_aborted_handles() {
         let readiness_done = Arc::new(AtomicBool::new(false));
