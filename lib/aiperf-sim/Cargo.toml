@@ -26,7 +26,7 @@ resolver = "3"
 aiperf-runtime = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf" }
 aiperf-simulate = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf" }
 aiperf-protocol = { git = "https://github.com/NVIDIA-dev/aiperf-rs.git", rev = "61e34f3f41d5687e01a6dbda813c54bc93aa3baf" }
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "4fd8aaabb68008e15ada1bb1750183968d56b0eb" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "bc33d2e940628a6be960e2433fb1f7fd1a4867fd" }
 anyhow = "1"
 dynamo-kv-router = { path = "../kv-router", features = ["bench"] }
 dynamo-mocker = { path = "../mocker", features = ["replay-bench"] }
