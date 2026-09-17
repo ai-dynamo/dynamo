@@ -292,6 +292,31 @@ fn drain_pending_mutations(
     }
 }
 
+/// Construction options for a single-threaded KV indexer.
+pub struct KvIndexerBuilder {
+    token: CancellationToken,
+    kv_block_size: u32,
+    metrics: Arc<KvIndexerMetrics>,
+    retention: Option<ApproximateRetentionConfig>,
+    delegate: Option<Arc<dyn super::KvIndexerDelegate>>,
+}
+
+impl KvIndexerBuilder {
+    pub fn delegate(mut self, delegate: Arc<dyn super::KvIndexerDelegate>) -> Self {
+        self.delegate = Some(delegate);
+        self
+    }
+
+    pub fn retention(mut self, retention: ApproximateRetentionConfig) -> Self {
+        self.retention = Some(retention);
+        self
+    }
+
+    pub fn build(self) -> KvIndexer {
+        KvIndexer::from_builder(self)
+    }
+}
+
 /// The KV Indexer, managing the KV store and handling events and match requests.
 #[derive(Clone)]
 pub struct KvIndexer {
@@ -359,6 +384,34 @@ impl KvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         retention: Option<ApproximateRetentionConfig>,
     ) -> Self {
+        let mut builder = Self::builder(token, kv_block_size, metrics);
+        builder.retention = retention;
+        builder.build()
+    }
+
+    /// Configure the indexer before its mutation thread starts.
+    pub fn builder(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+    ) -> KvIndexerBuilder {
+        KvIndexerBuilder {
+            token,
+            kv_block_size,
+            metrics,
+            retention: None,
+            delegate: None,
+        }
+    }
+
+    fn from_builder(builder: KvIndexerBuilder) -> Self {
+        let KvIndexerBuilder {
+            token,
+            kv_block_size,
+            metrics,
+            retention,
+            delegate,
+        } = builder;
         let (prune_config, approximate_lru_enabled) = match retention {
             Some(ApproximateRetentionConfig::Ttl(config)) => (Some(config), false),
             Some(ApproximateRetentionConfig::Lru { fallback_ttl }) => (Some(fallback_ttl), true),
@@ -404,7 +457,7 @@ impl KvIndexer {
                     let mut get_workers_rx = get_workers_rx;
                     let mut dump_rx = dump_rx;
                     let mut flush_rx = flush_rx;
-                    let mut trie = RadixTree::new();
+                    let mut trie = delegate.map_or_else(RadixTree::new, RadixTree::new_with_delegate);
                     let mut approximate_lru_lane = ApproximateLruLane::default();
                     let approximate_lru_rx = approximate_lru_rx;
 
@@ -470,7 +523,7 @@ impl KvIndexer {
                                 let matches = trie.find_match_details_with_options(
                                     req.sequence,
                                     req.early_exit,
-                                    req.retain_router_hint_chain,
+                                    req.retain_kv_transfer_chain,
                                 );
                                 let _ = req.resp.send(matches);
                             }
@@ -651,14 +704,14 @@ impl KvIndexer {
     pub async fn find_match_details_with_options(
         &self,
         sequence: Vec<LocalBlockHash>,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> Result<MatchDetails, KvRouterError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.match_details_tx
             .send(MatchDetailsRequest::new(
                 sequence,
                 false,
-                retain_router_hint_chain,
+                retain_kv_transfer_chain,
                 resp_tx,
             ))
             .await

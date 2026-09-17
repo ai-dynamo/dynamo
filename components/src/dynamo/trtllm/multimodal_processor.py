@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import httpx
+import aiohttp
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -192,7 +192,7 @@ class MultimodalRequestProcessor:
             return next(iter(data.values()))
         return data
 
-    def load_tensor_from_path_or_url(
+    async def load_tensor_from_path_or_url(
         self, path: str
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
         """Load tensors from a local .safetensors path or URL.
@@ -215,8 +215,32 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                with httpx.Client(timeout=300.0) as client:
-                    with client.stream("GET", path) as resp:
+                # Per-operation budget (connect + per-read), not a single
+                # whole-request cap: a large embedding on a slow link keeps
+                # downloading as long as it makes progress, while a stalled
+                # connect or a read that hangs still fast-fails at 300s.
+                timeout = aiohttp.ClientTimeout(sock_connect=300.0, sock_read=300.0)
+                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
+                # aiohttp ignores by default.
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=True
+                ) as client:
+                    # Do not follow redirects: this path applies no destination
+                    # policy, so following Location would turn one unvalidated
+                    # fetch into an attacker-chained multi-hop one.
+                    async with client.get(path, allow_redirects=False) as resp:
+                        # raise_for_status() only fires at >= 400, so a 3xx would
+                        # otherwise fall through to an empty-body read and surface
+                        # as a cryptic "safetensors: empty buffer". Redirecting
+                        # .safetensors URLs are common (CDN / presigned), so give
+                        # the operator an actionable message. Do not echo Location
+                        # or the path — both are caller-controlled and unbounded.
+                        if 300 <= resp.status < 400:
+                            raise RuntimeError(
+                                f"Embedding URL returned HTTP {resp.status}; this "
+                                "path does not follow redirects because it applies "
+                                "no destination policy. Supply the final URL."
+                            )
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
@@ -230,7 +254,7 @@ class MultimodalRequestProcessor:
                             )
                         chunks = []
                         downloaded = 0
-                        for chunk in resp.iter_bytes():
+                        async for chunk in resp.content.iter_chunked(1 << 20):
                             downloaded += len(chunk)
                             if downloaded > self.max_file_size_bytes:
                                 raise RuntimeError(
@@ -240,8 +264,8 @@ class MultimodalRequestProcessor:
                                 )
                             chunks.append(chunk)
                         content = b"".join(chunks)
-                    data = safetensors_load(content)
-                    return self._unwrap_safetensors(data)
+                data = safetensors_load(content)
+                return self._unwrap_safetensors(data)
             except RuntimeError:
                 raise
             except Exception as e:
@@ -454,7 +478,7 @@ class MultimodalRequestProcessor:
                 if embedding_paths:
                     try:
                         raw_loaded = [
-                            self.load_tensor_from_path_or_url(path)
+                            await self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
                         loaded_embeddings = []

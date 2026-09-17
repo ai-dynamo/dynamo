@@ -213,6 +213,25 @@ All targets use `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15p
 
 The Job passes the trace to AIPerf with `--custom-dataset-type mooncake_trace`. All targets use `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl`; its SHA-256 is `f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
 
+### Stage the trace
+
+Before creating the benchmark Job, materialize the trace and copy it to the `shared-model-cache` PVC. The Job exits before AIPerf starts when `TRACE_FILE` is absent. Keep `pvc-helper` running to fetch the benchmark artifacts after the run.
+
+```bash
+git lfs pull --include='recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl'
+
+kubectl run pvc-helper -n ${NAMESPACE} \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sh","-c","while sleep 3600; do :; done"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}'
+
+kubectl wait --for=condition=Ready pod/pvc-helper \
+  -n "${NAMESPACE}" --timeout=120s
+TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
+kubectl cp "${TRACE_SOURCE}" \
+  "${NAMESPACE}/pvc-helper:/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+```
+
 ### Run the benchmark
 
 Then run the Job:
@@ -225,7 +244,7 @@ kubectl wait --for=condition=Complete job/gemma4-31b-bench \
   -n ${NAMESPACE} --timeout=10800s
 ```
 
-For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md).
+For concurrency sweeps and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md).
 
 ## Expected Performance
 
