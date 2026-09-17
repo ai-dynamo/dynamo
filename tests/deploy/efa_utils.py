@@ -136,7 +136,7 @@ def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
     extremely chatty and both workers' logs are held at once.
     """
     chunks = []
-    spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
+    spec = pod.raw.get("spec", {})
     containers = [c["name"] for c in (spec.get("containers") or []) if c.get("name")]
     for container in containers or [""]:
         for previous in (True, False):
@@ -232,6 +232,34 @@ def assert_nixl_used_libfabric(worker_pods: dict, profile: EfaFrameworkProfile) 
     )
 
 
+def sum_nixl_agent_samples(text: str, metric: str) -> tuple[str, float | None]:
+    """Sum every ``metric`` sample in a NIXL Prometheus scrape.
+
+    Accepts the bare name or a ``_total`` suffix, since NIXL renames these
+    counters across versions and the lane has to read either. Matching on the
+    name rather than on a line prefix keeps a future sibling series --
+    ``_bucket``, ``_sum``, a per-backend split -- out of the total, which would
+    otherwise report growth the caller never asked about.
+    """
+    total = 0.0
+    found = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Samples look like: agent_rx_bytes{agent="..."} 1234. The name runs up
+        # to the label block or the first space; the value is the final field.
+        head = line.split("{", 1)[0].split(maxsplit=1)
+        if not head or head[0] not in (metric, f"{metric}_total"):
+            continue
+        try:
+            total += float(line.rsplit(maxsplit=1)[1])
+            found = True
+        except (IndexError, ValueError):
+            continue
+    return ("ok", total) if found else ("absent", None)
+
+
 def read_nixl_agent_bytes(pod, metric: str) -> tuple[str, float | None]:
     """Return the summed NIXL byte counter ``metric`` from a worker pod.
 
@@ -252,21 +280,7 @@ def read_nixl_agent_bytes(pod, metric: str) -> tuple[str, float | None]:
         logger.warning("Could not scrape NIXL telemetry from %s: %s", pod.name, e)
         return ("scrape_failed", None)
 
-    total = 0.0
-    found = False
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Samples look like: agent_rx_bytes{agent="..."} 1234 (also matches a
-        # possible _total suffix). The value is the final whitespace field.
-        if line.startswith(metric):
-            try:
-                total += float(line.rsplit(maxsplit=1)[1])
-                found = True
-            except (IndexError, ValueError):
-                continue
-    return ("ok", total) if found else ("absent", None)
+    return sum_nixl_agent_samples(text, metric)
 
 
 def _parse_prometheus_labels(label_block: str) -> dict:

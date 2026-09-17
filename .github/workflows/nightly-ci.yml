@@ -818,9 +818,15 @@ jobs:
             -n default --ignore-not-found --timeout=180s
           # Deletion returns once the DGD object is gone; the pods it owned can
           # outlive it, and those are what hold the GPUs and EFA devices.
-          kubectl wait --for=delete pod \
-            -l nvidia.com/dynamo-graph-deployment-name=vllm-disagg-efa \
-            -n default --timeout=180s || true
+          SEL="nvidia.com/dynamo-graph-deployment-name=vllm-disagg-efa"
+          if ! kubectl wait --for=delete pod -l "${SEL}" -n default --timeout=180s; then
+            # wait also exits non-zero when the selector matched nothing, which
+            # is the normal path. Only pods that outlived the timeout matter, and
+            # they are worth a warning rather than a failure: SGLang may still
+            # schedule, and a hard failure here would lose that run entirely.
+            REMAINING=$(kubectl get pod -l "${SEL}" -n default -o name | wc -l | tr -d ' ')
+            [ "${REMAINING}" -eq 0 ] || echo "::warning::${REMAINING} stranded vllm-disagg-efa pod(s) still hold GPUs/EFA devices"
+          fi
           rm -f "${PREFLIGHT_KUBECONFIG}"
 
       - name: Run EFA deploy test
