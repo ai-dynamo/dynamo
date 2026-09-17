@@ -876,6 +876,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fold_success_delivers_and_records_the_complete_response() {
+        let chunks = vec![
+            create_mock_chunk("Hello ".to_string(), 0),
+            create_mock_chunk("World".to_string(), 0),
+            create_final_chunk(0),
+        ];
+
+        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
+        let delivered: Vec<_> = folded.collect().await;
+        let outcome = future.await;
+
+        assert_eq!(delivered.len(), 1, "the fold path emits a single chunk");
+        assert_eq!(extract_content(&delivered[0]), "Hello World");
+        let client_response = delivered[0]
+            .data
+            .as_ref()
+            .expect("the successful chunk carries a body");
+        assert_eq!(client_response.inner.choices.len(), 1);
+        assert_eq!(
+            client_response.inner.choices[0].finish_reason,
+            Some(FinishReason::Stop)
+        );
+
+        assert!(
+            outcome.drop_reason.is_none(),
+            "a successful fold must not carry a drop reason"
+        );
+        let recorded = outcome
+            .response
+            .expect("the complete response must reach the record");
+        assert_eq!(recorded.inner.choices.len(), 1);
+        assert_eq!(
+            recorded.inner.choices[0].message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
+        assert_eq!(
+            recorded.inner.choices[0].finish_reason,
+            Some(FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
     async fn fold_error_after_content_records_the_prefix_and_sends_the_fallback() {
         let chunks = vec![
             create_mock_chunk("Hello ".to_string(), 0),
