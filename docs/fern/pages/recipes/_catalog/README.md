@@ -18,7 +18,8 @@ CSS-coupled vocabulary. For the machine-readable catalog contract, see the
 
 ## Steps to add a page
 
-1. **Write the MDX** at `docs/fern/pages/recipes/<slug>.mdx` (or `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`),
+1. **Write the MDX** at `docs/fern/pages/recipes/model-recipes/<slug>.mdx` (or
+   `docs/fern/pages/recipes/feature-benchmarks/<slug>.mdx`),
    following the [page blueprint](#page-blueprint) below.
 2. **Add a catalog entry** — create one per-entry file at
    `docs/fern/pages/recipes/_catalog/recipes/<id>.yaml` (or
@@ -83,9 +84,19 @@ python3 docs/fern/pages/recipes/_catalog/validate.py
 correspondence (no orphans, no dangling entries), internal-`id`/filename match,
 no duplicate ids, schema conformance, that every `page:` resolves under `docs/fern/`,
 that every deploy/perf/benchmark asset path resolves in the repo, that declared
-recipe-specific images are exact `image:` fields in their owning deploy assets
-and are not assigned to multiple recipes, and cross-catalog referential
-integrity (recipe `related_benchmarks` ↔ benchmark
+recipe-specific images are exact `image:` fields in their owning deploy assets,
+or have complete `github-release` provenance, and have non-overlapping,
+source-revision-backed ownership periods. GitHub release periods record
+`release_tag` and `release_state`; append one period and image per re-release so
+each tag retains independent pull history. Omit
+`effective_from` when the exact tag belongs to the recipe for all retained
+telemetry; use explicit dates for ownership handoffs. `source_revision` is the
+main-branch commit that introduced the recipe's image reference, not the image
+build revision. The offline validator checks its commit-SHA shape but does not
+prove that the commit exists or introduced the image. Verify new or changed
+revisions against repository history during review. The
+validator also checks cross-catalog referential integrity (recipe
+`related_benchmarks` ↔ benchmark
 ids; benchmark `related_recipes` and `promotion_candidate.deferred_recipe_id` ↔
 recipe ids, including deferred). It exits non-zero on any failure.
 

@@ -206,7 +206,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 }
 
 // ---------------------------------------------------------------------------
-// Direct-ZMQ KV ingress metrics
+// ZMQ KV ingress metrics
 // ---------------------------------------------------------------------------
 
 pub(crate) struct KvZmqIngressMetrics {
@@ -225,7 +225,7 @@ impl KvZmqIngressMetrics {
                 let sources = metrics
                     .create_intgaugevec(
                         "router_kv_zmq_ingress_sources",
-                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                        "Number of ZMQ KV ingress sources by lifecycle state",
                         &["state"],
                         &[],
                     )
@@ -233,14 +233,14 @@ impl KvZmqIngressMetrics {
                 let batches_total = metrics
                     .create_intcounter(
                         "router_kv_zmq_ingress_batches_total",
-                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                        "Total ZMQ KV ingress batches handed to WorkerQueryClient",
                         &[],
                     )
                     .expect("failed to create router_kv_zmq_ingress_batches_total counter");
                 let lifecycle_total = metrics
                     .create_intcountervec(
                         "router_kv_zmq_ingress_lifecycle_total",
-                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                        "Total ZMQ KV ingress lifecycle transitions and errors",
                         &["action"],
                         &[],
                     )
@@ -269,6 +269,17 @@ impl KvZmqIngressMetrics {
     pub(crate) fn increment_lifecycle(&self, action: &'static str) {
         self.lifecycle_total.with_label_values(&[action]).inc();
     }
+
+    pub(crate) fn increment_lifecycle_by(&self, action: &'static str, value: u64) {
+        self.lifecycle_total
+            .with_label_values(&[action])
+            .inc_by(value);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_count(&self, action: &'static str) -> u64 {
+        self.lifecycle_total.with_label_values(&[action]).get()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +296,7 @@ pub(crate) struct ActiveSequenceZmqIngressMetrics {
     payload_decode_errors_total: IntCounter,
     identity_errors_total: IntCounter,
     forced_aborts_total: IntCounter,
+    dropped_events_total: IntCounter,
 }
 
 static ACTIVE_SEQUENCE_ZMQ_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceZmqIngressMetrics>> =
@@ -340,6 +352,10 @@ impl ActiveSequenceZmqIngressMetrics {
                         "router_active_sequence_zmq_ingress_forced_aborts_total",
                         "Direct-ZMQ active-sequence source tasks aborted after join timeout",
                     ),
+                    dropped_events_total: counter(
+                        "router_active_sequence_zmq_ingress_dropped_events_total",
+                        "Direct-ZMQ active-sequence events dropped because the partition's inbound channel was full or closed",
+                    ),
                 })
             })
             .clone()
@@ -383,6 +399,103 @@ impl ActiveSequenceZmqIngressMetrics {
 
     pub(crate) fn record_forced_abort(&self) {
         self.forced_aborts_total.inc();
+    }
+
+    pub(crate) fn record_dropped_event(&self) {
+        self.dropped_events_total.inc();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Active-sequence inbound funnel metrics (per partition)
+// ---------------------------------------------------------------------------
+
+const ROUTING_GROUP_LABEL: &str = "routing_group";
+
+/// Instrumentation for the per-partition inbound replica funnel: one channel
+/// and one apply task per partition, fed by every publisher's ingress source.
+/// Updated once per drain batch from the apply task.
+pub(crate) struct ActiveSequenceIngressMetrics {
+    queue_depth: IntGaugeVec,
+    events_applied_total: IntCounterVec,
+    drain_batches_total: IntCounterVec,
+}
+
+/// Per-partition handles implementing the core's drain observer.
+pub(crate) struct ActiveSequenceIngressMetricHandles {
+    queue_depth: IntGauge,
+    events_applied_total: IntCounter,
+    drain_batches_total: IntCounter,
+}
+
+static ACTIVE_SEQUENCE_INGRESS_METRICS: OnceLock<Arc<ActiveSequenceIngressMetrics>> =
+    OnceLock::new();
+
+impl ActiveSequenceIngressMetrics {
+    pub(crate) fn from_component(component: &Component) -> Arc<Self> {
+        ACTIVE_SEQUENCE_INGRESS_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let labels = [labels::MODEL, ROUTING_GROUP_LABEL, labels::WORKER_TYPE];
+                Arc::new(Self {
+                    queue_depth: metrics
+                        .create_intgaugevec(
+                            "router_active_sequence_ingress_queue_depth",
+                            "Active-sequence events waiting in the partition's inbound channel, sampled after each drain batch",
+                            &labels,
+                            &[],
+                        )
+                        .expect("failed to create router_active_sequence_ingress_queue_depth"),
+                    events_applied_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_events_applied_total",
+                            "Active-sequence events applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_events_applied_total",
+                        ),
+                    drain_batches_total: metrics
+                        .create_intcountervec(
+                            "router_active_sequence_ingress_drain_batches_total",
+                            "Drain batches applied from the partition's inbound channel",
+                            &labels,
+                            &[],
+                        )
+                        .expect(
+                            "failed to create router_active_sequence_ingress_drain_batches_total",
+                        ),
+                })
+            })
+            .clone()
+    }
+
+    /// One handle set per router partition. `worker_type` separates the
+    /// prefill and decode routers of the same model, which run separate
+    /// ingress channels.
+    pub(crate) fn handles(
+        &self,
+        model: &str,
+        routing_group: &str,
+        worker_type: &str,
+    ) -> ActiveSequenceIngressMetricHandles {
+        let labels = [model, routing_group, worker_type];
+        ActiveSequenceIngressMetricHandles {
+            queue_depth: self.queue_depth.with_label_values(&labels),
+            events_applied_total: self.events_applied_total.with_label_values(&labels),
+            drain_batches_total: self.drain_batches_total.with_label_values(&labels),
+        }
+    }
+}
+
+impl dynamo_kv_router::services::selection::ReplicaIngressObserver
+    for ActiveSequenceIngressMetricHandles
+{
+    fn observe_drain(&self, queue_depth: usize, applied: usize) {
+        self.queue_depth.set(queue_depth as i64);
+        self.events_applied_total.inc_by(applied as u64);
+        self.drain_batches_total.inc();
     }
 }
 
@@ -437,6 +550,29 @@ impl RouterWorkerStatusMetrics {
                 })
             })
             .clone()
+    }
+
+    /// Gauges on no registry, for observer tests that only read them back.
+    #[cfg(test)]
+    pub(crate) fn unregistered() -> Self {
+        Self {
+            registered: IntGaugeVec::new(
+                Opts::new(router::WORKER_REGISTERED, "registered"),
+                &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE],
+            )
+            .expect("valid gauge"),
+            kv_event_source_mismatch_workers: IntGaugeVec::new(
+                Opts::new(router::KV_EVENT_SOURCE_MISMATCH_WORKERS, "mismatch"),
+                &[
+                    labels::MODEL,
+                    labels::WORKER_TYPE,
+                    TARGET_NAMESPACE_LABEL,
+                    TARGET_COMPONENT_LABEL,
+                    TARGET_ENDPOINT_LABEL,
+                ],
+            )
+            .expect("valid gauge"),
+        }
     }
 
     pub fn set_registered(&self, worker_id: u64, dp_rank: u32, worker_type: &str) {
@@ -831,7 +967,10 @@ impl RoutingOverheadMetrics {
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
 /// independently.
+#[cfg_attr(test, derive(Clone))]
 pub struct RouterRequestMetrics {
+    /// Total requests admitted by the router scheduler.
+    pub requests_started_total: prometheus::IntCounter,
     pub requests_total: prometheus::IntCounter,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
@@ -846,19 +985,11 @@ pub struct RouterRequestMetrics {
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
-static ROUTER_REQUESTS_STARTED_TOTAL: OnceLock<prometheus::IntCounter> = OnceLock::new();
 
 impl RouterRequestMetrics {
     /// Returns the registered metrics if `from_component()` was called earlier.
     pub fn get() -> Option<Arc<Self>> {
         ROUTER_REQUEST_METRICS.get().cloned()
-    }
-
-    /// Total requests admitted by the router scheduler.
-    pub fn requests_started_total(&self) -> &prometheus::IntCounter {
-        ROUTER_REQUESTS_STARTED_TOTAL
-            .get()
-            .expect("router request metrics must be initialized")
     }
 
     /// Create from a Component, memoized in a static OnceLock.
@@ -882,12 +1013,6 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_requests_started_total");
-                assert!(
-                    ROUTER_REQUESTS_STARTED_TOTAL
-                        .set(requests_started_total)
-                        .is_ok(),
-                    "router_requests_started_total already initialized"
-                );
                 let requests_total = metrics
                     .create_intcounter(
                         &router_metric(frontend_service::REQUESTS_TOTAL),
@@ -979,6 +1104,7 @@ impl RouterRequestMetrics {
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
+                    requests_started_total,
                     requests_total,
                     time_to_first_token_seconds,
                     inter_token_latency_seconds,
@@ -993,6 +1119,17 @@ impl RouterRequestMetrics {
                 })
             })
             .clone()
+    }
+
+    /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
+    #[cfg(test)]
+    pub(crate) fn with_isolated_counters_for_test(&self) -> Arc<Self> {
+        Arc::new(Self {
+            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
+                .unwrap(),
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            ..self.clone()
+        })
     }
 
     /// Record a selection that sacrificed KV cache overlap.

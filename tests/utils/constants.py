@@ -47,6 +47,7 @@ class DynamoPortRange(IntEnum):
     BOOTSTRAP = 24600
     PREFILL = 25200
     NIXL = 25800
+    NCCL = 26400
     ROUTER = 27000
     FPM = 28500
 

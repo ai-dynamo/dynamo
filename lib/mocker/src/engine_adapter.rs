@@ -87,6 +87,16 @@ pub(crate) fn engine_components(
     };
     let (timing_model, timing) = match args.perf_model.as_ref() {
         PerfModel::Polynomial => (TimingModelConfig::Polynomial, None),
+        PerfModel::Fixed {
+            prefill_ms,
+            decode_ms,
+        } => (
+            TimingModelConfig::Fixed {
+                prefill_ms: *prefill_ms,
+                decode_ms: *decode_ms,
+            },
+            None,
+        ),
         PerfModel::Interpolated { .. } | PerfModel::Aiconfigurator { .. } => (
             TimingModelConfig::External {
                 provider: "dynamo_perf_model".to_string(),
@@ -115,7 +125,8 @@ pub(crate) fn engine_components(
         preemption_mode,
         emit_kv_events,
         emit_kv_token_ids,
-        kv_bytes_per_token: args.kv_bytes_per_token,
+        kv_transfer_bytes_per_token: args.kv_bytes_per_token,
+        kv_cache_bytes_per_token: args.kv_cache_bytes_per_token,
         kv_transfer_bandwidth: args.kv_transfer_bandwidth,
         kv_transfer_timing_mode,
         timing_model,
@@ -149,6 +160,7 @@ pub(crate) fn aggregated_replay_setup(
     let config = ReplayEngineConfig {
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
+        num_gpu_blocks_is_explicit: None,
         rank: components.rank,
         prefill: None,
         decode: None,
@@ -171,16 +183,19 @@ pub(crate) fn disaggregated_replay_setup(
     let prefill_role = ReplayRoleConfig {
         dp_size: prefill.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&prefill.args)?,
+        num_gpu_blocks_is_explicit: None,
         rank: prefill.rank,
     };
     let decode_role = ReplayRoleConfig {
         dp_size: decode.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&decode.args)?,
+        num_gpu_blocks_is_explicit: None,
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
+        num_gpu_blocks_is_explicit: prefill_role.num_gpu_blocks_is_explicit,
         rank: prefill_role.rank.clone(),
         prefill: Some(prefill_role),
         decode: Some(decode_role),
@@ -269,16 +284,32 @@ mod tests {
 
     #[test]
     fn vllm_defaults_materialize_once_at_the_shared_boundary() {
-        let args = MockEngineArgs::builder().build().unwrap();
+        let mut args = MockEngineArgs::builder().build().unwrap();
+        args.kv_bytes_per_token = Some(4096);
+        args.kv_cache_bytes_per_token = Some(1024);
         let components = engine_components(args, true, true).unwrap();
 
         assert_eq!(components.args.block_size, 64);
         assert_eq!(components.rank.backend, Backend::Vllm);
         assert_eq!(components.rank.block_size, 64);
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
         assert!(components.rank.emit_kv_events);
         assert!(components.rank.emit_kv_token_ids);
         assert_eq!(components.rank.timing_model, TimingModelConfig::Polynomial);
         assert!(components.timing.is_none());
+    }
+
+    #[test]
+    fn replay_json_keeps_transfer_and_cache_geometry_independent() {
+        let args: MockEngineArgs = serde_json::from_value(serde_json::json!({
+            "kv_transfer_bytes_per_token": 4096,
+            "kv_cache_bytes_per_token": 1024,
+        }))
+        .unwrap();
+        let components = engine_components(args, false, false).unwrap();
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
     }
 
     #[test]
@@ -329,6 +360,24 @@ mod tests {
             .unwrap()
             .build(0)
             .unwrap();
+    }
+
+    #[test]
+    fn public_fixed_timing_materializes_as_builtin_engine_timing() {
+        let args = MockEngineArgs::from_json_str(
+            r#"{"timing_model":{"type":"fixed","prefill_ms":2.5,"decode_ms":0.5}}"#,
+        )
+        .unwrap();
+        let components = engine_components(args, false, false).unwrap();
+
+        assert_eq!(
+            components.rank.timing_model,
+            TimingModelConfig::Fixed {
+                prefill_ms: 2.5,
+                decode_ms: 0.5,
+            }
+        );
+        assert!(components.timing.is_none());
     }
 
     #[test]

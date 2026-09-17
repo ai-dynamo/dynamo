@@ -24,7 +24,7 @@ from tests.fault_tolerance.cancellation.utils import (
     verify_runtime_cancellation_metrics,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -96,12 +96,12 @@ class DynamoWorkerProcess(ManagedProcess):
         if mode in ["prefill", "decode"]:
             # Prefill and decode workers check their own status endpoint
             health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready)
+                (f"http://localhost:{system_port}/health", check_health_ready)
             ]
         else:
             # Aggregated workers check both system status and frontend
             health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api),
                 (f"http://localhost:{frontend_port}/health", check_health_generate),
             ]
@@ -174,22 +174,6 @@ class DynamoWorkerProcess(ManagedProcess):
             logging.warning(f"Failed to release SGLang worker port: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{self.mode.capitalize()} worker status is ready")
-                return True
-            logger.warning(
-                f"{self.mode.capitalize()} worker status is not ready: {data.get('status')}"
-            )
-        except ValueError:
-            logger.warning(
-                f"{self.mode.capitalize()} worker health response is not valid JSON"
-            )
-        return False
 
 
 @pytest.mark.timeout(160)  # 3x average

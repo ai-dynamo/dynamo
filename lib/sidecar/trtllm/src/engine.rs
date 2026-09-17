@@ -10,7 +10,7 @@ use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext, LLMEngine,
     LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
 use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
@@ -61,9 +61,16 @@ impl TrtllmSidecarEngine {
     }
 
     pub fn from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), DynamoError> {
-        let args = <Args as clap::Parser>::try_parse_from(argv)
-            .map_err(|err| client::invalid_argument(err.to_string()))?;
-        Self::from_parsed(args)
+        Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo)
+    }
+
+    /// Parse injected arguments while retaining Clap's structured exit error.
+    ///
+    /// Embedded callers use this to distinguish help and version output from
+    /// Dynamo startup failures without changing `from_args`'s error contract.
+    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::from_parsed(args).map_err(Into::into)
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
@@ -132,15 +139,38 @@ impl LLMEngine for TrtllmSidecarEngine {
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
-        // Prefer a server-reported context length; fall back to the configured
-        // `--context-length`. GetModelInfo returns zero on current TRT-LLM
-        // releases, so the argument is currently the only source. The resolved
-        // value backs the default-`max_tokens` path in `convert::max_tokens`.
+        // `GetModelInfo` reports the engine's `--max_seq_len`, which is unset by
+        // default; `client::model_info` discards the value TensorRT-LLM
+        // substitutes for it. A configured `--context-length` wins over what
+        // survives that check.
         let mut model = self.model.clone();
-        match client.model_info().await {
-            Ok(Some(context_length)) => model.context_length = Some(context_length),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "GetModelInfo failed; using --context-length"),
+        let reported = match client.model_info().await {
+            Ok(reported) => reported,
+            Err(error) => {
+                match model.context_length {
+                    Some(configured) => tracing::warn!(
+                        %error,
+                        configured_context_length = configured,
+                        "GetModelInfo failed; using the configured --context-length"
+                    ),
+                    None => tracing::warn!(
+                        %error,
+                        "GetModelInfo failed and no --context-length was configured; \
+                         no context length is available"
+                    ),
+                }
+                None
+            }
+        };
+        match (model.context_length, reported) {
+            (Some(configured), Some(reported)) if configured != reported => tracing::warn!(
+                configured_context_length = configured,
+                engine_context_length = reported,
+                "--context-length disagrees with the context length TensorRT-LLM reported; \
+                 using the configured --context-length"
+            ),
+            (None, Some(reported)) => model.context_length = Some(reported),
+            _ => {}
         }
         if let Some(context_length) = model.context_length {
             let _ = self.context_length.set(context_length);
@@ -153,6 +183,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             endpoint = %self.endpoint,
             connections = connection_count,
             model = %model.source,
+            context_length = ?model.context_length,
             "TensorRT-LLM gRPC is ready"
         );
         Ok(model.engine_config())

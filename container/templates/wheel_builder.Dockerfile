@@ -236,7 +236,7 @@ ENV VIRTUAL_ENV=/workspace/.venv
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
 
@@ -383,6 +383,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --disable-x86asm \
         --disable-network \
         --disable-bsfs \
+        --enable-bsf=h264_mp4toannexb,hevc_mp4toannexb \
         --disable-devices \
         --disable-libdrm \
         --enable-shared \
@@ -432,9 +433,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&  \
-    git checkout $NIXL_UCX_REF &&	 \
+    : "${NIXL_UCX_REF:?}" && \
+    git init -q ucx && cd ucx && \
+    git remote add origin https://github.com/openucx/ucx.git && \
+    git fetch --depth 1 origin "${NIXL_UCX_REF}" && \
+    git checkout -q FETCH_HEAD && \
     # The intel/llm-scaler xe-GDR patch (ucx-v1.12.0.patch) is upstream since
     # UCX v1.21.0 (ib_md.c xe srcversion check, ze_copy_md.c HOST bit); restore
     # the fetch + git apply for DEVICE=xpu if this ref ever drops below v1.21.0.
@@ -500,9 +503,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     cd /usr/local/src && \
-    git clone "${NIXL_LIBFABRIC_REPO}" && \
-    cd libfabric && \
-    git checkout $NIXL_LIBFABRIC_REF && \
+    : "${NIXL_LIBFABRIC_REF:?}" && \
+    git init -q libfabric && cd libfabric && \
+    git remote add origin "${NIXL_LIBFABRIC_REPO}" && \
+    git fetch --depth 1 origin "${NIXL_LIBFABRIC_REF}" && \
+    git checkout -q FETCH_HEAD && \
     ./autogen.sh && \
     ./configure --prefix="/usr/local/libfabric" \
                 --disable-verbs \
@@ -534,7 +539,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     if [ "$USE_SCCACHE" = "true" ]; then \
         eval $(/tmp/use-sccache.sh setup-env cmake); \
     fi && \
-    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+    git clone --recurse-submodules --shallow-submodules --depth 1 --branch "${AWS_SDK_CPP_VERSION}" \
         https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
     mkdir -p /tmp/aws-sdk-cpp/build && \
     cd /tmp/aws-sdk-cpp/build && \
@@ -590,15 +595,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo/lib/bindings/python && \
 {% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-        # Skip maturin's built-in repair: it would graft the in-tree libav* into the
-        # wheel, which the codec gate rejects. Repair with those sonames excluded so
-        # they stay external and resolve to the image's /usr/local/lib copies. This
-        # media-enabled wheel is intentionally image-only and non-self-contained.
+    # Skip maturin's built-in repair: it would graft the in-tree libav* into the
+    # wheel, which the codec gate rejects. Repair with those sonames excluded so
+    # they stay external and resolve to the image's /usr/local/lib copies. This
+    # media-enabled wheel is intentionally image-only and non-self-contained.
+{% if device == "xpu" %}        ARCH_ALT=x86_64 && \
+    MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
+{% else %}
         case "${TARGETARCH}" in \
             amd64) ARCH_ALT=x86_64 ;; \
             arm64) ARCH_ALT=aarch64 ;; \
             *) echo "ERROR: unexpected TARGETARCH='${TARGETARCH}'; cannot pick a manylinux platform tag" >&2; exit 1 ;; \
         esac && \
+    MANYLINUX_POLICY=manylinux_{{ "2_35" if device == "cpu" else "2_28" }}_${ARCH_ALT} && \
+{% endif %}
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
             --exclude 'libavcodec.so.*' \
@@ -608,7 +618,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --exclude 'libavutil.so.*' \
             --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat ${MANYLINUX_POLICY} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
     else \
@@ -620,6 +630,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # wheel metadata and optional source archival both validate every member.
 COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
@@ -756,9 +767,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         eval $(/tmp/use-sccache.sh setup-env); \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone "https://github.com/ai-dynamo/nixl.git" && \
-    cd nixl && \
-    git checkout ${NIXL_REF} && \
+    : "${NIXL_REF:?}" && \
+    git init -q nixl && cd nixl && \
+    git remote add origin https://github.com/ai-dynamo/nixl.git && \
+    git fetch --depth 1 origin "${NIXL_REF}" && \
+    git checkout -q FETCH_HEAD && \
     if [ "$DEVICE" = "cuda" ]; then \
         PKG_NAME="nixl-cu${CUDA_MAJOR}"; \
     else \

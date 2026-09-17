@@ -24,6 +24,7 @@ import (
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 )
 
 // validConfig returns a minimal valid OperatorConfiguration for cluster-wide mode.
@@ -208,4 +209,156 @@ func TestValidateOperatorConfiguration_NegativeTerminationDelay(t *testing.T) {
 	if len(errs) != 1 {
 		t.Errorf("expected 1 error for negative termination delay, got %d: %v", len(errs), errs)
 	}
+}
+
+// hasFieldError reports whether errs contains an entry whose field path ends with
+// the given suffix, making the test resilient to the parent "infrastructure." prefix.
+func hasFieldError(t *testing.T, errs field.ErrorList, fieldSuffix string) bool {
+	t.Helper()
+	for _, e := range errs {
+		if e.Field == fieldSuffix || e.Field == "infrastructure."+fieldSuffix {
+			return true
+		}
+	}
+	return false
+}
+
+func TestValidateInfrastructure_TLS(t *testing.T) {
+	// Valid: no TLS fields set → no TLS errors.
+	t.Run("empty config has no TLS errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{}, field.NewPath("infrastructure"))
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+
+	// Valid: TCP server cert+key together, with CA.
+	t.Run("TCP server cert+key+CA is valid", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSCertPath: "/c.pem",
+			TCPTLSKeyPath:  "/k.pem",
+			TCPTLSCAPath:   "/ca.pem",
+		}, field.NewPath("infrastructure"))
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+
+	// Invalid: TCP server cert without key.
+	t.Run("TCP server cert without key errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSCertPath: "/c.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSCertPath") {
+			t.Fatalf("expected tcpTLSCertPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: TCP server cert+key without CA (client stays plaintext, server is TLS).
+	t.Run("TCP server cert+key without CA errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSCertPath: "/c.pem",
+			TCPTLSKeyPath:  "/k.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSCAPath") {
+			t.Fatalf("expected tcpTLSCAPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: TCP client-CA without server cert/key.
+	t.Run("TCP client-CA without server cert errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSClientCAPath: "/client-ca.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSClientCAPath") {
+			t.Fatalf("expected tcpTLSClientCAPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: TCP client cert without CA.
+	t.Run("TCP client cert without CA errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSClientCertPath: "/client.pem",
+			TCPTLSClientKeyPath:  "/client-key.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSClientCertPath") {
+			t.Fatalf("expected tcpTLSClientCertPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: TCP CA without server cert/key (client-side TLS without server-side TLS).
+	t.Run("TCP CA without server cert errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSCAPath: "/ca.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSCertPath") {
+			t.Fatalf("expected tcpTLSCertPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: TCP client cert/key without server cert/key.
+	t.Run("TCP client cert without server cert errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSClientCertPath: "/client.pem",
+			TCPTLSClientKeyPath:  "/client-key.pem",
+			TCPTLSCAPath:         "/ca.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSCertPath") {
+			t.Fatalf("expected tcpTLSCertPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: NATS client cert without CA.
+	t.Run("NATS client cert without CA errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			NATSAddress:           "tls://nats:4222",
+			NATSTLSClientCertPath: "/client.pem",
+			NATSTLSClientKeyPath:  "/client-key.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "natsTLSClientCertPath") {
+			t.Fatalf("expected natsTLSClientCertPath error, got %v", errs)
+		}
+	})
+
+	// Invalid: NATS TLS with nats:// address.
+	t.Run("NATS TLS with nats:// address errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			NATSAddress:   "nats://nats:4222",
+			NATSTLSCAPath: "/ca.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "natsAddress") {
+			t.Fatalf("expected natsAddress error, got %v", errs)
+		}
+	})
+
+	// Invalid: NATS TLS without natsAddress (runtime would default to nats:// and fail).
+	t.Run("NATS TLS without natsAddress errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			NATSTLSCAPath: "/ca.pem",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "natsAddress") {
+			t.Fatalf("expected natsAddress error, got %v", errs)
+		}
+	})
+
+	// Valid: NATS TLS with tls:// address and CA.
+	t.Run("NATS TLS with tls:// address and CA is valid", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			NATSAddress:   "tls://nats:4222",
+			NATSTLSCAPath: "/ca.pem",
+		}, field.NewPath("infrastructure"))
+		if len(errs) != 0 {
+			t.Fatalf("expected no errors, got %v", errs)
+		}
+	})
+
+	// Invalid: tcpTLSServerName without tcpTLSCAPath (SNI override is inert without a TLS connector).
+	t.Run("TCP server name without CA errors", func(t *testing.T) {
+		errs := validateInfrastructure(&configv1alpha1.InfrastructureConfiguration{
+			TCPTLSServerName: "dynamo-worker.dynamo-system.svc.cluster.local",
+		}, field.NewPath("infrastructure"))
+		if !hasFieldError(t, errs, "tcpTLSServerName") {
+			t.Fatalf("expected tcpTLSServerName error, got %v", errs)
+		}
+	})
 }

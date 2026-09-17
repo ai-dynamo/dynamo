@@ -69,8 +69,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         openssh-server \
+        libturbojpeg \
         librdmacm1 \
-        rdma-core && \
+        rdma-core \
+        libjemalloc2 && \
     test -f /usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so && \
     test -d "${NIXL_PLUGIN_DIR}" && \
     ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
@@ -82,6 +84,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         "/opt/nvidia/nvda_nixl/lib64" \
         > /etc/ld.so.conf.d/00-dynamo-trtllm.conf && \
     ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0' && \
     rm -f \
         /usr/local/bin/etcd \
         /usr/local/bin/etcdctl \
@@ -92,6 +95,34 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     mkdir -p /opt/dynamo && \
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+
+# Restore Triton's default CUDA header/tool paths for SSH-launched ranks that
+# lack the image ENV (GH-14864). Use per-file links inside real directories so
+# later wheel installs cannot overwrite the CUDA toolkit through a directory link.
+# Check the JIT with path overrides unset and a fresh cache, using the CUDA
+# driver stub so the build needs no GPU.
+RUN set -eu; \
+    tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))'); \
+    echo "triton nvidia backend: $tb"; \
+    mkdir -p "$tb/include" "$tb/bin"; \
+    for hdr in cuda.h; do \
+        p="$tb/include/$hdr"; \
+        [ -e "$p" ] || [ -L "$p" ] || ln -s "/usr/local/cuda/include/$hdr" "$p"; \
+        test -f "$p"; \
+    done; \
+    for tool in ptxas cuobjdump nvdisasm; do \
+        p="$tb/bin/$tool"; \
+        [ -e "$p" ] || [ -L "$p" ] || ln -s "/usr/local/cuda/bin/$tool" "$p"; \
+        test -x "$p"; \
+    done; \
+    chk=/tmp/dynamo-triton-check; \
+    mkdir -p "$chk/stubs" && ln -sf /usr/local/cuda/lib64/stubs/libcuda.so "$chk/stubs/libcuda.so.1"; \
+    env -u TRITON_CUDACRT_PATH -u TRITON_CUDART_PATH -u TRITON_PTXAS_PATH -u TRITON_CUOBJDUMP_PATH -u TRITON_NVDISASM_PATH \
+        -u CPATH -u C_INCLUDE_PATH \
+        TRITON_HOME="$chk/home" TRITON_CACHE_DIR="$chk/cache" TRITON_LIBCUDA_PATH="$chk/stubs" \
+        LD_LIBRARY_PATH="$chk/stubs:${LD_LIBRARY_PATH:-}" \
+        /usr/bin/python3 -c 'from triton import knobs; from triton.backends.nvidia.driver import CudaUtils; CudaUtils(); print("triton env-free cuda_utils JIT ok; tools:", knobs.nvidia.ptxas.path, knobs.nvidia.cuobjdump.path, knobs.nvidia.nvdisasm.path)'; \
+    rm -rf "$chk"
 
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
@@ -662,6 +693,23 @@ RUN rm -rf /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metr
         find /usr/local -type d -name efa_metrics >&2; \
         exit 1; \
     fi
+
+# Post-overlay guard for the Triton wheel-layout symlinks runtime_full created
+# (GH-14864). The env-free JIT check there ran before the overlay; assert here,
+# where the shipped filesystem is assembled, that the links came through and
+# still resolve. Existence checks only -- `test -f`/`-x` follow symlinks.
+RUN set -eu; \
+    tb=$(/usr/bin/python3 -c 'import os, triton.backends.nvidia as b; print(os.path.dirname(b.__file__))'); \
+    if [ ! -f "$tb/include/cuda.h" ]; then \
+        echo "ERROR: Triton CUDA header missing after runtime overlay: $tb/include/cuda.h" >&2; \
+        exit 1; \
+    fi; \
+    for tool in ptxas cuobjdump nvdisasm; do \
+        if [ ! -x "$tb/bin/$tool" ]; then \
+            echo "ERROR: Triton CUDA tool missing or not executable after runtime overlay: $tb/bin/$tool" >&2; \
+            exit 1; \
+        fi; \
+    done
 
 # Mirrors runtime_full's ENV — must stay in sync. Re-declaration is required
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.

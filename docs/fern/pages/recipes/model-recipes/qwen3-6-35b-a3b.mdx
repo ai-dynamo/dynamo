@@ -1,0 +1,316 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.6-35B-A3B"
+subtitle: "Serve Qwen3.6-35B-A3B with Dynamo on B200, GB200, or H200."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+These aggregated recipes serve the agentic workload with `nvidia/Qwen3.6-35B-A3B-NVFP4` on B200 or GB200 and `Qwen/Qwen3.6-35B-A3B-FP8` on H200.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200</label>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200">
+<span><b>Checkpoint</b> nvidia/Qwen3.6-35B-A3B-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights + FP8 KV cache</span>
+<span><b>GPUs</b> 1x B200</span>
+<span><b>Runtime</b> SGLang aggregate worker</span>
+<span><b>Spec decode</b> MTP, 3 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200">
+<span><b>Checkpoint</b> Qwen/Qwen3.6-35B-A3B-FP8</span>
+<span><b>Precision</b> FP8 weights, BF16 KV</span>
+<span><b>GPUs</b> 1x H200</span>
+<span><b>Runtime</b> SGLang aggregate worker</span>
+<span><b>Spec decode</b> MTP, 3 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200">
+<span><b>Checkpoint</b> nvidia/Qwen3.6-35B-A3B-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights + FP8 KV cache</span>
+<span><b>GPUs</b> 1x GB200</span>
+<span><b>Runtime</b> SGLang aggregate worker</span>
+<span><b>Spec decode</b> MTP, 3 tokens</span>
+</div>
+</div>
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo platform and DGD CRDs installed.
+- A namespace with access to the selected GPU target.
+- A ReadWriteMany `model-cache` PVC. Set `storageClassName` in the model-cache manifest before deployment.
+
+The checkpoint is downloaded from Hugging Face by the selected model-download Job. Add a Hugging Face token only if your environment requires authenticated access.
+
+<Warning>
+Edit namespace, storage class, image tags, node selectors, resource claims, and cluster-specific placement in the manifests before applying them.
+</Warning>
+
+## Deploy
+
+Create the model cache and download the selected checkpoint:
+
+<div data-sku="b200">
+
+```bash
+export NAMESPACE=your-namespace
+kubectl apply -f recipes/qwen3.6-35b-a3b/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.6-35b-a3b/model-cache/model-download-nvfp4.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-nvfp4 -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+<div data-sku="gb200">
+
+```bash
+export NAMESPACE=your-namespace
+kubectl apply -f recipes/qwen3.6-35b-a3b/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.6-35b-a3b/model-cache/model-download-nvfp4.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-nvfp4 -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+export NAMESPACE=your-namespace
+kubectl apply -f recipes/qwen3.6-35b-a3b/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/qwen3.6-35b-a3b/model-cache/model-download-fp8.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download-fp8 -n ${NAMESPACE} --timeout=7200s
+```
+
+</div>
+
+Deploy the selected target:
+
+<div data-sku="b200">
+
+```bash
+kubectl apply -f recipes/qwen3.6-35b-a3b/sglang/agg-b200-mtp/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200">
+
+```bash
+kubectl apply -f recipes/qwen3.6-35b-a3b/sglang/agg-gb200-mtp/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+kubectl apply -f recipes/qwen3.6-35b-a3b/sglang/agg-h200-mtp/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+## Smoke Test
+
+<div data-sku="b200 gb200">
+
+Forward the frontend service and verify the model:
+
+```bash
+kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
+curl http://localhost:8000/v1/models
+```
+
+Send a chat request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/Qwen3.6-35B-A3B-NVFP4","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+```
+
+</div>
+
+<div data-sku="h200">
+
+Forward the frontend service and verify the model:
+
+```bash
+kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}
+curl http://localhost:8000/v1/models
+```
+
+Send a chat request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3.6-35B-A3B-FP8","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
+```
+
+</div>
+
+Qwen3.6 also accepts image input. Send an `image_url` content part:
+
+<div data-sku="b200 gb200">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/Qwen3.6-35B-A3B-NVFP4","messages":[{"role":"user","content":[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":"https://raw.githubusercontent.com/ai-dynamo/dynamo/main/docs/fern/assets/img/frontpage-banner.png"}}]}],"max_tokens":1024}'
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3.6-35B-A3B-FP8","messages":[{"role":"user","content":[{"type":"text","text":"Describe this image."},{"type":"image_url","image_url":{"url":"https://raw.githubusercontent.com/ai-dynamo/dynamo/main/docs/fern/assets/img/frontpage-banner.png"}}]}],"max_tokens":1024}'
+```
+
+</div>
+
+## Benchmark
+
+These results use [AIPerf](https://github.com/ai-dynamo/aiperf) 0.10.0 and the
+[`64k_400_90kv_agent_new_noschedule_short_15perc.jsonl`](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl)
+trace. The workload uses 64K input tokens, 400 output tokens, 90% KV reuse,
+concurrency 32, and 3,541 trace requests. The trace contains 131 requests
+expected to exceed the model context length and fail.
+You can fetch the Git LFS-backed trace before running the benchmark:
+
+```bash
+# Required to pull the 64K trace used by the benchmark.
+git lfs install && git lfs pull
+```
+
+All measurements use one GPU.
+
+Run one separate 32-request pass using the same trace and options before the
+measured phase for warmup.
+
+<div data-sku="b200 gb200">
+
+```bash
+aiperf profile \
+  -m nvidia/Qwen3.6-35B-A3B-NVFP4 \
+  --tokenizer nvidia/Qwen3.6-35B-A3B-NVFP4 \
+  --input-file /data/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --num-requests 3541 \
+  --url http://<deployment>-frontend:8000 \
+  --endpoint-type chat \
+  --streaming --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --concurrency 32 --workers-max 32 \
+  --random-seed 42 --ui none \
+  --tokenizer-trust-remote-code \
+  --request-timeout-seconds 1200
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+aiperf profile \
+  -m Qwen/Qwen3.6-35B-A3B-FP8 \
+  --tokenizer Qwen/Qwen3.6-35B-A3B-FP8 \
+  --input-file /data/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl \
+  --custom-dataset-type mooncake_trace \
+  --num-requests 3541 \
+  --url http://<deployment>-frontend:8000 \
+  --endpoint-type chat \
+  --streaming --use-server-token-count \
+  --extra-inputs ignore_eos:true \
+  --concurrency 32 --workers-max 32 \
+  --random-seed 42 --ui none \
+  --tokenizer-trust-remote-code \
+  --request-timeout-seconds 1200
+```
+
+</div>
+
+The MTP results use three speculative tokens with a synthetic acceptance
+length of 3.3153. This value was calculated for the coding workload in
+SpeedBench. The full trace produced 131 expected context-length errors.
+
+<div data-sku="h200">
+
+When benchmarking with synthetic acceptance, uncomment the `SGLANG_SIMULATE_ACC_*`
+variables in the manifest. `SGLANG_SIMULATE_ACC_TOKEN_MODE` must be
+`real-draft-token`: with the default fixed fake token id SGLang emits id 100, which
+is not a valid token in the Qwen tokenizer, so the frontend drops the response and
+inter-token latency reports 0.
+
+</div>
+
+<div data-sku="b200 gb200">
+
+When benchmarking SGLang with synthetic acceptance, set
+`SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token` together with
+`SGLANG_SIMULATE_ACC_LEN` and `SGLANG_SIMULATE_ACC_METHOD`. SGLang 0.5.16 uses
+fixed token ID 100 when the token mode is omitted. That token decodes to the
+Unicode replacement character for the Qwen tokenizer, so Dynamo buffers the
+generated text until the response finishes and AIPerf cannot calculate
+inter-token latency or output throughput per user.
+
+</div>
+
+## Expected Performance
+
+Measured with 64K input tokens, 400 output tokens, and 90% KV reuse at concurrency 32
+with 3,541 trace requests. MTP runs with simulated acceptance, `acc_len=3.3153` from
+SpeedBench coding, not acceptance measured on this agentic trace. The 32-request warmup
+is a separate pass and is not included in these figures:
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead>
+<tr><th>Recipe</th><th>Model</th><th>GPU</th><th>Passed</th><th>Failed</th><th>OUTPUT TOK/S/GPU</th><th>Average tok/s/user</th><th>P50 tok/s/user</th><th>P50 ITL</th><th>P50 TTFT</th></tr>
+</thead>
+<tbody>
+<tr data-gpu="b200"><td><code>sglang/agg-b200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>B200</td><td>3,410</td><td>131</td><td>2,988.50</td><td>115.81</td><td>111.98</td><td>8.93 ms</td><td>286.90 ms</td></tr>
+<tr data-gpu="gb200"><td><code>sglang/agg-gb200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>GB200</td><td>3,410</td><td>131</td><td>3,035.98</td><td>114.03</td><td>111.47</td><td>8.97 ms</td><td>156.07 ms</td></tr>
+<tr data-gpu="h200"><td><code>sglang/agg-h200-mtp/deploy.yaml</code></td><td>FP8</td><td>H200</td><td>3,410</td><td>131</td><td>1,332.03</td><td>61.90</td><td>57.75</td><td>17.32 ms</td><td>360.31 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+## Expected Accuracy
+
+GPQA Diamond (`gpqa_diamond_aa_v3`) via NVIDIA Eval Factory
+
+<div className="dynamo-target-table">
+<table>
+<thead>
+<tr><th>Recipe</th><th>Model</th><th>GPU</th><th>GPQA Diamond</th><th>Baseline</th></tr>
+</thead>
+<tbody>
+<tr data-gpu="b200"><td><code>sglang/agg-b200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>B200</td><td>79.23%</td><td>79.10%</td></tr>
+<tr data-gpu="gb200"><td><code>sglang/agg-gb200-mtp/deploy.yaml</code></td><td>NVFP4</td><td>GB200</td><td>79.23%</td><td>79.48%</td></tr>
+<tr data-gpu="h200"><td><code>sglang/agg-h200-mtp/deploy.yaml</code></td><td>FP8</td><td>H200</td><td>81.44%</td><td>80.24%</td></tr>
+</tbody>
+</table>
+</div>
+
+## Source
+
+- [B200 SGLang deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b/sglang/agg-b200-mtp/deploy.yaml)
+- [GB200 SGLang deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b/sglang/agg-gb200-mtp/deploy.yaml)
+- [H200 SGLang deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b/sglang/agg-h200-mtp/deploy.yaml)
+- [NVFP4 model-download manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b/model-cache/model-download-nvfp4.yaml)
+- [FP8 model-download manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.6-35b-a3b/model-cache/model-download-fp8.yaml)
+- [Model-cache manifests](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3.6-35b-a3b/model-cache)

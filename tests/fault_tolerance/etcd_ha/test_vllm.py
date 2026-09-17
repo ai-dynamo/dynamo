@@ -23,10 +23,11 @@ from tests.fault_tolerance.etcd_ha.utils import (
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
     build_nixl_kv_transfer_config,
+    detect_target_device,
     get_default_vllm_block_size,
 )
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
@@ -78,12 +79,14 @@ class DynamoWorkerProcess(ManagedProcess):
         # Configure disaggregation mode, KV transfer, and health checks per worker type.
         if mode == WorkerMode.PREFILL:
             command.extend(["--disaggregation-mode", "prefill"])
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_urls = [
+                (f"http://localhost:{port}/health", check_health_ready)
+            ]
         else:
             if mode == WorkerMode.DECODE:
                 command.extend(["--disaggregation-mode", "decode"])
             health_check_urls = [
-                (f"http://localhost:{port}/health", self.is_ready),
+                (f"http://localhost:{port}/health", check_health_ready),
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
                 (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
             ]
@@ -94,6 +97,13 @@ class DynamoWorkerProcess(ManagedProcess):
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
+        if detect_target_device() == "xpu":
+            visible_devices = [
+                device.strip()
+                for device in env.get("ZE_AFFINITY_MASK", "").split(",")
+                if device.strip()
+            ]
+            env["ZE_AFFINITY_MASK"] = visible_devices[0] if visible_devices else "0"
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:
@@ -172,19 +182,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         if cleanup_errors:
             raise cleanup_errors[0]
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        worker_type = "Prefill worker" if self.mode == WorkerMode.PREFILL else "Worker"
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{worker_type} status is ready")
-                return True
-            logger.warning(f"{worker_type} status is not ready: {data.get('status')}")
-        except ValueError:
-            logger.warning(f"{worker_type} health response is not valid JSON")
-        return False
 
 
 @pytest.mark.gpu_1

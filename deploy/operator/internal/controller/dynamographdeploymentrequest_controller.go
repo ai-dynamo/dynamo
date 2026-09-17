@@ -60,14 +60,9 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gpu"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 )
 
 const (
-	// Job naming
-	JobNamePrefixOnline = "profile-online-"
-	JobNamePrefixAIC    = "profile-aic-"
-
 	// Container names
 	ContainerNameProfiler             = "profiler"
 	ContainerNameOutputCopier         = "output-copier"
@@ -83,6 +78,7 @@ const (
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
 	AnnotationDGDRUID             = "nvidia.com/dgdr-uid"
+	AnnotationConfirmedDGDUID     = "nvidia.com/confirmed-dgd-uid"
 
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
@@ -110,41 +106,28 @@ const (
 	DGDOverrideToolPath        = DGDOverrideToolMountPath + "/dgd-apply-overrides"
 	EnvDGDOverrideToolPath     = "DYNAMO_DGD_APPLY_OVERRIDES_BIN"
 
-	// Command line arguments
-	ArgModel   = "--model"
-	ArgBackend = "--backend"
-	ArgTTFT    = "--ttft"
-	ArgITL     = "--itl"
-	ArgConfig  = "--config"
-
 	// Messages
-	MessageValidationPassed          = "DGDR spec validation passed"
-	MessageInitialized               = "DGDR initialized successfully"
-	MessageDiscoveringHardware       = "Discovering GPU hardware and preparing profiling job"
-	MessageProfilingJobCreated       = "Profiling job created"
-	MessageAICProfilingJobCreated    = "AIC profiling job created"
-	MessageProfilingInProgress       = "Profiling is in progress"
-	MessageSpecGenerated             = "DynamoGraphDeployment spec generated successfully"
-	MessageSpecAvailable             = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
-	MessageDeploymentCreated         = "DynamoGraphDeployment %s created successfully"
-	MessageDeploymentReady           = "DynamoGraphDeployment %s is ready"
-	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
-	MessageDeploymentDeleted         = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
-	MessageInvalidState              = "Invalid state"
-	MessageSpecChangeRejected        = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
-	MessageJobCreationFailed         = "JobCreationFailed"
-	MessageDeploymentCreationFailed  = "DeploymentCreationFailed"
-	MessageResultsRetrievalFailed    = "ResultsRetrievalFailed"
-	MessageGenerationFailed          = "GenerationFailed"
-	MessageAIConfiguratorCheckFailed = "AIConfiguratorCheckFailed"
-	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
-	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
-	MessageDeploymentNameCollision   = "DynamoGraphDeployment %s already exists in namespace %s and was not created by this request (%s). Refusing to adopt it. Delete this DynamoGraphDeploymentRequest and create a new one whose generated deployment uses a free name."
-	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
-	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
+	MessageValidationPassed         = "DGDR spec validation passed"
+	MessageInitialized              = "DGDR initialized successfully"
+	MessageDiscoveringHardware      = "Discovering GPU hardware and preparing profiling job"
+	MessageProfilingJobCreated      = "Profiling job created"
+	MessageProfilingInProgress      = "Profiling is in progress"
+	MessageSpecGenerated            = "DynamoGraphDeployment spec generated successfully"
+	MessageSpecAvailable            = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
+	MessageDeploymentCreated        = "DynamoGraphDeployment %s created successfully"
+	MessageDeploymentReady          = "DynamoGraphDeployment %s is ready"
+	MessageDeploymentDegraded       = "DynamoGraphDeployment %s degraded from Ready to %s"
+	MessageDeploymentDeleted        = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
+	MessageInvalidState             = "Invalid state"
+	MessageSpecChangeRejected       = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
+	MessageJobCreationFailed        = "JobCreationFailed"
+	MessageDeploymentCreationFailed = "DeploymentCreationFailed"
+	MessageGenerationFailed         = "GenerationFailed"
+	MessageProfilingCheckFailed     = "ProfilingCheckFailed"
+	MessageModelCachePVCNotFound    = "model cache PVC %s not found in namespace %s"
+	MessageDeploymentNameCollision  = "DynamoGraphDeployment %s already exists in namespace %s and was not created by this request (%s). Refusing to adopt it. Delete this DynamoGraphDeploymentRequest and create a new one whose generated deployment uses a free name."
 
-	// ReasonDeploymentNameCollision marks the terminal failure raised when the DGD
-	// name this request generated is already taken by a deployment it does not own.
+	// ReasonDeploymentNameCollision marks a DGD identity mismatch.
 	ReasonDeploymentNameCollision = "DeploymentNameCollision"
 )
 
@@ -160,6 +143,13 @@ var errProfilingOutputNotReady = errors.New("profiling output is not ready")
 const sidecarScriptTemplate = `
 set -e
 set -o pipefail
+
+# Without kubectl the sidecar would poll forever and strand the DGDR in
+# Profiling; fail the Job instead so the controller can move it to Failed.
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "ERROR: kubectl not found in the output-copier image. The image set for the output-copier container through spec.overrides.profilingJob must contain kubectl." >&2
+  exit 1
+fi
 
 STATUS_FILE="{{.OutputPath}}/profiler_status.yaml"
 LAST_PHASE=""
@@ -567,12 +557,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return ctrl.Result{}, nil
 	}
 
-	// Record event with appropriate message
-	if isOnlineProfiling(dgdr) {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
-	} else {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageAICProfilingJobCreated)
-	}
+	r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
 
 	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
@@ -843,25 +828,13 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 		return ctrl.Result{}, err
 	}
 
-	// A non-empty generated-spec annotation means this request has not yet confirmed
-	// a DGD of its own, so the same-name DGD must pass the identity check first.
-	if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
-		generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-
-		matches, mismatchReason, err := resolveGeneratedDGDIdentity(dgdr, dgd, generatedDGD)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if !matches {
-			return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
-		}
-	}
-
-	if err := r.clearGeneratedSpecAnnotation(ctx, dgdr); err != nil {
+	// Confirm object identity before adopting resources or consuming deployment status.
+	mismatchReason, err := r.confirmDGDIdentity(ctx, dgdr, dgd)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if mismatchReason != "" {
+		return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 	}
 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
@@ -924,6 +897,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Confirm object identity before adopting resources or consuming deployment status.
+	mismatchReason, err := r.confirmDGDIdentity(ctx, dgdr, dgd)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if mismatchReason != "" {
+		return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 	}
 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
@@ -1043,29 +1025,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// Identify the object holding the name before waiting on a watch for it.
-			existingDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
-			getErr := r.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: dgdNamespace}, existingDGD)
-			if apierrors.IsNotFound(getErr) {
-				// The cache has not caught up with the object the API server rejected against.
-				logger.Info("DGD already exists but is not observable yet, requeueing", "name", dgdName)
-				return ctrl.Result{RequeueAfter: dgdCollisionRequeueDelay}, nil
-			}
-			if getErr != nil {
-				return ctrl.Result{}, getErr
-			}
-
-			matches, mismatchReason, identityErr := resolveGeneratedDGDIdentity(dgdr, existingDGD, generatedDGD)
-			if identityErr != nil {
-				return ctrl.Result{}, identityErr
-			}
-			if !matches {
-				return r.failDeploymentNameCollision(ctx, dgdr, existingDGD, mismatchReason)
-			}
-
-			// The DGD watch reconciles again after the object is in the informer cache.
-			logger.Info("DGD already exists, waiting for informer observation")
-			return ctrl.Result{}, nil
+			// A foreign DGD may not route watch events to this request. Retry the
+			// level-driven observation path even when the informer has not caught up.
+			logger.Info("DGD already exists, requeueing for identity confirmation")
+			return ctrl.Result{RequeueAfter: dgdCollisionRequeueDelay}, nil
 		}
 		r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeWarning, MessageDeploymentCreationFailed, "Create", "%s", err.Error())
 		// Admission webhook denials and other permanent API rejections (400/403/422)
@@ -1109,36 +1072,6 @@ func (r *DynamoGraphDeploymentRequestReconciler) generatedDGDFromAnnotation(
 	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	return generatedDGD, nil
-}
-
-// resolveGeneratedDGDIdentity reports whether liveDGD is the deployment dgdr created,
-// and names the failing half of the contract when it is not. Both halves are required.
-func resolveGeneratedDGDIdentity(
-	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
-	generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment,
-) (matches bool, mismatchReason string, err error) {
-	// Require the tracking labels this controller writes on every DGD it creates.
-	if liveDGD.Labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
-		liveDGD.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
-		liveDGD.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
-		return false, "it does not carry this request's tracking labels", nil
-	}
-	// DGDs created before UID binding rely on the existing labels-and-spec contract.
-	if dgdUID, bound := liveDGD.Annotations[AnnotationDGDRUID]; bound && dgdUID != string(dgdr.UID) {
-		return false, "it is not bound to this request's UID", nil
-	}
-
-	// Require the live spec to carry everything this request asked for.
-	divergence, err := generatedSpecDivergence(liveDGD, generatedDGD)
-	if err != nil {
-		return false, "", err
-	}
-	if divergence != "" {
-		return false, fmt.Sprintf("its %s differs from the spec this request generated", divergence), nil
-	}
-
-	return true, "", nil
 }
 
 // generatedSpecDivergence returns the first field path where liveDGD fails to carry what
@@ -1239,15 +1172,53 @@ func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
 	return result, nil
 }
 
-// clearGeneratedSpecAnnotation marks the DGD as observed in the informer cache.
-func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
+// confirmDGDIdentity validates an unbound deployment and durably binds its UID before
+// resource adoption. Later observations compare UIDs without rechecking mutable specs.
+// dgdr and dgd must be non-nil; successful persistence updates dgdr's metadata in place.
+func (r *DynamoGraphDeploymentRequestReconciler) confirmDGDIdentity(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-) error {
-	if dgdr.Annotations[AnnotationGeneratedDGDSpec] == "" {
-		return nil
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (string, error) {
+	// A persisted binding rejects replacements even if they copy the tracking metadata.
+	if uid := dgdr.Annotations[AnnotationConfirmedDGDUID]; uid != "" {
+		if uid != string(dgd.UID) {
+			return "its UID differs from the confirmed deployment", nil
+		}
+		return "", nil
 	}
-	annotations := map[string]any{AnnotationGeneratedDGDSpec: ""}
+
+	// Bootstrap legacy requests once from their tracking metadata. A missing DGD-side
+	// UID remains compatible with older operators; an explicit mismatch never does.
+	if dgd.Labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
+		dgd.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
+		dgd.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
+		return "it does not carry this request's tracking labels", nil
+	}
+	if uid, bound := dgd.Annotations[AnnotationDGDRUID]; bound && uid != string(dgdr.UID) {
+		return "it is not bound to this request's UID", nil
+	}
+
+	// Validate generated intent only before the original confirmation marker is cleared.
+	if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
+		generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
+		if err != nil {
+			return "", err
+		}
+		divergence, err := generatedSpecDivergence(dgd, generatedDGD)
+		if err != nil {
+			return "", err
+		}
+		if divergence != "" {
+			return fmt.Sprintf("its %s differs from the spec this request generated", divergence), nil
+		}
+	}
+
+	// Commit the UID and marker together so an interrupted confirmation cannot lose identity.
+	annotations := map[string]any{
+		AnnotationGeneratedDGDSpec: "",
+		AnnotationConfirmedDGDUID:  string(dgd.UID),
+	}
 	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
 		annotations[AnnotationAdditionalResources] = additionalResources
 	}
@@ -1262,11 +1233,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
 		},
 	}}
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
-		return fmt.Errorf("failed to clear generated DGD annotation: %w", err)
+		return "", fmt.Errorf("failed to persist confirmed DGD identity: %w", err)
+	}
+	if dgdr.Annotations == nil {
+		dgdr.Annotations = make(map[string]string)
 	}
 	dgdr.Annotations[AnnotationGeneratedDGDSpec] = ""
+	dgdr.Annotations[AnnotationConfirmedDGDUID] = string(dgd.UID)
 	dgdr.ResourceVersion = apply.GetResourceVersion()
-	return nil
+	return "", nil
 }
 
 // adoptAdditionalResources makes profiling-generated ConfigMaps follow the DGD lifecycle.
@@ -1437,12 +1412,6 @@ func getProfilingJobName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) st
 // getOutputConfigMapName returns the ConfigMap name for profiling output
 func getOutputConfigMapName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
 	return fmt.Sprintf("%s%s", ConfigMapOutputPrefix, dgdr.Name)
-}
-
-// isOnlineProfiling returns true. In v1beta1, the profiler decides online vs AIC
-// mode internally based on its config. The controller always uses the same label.
-func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
-	return true
 }
 
 // validateSpec validates the DGDR spec
@@ -2656,5 +2625,5 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 		).
 		// Set the event filter to ignore resources handled by other controllers in namespace-restricted mode
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config, r.RuntimeConfig)).
-		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
+		Complete(r)
 }

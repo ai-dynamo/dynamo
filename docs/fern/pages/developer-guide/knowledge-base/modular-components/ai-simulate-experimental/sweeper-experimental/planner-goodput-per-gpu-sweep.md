@@ -155,9 +155,9 @@ spread within the `load_180_10` family is noise).
 
 ## Reproduction Status
 
-These results are historical and cannot be reproduced from the current public artifacts.
-The published `aisimulate==0.1.0.dev1` wheel does not include the example runner or the
-experiment configuration used for this sweep.
+These results are historical and cannot be reproduced exactly. The experiment used
+`aisimulate==0.1.0.dev1`; that wheel did not include the example runner, and the experiment
+configuration was not published.
 
 The original planner path required the `aic-forward-pass` binding; a per-throughput-interval
 load-predictor sub-sweep ran first (forecast-loss winner pinned per interval). Static and
