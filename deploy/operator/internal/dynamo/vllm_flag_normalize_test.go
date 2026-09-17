@@ -1,0 +1,154 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package dynamo
+
+import (
+	"fmt"
+	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+)
+
+func vllmContainer(args ...string) *corev1.Container {
+	return &corev1.Container{
+		Name:    "main",
+		Command: []string{"python3"},
+		Args:    append([]string{"-m", "dynamo.vllm", "--model", "m"}, args...),
+	}
+}
+
+// TestNormalizeVLLMFlags_EverySpellingReadsTheSame is the point of this change: a flag vLLM
+// accepts must read identically however it is spelled. Before normalization, getFlagValue
+// matched only "--flag value" and silently returned its default of 1 for the other two forms.
+//
+// Mutation check: drop the normalizeVLLMFlags call from getExpandedCommandLine and every
+// equals-form and short-form subtest below fails on the value assertion.
+func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
+	for _, tc := range []struct {
+		flag  string
+		short string
+	}{
+		{tensorParallelSizeFlag, "-tp"},
+		{pipelineParallelSizeFlag, "-pp"},
+		{dataParallelSizeFlag, "-dp"},
+		{dataParallelSizeLocalFlag, "-dpl"},
+	} {
+		spellings := map[string][]string{
+			"long separated":  {tc.flag, "4"},
+			"long equals":     {tc.flag + "=4"},
+			"short separated": {tc.short, "4"},
+			"short equals":    {tc.short + "=4"},
+		}
+		for name, args := range spellings {
+			t.Run(fmt.Sprintf("%s/%s", tc.flag, name), func(t *testing.T) {
+				got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tc.flag)
+				if got != 4 {
+					t.Errorf("%s spelled %q read as %d, want 4 -- vLLM accepts all of these forms, "+
+						"so every reader in this package must too", tc.flag, args, got)
+				}
+			})
+		}
+	}
+}
+
+// TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes pins the asymmetry that motivated this
+// fix, at the level available on this branch.
+//
+// IsElasticEPRayLaunch decides WHETHER a launch is elastic EP; it uses hasArg, which already
+// understood "-dpb" and the equals form. The width of that launch is read separately, through
+// getFlagValue, which did not. So a command line could qualify as elastic EP and read as one
+// rank -- and a one-rank reading renders no extra pods, no local-rank pin and no width gate
+// while vLLM still places N ranks, which is the abort those three exist to prevent.
+//
+// Asserted on getFlagValue rather than on the Phase 4 sizing helper because that helper
+// (ElasticEPFollowerReplicas, #13580) is not on this branch. It calls getFlagValue, so it
+// inherits this fix.
+//
+// Mutation check: drop the normalizeVLLMFlags call from getExpandedCommandLine and the
+// equals-form and short-form subtests fail with dp read as 1.
+func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
+	for name, args := range map[string][]string{
+		"long flags":           {"--enable-elastic-ep", dataParallelBackendFlag, "ray", dataParallelSizeFlag, "4"},
+		"equals flags":         {"--enable-elastic-ep", dataParallelBackendFlag + "=ray", dataParallelSizeFlag + "=4"},
+		"short flags":          {"--enable-elastic-ep", "-dpb", "ray", "-dp", "4"},
+		"mixed short and long": {"--enable-elastic-ep", "-dpb", "ray", dataParallelSizeFlag, "4"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			container := vllmContainer(args...)
+			if !IsElasticEPRayLaunch(container) {
+				t.Fatalf("spelling %q should qualify as an elastic-EP Ray launch", args)
+			}
+			if got := getFlagValue(getExpandedCommandLine(container), dataParallelSizeFlag); got != 4 {
+				t.Errorf("qualified as elastic EP but its declared width read as %d, want 4. A shape "+
+					"that qualifies must also size correctly, or the leader renders with no width "+
+					"gate and vLLM aborts placing 4 ranks on one pod", got)
+			}
+		})
+	}
+}
+
+// TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms covers the multinode consumer.
+// getWorldSize multiplies tensor by pipeline size, and it decides data-parallel-size-local and
+// whether multinode coordination is injected at all -- so a size silently read as 1 is not a
+// cosmetic miss.
+func TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms(t *testing.T) {
+	for name, args := range map[string][]string{
+		"long separated": {tensorParallelSizeFlag, "4", pipelineParallelSizeFlag, "2"},
+		"equals":         {tensorParallelSizeFlag + "=4", pipelineParallelSizeFlag + "=2"},
+		"short":          {"-tp", "4", "-pp", "2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := getWorldSize(getExpandedCommandLine(vllmContainer(args...))); got != 8 {
+				t.Errorf("getWorldSize = %d, want 8 (tp 4 x pp 2) for spelling %q", got, args)
+			}
+		})
+	}
+}
+
+// TestNormalizeVLLMFlags_LeavesEverythingElseAlone: this canonicalizes spelling, it does not
+// filter. An unrecognized flag, a bare value, and a non-flag token carrying "=" must survive.
+func TestNormalizeVLLMFlags_LeavesEverythingElseAlone(t *testing.T) {
+	in := []string{"python3", "-m", "dynamo.vllm", "--model", "deepseek-ai/DeepSeek-V2-Lite",
+		"--some-future-flag=value", "--trust-remote-code", "-dp", "4"}
+	got := normalizeVLLMFlags(in)
+
+	want := []string{"python3", "-m", "dynamo.vllm", "--model", "deepseek-ai/DeepSeek-V2-Lite",
+		"--some-future-flag", "value", "--trust-remote-code", dataParallelSizeFlag, "4"}
+	if len(got) != len(want) {
+		t.Fatalf("normalizeVLLMFlags(%q) = %q, want %q", in, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("token %d = %q, want %q (full: %q)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched guards the obvious wrong
+// implementation: rewriting by prefix or substring rather than by whole token. "-dpb" must not
+// be read as "-dp" with a stray "b", and a longer flag that merely starts with a short alias
+// must be left alone.
+func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
+	got := normalizeVLLMFlags([]string{"-dpb", "ray", "-dpx", "1", "--dp", "2"})
+	want := []string{dataParallelBackendFlag, "ray", "-dpx", "1", "--dp", "2"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("token %d = %q, want %q (full: %q)", i, got[i], want[i], got)
+		}
+	}
+}

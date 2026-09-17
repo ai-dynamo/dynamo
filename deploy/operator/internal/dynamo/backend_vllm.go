@@ -344,7 +344,9 @@ func getExpandedArgs(container *corev1.Container) []string {
 	for _, arg := range container.Args {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}
-	return expandedArgs
+	// Same canonicalization as getExpandedCommandLine -- see normalizeVLLMFlags. The
+	// multinode launch path reads through this one, and getWorldSize is one of its consumers.
+	return normalizeVLLMFlags(expandedArgs)
 }
 
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
@@ -584,7 +586,55 @@ func getExpandedCommandLine(container *corev1.Container) []string {
 	for _, arg := range commandLine {
 		expanded = append(expanded, strings.Fields(arg)...)
 	}
-	return expanded
+	return normalizeVLLMFlags(expanded)
+}
+
+// vllmShortFlagAliases maps vLLM's documented short flag names to their canonical long form.
+// Kept here rather than at each reader so a new alias is added once.
+var vllmShortFlagAliases = map[string]string{
+	"-tp":  tensorParallelSizeFlag,
+	"-pp":  pipelineParallelSizeFlag,
+	"-dp":  dataParallelSizeFlag,
+	"-dpl": dataParallelSizeLocalFlag,
+	"-dpb": dataParallelBackendFlag,
+}
+
+// normalizeVLLMFlags rewrites a tokenized command line into ONE canonical spelling:
+// "--long-flag", "value" pairs, with short aliases expanded and "--flag=value" split.
+//
+// This exists because vLLM accepts the same flag several ways -- "--data-parallel-size 4",
+// "--data-parallel-size=4" and "-dp 4" are identical to the engine -- while the readers in
+// this package were not equally tolerant. hasArg matched all three forms; getFlagValue
+// matched only the exact long flag followed by a separate token, and silently returned its
+// default of 1 otherwise. Two readers of the same command line, disagreeing.
+//
+// The consequences were real in both directions:
+//
+//   - elastic EP: "--enable-elastic-ep -dpb ray -dp 4" QUALIFIED as an elastic launch (hasArg
+//     understands -dpb) but derived a width of 1, so no followers, no local-rank pin and no
+//     width gate were rendered while vLLM still placed 4 ranks -- the exact abort those
+//     three exist to prevent.
+//   - multinode: getWorldSize reads tensor and pipeline sizes through the same helper, so
+//     "-tp 4" or "--tensor-parallel-size=4" read as 1. World size then decides
+//     data-parallel-size-local and whether multinode coordination is injected at all.
+//
+// Normalizing at the tokenizer rather than at each reader is deliberate: every caller of
+// getExpandedCommandLine gets it, and there is no second parser left to drift from this one.
+// Anything unrecognized is passed through untouched -- this canonicalizes spelling, it does
+// not filter.
+func normalizeVLLMFlags(expanded []string) []string {
+	normalized := make([]string, 0, len(expanded))
+	for _, arg := range expanded {
+		flag, value, hasEquals := strings.Cut(arg, "=")
+		if canonical, ok := vllmShortFlagAliases[flag]; ok {
+			flag = canonical
+		}
+		normalized = append(normalized, flag)
+		if hasEquals {
+			normalized = append(normalized, value)
+		}
+	}
+	return normalized
 }
 
 // hasFlag returns true if flag exists in expandedArgs.
