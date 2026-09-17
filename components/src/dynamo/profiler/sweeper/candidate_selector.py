@@ -5,14 +5,6 @@
 bounded scalar/Pareto results"). Pure function: given the current
 selection and one newly-scored Candidate, returns the updated selection.
 Maintaining state across a stream of candidates is the caller's job.
-
-Confirmed against the real Sweeper Results/Optimization Goals docs, not
-assumed: Candidate.objectives is a dict keyed by OptimizationTarget value;
-each objective's maximize/minimize direction is a search-level property
-("[(t.value, t.maximize) for t in resolved_pareto_objectives]"), not a
-per-candidate field -- callers supply it via ObjectiveSpec. Scalar goals
-break score ties by fewer GPUs ("rank (best score, ties -> fewer GPUs)
-for every scalar goal").
 """
 
 from __future__ import annotations
@@ -22,8 +14,6 @@ from typing import Mapping, Protocol, Sequence
 
 
 class CandidateLike(Protocol):
-    """Matches the real, confirmed Sweeper Candidate's relevant fields."""
-
     score: float
     objectives: Mapping[str, float]
     used_gpus: int
