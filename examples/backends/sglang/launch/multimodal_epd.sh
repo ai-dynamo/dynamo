@@ -153,6 +153,7 @@ print_launch_banner --multimodal "Launching Multimodal E/PD ($GPU_LABEL)" "$MODE
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 python3 -m dynamo.frontend &
+FRONTEND_PID=$!
 
 # run SGLang multimodal inference worker
 # Start before the encode worker: that worker waits for instances of
@@ -189,20 +190,26 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     # The gate direction is forced: the encode worker withholds its own
     # readiness until backend.generate has instances, which only the PD worker
     # registers, so the encode worker's /health can never turn 200 first.
-    # Watch WORKER_PID as well as the endpoint -- a worker that dies while
-    # loading never answers, and polling it for the full 120s would hide the
-    # error behind a two-minute stall.
+    # Watch both startup processes so a frontend or PD failure does not wait
+    # for the readiness timeout.
     # || _gate_rc=$?: set -e must not end the script on a timeout.
     echo "Waiting for PD worker to initialize..."
     _gate_rc=0
-    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120 "$WORKER_PID" || _gate_rc=$?
-    if (( _gate_rc == 2 )); then
-        # PD worker is gone. The encode worker would block in
-        # wait_for_instances() on a backend.generate that will never appear, so
-        # report the PD worker's exit status now instead of starting it.
-        echo "PD worker exited during startup; not starting the encode worker."
-        wait_any_exit
-    elif (( _gate_rc != 0 )); then
+    wait_for_ready "http://localhost:${DYN_SYSTEM_PORT2:-8082}/health" 120 "$WORKER_PID" "$FRONTEND_PID" || _gate_rc=$?
+    # Check again after the final HTTP request or timeout, before starting encode.
+    for _startup_pid in "$WORKER_PID" "$FRONTEND_PID"; do
+        if ! kill -0 "$_startup_pid" 2>/dev/null; then
+            # Without a live PD worker, encode blocks in wait_for_instances()
+            # waiting for backend.generate.
+            # Reap the known PID: wait -n can miss an already-completed job.
+            # Even a zero exit is a startup failure before encode has started.
+            _startup_rc=1
+            wait "$_startup_pid" || _startup_rc=$?
+            echo "Startup process $_startup_pid exited; not starting the encode worker."
+            dynamo_reap_and_exit "$_startup_rc"
+        fi
+    done
+    if (( _gate_rc != 0 )); then
         # Timed out with the PD worker still alive, so it is still loading -- a
         # cold weight cache outlasts 120s where a warm one needs about 30s.
         # Deliberately not fatal: the worker still registers backend.generate
