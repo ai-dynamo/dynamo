@@ -4457,6 +4457,7 @@ var _ = Describe("DGDR Image Pull Error Detection", func() {
 					Labels: map[string]string{
 						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
 						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
 					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
