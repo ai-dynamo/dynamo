@@ -11,7 +11,7 @@ This is an architecture reference. For how to enable and tune migration, its ben
 
 ## Overview
 
-Request migration is implemented through a Migration operator that sits in the LLM processing pipeline between the Backend operator and the service backend. When a worker fails during request processing, the migration system preserves the partial generation state and recreates the request on a new worker to continue from where the previous worker left off.
+Request migration is implemented through a Migration operator that sits in the LLM processing pipeline between the frontend preprocessing and the service backend. When a worker fails during request processing, the migration system preserves the partial generation state and recreates the request on a new worker to continue from where the previous worker left off.
 
 ## Architecture Components
 

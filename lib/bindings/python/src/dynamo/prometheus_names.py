@@ -97,6 +97,8 @@ class frontend_service:
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Total number of terminal semantic request failures.
+    FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
