@@ -96,7 +96,7 @@ spec:
       scalingAdapter: {}
       sharedMemorySize: 16Gi
       type: worker
-    - name: VllmWorker
+    - name: worker
       podTemplate:
         spec:
           containers:
