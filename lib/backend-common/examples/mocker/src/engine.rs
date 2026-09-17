@@ -431,7 +431,7 @@ impl LLMEngine for MockerBackend {
         }
 
         let direct = DirectRequest {
-            tokens: request.token_ids.clone(),
+            tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             uuid: Some(uuid),
             dp_rank: DP_RANK,

@@ -8,6 +8,13 @@ from dataclasses import dataclass, field
 
 import pytest
 
+# dynamo.common.multimodal eagerly imports torch via its package __init__.
+# Skip the whole module in images that do not ship torch (e.g. Triton).
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError as e:
+    pytest.skip(f"torch not available in this image: {e}", allow_module_level=True)
+
 from dynamo.common.multimodal.nvdec_decoder import nvdec_available
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from tests.serve.common import (
@@ -841,7 +848,7 @@ sglang_configs = {
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
-            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "nixl-read",
             # The clips come from the image_server over plain http on localhost,
             # which the URL policy rejects by default. This model is gated out of
             # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
@@ -878,7 +885,10 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                expected_log=["Embedding cache hit for VIDEO URL index 0"],
+                expected_log=[
+                    "Embedding cache hit for VIDEO URL index 0",
+                    "Initialized NIXL agent",
+                ],
                 temperature=0.0,
                 max_tokens=100,
             ),

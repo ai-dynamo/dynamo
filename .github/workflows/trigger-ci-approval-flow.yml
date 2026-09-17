@@ -24,9 +24,13 @@
 #    For example, a maintainer may merge `main` into a contributor's branch. This path approves
 #    only the head created by that synchronization; it does not make the PR or contributor trusted
 #    for later pushes.
+# 4. `glamr-agent` posts `@dynamo-ops please run full CI for <full-head-sha>`, optionally
+#    preceded by a label and colon. The SHA must match the open fork PR's head when resolved.
+#    Set the repository Actions variable GLAMR_CI_REQUESTS_DISABLED=true to disable this path.
 #
-# All paths require every commit currently in the PR to have a signature that GitHub reports as
-# verified. If any commit is unsigned, the workflow does not post `/ok to test`. For PRs authored
+# All paths require every commit in the captured base-to-head comparison to have a signature
+# that GitHub reports as verified. If any commit is unsigned, the workflow does not post
+# `/ok to test`. For PRs authored
 # by maintainers, it explains which commits failed verification. Approved external contributors
 # receive guidance for either signing the commits or requesting manual approval. Other external
 # contributors wait for manual approval without receiving an unsigned-commit comment. Repository-
@@ -45,9 +49,11 @@
 #
 # Desired state
 # -------------
-# The workflow posts an `/ok to test` command containing the current PR head SHA only after the
-# current head has a trusted approval path and all commits are verified. Every later push creates a
-# different head SHA and causes the complete approval process to run again.
+# The workflow posts `/ok to test <captured-head-sha>` after checking its approval path and
+# verifying every commit in the captured base-to-head comparison. The final read requires the
+# PR to remain open with the same base and head, but that read and comment creation are separate
+# operations. The PR may change before publication; the consumer must enforce the command's
+# SHA when approval is required. Later heads require their own approval evaluation.
 
 name: Trigger CI Approval Flow
 
@@ -57,6 +63,8 @@ on:
       - opened
       - synchronize
       - reopened
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
@@ -65,15 +73,52 @@ permissions:
 
 jobs:
   ok-to-test:
-    if: github.event.pull_request.head.repo.fork
+    # Authenticate glamr-agent by GitHub account ID, independent of login changes.
+    if: >-
+      (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.fork) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       vars.GLAMR_CI_REQUESTS_DISABLED != 'true' &&
+       github.event.comment.user.id == 282374502 &&
+       contains(github.event.comment.body, '@dynamo-ops please run full CI for '))
     runs-on: ubuntu-latest
     environment: external_collaborator
+    concurrency:
+      group: ci-approval-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: false
+      queue: max
+    env:
+      REPO_OWNER: ${{ github.repository_owner }}
+      REPO_NAME: ${{ github.event.repository.name }}
+      UNSIGNED_COMMENT_MARKER: "<!-- dynamo-ext-contributor: unsigned -->"
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
     steps:
+      - name: Resolve current PR and requested commit
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+          [[ $(jq -r '.state == "open" and .head.repo.fork == true' <<< "$pr") == true ]] || exit 0
+          head=$(jq -r '.head.sha' <<< "$pr")
+          if [[ "$GITHUB_EVENT_NAME" == issue_comment ]]; then
+            body=$(jq -r '.comment.body' "$GITHUB_EVENT_PATH")
+            pattern='^([^[:space:]]+:[[:blank:]]+)?@dynamo-ops please run full CI for ([0-9a-f]{40})[[:space:]]*$'
+            [[ "$body" =~ $pattern ]] || exit 0
+            [[ "${BASH_REMATCH[2]}" == "$head" ]] || exit 0
+            echo "is_approved=true" >> "$GITHUB_OUTPUT"
+          else
+            [[ $(jq -r '.pull_request.head.sha' "$GITHUB_EVENT_PATH") == "$head" ]] || exit 0
+          fi
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "base=$(jq -r '.base.sha' <<< "$pr")" >> "$GITHUB_OUTPUT"
+          echo "author=$(jq -r '.user.login' <<< "$pr")" >> "$GITHUB_OUTPUT"
+          echo "current=true" >> "$GITHUB_OUTPUT"
       - name: Validate approved contributor
         id: author_check
+        if: steps.request.outputs.current == 'true'
         env:
           APPROVED_EXTERNAL_CONTRIBUTORS: ${{ secrets.APPROVED_EXTERNAL_CONTRIBUTORS }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR: ${{ steps.request.outputs.author }}
         run: |
           if ! echo "$APPROVED_EXTERNAL_CONTRIBUTORS" | jq -e 'if type == "array" then . else error("not an array") end' > /dev/null 2>&1; then
             echo "Warning: APPROVED_EXTERNAL_CONTRIBUTORS is not a valid JSON array." >&2
@@ -90,10 +135,11 @@ jobs:
           fi
       - name: Validate PR author permission
         id: author_permission_check
+        if: steps.request.outputs.current == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR: ${{ steps.request.outputs.author }}
         run: |
           # This checks effective repository permission, not organization membership.
           if ! author_permission=$(gh api \
@@ -118,7 +164,7 @@ jobs:
           esac
       - name: Validate triggering actor
         id: actor_check
-        if: github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
+        if: steps.request.outputs.current == 'true' && github.event_name == 'pull_request_target' && github.event.action == 'synchronize' && steps.author_check.outputs.is_approved != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -149,13 +195,15 @@ jobs:
           esac
       - name: Determine CI approval
         id: approval_check
+        if: steps.request.outputs.current == 'true'
         env:
+          REQUEST_APPROVED: ${{ steps.request.outputs.is_approved }}
           AUTHOR_APPROVED: ${{ steps.author_check.outputs.is_approved }}
           AUTHOR_MAINTAINER: ${{ steps.author_permission_check.outputs.is_maintainer }}
           ACTOR_APPROVED: ${{ steps.actor_check.outputs.is_approved }}
           EVENT_ACTION: ${{ github.event.action }}
         run: |
-          if [[ "$AUTHOR_APPROVED" == "true" ]]; then
+          if [[ "$REQUEST_APPROVED" == "true" || "$AUTHOR_APPROVED" == "true" ]]; then
             echo "is_approved=true" >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_ACTION" == "synchronize" && "$ACTOR_APPROVED" == "true" ]]; then
             echo "is_approved=true" >> "$GITHUB_OUTPUT"
@@ -169,13 +217,12 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE: ${{ steps.request.outputs.base }}
+          PR_SHA: ${{ steps.request.outputs.head }}
         run: |
           commit_shas=$(gh api --paginate \
-            "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER/commits?per_page=100" \
-            --jq '.[].sha')
+            "repos/$REPO_OWNER/$REPO_NAME/compare/$PR_BASE...$PR_SHA?per_page=100" \
+            --jq '.commits[].sha')
 
           if [[ -z "$commit_shas" ]]; then
             echo "Warning: No commits found in PR." >&2
@@ -217,14 +264,11 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           bot_login=$(gh api user --jq '.login')
           gh api "repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments" \
-          | jq -r --arg login "$bot_login" \
-            '.[] | select(.user.login == $login and (.body | contains("<!-- dynamo-ext-contributor: unsigned -->"))) | .id' \
+          | jq -r --arg login "$bot_login" --arg marker "$UNSIGNED_COMMENT_MARKER" \
+            '.[] | select(.user.login == $login and (.body | contains($marker))) | .id' \
           | while read -r comment_id; do
               echo "Deleting stale unsigned-commits comment $comment_id"
               gh api --method DELETE "repos/$REPO_OWNER/$REPO_NAME/issues/comments/$comment_id"
@@ -233,13 +277,10 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true' && steps.author_permission_check.outputs.is_maintainer == 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
           UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
         run: |
           table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
-          body="<!-- dynamo-ext-contributor: unsigned -->
+          body="$UNSIGNED_COMMENT_MARKER
           ## Unsigned Commits Detected
 
           The following commits are not GPG-signed and must be signed before CI can run:
@@ -257,14 +298,11 @@ jobs:
         if: steps.author_check.outputs.is_approved == 'true' && steps.author_permission_check.outputs.is_maintainer != 'true' && steps.signature_check.outputs.all_signed == 'false'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_SHA: ${{ steps.request.outputs.head }}
           UNSIGNED_COMMITS: ${{ steps.signature_check.outputs.unsigned_commits }}
         run: |
           table=$(echo "$UNSIGNED_COMMITS" | jq -r '.[] | "| `\(.sha)` | \(.reason) |"')
-          body="<!-- dynamo-ext-contributor: unsigned -->
+          body="$UNSIGNED_COMMENT_MARKER
           ## Automatic CI Approval Skipped
 
           Automatic approval requires every commit to have a signature that GitHub reports as verified. The following commits do not meet that requirement:
@@ -282,15 +320,26 @@ jobs:
         if: steps.approval_check.outputs.is_approved == 'true' && steps.signature_check.outputs.all_signed == 'true'
         env:
           GH_TOKEN: ${{ secrets.AUTO_VERIFIER_CI_TOKEN }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE: ${{ steps.request.outputs.base }}
+          PR_SHA: ${{ steps.request.outputs.head }}
         run: |
           if [[ -z "$PR_SHA" ]]; then
             echo "Could not determine PR head SHA; aborting /ok to test comment." >&2
             exit 1
           fi
+
+          bot_login=$(gh api user --jq '.login')
+          comments=$(gh api --paginate --slurp "repos/$REPO_OWNER/$REPO_NAME/issues/$PR_NUMBER/comments?per_page=100")
+          if jq -e --arg login "$bot_login" --arg body "/ok to test $PR_SHA" \
+            'any(.[][]; .user.login == $login and .body == $body)' <<< "$comments" > /dev/null; then
+            echo "CI approval already posted for $PR_SHA."
+            exit 0
+          fi
+          # This read can reject an already-stale request, but cannot prevent a later push.
+          # Keep the command below bound to the captured, verified PR_SHA.
+          pr=$(gh api "repos/$REPO_OWNER/$REPO_NAME/pulls/$PR_NUMBER")
+          jq -e --arg sha "$PR_SHA" --arg base "$PR_BASE" \
+            '.state == "open" and .head.sha == $sha and .base.sha == $base' <<< "$pr" > /dev/null || exit 0
 
           gh pr comment "$PR_NUMBER" \
             --repo "$REPO_OWNER/$REPO_NAME" \

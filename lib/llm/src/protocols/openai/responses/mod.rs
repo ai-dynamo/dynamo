@@ -679,7 +679,8 @@ fn convert_input_items_to_messages(
 ///
 /// Bare function names are preserved for model compatibility. Reject collisions
 /// from different origins instead of guessing which namespace to restore on the
-/// response path.
+/// response path. Return `InvalidArgument` for non-function tools, including
+/// namespace members, instead of silently discarding unsupported definitions.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut origins = HashMap::<String, Option<String>>::new();
@@ -719,27 +720,41 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
+                    match tool {
+                        NamespaceToolParamTool::Function(f) => push_function(
                             &f.name,
                             &f.description,
                             &f.parameters,
                             f.strict,
                             Some(&namespace.name),
-                        )?;
+                        )?,
+                        _ => return unsupported_tool(tool, "tools"),
                     }
                 }
             }
-            // Only function tools are forwarded to Chat Completions.
-            _ => {}
+            _ => return unsupported_tool(tool, "tools"),
         }
     }
     Ok(converted)
 }
 
+/// Identify an unsupported tool or choice by its serialized type and return
+/// `InvalidArgument` with the affected request field and supported alternatives.
+fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Result<T> {
+    let value = serde_json::to_value(tool)?;
+    let tool_type = value["type"].as_str().unwrap_or("unknown");
+    Err(ResponsesConversionError::InvalidArgument(format!(
+        "Unsupported Responses {field} type '{tool_type}': the Chat Completions adapter supports only function tools and none, auto, required, or named function tool choices"
+    ))
+    .into())
+}
+
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
-    match tc {
+///
+/// Preserve supported modes and named functions; return `InvalidArgument` for
+/// choices whose semantics cannot be represented by the adapter.
+fn convert_tool_choice(tc: &ToolChoiceParam) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -753,15 +768,8 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
                 },
             })
         }
-        ToolChoiceParam::Hosted(_) => {
-            // Hosted tools are not forwarded to chat completions
-            ChatCompletionToolChoiceOption::Auto
-        }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
-    }
+        _ => return unsupported_tool(tc, "tool_choice"),
+    })
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
@@ -876,7 +884,12 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let tool_choice = resp
+            .inner
+            .tool_choice
+            .as_ref()
+            .map(convert_tool_choice)
+            .transpose()?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -1215,7 +1228,24 @@ pub fn chat_completion_to_response(
         if let Some(content_text) = content_text
             && !content_text.is_empty()
         {
-            let parsed_calls = parse_tool_call_text(&content_text);
+            let has_enabled_tools = params.tools.as_ref().is_some_and(|tools| {
+                tools.iter().any(|tool| match tool {
+                    Tool::Function(_) => true,
+                    Tool::Namespace(namespace) => namespace
+                        .tools
+                        .iter()
+                        .any(|tool| matches!(tool, NamespaceToolParamTool::Function(_))),
+                    _ => false,
+                })
+            }) && !matches!(
+                params.tool_choice,
+                Some(ToolChoiceParam::Mode(ToolChoiceOptions::None))
+            );
+            let parsed_calls = if has_enabled_tools {
+                parse_tool_call_text(&content_text)
+            } else {
+                Vec::new()
+            };
             if !parsed_calls.is_empty() {
                 for (name, arguments) in parsed_calls {
                     let namespace = params.namespace_for_function(&name);
@@ -3033,6 +3063,104 @@ Let me check the weather.
         let text = "Just a regular message with no tool calls.";
         let calls = parse_tool_call_text(text);
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_text_tool_calls_preserved_when_tools_are_disabled() {
+        let text = r#"Example: <think>reasoning</think><tool_call>{"name":"get_weather","arguments":{"city":"Beijing"}}</tool_call>"#;
+        let tools = vec![
+            serde_json::from_value(serde_json::json!({
+                "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ];
+        for (tools, tool_choice) in [
+            (
+                Some(tools),
+                Some(ToolChoiceParam::Mode(ToolChoiceOptions::None)),
+            ),
+            (None, None),
+            (
+                Some(serde_json::from_value(serde_json::json!([{
+                    "type": "namespace", "name": "weather", "description": "Weather tools", "tools": []
+                }])).unwrap()),
+                Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ),
+        ] {
+            let params = ResponseParams {
+                tools,
+                tool_choice,
+                ..Default::default()
+            };
+            let response =
+                chat_completion_to_response(make_chat_resp_with_text(text), &params, None).unwrap();
+            assert_eq!(response.inner.output.len(), 1);
+            let OutputItem::Message(message) = &response.inner.output[0] else {
+                panic!("tool-disabled request must preserve literal tool-call text");
+            };
+            let OutputMessageContent::OutputText(content) = &message.content[0] else {
+                panic!("expected output text");
+            };
+            assert_eq!(content.text, text);
+        }
+    }
+
+    #[test]
+    fn test_text_tool_calls_parsed_when_tools_are_enabled() {
+        let text =
+            r#"<tool_call>{"name":"get_weather","arguments":{"city":"Beijing"}}</tool_call>"#;
+        let tools = serde_json::from_value(serde_json::json!([{
+            "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+        }]))
+        .unwrap();
+        let params = ResponseParams {
+            tools: Some(tools),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ..Default::default()
+        };
+        let response =
+            chat_completion_to_response(make_chat_resp_with_text(text), &params, None).unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected a function call for an enabled tool request");
+        };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+            serde_json::json!({"city":"Beijing"})
+        );
+    }
+
+    #[test]
+    fn test_text_tool_call_preserves_namespace() {
+        let params = ResponseParams {
+            tools: Some(
+                serde_json::from_value(serde_json::json!([{
+                    "type": "namespace",
+                    "name": "weather",
+                    "description": "Weather tools",
+                    "tools": [{"type": "function", "name": "get_weather"}]
+                }]))
+                .unwrap(),
+            ),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ..Default::default()
+        };
+        let response = chat_completion_to_response(
+            make_chat_resp_with_text(
+                r#"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#,
+            ),
+            &params,
+            None,
+        )
+        .unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected a namespaced function call");
+        };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(call.namespace.as_deref(), Some("weather"));
+        assert_eq!(call.arguments, "{}");
     }
 
     #[test]

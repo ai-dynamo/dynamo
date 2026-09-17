@@ -2,20 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dynamo_kv_router::protocols::WorkerId;
-use dynamo_runtime::discovery::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    ModelCardInstanceId,
-};
+use dynamo_runtime::discovery::DiscoveryEvent;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryInstanceId, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
-use futures::{Stream, StreamExt, future::try_join_all};
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
 
 use super::identity::{
     CanonicalModelId, CanonicalModelRegistration, ModelAlias, ModelTarget, WorkerRole,
@@ -26,104 +18,21 @@ use crate::model_card::ModelDeploymentCard;
 use crate::model_type::ModelType;
 use crate::worker_type::WorkerType;
 
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+use super::{
+    membership_watch::publish_membership_if_changed,
+    namespace_source::discovery::KvDcRelayDiscoveryConfig,
+};
+#[cfg(test)]
+use dynamo_runtime::discovery::DiscoveryQuery;
+#[cfg(test)]
+use tokio::sync::watch;
 
 pub(crate) type KvCacheDomainKey = ResolvedIndexerDomain;
 
-/// Selects which Dynamo endpoints one Relay supervises.
-///
-/// The watch scope also fixes a naming invariant: request-facing model and
-/// adapter names must be unique across every namespace one Relay watches. A
-/// local ModelManager may resolve a name collision by its own first-wins
-/// order, but a Relay federates independently owned endpoints and has no safe
-/// canonical owner to choose, so a name claimed by conflicting targets is
-/// omitted from every endpoint (fail-closed, recorded as a serving conflict)
-/// rather than arbitrated per namespace.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct KvDcRelayDiscoveryConfig {
-    pub namespaces: Vec<String>,
-    pub endpoint_prefixes: Vec<String>,
-    pub watch_all: bool,
-}
-
-impl KvDcRelayDiscoveryConfig {
-    pub fn validate(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.watch_all || !self.namespaces.is_empty(),
-            "KV DC Relay requires at least one discovery namespace or explicit watch_all"
-        );
-        anyhow::ensure!(
-            !self.watch_all || self.namespaces.is_empty(),
-            "KV DC Relay watch_all cannot be combined with explicit discovery namespaces"
-        );
-
-        let mut unique_namespaces = HashSet::new();
-        for namespace in &self.namespaces {
-            anyhow::ensure!(
-                !namespace.trim().is_empty(),
-                "KV DC Relay discovery namespaces must not be empty"
-            );
-            anyhow::ensure!(
-                namespace.trim() == namespace,
-                "KV DC Relay discovery namespaces must not contain surrounding whitespace"
-            );
-            anyhow::ensure!(
-                unique_namespaces.insert(namespace),
-                "duplicate KV DC Relay discovery namespace: {namespace}"
-            );
-        }
-
-        let mut unique_prefixes = HashSet::new();
-        for prefix in &self.endpoint_prefixes {
-            anyhow::ensure!(
-                !prefix.trim().is_empty(),
-                "KV DC Relay endpoint prefixes must not be empty"
-            );
-            anyhow::ensure!(
-                prefix.trim() == prefix,
-                "KV DC Relay endpoint prefixes must not contain surrounding whitespace"
-            );
-            anyhow::ensure!(
-                unique_prefixes.insert(prefix),
-                "duplicate KV DC Relay endpoint prefix: {prefix}"
-            );
-            anyhow::ensure!(
-                self.watch_all
-                    || self.namespaces.iter().any(|namespace| {
-                        prefix == namespace
-                            || prefix
-                                .strip_prefix(namespace)
-                                .is_some_and(|suffix| suffix.starts_with('.'))
-                    }),
-                "KV DC Relay endpoint prefix {prefix} is outside the configured namespaces"
-            );
-        }
-        Ok(())
-    }
-
-    fn queries(&self) -> Vec<DiscoveryQuery> {
-        if self.watch_all {
-            vec![DiscoveryQuery::AllModels]
-        } else {
-            self.namespaces
-                .iter()
-                .map(|namespace| DiscoveryQuery::NamespacedModels {
-                    namespace: namespace.clone(),
-                })
-                .collect()
-        }
-    }
-
-    fn filter(&self) -> DcDiscoveryFilter {
-        DcDiscoveryFilter {
-            endpoint_prefixes: self.endpoint_prefixes.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct DcDiscoveryFilter {
-    endpoint_prefixes: Vec<String>,
+    pub(super) endpoint_prefixes: Vec<String>,
 }
 
 impl DcDiscoveryFilter {
@@ -414,52 +323,7 @@ impl<'a> ProjectionDiagnostics<'a> {
     }
 }
 
-pub(crate) struct DcMembershipWatch {
-    receiver: watch::Receiver<DcMembershipView>,
-    cancel: CancellationToken,
-    task: JoinHandle<()>,
-}
-
-impl DcMembershipWatch {
-    pub(crate) async fn start(
-        discovery: Arc<dyn Discovery>,
-        config: KvDcRelayDiscoveryConfig,
-        parent_cancel: CancellationToken,
-    ) -> anyhow::Result<Self> {
-        config.validate()?;
-        let queries = config.queries();
-        let filter = config.filter();
-        let initial = list_queries(&discovery, &queries).await?;
-        let mut state = MembershipState::default();
-        state.replace_all(initial, &filter);
-        let (sender, receiver) = watch::channel(state.view(&filter));
-        let cancel = parent_cancel.child_token();
-        let task_cancel = cancel.clone();
-        let task = tokio::spawn(async move {
-            run_membership_watch(discovery, queries, filter, state, sender, task_cancel).await;
-        });
-        Ok(Self {
-            receiver,
-            cancel,
-            task,
-        })
-    }
-
-    pub(crate) fn subscribe(&self) -> watch::Receiver<DcMembershipView> {
-        self.receiver.clone()
-    }
-
-    pub(crate) async fn shutdown(self) {
-        self.cancel.cancel();
-        if let Err(error) = self.task.await
-            && !error.is_cancelled()
-        {
-            tracing::warn!(%error, "KV DC Relay model-card watch failed during shutdown");
-        }
-    }
-}
-
-struct MembershipState {
+pub(super) struct MembershipState {
     cards: HashMap<ModelCardInstanceId, StoredModelCard>,
     next_membership_generation: u64,
     previous: Arc<HashMap<EndpointId, EndpointMembership>>,
@@ -490,7 +354,7 @@ impl Default for MembershipState {
 }
 
 impl MembershipState {
-    fn replace_all(
+    pub(super) fn replace_all(
         &mut self,
         instances: Vec<DiscoveryInstance>,
         filter: &DcDiscoveryFilter,
@@ -511,7 +375,7 @@ impl MembershipState {
         true
     }
 
-    fn apply(&mut self, event: DiscoveryEvent, filter: &DcDiscoveryFilter) -> bool {
+    pub(super) fn apply(&mut self, event: DiscoveryEvent, filter: &DcDiscoveryFilter) -> bool {
         match event {
             DiscoveryEvent::Added(instance) => {
                 let Some((id, card)) = decode_card(instance) else {
@@ -546,7 +410,7 @@ impl MembershipState {
         }
     }
 
-    fn view(&mut self, filter: &DcDiscoveryFilter) -> DcMembershipView {
+    pub(super) fn view(&mut self, filter: &DcDiscoveryFilter) -> DcMembershipView {
         #[cfg(test)]
         {
             self.projection_count = self.projection_count.saturating_add(1);
@@ -993,165 +857,6 @@ pub(super) fn project_instances_for_test(instances: Vec<DiscoveryInstance>) -> D
     let mut state = MembershipState::default();
     state.replace_all(instances, &filter);
     state.view(&filter)
-}
-
-async fn run_membership_watch(
-    discovery: Arc<dyn Discovery>,
-    queries: Vec<DiscoveryQuery>,
-    filter: DcDiscoveryFilter,
-    mut state: MembershipState,
-    sender: watch::Sender<DcMembershipView>,
-    cancel: CancellationToken,
-) {
-    let mut retry_delay = Duration::from_millis(100);
-    let mut watch_failures = 0u64;
-    let mut reconcile_failures = 0u64;
-    loop {
-        let stream_cancel = cancel.child_token();
-        let streams = open_query_streams(&discovery, &queries, &stream_cancel).await;
-        let mut stream = match streams {
-            Ok(stream) => stream,
-            Err(error) => {
-                stream_cancel.cancel();
-                watch_failures = watch_failures.saturating_add(1);
-                if watch_failures == 1 {
-                    tracing::error!(
-                        %error,
-                        query_count = queries.len(),
-                        "Failed to watch scoped KV DC Relay model-card membership"
-                    );
-                } else {
-                    tracing::debug!(
-                        %error, watch_failures, query_count = queries.len(),
-                        retry_ms = retry_delay.as_millis(),
-                        "Scoped KV DC Relay model-card watch retry failed"
-                    );
-                }
-                if !retry_or_cancel(retry_delay, &cancel).await {
-                    return;
-                }
-                retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
-                continue;
-            }
-        };
-        let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
-        reconcile.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                event = stream.next() => match event {
-                    Some(Ok(Some(event))) => {
-                        watch_failures = 0;
-                        retry_delay = Duration::from_millis(100);
-                        if state.apply(event, &filter) {
-                            publish_membership_if_changed(&sender, state.view(&filter));
-                        }
-                    }
-                    Some(Err(error)) => {
-                        watch_failures = watch_failures.saturating_add(1);
-                        if watch_failures == 1 {
-                            tracing::error!(%error, "Scoped KV DC Relay model-card discovery stream failed; rebinding");
-                        } else {
-                            tracing::debug!(
-                                %error, watch_failures, retry_ms = retry_delay.as_millis(),
-                                "Scoped KV DC Relay model-card discovery stream failed again; rebinding"
-                            );
-                        }
-                        break;
-                    }
-                    Some(Ok(None)) | None => {
-                        watch_failures = watch_failures.saturating_add(1);
-                        if watch_failures == 1 {
-                            tracing::error!("Scoped KV DC Relay model-card discovery stream closed; rebinding");
-                        } else {
-                            tracing::debug!(
-                                watch_failures, retry_ms = retry_delay.as_millis(),
-                                "Scoped KV DC Relay model-card discovery stream closed again; rebinding"
-                            );
-                        }
-                        break;
-                    }
-                },
-                _ = reconcile.tick() => match list_queries(&discovery, &queries).await {
-                    Ok(instances) => {
-                        watch_failures = 0;
-                        reconcile_failures = 0;
-                        retry_delay = Duration::from_millis(100);
-                        if state.replace_all(instances, &filter) {
-                            publish_membership_if_changed(&sender, state.view(&filter));
-                        }
-                    }
-                    Err(error) => {
-                        reconcile_failures = reconcile_failures.saturating_add(1);
-                        if reconcile_failures == 1 {
-                            tracing::warn!(%error, "Failed periodic KV DC Relay membership reconciliation");
-                        } else {
-                            tracing::debug!(
-                                %error, reconcile_failures,
-                                "Periodic KV DC Relay membership reconciliation failed again"
-                            );
-                        }
-                    }
-                },
-            }
-        }
-        stream_cancel.cancel();
-        if !retry_or_cancel(retry_delay, &cancel).await {
-            return;
-        }
-        retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
-    }
-}
-
-fn publish_membership_if_changed(sender: &watch::Sender<DcMembershipView>, next: DcMembershipView) {
-    sender.send_if_modified(move |current| {
-        if current == &next {
-            return false;
-        }
-        *current = next;
-        true
-    });
-}
-
-async fn list_queries(
-    discovery: &Arc<dyn Discovery>,
-    queries: &[DiscoveryQuery],
-) -> anyhow::Result<Vec<DiscoveryInstance>> {
-    let results = try_join_all(queries.iter().cloned().map(|query| discovery.list(query))).await?;
-    Ok(results.into_iter().flatten().collect())
-}
-
-type RebindingDiscoveryStream =
-    Pin<Box<dyn Stream<Item = anyhow::Result<Option<DiscoveryEvent>>> + Send>>;
-
-async fn open_query_streams(
-    discovery: &Arc<dyn Discovery>,
-    queries: &[DiscoveryQuery],
-    cancel: &CancellationToken,
-) -> anyhow::Result<futures::stream::SelectAll<RebindingDiscoveryStream>> {
-    let opened = try_join_all(
-        queries
-            .iter()
-            .cloned()
-            .map(|query| discovery.list_and_watch(query, Some(cancel.clone()))),
-    )
-    .await?;
-    let mut streams = futures::stream::SelectAll::new();
-    for stream in opened {
-        let stream = stream
-            .map(|event| event.map(Some))
-            .chain(futures::stream::once(async { Ok(None) }));
-        streams.push(Box::pin(stream) as RebindingDiscoveryStream);
-    }
-    Ok(streams)
-}
-
-async fn retry_or_cancel(delay: Duration, cancel: &CancellationToken) -> bool {
-    tokio::select! {
-        _ = cancel.cancelled() => false,
-        _ = tokio::time::sleep(delay) => true,
-    }
 }
 
 fn decode_card(instance: DiscoveryInstance) -> Option<(ModelCardInstanceId, StoredModelCard)> {

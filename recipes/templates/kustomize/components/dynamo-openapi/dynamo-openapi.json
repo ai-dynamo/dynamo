@@ -399,6 +399,309 @@
                 "properties": {
                   "name": {
                     "type": "string"
+                  },
+                  "podTemplate": {
+                    "properties": {
+                      "spec": {
+                        "properties": {
+                          "containers": {
+                            "items": {
+                              "properties": {
+                                "env": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "volumeDevices": {
+                                  "items": {
+                                    "properties": {
+                                      "devicePath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "devicePath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumeMounts": {
+                                  "items": {
+                                    "properties": {
+                                      "mountPath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "mountPath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "ephemeralContainers": {
+                            "items": {
+                              "properties": {
+                                "env": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "volumeDevices": {
+                                  "items": {
+                                    "properties": {
+                                      "devicePath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "devicePath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumeMounts": {
+                                  "items": {
+                                    "properties": {
+                                      "mountPath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "mountPath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "hostAliases": {
+                            "items": {
+                              "properties": {
+                                "ip": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "ip",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "imagePullSecrets": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "initContainers": {
+                            "items": {
+                              "properties": {
+                                "env": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "volumeDevices": {
+                                  "items": {
+                                    "properties": {
+                                      "devicePath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "devicePath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumeMounts": {
+                                  "items": {
+                                    "properties": {
+                                      "mountPath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "mountPath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "resourceClaims": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "resources": {
+                            "properties": {
+                              "claims": {
+                                "items": {
+                                  "properties": {
+                                    "name": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "type": "array",
+                                "x-kubernetes-patch-merge-key": "name",
+                                "x-kubernetes-patch-strategy": "merge"
+                              }
+                            },
+                            "type": "object"
+                          },
+                          "schedulingGates": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "volumes": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          }
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
                   }
                 },
                 "type": "object"
@@ -819,6 +1122,309 @@
                       "properties": {
                         "name": {
                           "type": "string"
+                        },
+                        "podTemplate": {
+                          "properties": {
+                            "spec": {
+                              "properties": {
+                                "containers": {
+                                  "items": {
+                                    "properties": {
+                                      "env": {
+                                        "items": {
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "name",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "resources": {
+                                        "properties": {
+                                          "claims": {
+                                            "items": {
+                                              "properties": {
+                                                "name": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "type": "object"
+                                            },
+                                            "type": "array",
+                                            "x-kubernetes-patch-merge-key": "name",
+                                            "x-kubernetes-patch-strategy": "merge"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "volumeDevices": {
+                                        "items": {
+                                          "properties": {
+                                            "devicePath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "devicePath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "volumeMounts": {
+                                        "items": {
+                                          "properties": {
+                                            "mountPath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "mountPath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "ephemeralContainers": {
+                                  "items": {
+                                    "properties": {
+                                      "env": {
+                                        "items": {
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "name",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "resources": {
+                                        "properties": {
+                                          "claims": {
+                                            "items": {
+                                              "properties": {
+                                                "name": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "type": "object"
+                                            },
+                                            "type": "array",
+                                            "x-kubernetes-patch-merge-key": "name",
+                                            "x-kubernetes-patch-strategy": "merge"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "volumeDevices": {
+                                        "items": {
+                                          "properties": {
+                                            "devicePath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "devicePath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "volumeMounts": {
+                                        "items": {
+                                          "properties": {
+                                            "mountPath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "mountPath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "hostAliases": {
+                                  "items": {
+                                    "properties": {
+                                      "ip": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "ip",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "imagePullSecrets": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "initContainers": {
+                                  "items": {
+                                    "properties": {
+                                      "env": {
+                                        "items": {
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "name",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "resources": {
+                                        "properties": {
+                                          "claims": {
+                                            "items": {
+                                              "properties": {
+                                                "name": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "type": "object"
+                                            },
+                                            "type": "array",
+                                            "x-kubernetes-patch-merge-key": "name",
+                                            "x-kubernetes-patch-strategy": "merge"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "volumeDevices": {
+                                        "items": {
+                                          "properties": {
+                                            "devicePath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "devicePath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "volumeMounts": {
+                                        "items": {
+                                          "properties": {
+                                            "mountPath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "mountPath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "resourceClaims": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "schedulingGates": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumes": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            }
+                          },
+                          "type": "object"
                         }
                       },
                       "type": "object"
@@ -1301,6 +1907,309 @@
                 "properties": {
                   "name": {
                     "type": "string"
+                  },
+                  "podTemplate": {
+                    "properties": {
+                      "spec": {
+                        "properties": {
+                          "containers": {
+                            "items": {
+                              "properties": {
+                                "env": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "volumeDevices": {
+                                  "items": {
+                                    "properties": {
+                                      "devicePath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "devicePath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumeMounts": {
+                                  "items": {
+                                    "properties": {
+                                      "mountPath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "mountPath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "ephemeralContainers": {
+                            "items": {
+                              "properties": {
+                                "env": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "volumeDevices": {
+                                  "items": {
+                                    "properties": {
+                                      "devicePath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "devicePath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumeMounts": {
+                                  "items": {
+                                    "properties": {
+                                      "mountPath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "mountPath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "hostAliases": {
+                            "items": {
+                              "properties": {
+                                "ip": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "ip",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "imagePullSecrets": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "initContainers": {
+                            "items": {
+                              "properties": {
+                                "env": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "name": {
+                                  "type": "string"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "volumeDevices": {
+                                  "items": {
+                                    "properties": {
+                                      "devicePath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "devicePath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumeMounts": {
+                                  "items": {
+                                    "properties": {
+                                      "mountPath": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "mountPath",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "resourceClaims": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "resources": {
+                            "properties": {
+                              "claims": {
+                                "items": {
+                                  "properties": {
+                                    "name": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "type": "array",
+                                "x-kubernetes-patch-merge-key": "name",
+                                "x-kubernetes-patch-strategy": "merge"
+                              }
+                            },
+                            "type": "object"
+                          },
+                          "schedulingGates": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          },
+                          "volumes": {
+                            "items": {
+                              "properties": {
+                                "name": {
+                                  "type": "string"
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "x-kubernetes-patch-merge-key": "name",
+                            "x-kubernetes-patch-strategy": "merge"
+                          }
+                        },
+                        "type": "object"
+                      }
+                    },
+                    "type": "object"
                   }
                 },
                 "type": "object"
@@ -1672,6 +2581,309 @@
                       "properties": {
                         "name": {
                           "type": "string"
+                        },
+                        "podTemplate": {
+                          "properties": {
+                            "spec": {
+                              "properties": {
+                                "containers": {
+                                  "items": {
+                                    "properties": {
+                                      "env": {
+                                        "items": {
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "name",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "resources": {
+                                        "properties": {
+                                          "claims": {
+                                            "items": {
+                                              "properties": {
+                                                "name": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "type": "object"
+                                            },
+                                            "type": "array",
+                                            "x-kubernetes-patch-merge-key": "name",
+                                            "x-kubernetes-patch-strategy": "merge"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "volumeDevices": {
+                                        "items": {
+                                          "properties": {
+                                            "devicePath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "devicePath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "volumeMounts": {
+                                        "items": {
+                                          "properties": {
+                                            "mountPath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "mountPath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "ephemeralContainers": {
+                                  "items": {
+                                    "properties": {
+                                      "env": {
+                                        "items": {
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "name",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "resources": {
+                                        "properties": {
+                                          "claims": {
+                                            "items": {
+                                              "properties": {
+                                                "name": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "type": "object"
+                                            },
+                                            "type": "array",
+                                            "x-kubernetes-patch-merge-key": "name",
+                                            "x-kubernetes-patch-strategy": "merge"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "volumeDevices": {
+                                        "items": {
+                                          "properties": {
+                                            "devicePath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "devicePath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "volumeMounts": {
+                                        "items": {
+                                          "properties": {
+                                            "mountPath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "mountPath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "hostAliases": {
+                                  "items": {
+                                    "properties": {
+                                      "ip": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "ip",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "imagePullSecrets": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "initContainers": {
+                                  "items": {
+                                    "properties": {
+                                      "env": {
+                                        "items": {
+                                          "properties": {
+                                            "name": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "name",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "name": {
+                                        "type": "string"
+                                      },
+                                      "resources": {
+                                        "properties": {
+                                          "claims": {
+                                            "items": {
+                                              "properties": {
+                                                "name": {
+                                                  "type": "string"
+                                                }
+                                              },
+                                              "type": "object"
+                                            },
+                                            "type": "array",
+                                            "x-kubernetes-patch-merge-key": "name",
+                                            "x-kubernetes-patch-strategy": "merge"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "volumeDevices": {
+                                        "items": {
+                                          "properties": {
+                                            "devicePath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "devicePath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      },
+                                      "volumeMounts": {
+                                        "items": {
+                                          "properties": {
+                                            "mountPath": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "type": "object"
+                                        },
+                                        "type": "array",
+                                        "x-kubernetes-patch-merge-key": "mountPath",
+                                        "x-kubernetes-patch-strategy": "merge"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "resourceClaims": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "resources": {
+                                  "properties": {
+                                    "claims": {
+                                      "items": {
+                                        "properties": {
+                                          "name": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "type": "object"
+                                      },
+                                      "type": "array",
+                                      "x-kubernetes-patch-merge-key": "name",
+                                      "x-kubernetes-patch-strategy": "merge"
+                                    }
+                                  },
+                                  "type": "object"
+                                },
+                                "schedulingGates": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                },
+                                "volumes": {
+                                  "items": {
+                                    "properties": {
+                                      "name": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  },
+                                  "type": "array",
+                                  "x-kubernetes-patch-merge-key": "name",
+                                  "x-kubernetes-patch-strategy": "merge"
+                                }
+                              },
+                              "type": "object"
+                            }
+                          },
+                          "type": "object"
                         }
                       },
                       "type": "object"

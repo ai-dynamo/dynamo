@@ -480,6 +480,36 @@ mod tests {
     }
 
     #[test]
+    fn retained_workers_remain_available_while_replacement_is_pending_or_failed() {
+        let f = Fixture::new();
+        *f.available.lock() = HashSet::from([1, 2]);
+        for gauge in &f.values {
+            gauge.with_label_values(&["1", "0", "decode"]).set(7);
+            gauge.with_label_values(&["2", "0", "decode"]).set(9);
+        }
+        for state in [
+            WorkerGroupState::Pending,
+            WorkerGroupState::MaterializationFailed,
+        ] {
+            f.observe(&[1, 2], &[1], state);
+            assert_eq!(f.count("available"), Some(1.0));
+            for gauge in &f.values {
+                let name = &gauge.desc()[0].fq_name;
+                assert_eq!(f.sample(name, &[("worker_id", "1")]), Some(7.0));
+                assert_eq!(f.sample(name, &[("worker_id", "2")]), None);
+            }
+        }
+        f.observe(&[1, 2], &[], WorkerGroupState::Pending);
+        assert_eq!(f.count("available"), Some(0.0));
+        for gauge in &f.values {
+            assert_eq!(
+                f.sample(&gauge.desc()[0].fq_name, &[("worker_id", "1")]),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn first_wins_metrics_preserve_local_incumbent_and_track_succession() {
         for (incumbent, rejected) in [(1, 2), (2, 1)] {
             let f = Fixture::new();

@@ -18,7 +18,7 @@ use dynamo_kv_router::scheduling::WorkerAvailabilityProvider;
 
 const LABELS: &[&str] = &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE];
 
-/// Owned by a scheduler, independently of its request/replica slot state.
+/// Owned by an embedded router, independently of its request/replica slot state.
 pub(crate) struct RouterWorkerRegistration {
     workers: RuntimeConfigWatch,
     worker_type: &'static str,
@@ -72,7 +72,7 @@ impl Collector for RouterWorkerRegistered {
 
     fn collect(&self) -> Vec<MetricFamily> {
         // A fresh vector makes concurrent scrapes independent and unions duplicate labels
-        // across scheduler owners without deleting another live owner's registration.
+        // across router owners without deleting another live owner's registration.
         let gauge = IntGaugeVec::new(self.opts.clone(), LABELS)
             .expect("validated router worker metric options");
         let mut sources = self.sources.lock();

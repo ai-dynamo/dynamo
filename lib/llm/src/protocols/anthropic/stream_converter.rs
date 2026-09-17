@@ -186,11 +186,23 @@ impl AnthropicStreamConverter {
         // call and must not make an earlier ready call look like the truncation target.
         let last_call = self.tool_call_states.len().checked_sub(1);
 
-        for (call_index, tool_call) in self.tool_call_states.iter().enumerate() {
-            if !tool_call.is_emit_ready() {
-                continue;
-            }
+        let call_limit = if self
+            .api_context
+            .as_ref()
+            .is_some_and(|ctx| ctx.disable_parallel_tool_use)
+        {
+            1
+        } else {
+            usize::MAX
+        };
 
+        for (call_index, tool_call) in self
+            .tool_call_states
+            .iter()
+            .enumerate()
+            .filter(|(_, tool_call)| tool_call.is_emit_ready())
+            .take(call_limit)
+        {
             let raw: String = tool_call
                 .argument_fragments
                 .iter()
@@ -1535,9 +1547,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_later_incomplete_identity_does_not_emit_an_earlier_malformed_call() {
-        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_later_incomplete_identity_does_not_emit_an_earlier_malformed_call(
+        #[case] disable_parallel_tool_use: bool,
+    ) {
+        let mut conv = AnthropicStreamConverter::with_context(
+            "test-model".into(),
+            0,
+            AnthropicContext {
+                disable_parallel_tool_use,
+                ..Default::default()
+            },
+        );
         conv.process_chunk_tagged(&tool_call_chunk(
             0,
             Some("call-1"),
