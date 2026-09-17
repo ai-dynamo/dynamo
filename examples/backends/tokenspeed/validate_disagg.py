@@ -160,7 +160,9 @@ async def run(args):
                     forced_prefill is not None
                     and workers["prefill_worker_id"] != forced_prefill
                 ):
-                    raise RuntimeError(f"Forced prefill worker was not selected: {record}")
+                    raise RuntimeError(
+                        f"Forced prefill worker was not selected: {record}"
+                    )
                 print(
                     json.dumps({k: v for k, v in record.items() if k != "chunks"}),
                     flush=True,
@@ -179,14 +181,18 @@ async def run(args):
             if any(
                 row["device_blocks"] != 0 for row in report["cold_overlap"]["workers"]
             ):
-                raise RuntimeError(f"Cold prefix was already cached: {report['cold_overlap']}")
+                raise RuntimeError(
+                    f"Cold prefix was already cached: {report['cold_overlap']}"
+                )
             for repeat in range(2):
                 for i, owner in enumerate(prefill_ids):
                     record = await request(
                         f"reuse-{i}-{repeat}", prompts[i], ("ORANGE", "PURPLE")[i]
                     )
                     if record["worker_ids"]["prefill_worker_id"] != owner:
-                        raise RuntimeError(f"Cached-prefix owner was not selected: {record}")
+                        raise RuntimeError(
+                            f"Cached-prefix owner was not selected: {record}"
+                        )
             await request("cold-control", prompts[2], "SILVER")
         report["passed"] = True
     except Exception as error:
