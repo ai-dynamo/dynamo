@@ -385,7 +385,9 @@ async def test_prefill_creates_handoff_when_router_has_no_bootstrap_endpoint(
     native, _ = native_engine
     inputs = []
     rooms = Mock(side_effect=[17, 23])
-    monkeypatch.setattr(disagg, "secrets", SimpleNamespace(randbits=rooms), raising=False)
+    monkeypatch.setattr(
+        disagg, "secrets", SimpleNamespace(randbits=rooms), raising=False
+    )
 
     async def generate(obj):
         inputs.append(obj)
@@ -416,9 +418,12 @@ async def test_prefill_creates_handoff_when_router_has_no_bootstrap_endpoint(
                 assert chunks[0]["token_ids"] == [20]
                 for key, value in handoff.items():
                     assert getattr(inputs[index], key) == value
-                assert disagg.bootstrap_kwargs(
-                    {"bootstrap_info": handoff}, DisaggregationMode.DECODE
-                ) == handoff
+                assert (
+                    disagg.bootstrap_kwargs(
+                        {"bootstrap_info": handoff}, DisaggregationMode.DECODE
+                    )
+                    == handoff
+                )
                 assert engine._active_rids_by_context == {}
             finally:
                 await stream.aclose()
