@@ -53,7 +53,7 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 	tests := []struct {
 		name       string
 		dgd        *v1beta1.DynamoGraphDeployment
-		registry   lpxModelRegistry
+		registry   lpx.ModelRegistry
 		wantReady  bool
 		wantErr    string
 		wantCalls  []string
@@ -322,7 +322,7 @@ func TestLPXDisabledRevisionPreservesObservationFence(t *testing.T) {
 }
 
 type fakeModelDownloadRegistry struct {
-	*lpx.ModelRegistry
+	lpx.ModelRegistry
 	ready                     map[string]bool
 	err                       map[string]error
 	calls                     []string

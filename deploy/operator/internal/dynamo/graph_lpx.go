@@ -51,6 +51,14 @@ func RenderLPXBasePodCliqueSet(
 		return nil, nil, err
 	}
 
+	// Publish the validated queue for the LPX backend's KAI fallback.
+	if queue != "" {
+		if pcs.Labels == nil {
+			pcs.Labels = make(map[string]string)
+		}
+		pcs.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queue
+	}
+
 	// Cyborg uses ordinary worker KV-transfer defaults, including the binding's domains.
 	var topologyDomains []v1beta1.TopologyDomain
 	if dynamoDeployment.Spec.Experimental != nil {

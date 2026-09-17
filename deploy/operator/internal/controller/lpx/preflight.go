@@ -20,10 +20,8 @@ package lpx
 import (
 	"context"
 	"fmt"
-	"maps"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -72,53 +70,6 @@ func (r *graphReconciler) reconcileSelectedLPXSafetyPreflight(
 		return nil, rejected, nil
 	}
 
+	// Grove accepts the desired spec before individual engine requests are reconciled.
 	return selectedLPX, nil, nil
-}
-
-// retireChangedLPXRequests withdraws changed intent before Grove can consume it.
-// Deleting requests may still need Grove to remove their Pods to finish cleanup.
-func (r *graphReconciler) retireChangedLPXRequests(ctx context.Context, deployment *nvidiacomv1alpha1.LPXGraphDeployment, desired *lpxMaterializing, rosterChanged bool) (*lpxDeadlineTransition, error) {
-	requests, err := r.listOwnedLPXRequests(ctx, deployment)
-	if err != nil || len(requests) == 0 {
-		return nil, err
-	}
-	desiredByName := make(map[string]*lpxModelMaterializing, len(desired.requests))
-	for index := range desired.requests {
-		request := &desired.requests[index]
-		desiredByName[request.requestName] = request
-	}
-
-	// Cancel removed batch members before deletion can be mistaken for a timeout.
-	if attempt := currentLPXAttemptStatus(deployment); attempt != nil && attempt.ExceededAt == nil {
-		currents := lpxRequestsByName(requests)
-		maps.DeleteFunc(currents, func(name string, _ *lpxv1alpha1.LPUPipelineRequest) bool { return desiredByName[name] == nil })
-		if len(currents) != len(requests) {
-			want := desiredLPXAttemptStatus(desired, deployment.Generation, attempt.PodCliqueSetUID)
-			if transition := r.reconcileLPXAttemptPreparation(deployment, desired.deadlineSeconds, want, currents); transition != nil {
-				return transition, nil
-			}
-		}
-	}
-
-	// Keep unchanged engines, including those surviving scale and native image rollouts.
-	for index := range requests {
-		request := &requests[index]
-		wanted := desiredByName[request.Name]
-		if !request.DeletionTimestamp.IsZero() || !rosterChanged && wanted != nil &&
-			wanted.modelProjection.Digest().String() == request.Annotations[dynamolpx.WorkloadDigestAnnotation] {
-			continue
-		}
-		classification, err := r.retireLPXEngineRequest(ctx, deployment, request, "The engine's scheduler intent changed or was removed", true)
-		if err != nil {
-			return nil, err
-		}
-		if transition, recording := classification.(*lpxDeadlineTransition); recording {
-			if _, completed, _ := exactLPXAttemptState(currentLPXAttemptStatus(deployment), lpxRequestsByName(requests)); completed {
-				disarmedAt := metav1.Now()
-				transition.attempt.DisarmedAt = &disarmedAt
-			}
-			return transition, nil
-		}
-	}
-	return nil, nil
 }

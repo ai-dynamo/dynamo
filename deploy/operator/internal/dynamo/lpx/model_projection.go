@@ -55,13 +55,14 @@ type ModelProjectionInput struct {
 // derived for one model. Completed component data is shared read-only; only the
 // resolver assigns the stage before publishing the immutable projections.
 type ModelProjection struct {
-	digest             WorkloadDigest
-	runtimeBuildRef    string
-	model              string
-	stage              string
-	pipeline           Pipeline
-	configuredBuild    Build
-	allocationMetadata json.RawMessage
+	digest                 WorkloadDigest
+	compilerSnapshotDigest string
+	runtimeBuildRef        string
+	model                  string
+	stage                  string
+	pipeline               Pipeline
+	configuredBuild        Build
+	allocationMetadata     json.RawMessage
 	// partitions retains immutable physical build evidence before runtime collapse.
 	partitions    []BuildPartition
 	connectors    []lpxv1alpha1.PropSyncConnectorRequest
@@ -73,19 +74,21 @@ func (p *ModelProjection) Digest() WorkloadDigest {
 	return p.digest
 }
 
+// CompilerSnapshotDigest returns the immutable compiler snapshot identity.
+func (p *ModelProjection) CompilerSnapshotDigest() string {
+	return p.compilerSnapshotDigest
+}
+
 // Model returns the logical model identity. The receiver must be non-nil.
 func (p *ModelProjection) Model() string {
 	return p.model
 }
 
-// RequestSpec returns a fresh node-local LPR spec. The materialization owner
-// supplies only workload references; scheduler-owned placement fields do not
-// exist in this request arm. The receiver must be non-nil. A nil cyborgRef is
-// supported and omits the Cyborg reference. Neither input is mutated.
+// RequestSpec returns a fresh node-local request for one Grove scaling-group
+// replica. The receiver and plan must be non-nil; neither input is mutated.
 func (p *ModelProjection) RequestSpec(
-	namespace string,
-	podGangName string,
-	cyborgRef *lpxv1alpha1.CyborgPodCliqueReference,
+	plan *MaterializationPlan,
+	agentPodCliqueName string,
 ) lpxv1alpha1.LPUPipelineRequestSpec {
 	connectors := make([]lpxv1alpha1.PropSyncConnectorRequest, len(p.connectors))
 	for i := range p.connectors {
@@ -114,22 +117,28 @@ func (p *ModelProjection) RequestSpec(
 			PartitionID:      partitionID,
 		}
 	}
-	ns := namespace
 	spec := lpxv1alpha1.LPUPipelineRequestSpec{
 		AllocationMetadata: runtime.RawExtension{Raw: slices.Clone(p.allocationMetadata)},
-		PodGangRef:         lpxv1alpha1.NamespacedName{Name: podGangName, Namespace: &ns},
+		MaterializationTarget: lpxv1alpha1.MaterializationTarget{
+			PodCliqueSetReplicaIndex: 0,
+			PodCliqueScalingGroupRef: &lpxv1alpha1.PodCliqueScalingGroupReference{
+				Name: plan.LPXScalingGroup, ReplicaIndex: int64(plan.ReplicaIndex),
+			},
+		},
+		RepairPolicy:       &lpxv1alpha1.RepairPolicy{Mode: lpxv1alpha1.RepairPolicyModeSamePlacement},
 		PropSyncConnectors: connectors,
 		TargetFamily:       lpxv1alpha1.TargetFamily(p.configuredBuild.Family),
 		WorkloadMode:       p.schedulerWorkloadMode(),
 		ExecutionBackend:   lpxv1alpha1.ExecutionBackendNodeLocal,
 		NodeLocal: &lpxv1alpha1.NodeLocalRequest{
+			AgentPodCliqueRef: lpxv1alpha1.PodCliqueReference{Name: agentPodCliqueName},
 			Model:             p.model,
 			PartitionMappings: mappings,
 		},
 		Partitions: partitions,
 	}
-	if cyborgRef != nil {
-		spec.CyborgPodCliqueRef = cyborgRef.DeepCopy()
+	if plan.CyborgClique != "" {
+		spec.CyborgPodCliqueRef = &lpxv1alpha1.PodCliqueReference{Name: plan.CyborgClique}
 	}
 	return spec
 }

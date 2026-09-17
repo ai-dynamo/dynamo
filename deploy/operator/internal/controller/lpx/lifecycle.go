@@ -20,15 +20,11 @@ import (
 	"unicode/utf8"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -43,11 +39,10 @@ import (
 const (
 	lpxAttemptDigestAnnotation = "scheduling.lpu.nvidia.com/dynamo-attempt-digest"
 	lpxDeploymentUIDAnnotation = dynamo.LPXDeploymentUIDAnnotation
+	lpxOwnerUIDLabel           = lpxDeploymentUIDAnnotation
 	lpxModelAnnotation         = "scheduling.lpu.nvidia.com/dynamo-model"
 	lpxPCSUIDAnnotation        = "scheduling.lpu.nvidia.com/podcliqueset-uid"
-	lpxPodGangUIDAnnotation    = "scheduling.lpu.nvidia.com/podgang-uid"
 	lpxRetirementRequeueAfter  = 5 * time.Second
-	lpxLifecycleListPageSize   = 64
 	maxDGDConditionMessageSize = 32768
 )
 
@@ -55,8 +50,6 @@ const (
 	lpxRetiringReason               string = "LPXRetiring"
 	lpxSchedulerStatusInvalidReason string = "LPXSchedulerStatusInvalid"
 )
-
-var errLPXEngineReplacing = errors.New("Grove is replacing the engine's PodCliques")
 
 // lpxClassification is deliberately private and closed: reconciliation can
 // report only one legal protocol state, never a freely assembled collection
@@ -90,23 +83,13 @@ type lpxModelMaterializing struct {
 	attemptDigest   string
 	modelProjection *lpx.ModelProjection
 	replicaIndex    int32
-}
-
-type lpxGroveSnapshot struct {
-	podCliqueSet   *grovev1alpha1.PodCliqueSet
-	scalingGroup   *grovev1alpha1.PodCliqueScalingGroup
-	generationHash string
-	incomplete     string
-	podGangs       []groveschedulerv1alpha1.PodGang
+	agentCliqueName string
 }
 
 type lpxGroveIdentity struct {
-	pcsUID       types.UID
-	podGangName  string
-	podGangUID   types.UID
-	cyborgClique *lpxv1alpha1.CyborgPodCliqueReference
-	agentUIDs    []types.UID
-	complete     bool
+	pcsUID types.UID
+	pcs    *grovev1alpha1.PodCliqueSet
+	plan   *lpx.MaterializationPlan
 }
 
 type lpxClosed struct {
@@ -165,72 +148,44 @@ func lpxResult(classification lpxClassification) reconcileOutcome {
 // lpxSchedulerResult classifies the receipt without formatting diagnostics before selection.
 func lpxSchedulerResult(state *lpxSchedulerObserved) reconcileOutcome {
 	result := reconcileOutcome{State: nvidiacomv1beta1.DGDStatePending}
+	var summary string
 	switch state.Phase {
 	case lpxv1alpha1.RequestPhasePending:
 		result.Reason = "LPXSchedulerPending"
-		result.Message = "LPX scheduler is waiting to plan the current request"
+		summary = "LPX scheduler is waiting to plan the current request"
 	case lpxv1alpha1.RequestPhaseNoFit:
 		result.Reason = "LPXNoFit"
-		result.Message = "LPX scheduler found no placement for the current request"
+		summary = "LPX scheduler found no placement for the current request"
 	case lpxv1alpha1.RequestPhaseUnsupported:
 		result.State = nvidiacomv1beta1.DGDStateFailed
 		result.Reason = "LPXUnsupported"
-		result.Message = "LPX scheduler cannot support the current request"
+		summary = "LPX scheduler cannot support the current request"
 	case lpxv1alpha1.RequestPhasePlanned:
 		result.Reason = "LPXPlanned"
-		result.Message = "LPX scheduler committed a placement plan for the current request"
+		summary = "LPX scheduler committed a placement plan for the current request"
 	case lpxv1alpha1.RequestPhaseReserving:
 		result.Reason = "LPXReserving"
-		result.Message = "LPX scheduler is reserving the planned LPU allocation"
+		summary = "LPX scheduler is reserving the planned LPU allocation"
 	case lpxv1alpha1.RequestPhaseBinding:
 		result.Reason = "LPXBinding"
-		result.Message = "LPX scheduler is binding the planned workload Pods"
+		summary = "LPX scheduler is binding the planned workload Pods"
 	case lpxv1alpha1.RequestPhaseDegraded:
-		result.State = nvidiacomv1beta1.DGDStateFailed
 		result.Reason = "LPXDegraded"
-		result.Message = "LPX scheduler detected that the committed plan is no longer valid"
-	case lpxv1alpha1.RequestPhaseReleasing, lpxv1alpha1.RequestPhaseReleased:
-		result = lpxSchedulerReleaseResult(state)
-	case lpxv1alpha1.RequestPhaseBound:
-		result.State = nvidiacomv1beta1.DGDStateFailed
-		result.Reason = lpxSchedulerStatusInvalidReason
-		result.Message = "LPX scheduler reported Bound without the exact current-generation plan proof required by Dynamo"
-	default:
-		result.State = nvidiacomv1beta1.DGDStateFailed
-		result.Reason = lpxSchedulerStatusInvalidReason
-		result.Message = fmt.Sprintf("LPX scheduler reported unknown phase %q", state.Phase)
-	}
-	return result
-}
-
-func lpxSchedulerReleaseResult(state *lpxSchedulerObserved) reconcileOutcome {
-	result := reconcileOutcome{State: nvidiacomv1beta1.DGDStatePending}
-	phase := "releasing"
-	result.Reason = "LPXReleasing"
-	result.Message = "LPX scheduler is releasing the current plan"
-	if state.Phase == lpxv1alpha1.RequestPhaseReleased {
-		phase = "released"
+		summary = "LPX scheduler is repairing or releasing a degraded placement"
+	case lpxv1alpha1.RequestPhaseReleasing:
+		result.Reason = "LPXReleasing"
+		summary = "LPX scheduler is releasing the current plan"
+	case lpxv1alpha1.RequestPhaseReleased:
 		result.Reason = "LPXReleased"
-		result.Message = "LPX scheduler released the current plan and is finalizing its journal"
-	}
-	if state.Committed == nil || state.Committed.Execution.Release == nil {
-		result.State = nvidiacomv1beta1.DGDStateFailed
-		result.Reason = lpxSchedulerStatusInvalidReason
-		result.Message = fmt.Sprintf("LPX scheduler reported %s without the required release journal", phase)
-		return result
-	}
-	releaseReason := state.Committed.Execution.Release.Reason
-	switch releaseReason {
-	case lpxv1alpha1.ReleaseReasonDependencyChanged, lpxv1alpha1.ReleaseReasonBindingFailed:
-		result.State = nvidiacomv1beta1.DGDStateFailed
-	case lpxv1alpha1.ReleaseReasonRequestChanged, lpxv1alpha1.ReleaseReasonRequestDeleted:
+		summary = "LPX scheduler released the current plan"
+	case lpxv1alpha1.RequestPhaseBound:
+		return lpxResult(&lpxBound{})
 	default:
 		result.State = nvidiacomv1beta1.DGDStateFailed
 		result.Reason = lpxSchedulerStatusInvalidReason
-		result.Message = fmt.Sprintf("LPX scheduler reported %s with unknown release reason %q", phase, releaseReason)
-		return result
+		summary = fmt.Sprintf("LPX scheduler reported unknown phase %q", state.Phase)
 	}
-	result.Message = fmt.Sprintf("%s after %s", result.Message, releaseReason)
+	result.Message = lpxMessageWithDiagnostics(summary, state.Diagnostics)
 	return result
 }
 
@@ -310,7 +265,7 @@ func (r *graphReconciler) reconcileLPXKnownIntentFence(
 		if selected {
 			reason = "The DGD incarnation, generation, model, or selected input changed"
 		}
-		retiring, retireErr := r.retireLPXRequest(ctx, deployment, "", request, reason)
+		retiring, retireErr := r.retireLPXEngineRequest(ctx, deployment, request, reason, false)
 		return retiring, nil, retireErr
 	}
 	return nil, requests, nil
@@ -357,7 +312,7 @@ func (r *graphReconciler) prepareLPXMaterializing(
 	workloadDigest := workload.Digest().String()
 	requests := make([]lpxModelMaterializing, 0, len(projections)*int(plan.Replicas))
 	for replicaIndex := int32(0); replicaIndex < plan.Replicas; replicaIndex++ {
-		for _, projection := range projections {
+		for projectionIndex, projection := range projections {
 			requestDigest := digestAttemptKey(
 				deployment.Namespace,
 				deployment.Name,
@@ -369,6 +324,7 @@ func (r *graphReconciler) prepareLPXMaterializing(
 				requestName:     lpxRequestName(deployment.Name, requestDigest),
 				modelProjection: projection,
 				replicaIndex:    replicaIndex,
+				agentCliqueName: plan.ForReplica(replicaIndex).Agents[projectionIndex].CliqueName,
 			})
 		}
 	}
@@ -388,47 +344,66 @@ func (r *graphReconciler) retireInvalidLPXWorkload(
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	reason string,
 ) (*lpxRetiring, error) {
-	// Preserve request-first retirement before removing unpublished staging.
+	selector := client.MatchingLabels{lpxOwnerUIDLabel: string(deployment.UID)}
+	owned := make([]client.Object, 0)
+	podCliqueSets := &grovev1alpha1.PodCliqueSetList{}
+	if err := r.apiReader.List(ctx, podCliqueSets, client.InNamespace(deployment.Namespace), selector); err != nil {
+		return nil, err
+	}
+	for index := range podCliqueSets.Items {
+		if pcs := &podCliqueSets.Items[index]; metav1.IsControlledBy(pcs, deployment) {
+			owned = append(owned, pcs)
+		}
+	}
+
+	services := &corev1.ServiceList{}
+	if err := r.apiReader.List(ctx, services, client.InNamespace(deployment.Namespace), selector); err != nil {
+		return nil, err
+	}
+	for index := range services.Items {
+		if service := &services.Items[index]; metav1.IsControlledBy(service, deployment) {
+			owned = append(owned, service)
+		}
+	}
+
+	configMaps := &corev1.ConfigMapList{}
+	if err := r.apiReader.List(ctx, configMaps, client.InNamespace(deployment.Namespace), selector); err != nil {
+		return nil, err
+	}
+	for index := range configMaps.Items {
+		if configMap := &configMaps.Items[index]; metav1.IsControlledBy(configMap, deployment) {
+			owned = append(owned, configMap)
+		}
+	}
+
 	requests, err := r.listOwnedLPXRequests(ctx, deployment)
 	if err != nil {
 		return nil, err
 	}
-	if len(requests) > 0 {
-		return r.retireLPXRequest(ctx, deployment, "", &requests[0], reason)
-	}
-
-	// Source edits can rename resources; discover only this exact child's old objects.
-	owned := make([]client.Object, 0)
-	for _, list := range []client.ObjectList{&corev1.ServiceList{}, &grovev1alpha1.PodCliqueSetList{}, &corev1.ConfigMapList{}} {
-		if err := visitLifecycleObjectPages(ctx, r.apiReader, list, func(object k8sruntime.Object) error {
-			resource := object.(client.Object)
-			if metav1.IsControlledBy(resource, deployment) {
-				owned = append(owned, resource)
-			}
-			return nil
-		}, client.InNamespace(deployment.Namespace)); err != nil {
-			return nil, err
-		}
-	}
-	if len(owned) == 0 {
+	if len(owned) == 0 && len(requests) == 0 {
 		return nil, nil
 	}
-
-	// A newer child seen during listing must not lose its staging to this stale failure.
-	if err := r.validateLPXDeploymentAuthority(ctx, deployment); err != nil {
-		return nil, err
-	}
-	for _, resource := range owned {
-		if !resource.GetDeletionTimestamp().IsZero() {
-			continue
-		}
-		uid, resourceVersion := resource.GetUID(), resource.GetResourceVersion()
-		if err := r.Delete(ctx, resource, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
-			UID: &uid, ResourceVersion: &resourceVersion,
-		}}); err != nil && !apierrors.IsNotFound(err) {
+	if len(owned) > 0 {
+		// A newer child seen during listing must not lose its staging to this stale failure.
+		if err := r.validateLPXDeploymentAuthority(ctx, deployment); err != nil {
 			return nil, err
 		}
+
+		propagation := metav1.DeletePropagationBackground
+		for _, resource := range owned {
+			if !resource.GetDeletionTimestamp().IsZero() {
+				continue
+			}
+			uid, resourceVersion := resource.GetUID(), resource.GetResourceVersion()
+			if err := r.Delete(ctx, resource, &client.DeleteOptions{
+				Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion},
+				PropagationPolicy: &propagation,
+			}); err != nil && !apierrors.IsNotFound(err) {
+				return nil, err
+			}
+		}
 	}
+
 	return &lpxRetiring{retirementReason: reason}, nil
 }
 
@@ -482,11 +457,13 @@ func lpxRequestName(dgdName, digest string) string {
 	return fmt.Sprintf("lpx-%s-%s", prefix, hexDigest[:32])
 }
 
-// reconcileLPXAttemptFence requires a nonnil desired whose requests remain immutable during the call.
-func (r *graphReconciler) reconcileLPXAttemptFence(
+// reconcileLPXPublicationFence requires a nonnil desired whose requests remain immutable during the call.
+// A missing PCS cannot be recreated until garbage collection removes every request from its previous incarnation.
+func (r *graphReconciler) reconcileLPXPublicationFence(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	desired *lpxMaterializing,
+	podCliqueSetMissing bool,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, lpxClassification, error) {
 	// Retain each desired position for digest lookup and collision precedence.
 	desiredByName := make(map[string]int, len(desired.requests))
@@ -495,44 +472,43 @@ func (r *graphReconciler) reconcileLPXAttemptFence(
 	}
 	currents := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(desired.requests))
 	foreignCollision := len(desired.requests)
-	var stale *lpxv1alpha1.LPUPipelineRequest
-	if err := visitLifecycleObjectPages(
-		ctx,
-		r.apiReader,
-		&lpxv1alpha1.LPUPipelineRequestList{},
-		func(object k8sruntime.Object) error {
-			request := object.(*lpxv1alpha1.LPUPipelineRequest)
-			desiredIndex, desiredName := desiredByName[request.Name]
-			if !metav1.IsControlledBy(request, deployment) {
-				// Preserve desired-order error precedence without retaining collision state.
-				if desiredName {
-					foreignCollision = min(foreignCollision, desiredIndex)
-				}
-				return nil
-			}
-			if desiredName {
-				currents[request.Name] = request
-				return nil
-			}
-			if stale == nil || request.Name < stale.Name {
-				stale = request
-			}
-			return nil
-		},
-		client.InNamespace(deployment.Namespace),
-	); err != nil {
+	stale := make([]*lpxv1alpha1.LPUPipelineRequest, 0)
+	requests, err := r.listLPXRequestCandidates(ctx, deployment)
+	if err != nil {
 		return nil, nil, err
 	}
-	if stale != nil {
-		// Persist cancellation or a replacement scheduling batch before retiring removed engines.
+	for index := range requests.Items {
+		request := &requests.Items[index]
+		desiredIndex, desiredName := desiredByName[request.Name]
+		ownedByChild, err := r.ownsLPXRequest(ctx, deployment, request)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !ownedByChild {
+			// Preserve desired-order error precedence without retaining collision state.
+			if desiredName {
+				foreignCollision = min(foreignCollision, desiredIndex)
+			}
+			continue
+		}
+		if desiredName {
+			currents[request.Name] = request
+			continue
+		}
+		stale = append(stale, request)
+	}
+	if len(stale) > 0 {
+		// Persist cancellation before deleting scheduler intent for removed engines.
 		if attempt := currentLPXAttemptStatus(deployment); attempt != nil && attempt.ExceededAt == nil {
 			want := desiredLPXAttemptStatus(desired, deployment.Generation, attempt.PodCliqueSetUID)
 			if transition := r.reconcileLPXAttemptPreparation(deployment, desired.deadlineSeconds, want, currents); transition != nil {
 				return currents, transition, nil
 			}
 		}
-		retiring, retireErr := r.retireLPXEngineRequest(ctx, deployment, stale, "The engine is no longer requested", true)
-		return currents, retiring, retireErr
+		if err := r.deleteStaleLPXRequests(ctx, deployment, stale); err != nil {
+			return nil, nil, err
+		}
+		return currents, &lpxRetiring{retirementReason: "One or more engines are no longer requested"}, nil
 	}
 	// Keep exact cleanup authority until the replaced request is authoritatively absent.
 	if attempt := currentLPXAttemptStatus(deployment); attempt != nil {
@@ -554,224 +530,153 @@ func (r *graphReconciler) reconcileLPXAttemptFence(
 	if foreignCollision < len(desired.requests) {
 		return nil, nil, fmt.Errorf("LPX request name %q is occupied by a foreign owner", desired.requests[foreignCollision].requestName)
 	}
+	if podCliqueSetMissing && len(currents) > 0 {
+		return currents, &lpxRetiring{retirementReason: "Waiting for garbage collection to remove the previous LPX requests"}, nil
+	}
+
+	// Keep scale-up fenced until terminal cleanup can retire the failed engines.
+	if attempt := currentLPXAttemptStatus(deployment); attempt != nil {
+		_, _, missing := exactLPXAttemptState(attempt, currents)
+		if attempt.ExceededAt != nil || missing {
+			return currents, &lpxRetiring{retirementReason: "Waiting for the terminal scheduling batch to finish cleanup"}, nil
+		}
+	}
+
+	// Grove must not recreate pods while a retiring request still protects their names.
+	for _, request := range desired.requests {
+		if live := currents[request.requestName]; live != nil && !live.DeletionTimestamp.IsZero() {
+			return currents, &lpxRetiring{retirementReason: "Waiting for the current LPX request to finish cleanup"}, nil
+		}
+	}
 	return currents, nil, nil
 }
 
-func visitLifecycleObjectPages(
+// listLPXRequestCandidates uses the propagated child identity only
+// to narrow the authoritative read. Owner references and recorded UIDs remain
+// the authority for adopting or deleting any returned request.
+func (r *graphReconciler) listLPXRequestCandidates(
 	ctx context.Context,
-	reader client.Reader,
-	list client.ObjectList,
-	visit func(k8sruntime.Object) error,
-	opts ...client.ListOption,
-) error {
-	continueToken := ""
-	pageOptions := make([]client.ListOption, 0, len(opts)+2)
-	for {
-		page := list.DeepCopyObject().(client.ObjectList)
-		pageOptions = pageOptions[:0]
-		pageOptions = append(pageOptions, opts...)
-		pageOptions = append(pageOptions, client.Limit(lpxLifecycleListPageSize))
-		if continueToken != "" {
-			pageOptions = append(pageOptions, client.Continue(continueToken))
-		}
-		if err := reader.List(ctx, page, pageOptions...); err != nil {
-			return err
-		}
-		if err := meta.EachListItem(page, visit); err != nil {
-			return err
-		}
-		nextToken := page.GetContinue()
-		if nextToken == "" {
-			break
-		}
-		if nextToken == continueToken {
-			return fmt.Errorf("lifecycle list %T repeated continuation token %q", list, nextToken)
-		}
-		continueToken = nextToken
+	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+) (*lpxv1alpha1.LPUPipelineRequestList, error) {
+	list := &lpxv1alpha1.LPUPipelineRequestList{}
+	err := r.apiReader.List(ctx, list,
+		client.InNamespace(deployment.Namespace),
+		client.MatchingLabels{lpxOwnerUIDLabel: string(deployment.UID)},
+	)
+	return list, err
+}
+
+// ownsLPXRequest follows the request's exact controller chain, including a PCS
+// whose name predates the current source input.
+func (r *graphReconciler) ownsLPXRequest(ctx context.Context, deployment *nvidiacomv1alpha1.LPXGraphDeployment, request *lpxv1alpha1.LPUPipelineRequest) (bool, error) {
+	owner := metav1.GetControllerOf(request)
+	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.Kind != "PodCliqueSet" {
+		return false, nil
 	}
-	return nil
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	if err := r.apiReader.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: owner.Name}, pcs); err == nil {
+		return metav1.IsControlledBy(pcs, deployment) && metav1.IsControlledBy(request, pcs), nil
+	} else if !apierrors.IsNotFound(err) {
+		return false, err
+	}
+
+	// Every labeled request for the recorded PCS remains retireable after garbage
+	// collection removes that owner, including requests that had already left the
+	// active deadline batch.
+	attempt := currentLPXAttemptStatus(deployment)
+	return attempt != nil && owner.UID == attempt.PodCliqueSetUID, nil
 }
 
 func (r *graphReconciler) listOwnedLPXRequests(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 ) ([]lpxv1alpha1.LPUPipelineRequest, error) {
-	requests, available, err := r.listOwnedLPXRequestsIfAvailable(ctx, deployment)
-	if err == nil && !available {
-		return nil, fmt.Errorf("LPX request API is unavailable after startup discovery")
+	requests, err := r.listLPXRequestCandidates(ctx, deployment)
+	if err != nil {
+		return nil, err
 	}
-	return requests, err
-}
-
-func (r *graphReconciler) listOwnedLPXRequestsIfAvailable(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-) ([]lpxv1alpha1.LPUPipelineRequest, bool, error) {
-	list := &lpxv1alpha1.LPUPipelineRequestList{}
 	owned := make([]lpxv1alpha1.LPUPipelineRequest, 0)
-	visit := func(object k8sruntime.Object) error {
-		request := object.(*lpxv1alpha1.LPUPipelineRequest)
-		if metav1.IsControlledBy(request, deployment) {
+	for index := range requests.Items {
+		request := &requests.Items[index]
+		ownedByChild, err := r.ownsLPXRequest(ctx, deployment, request)
+		if err != nil {
+			return nil, err
+		}
+		if ownedByChild {
 			owned = append(owned, *request)
 		}
-		return nil
-	}
-	err := visitLifecycleObjectPages(
-		ctx,
-		r.apiReader,
-		list,
-		visit,
-		client.InNamespace(deployment.Namespace),
-	)
-	if err != nil {
-		if meta.IsNoMatchError(err) || k8sruntime.IsNotRegisteredError(err) || apierrors.IsNotFound(err) {
-			return nil, false, nil
-		}
-		return nil, false, err
 	}
 	sort.Slice(owned, func(i, j int) bool { return owned[i].Name < owned[j].Name })
-	return owned, true, nil
+	return owned, nil
 }
 
-// retireFirstOwnedLPXRequest uses the sorted authoritative first request as the retirement witness.
-func (r *graphReconciler) retireFirstOwnedLPXRequest(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	pcsName string,
-	reason string,
-) (*lpxRetiring, error) {
-	requests, err := r.listOwnedLPXRequests(ctx, deployment)
-	if err != nil || len(requests) == 0 {
-		return nil, err
-	}
-	return r.retireLPXRequest(ctx, deployment, pcsName, &requests[0], reason)
-}
-
-func (r *graphReconciler) retireLPXRequest(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	pcsName string,
-	request *lpxv1alpha1.LPUPipelineRequest,
-	reason string,
-) (*lpxRetiring, error) {
-	if request == nil || !metav1.IsControlledBy(request, deployment) {
-		return nil, fmt.Errorf("refusing to retire an LPX request without the exact LPXGraphDeployment controller owner")
-	}
-	if err := r.releaseLPXAttemptRecordingFinalizer(ctx, request); err != nil {
-		return nil, err
-	}
-
-	// Read the complete publication set directly from the API before changing shared Grove state.
-	type requestDeletePrecondition struct {
-		name            string
-		uid             types.UID
-		resourceVersion string
-	}
-	owned := make([]requestDeletePrecondition, 0)
-	if err := visitLifecycleObjectPages(
-		ctx,
-		r.apiReader,
-		&lpxv1alpha1.LPUPipelineRequestList{},
-		func(object k8sruntime.Object) error {
-			live := object.(*lpxv1alpha1.LPUPipelineRequest)
-			if metav1.IsControlledBy(live, deployment) && live.DeletionTimestamp.IsZero() {
-				owned = append(owned, requestDeletePrecondition{
-					name:            live.Name,
-					uid:             live.UID,
-					resourceVersion: live.ResourceVersion,
-				})
-			}
-			return nil
-		},
-		client.InNamespace(deployment.Namespace),
-	); err != nil {
-		return nil, fmt.Errorf("list the exact LPXGraphDeployment-owned LPX requests for attempt-wide retirement: %w", err)
-	}
-
-	// Delete every live publication with exact-object preconditions before scaling the shared PCS.
-	for _, current := range owned {
-		live := &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{
-			Namespace:       deployment.Namespace,
-			Name:            current.name,
-			UID:             current.uid,
-			ResourceVersion: current.resourceVersion,
-		}}
-		if err := r.Delete(ctx, live, &client.DeleteOptions{
-			Preconditions: &metav1.Preconditions{UID: &current.uid, ResourceVersion: &current.resourceVersion},
-		}); err != nil && !apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("delete exact LPXGraphDeployment-owned LPX request %q: %w", current.name, err)
-		}
-	}
-
-	// Hold the shared Grove attempt at zero only after every publication is retiring.
-	if err := r.scaleDownLPXPodCliqueSet(ctx, deployment, pcsName, ""); err != nil {
-		return nil, fmt.Errorf("scale down the LPX PodCliqueSet after retiring all attempt requests: %w", err)
-	}
-	return &lpxRetiring{
-		retirementReason: reason,
-	}, nil
-}
-
-// scaleDownLPXPodCliqueSet holds the complete Grove attempt at zero while LPX
-// releases its deleted requests. LPX requires every exact old workload Pod to be
-// absent and treats a same-name replacement UID as a cleanup blocker.
-// Grove supports mutable PodCliqueSet scale-to-zero and deletes every child
-// replica without changing the immutable clique composition.
-func (r *graphReconciler) scaleDownLPXPodCliqueSet(
+// deleteLPXPodCliqueSet starts background cascading deletion of an exact PCS.
+// A same-name replacement proves that the old UID is already absent and is
+// never adopted or deleted.
+func (r *graphReconciler) deleteLPXPodCliqueSet(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	pcsName string,
 	pcsUID types.UID,
-) error {
-	scale := func(pcs *grovev1alpha1.PodCliqueSet) error {
-		if pcsUID != "" && pcs.UID != pcsUID {
-			return nil
+) (bool, error) {
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: pcsName}, pcs); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
 		}
-		if !metav1.IsControlledBy(pcs, deployment) {
-			return fmt.Errorf("refusing to scale down PodCliqueSet %q without the exact LPXGraphDeployment controller owner", pcs.Name)
-		}
-		if !pcs.DeletionTimestamp.IsZero() || pcs.Spec.Replicas == 0 {
-			return nil
-		}
-		pcs.Spec.Replicas = 0
-		return r.Update(ctx, pcs)
+		return false, err
 	}
-	if pcsName != "" {
-		pcs := &grovev1alpha1.PodCliqueSet{}
-		if err := r.apiReader.Get(ctx, types.NamespacedName{Namespace: deployment.Namespace, Name: pcsName}, pcs); err != nil {
-			return client.IgnoreNotFound(err)
-		}
-		return scale(pcs)
+	if pcs.UID != pcsUID {
+		return false, nil
 	}
-	return visitLifecycleObjectPages(ctx, r.apiReader, &grovev1alpha1.PodCliqueSetList{}, func(object k8sruntime.Object) error {
-		pcs := object.(*grovev1alpha1.PodCliqueSet)
-		if !metav1.IsControlledBy(pcs, deployment) {
-			return nil
+	if !metav1.IsControlledBy(pcs, deployment) {
+		return false, fmt.Errorf("refusing to delete PodCliqueSet %q without the exact LPXGraphDeployment controller owner", pcs.Name)
+	}
+	if !pcs.DeletionTimestamp.IsZero() {
+		return true, nil
+	}
+	if deployment.DeletionTimestamp.IsZero() {
+		if err := r.validateLPXDeploymentAuthority(ctx, deployment); err != nil {
+			return false, err
 		}
-		return scale(pcs)
-	}, client.InNamespace(deployment.Namespace))
+	}
+	propagation := metav1.DeletePropagationBackground
+	if err := r.Delete(ctx, pcs, &client.DeleteOptions{
+		Preconditions:     &metav1.Preconditions{UID: &pcs.UID, ResourceVersion: &pcs.ResourceVersion},
+		PropagationPolicy: &propagation,
+	}); err != nil && !apierrors.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
 }
 
-func (r *graphReconciler) reconcileSelectedLPX(
+// deleteStaleLPXRequests removes scaled-in scheduler intent without disturbing
+// the shared PCS. Grove and the LPX scheduler converge their pods independently.
+func (r *graphReconciler) deleteStaleLPXRequests(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	desired *lpxMaterializing,
-) (lpxClassification, error) {
-	// Retiring a removed engine must not block publication for surviving engines.
-	currents, retiring, err := r.reconcileLPXAttemptFence(ctx, deployment, desired)
-	if err != nil {
-		return nil, err
-	}
-	if _, recording := retiring.(*lpxDeadlineTransition); recording {
-		return retiring, nil
-	}
-	classification, err := r.reconcileSelectedLPXFromCurrentRequests(ctx, deployment, desired, currents, true)
-	if retiring != nil && err == nil {
-		if _, recording := classification.(*lpxDeadlineTransition); !recording {
-			return retiring, nil
+	requests []*lpxv1alpha1.LPUPipelineRequest,
+) error {
+	if deployment.DeletionTimestamp.IsZero() {
+		if err := r.validateLPXDeploymentAuthority(ctx, deployment); err != nil {
+			return err
 		}
 	}
-	return classification, err
+	for _, request := range requests {
+		if !request.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if request.UID == "" {
+			return fmt.Errorf("refusing to delete LPX request %q without an immutable UID", request.Name)
+		}
+		uid, resourceVersion := request.UID, request.ResourceVersion
+		if err := r.Delete(ctx, request, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
+			UID: &uid, ResourceVersion: &resourceVersion,
+		}}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete stale LPX request %q: %w", request.Name, err)
+		}
+	}
+	return nil
 }
 
 func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
@@ -779,13 +684,12 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	desired *lpxMaterializing,
 	currents map[string]*lpxv1alpha1.LPUPipelineRequest,
-	allowPublication bool,
 ) (lpxClassification, error) {
 	if currents == nil {
 		currents = make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(desired.requests))
 	}
 
-	groveIdentities, pending, classification, err := r.reconcileSelectedLPXGroveIdentityPrefix(
+	pcs, classification, err := r.reconcileSelectedLPXPodCliqueSet(
 		ctx,
 		deployment,
 		desired,
@@ -795,47 +699,29 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 		return classification, err
 	}
 
-	// Validate staged identities without crossing the scheduler-publication boundary.
-	if !allowPublication {
-		if closed := classifyLPXPublicationReadiness(desired.requests, currents, groveIdentities, pending); closed != nil {
-			return closed, nil
-		}
-	}
-
-	// Prepare the batch from any ready engine, independently of replica zero's rollout.
-	var attemptProjection *nvidiacomv1beta1.LPXAttemptStatus
-	trackAttempt := desired.deadlineSeconds != nil || currentLPXAttemptStatus(deployment) != nil
-	for _, baseGroveIdentity := range groveIdentities {
-		if baseGroveIdentity == nil || !baseGroveIdentity.complete {
-			continue
-		}
-		if trackAttempt {
-			attemptProjection = desiredLPXAttemptStatus(desired, deployment.Generation, baseGroveIdentity.pcsUID)
-		}
-		transition := r.reconcileLPXAttemptPreparation(deployment, desired.deadlineSeconds, attemptProjection, currents)
-		if transition != nil {
-			return transition, nil
-		}
-		break
+	// Record the immutable PCS and request identities before publication. The
+	// attempt status is the durable ownership fence used during GC-driven cleanup;
+	// a scheduling deadline only adds a clock to that record.
+	attemptProjection := desiredLPXAttemptStatus(desired, deployment.Generation, pcs.UID)
+	if transition := r.reconcileLPXAttemptPreparation(deployment, desired.deadlineSeconds, attemptProjection, currents); transition != nil {
+		return transition, nil
 	}
 	for index := range desired.requests {
 		request := &desired.requests[index]
-		groveIdentity := groveIdentities[request.replicaIndex]
-		if currents[request.requestName] != nil || groveIdentity == nil || !groveIdentity.complete {
+		if currents[request.requestName] != nil {
 			continue
 		}
-		if attemptProjection != nil {
-			// Classify known authority loss before attempting a replacement publication.
-			attempt := currentLPXAttemptStatus(deployment)
-			if _, _, missing := exactLPXAttemptState(attempt, currents); missing {
-				return newLPXDeadlineTransition(attempt, nvidiacomv1beta1.DGDStateFailed,
-					lpxAttemptAuthorityLostReason, "An exact LPX request disappeared; retiring its scheduling batch without replacement", 0), nil
-			}
-			if err := r.revalidateLPXAttemptPublication(ctx, deployment, desired.plan.PodCliqueSetName); err != nil {
-				return nil, err
-			}
+		// Classify known authority loss before attempting a replacement publication.
+		attempt := currentLPXAttemptStatus(deployment)
+		if _, _, missing := exactLPXAttemptState(attempt, currents); missing {
+			return newLPXDeadlineTransition(attempt, nvidiacomv1beta1.DGDStateFailed,
+				lpxAttemptAuthorityLostReason, "An exact LPX request disappeared; retiring its scheduling batch without replacement", 0), nil
 		}
-		live, createErr := r.createPublishedLPXRequest(ctx, deployment, request, groveIdentity, trackAttempt)
+		if err := r.revalidateLPXAttemptPublication(ctx, deployment, desired.plan.PodCliqueSetName); err != nil {
+			return nil, err
+		}
+		groveIdentity := &lpxGroveIdentity{pcsUID: pcs.UID, pcs: pcs, plan: desired.plan.ForReplica(request.replicaIndex)}
+		live, createErr := r.createPublishedLPXRequest(ctx, deployment, request, groveIdentity)
 		if createErr != nil {
 			return nil, createErr
 		}
@@ -845,32 +731,14 @@ func (r *graphReconciler) reconcileSelectedLPXFromCurrentRequests(
 			return transition, nil
 		}
 	}
-	return classifyLPXCurrentRequests(desired.requests, currents, pending), nil
+
+	return classifyLPXCurrentRequests(desired.requests, currents), nil
 }
 
-// classifyLPXPublicationReadiness requires identities to cover every request's replica index.
-// Identity entries, current requests and pending state may be nil.
-func classifyLPXPublicationReadiness(
-	requests []lpxModelMaterializing,
-	currents map[string]*lpxv1alpha1.LPUPipelineRequest,
-	identities []*lpxGroveIdentity,
-	pending *lpxClosed,
-) *lpxClosed {
-	// Complete identities with no request must wait for the Grove synchronization boundary.
-	for _, request := range requests {
-		identity := identities[request.replicaIndex]
-		if identity != nil && identity.complete && currents[request.requestName] == nil {
-			return &lpxClosed{incomplete: "The Grove publication identities are staged; LPX publication waits for Grove synchronization"}
-		}
-	}
-	return pending
-}
-
-// classifyLPXCurrentRequests accepts absent requests and a nil pending state.
+// classifyLPXCurrentRequests accepts absent requests.
 func classifyLPXCurrentRequests(
 	requests []lpxModelMaterializing,
 	currents map[string]*lpxv1alpha1.LPUPipelineRequest,
-	pending *lpxClosed,
 ) lpxClassification {
 	// Stream terminal, side-effect-free classifications in request order.
 	var firstNonBound lpxClassification
@@ -886,166 +754,66 @@ func classifyLPXCurrentRequests(
 		}
 	}
 
-	// Keep pending behind every published non-bound request.
 	if firstNonBound != nil {
 		return firstNonBound
-	}
-	if pending != nil {
-		return pending
 	}
 	return &lpxBound{}
 }
 
-func (r *graphReconciler) reconcileSelectedLPXGroveIdentityPrefix(
+func (r *graphReconciler) reconcileSelectedLPXPodCliqueSet(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	desired *lpxMaterializing,
 	currents map[string]*lpxv1alpha1.LPUPipelineRequest,
-) ([]*lpxGroveIdentity, *lpxClosed, lpxClassification, error) {
-	snapshot, incomplete, err := r.observeLPXGroveSnapshot(ctx, deployment, desired, len(currents) == 0)
+) (*grovev1alpha1.PodCliqueSet, lpxClassification, error) {
+	pcs, incomplete, err := r.observeLPXPodCliqueSet(ctx, deployment, desired, len(currents) == 0)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	if snapshot == nil {
-		return nil, nil, &lpxClosed{incomplete: incomplete}, nil
+		return nil, nil, err
 	}
 
-	groveIdentities := make([]*lpxGroveIdentity, desired.plan.Replicas)
-	replicaPlans := make([]*lpx.MaterializationPlan, desired.plan.Replicas)
-	allAgentGroups := make(map[string]struct{}, int(desired.plan.Replicas)*len(desired.plan.Agents))
-	for replicaIndex := int32(0); replicaIndex < desired.plan.Replicas; replicaIndex++ {
-		plan := desired.plan.ForReplica(replicaIndex)
-		replicaPlans[replicaIndex] = plan
-		for _, agent := range plan.Agents {
-			allAgentGroups[agent.CliqueName] = struct{}{}
+	if pcs == nil || incomplete != "" {
+		if len(currents) == 0 {
+			return nil, &lpxClosed{incomplete: incomplete}, nil
 		}
-	}
-	var pending *lpxClosed
-	retire := make(map[int32]bool)
-	intentional := make(map[int32]bool)
-	for replicaIndex, plan := range replicaPlans {
-		identity, incomplete, drift, err := r.observeLPXGroveIdentity(ctx, deployment, desired, snapshot, plan, allAgentGroups)
-		if err != nil {
-			if errors.Is(err, errLPXEngineReplacing) {
-				intentional[int32(replicaIndex)] = true
-				incomplete = err.Error()
-			} else {
-				return nil, nil, nil, err
-			}
-			retire[int32(replicaIndex)] = true
-		}
-		if drift != nil {
-			incomplete = drift.retirementReason
-			retire[int32(replicaIndex)] = true
-		}
-		if incomplete != "" {
-			if pending == nil {
-				pending = &lpxClosed{incomplete: incomplete}
+		for _, request := range desired.requests {
+			if live := currents[request.requestName]; live != nil {
+				retiring, err := r.retireLPXEngineRequest(ctx, deployment, live, fmt.Sprintf("The published PCS identity became unavailable: %q", incomplete), false)
+				return nil, retiring, err
 			}
 		}
-		if identity != nil {
-			identity.complete = incomplete == ""
-			groveIdentities[replicaIndex] = identity
-		}
+		return nil, &lpxClosed{incomplete: incomplete}, nil
 	}
 
-	// Observe retirement per engine; an incomplete sibling never fences this engine.
+	// The PCS owns each request; LPX resolves the replica-local clique references itself.
 	for index := range desired.requests {
 		request := &desired.requests[index]
-		live := currents[request.requestName]
-		identity := groveIdentities[request.replicaIndex]
-		digest, intentChanged, err := resolveLPXCurrentRequestIntent(deployment, *request, identity, live)
+		identity := &lpxGroveIdentity{pcsUID: pcs.UID, pcs: pcs, plan: desired.plan.ForReplica(request.replicaIndex)}
+		spec, err := json.Marshal(request.modelProjection.RequestSpec(identity.plan, request.agentCliqueName))
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, err
 		}
-		request.attemptDigest = digest
-		if live == nil {
-			continue
-		}
-		if intentChanged {
-			intentional[request.replicaIndex] = true
-		}
-		if intentional[request.replicaIndex] || !live.DeletionTimestamp.IsZero() || lpx.ValidateRequestSize(live) != nil {
-			retire[request.replicaIndex] = true
-		}
-	}
-
-	// All model requests of a replacing engine must finish before any is republished.
-	for index := range desired.requests {
-		request := &desired.requests[index]
-		if !retire[request.replicaIndex] {
-			continue
-		}
-		request.attemptDigest = ""
-		groveIdentities[request.replicaIndex] = nil
-		pending = &lpxClosed{incomplete: "Waiting for the replaced engine's scheduler requests to finish cleanup"}
+		request.attemptDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(spec))
 		if live := currents[request.requestName]; live != nil {
-			classification, err := r.retireLPXEngineRequest(ctx, deployment, live, pending.incomplete, intentional[request.replicaIndex])
-			if transition, recording := classification.(*lpxDeadlineTransition); recording {
-				if _, completed, _ := exactLPXAttemptState(currentLPXAttemptStatus(deployment), currents); completed {
-					disarmedAt := metav1.Now()
-					transition.attempt.DisarmedAt = &disarmedAt
-				}
-				return nil, nil, classification, err
+			if err := validateCurrentLPXRequest(deployment, request, identity, live); err != nil {
+				retiring, retireErr := r.retireLPXEngineRequest(ctx, deployment, live, err.Error(), true)
+				return nil, retiring, retireErr
 			}
-			if err != nil {
-				return nil, nil, classification, err
-			}
-			delete(currents, request.requestName)
 		}
 	}
-	return groveIdentities, pending, nil, nil
-}
-
-// resolveLPXCurrentRequestIntent does not mutate its inputs. deployment must be non-nil;
-// identity and live may be nil while their observations are pending.
-func resolveLPXCurrentRequestIntent(
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	desired lpxModelMaterializing,
-	identity *lpxGroveIdentity,
-	live *lpxv1alpha1.LPUPipelineRequest,
-) (string, bool, error) {
-	// Preserve the observed digest until Grove supplies a complete replacement identity.
-	if identity == nil || !identity.complete {
-		if live != nil {
-			desired.attemptDigest = live.Annotations[lpxAttemptDigestAnnotation]
-		}
-		return desired.attemptDigest, false, nil
-	}
-
-	// Compare immutable intent using the digest derived from the complete Grove identity.
-	spec, err := json.Marshal(struct {
-		Spec      lpxv1alpha1.LPUPipelineRequestSpec
-		AgentUIDs []types.UID
-	}{desired.modelProjection.RequestSpec(deployment.Namespace, identity.podGangName, identity.cyborgClique), identity.agentUIDs})
-	if err != nil {
-		return "", false, err
-	}
-	desired.attemptDigest = fmt.Sprintf("sha256:%x", sha256.Sum256(spec))
-	return desired.attemptDigest, live != nil && validateCurrentLPXRequest(deployment, &desired, identity, live) != nil, nil
+	return pcs, nil, nil
 }
 
 // classifyPublishedLPX classifies a non-nil published request from its current scheduler receipt.
 func classifyPublishedLPX(current *lpxv1alpha1.LPUPipelineRequest) lpxClassification {
-	// Expose only scheduler status observed for the current request generation.
-	status := current.Status
-	if current.Generation <= 0 || status == nil || status.ObservedGeneration == nil || *status.ObservedGeneration != current.Generation {
+	if current == nil || current.Status == nil || current.Status.ObservedGeneration == nil ||
+		*current.Status.ObservedGeneration != current.Generation {
 		return &lpxOpen{}
 	}
-
-	// Bound requires one complete committed receipt for this exact request and plan.
-	committed := status.Committed
-	if status.Phase == lpxv1alpha1.RequestPhaseBound && committed != nil &&
-		committed.Execution.AcceptedGeneration != nil && *committed.Execution.AcceptedGeneration == current.Generation &&
-		committed.Plan.PlannedFromGeneration == current.Generation &&
-		committed.Plan.Revision > 0 && committed.Plan.Revision == status.LastPlanRevision &&
-		committed.Plan.PlanDigest != "" && committed.Plan.Placement.ExecutionBackend == current.Spec.ExecutionBackend &&
-		current.Spec.ExecutionBackend == lpxv1alpha1.ExecutionBackendNodeLocal &&
-		committed.Plan.Placement.NodeLocal != nil && committed.Plan.Placement.RemoteDra == nil &&
-		committed.Execution.NodeLocal != nil && committed.Execution.RemoteDra == nil {
+	if current.Status.Phase == lpxv1alpha1.RequestPhaseBound {
 		return &lpxBound{}
 	}
-	return (*lpxSchedulerObserved)(status)
+	observed := lpxSchedulerObserved(*current.Status.DeepCopy())
+	return &observed
 }
 
 func (r *graphReconciler) createPublishedLPXRequest(
@@ -1053,12 +821,11 @@ func (r *graphReconciler) createPublishedLPXRequest(
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	materializing *lpxModelMaterializing,
 	grove *lpxGroveIdentity,
-	recordAttempt bool,
 ) (*lpxv1alpha1.LPUPipelineRequest, error) {
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
 		return nil, err
 	}
-	spec := materializing.modelProjection.RequestSpec(deployment.Namespace, grove.podGangName, grove.cyborgClique)
+	spec := materializing.modelProjection.RequestSpec(grove.plan, materializing.agentCliqueName)
 	request := &lpxv1alpha1.LPUPipelineRequest{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: lpxv1alpha1.GroupVersion.String(),
@@ -1069,19 +836,14 @@ func (r *graphReconciler) createPublishedLPXRequest(
 			Namespace: deployment.Namespace,
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: metav1.GetControllerOf(deployment).Name,
+				lpxOwnerUIDLabel: string(deployment.UID),
 			},
 			Annotations: lpxRequestAnnotations(deployment, materializing, grove),
 		},
 		Spec: spec,
 	}
-	if recordAttempt {
-		controllerutil.AddFinalizer(request, lpxAttemptRecordingFinalizer)
-	}
-	if err := controllerutil.SetControllerReference(deployment, request, r.Client.Scheme()); err != nil {
+	if err := controllerutil.SetControllerReference(grove.pcs, request, r.Client.Scheme()); err != nil {
 		return nil, err
-	}
-	if err := lpx.ValidateRequestSize(request); err != nil {
-		return nil, fmt.Errorf("constructed LPX request exceeds the scheduler budget: %w", err)
 	}
 	if err := r.Create(ctx, request); err != nil {
 		return nil, fmt.Errorf(
@@ -1102,13 +864,14 @@ func lpxRequestAnnotations(
 	// Callers validate the exact source controller owner before constructing requests.
 	sourceOwner := metav1.GetControllerOf(deployment)
 	return map[string]string{
-		lpxAttemptDigestAnnotation:   materializing.attemptDigest,
-		lpx.DGDUIDAnnotation:         string(sourceOwner.UID),
-		lpxDeploymentUIDAnnotation:   string(deployment.UID),
-		lpxModelAnnotation:           materializing.modelProjection.Model(),
-		lpxPCSUIDAnnotation:          string(grove.pcsUID),
-		lpxPodGangUIDAnnotation:      string(grove.podGangUID),
-		lpx.WorkloadDigestAnnotation: materializing.modelProjection.Digest().String(),
+		lpxAttemptDigestAnnotation:                   materializing.attemptDigest,
+		lpx.DGDUIDAnnotation:                         string(sourceOwner.UID),
+		lpx.DeploymentNameAnnotation:                 deployment.Name,
+		lpxDeploymentUIDAnnotation:                   string(deployment.UID),
+		lpxModelAnnotation:                           materializing.modelProjection.Model(),
+		lpxPCSUIDAnnotation:                          string(grove.pcsUID),
+		lpx.WorkloadDigestAnnotation:                 materializing.modelProjection.Digest().String(),
+		lpxv1alpha1.CompilerSnapshotDigestAnnotation: materializing.modelProjection.CompilerSnapshotDigest(),
 	}
 }
 
@@ -1118,6 +881,9 @@ func validateCurrentLPXRequest(
 	grove *lpxGroveIdentity,
 	request *lpxv1alpha1.LPUPipelineRequest,
 ) error {
+	if !metav1.IsControlledBy(request, grove.pcs) {
+		return fmt.Errorf("LPX request %q does not have the exact PCS owner", request.Name)
+	}
 	if request.UID == "" {
 		return fmt.Errorf("LPX request %q has no immutable UID", request.Name)
 	}
@@ -1127,168 +893,11 @@ func validateCurrentLPXRequest(
 			return fmt.Errorf("LPX request %q immutable annotation %q no longer matches the current attempt", request.Name, key)
 		}
 	}
-	wantSpec := desired.modelProjection.RequestSpec(deployment.Namespace, grove.podGangName, grove.cyborgClique)
+	wantSpec := desired.modelProjection.RequestSpec(grove.plan, desired.agentCliqueName)
 	if !apiequality.Semantic.DeepEqual(request.Spec, wantSpec) {
 		return fmt.Errorf("LPX request %q immutable intent no longer matches the current attempt", request.Name)
 	}
 	return nil
-}
-
-func (r *graphReconciler) observeLPXGroveSnapshot(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	desired *lpxMaterializing,
-	noCurrentRequests bool,
-) (*lpxGroveSnapshot, string, error) {
-	pcs, incomplete, err := r.observeLPXPodCliqueSet(ctx, deployment, desired, noCurrentRequests)
-	if err != nil || pcs == nil {
-		return nil, incomplete, err
-	}
-	generationHash, wait := observedLPXPCSGenerationHash(pcs)
-	if wait != "" {
-		if incomplete == "" {
-			incomplete = wait
-		}
-	}
-	podGangs, err := r.listLPXPublicationPodGangs(ctx, deployment, pcs)
-	if err != nil {
-		return nil, "", err
-	}
-
-	// Every resolved runtime has one serving clique in this scaling group.
-	scalingGroupName := desired.plan.LPXScalingGroup
-	scalingGroup := &grovev1alpha1.PodCliqueScalingGroup{}
-	key := types.NamespacedName{Namespace: deployment.Namespace, Name: scalingGroupName}
-	if err := r.apiReader.Get(ctx, key, scalingGroup); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Sprintf("Waiting for current LPU PodCliqueScalingGroup %q", scalingGroupName), nil
-		}
-		return nil, "", err
-	}
-	if scalingGroup.UID == "" || !scalingGroup.DeletionTimestamp.IsZero() ||
-		!metav1.IsControlledBy(scalingGroup, pcs) {
-		return nil, fmt.Sprintf(
-			"LPU PodCliqueScalingGroup %q lacks the current PodCliqueSet owner identity",
-			scalingGroupName,
-		), nil
-	}
-	return &lpxGroveSnapshot{
-		podCliqueSet:   pcs,
-		scalingGroup:   scalingGroup,
-		generationHash: generationHash,
-		incomplete:     incomplete,
-		podGangs:       podGangs,
-	}, "", nil
-}
-
-func (r *graphReconciler) observeLPXGroveIdentity(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	desired *lpxMaterializing,
-	snapshot *lpxGroveSnapshot,
-	plan *lpx.MaterializationPlan,
-	allAgentGroups map[string]struct{},
-) (*lpxGroveIdentity, string, *lpxRetiring, error) {
-	incomplete := snapshot.incomplete
-	// Observe native retirement before gang availability or successor revision readiness.
-	agentUIDs := make([]types.UID, 0, len(plan.Agents))
-	projections := desired.workload.ModelProjections()
-	for index, agent := range plan.Agents {
-		clique := &grovev1alpha1.PodClique{}
-		if err := r.apiReader.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: agent.CliqueName}, clique); err != nil {
-			if apierrors.IsNotFound(err) {
-				incomplete = fmt.Sprintf("Waiting for Agent PodClique %q", agent.CliqueName)
-				continue
-			}
-			return nil, "", nil, err
-		}
-		if !hasCurrentLPXScalingGroupOwner(clique, snapshot.scalingGroup) || clique.UID == "" {
-			incomplete = fmt.Sprintf("Waiting for owned Agent PodClique %q", agent.CliqueName)
-			continue
-		}
-		if !clique.DeletionTimestamp.IsZero() {
-			return nil, "", nil, errLPXEngineReplacing
-		}
-		agentUIDs = append(agentUIDs, clique.UID)
-		if !desired.hasCurrentLPXAttemptAnnotations(clique, deployment) ||
-			clique.Annotations[lpx.WorkloadDigestAnnotation] != projections[index].Digest().String() ||
-			clique.Status.CurrentPodCliqueSetGenerationHash == nil || *clique.Status.CurrentPodCliqueSetGenerationHash != snapshot.generationHash {
-			incomplete = fmt.Sprintf("Waiting for current Agent PodClique %q", agent.CliqueName)
-		}
-	}
-	lpxPodGang, ordinaryPodGang, wait := selectLPXPublicationPodGangs(
-		deployment.Namespace,
-		snapshot.podGangs,
-		plan,
-		allAgentGroups,
-	)
-	if wait != "" {
-		return nil, wait, nil, nil
-	}
-
-	identity := &lpxGroveIdentity{
-		pcsUID:      snapshot.podCliqueSet.UID,
-		podGangName: lpxPodGang.Name,
-		podGangUID:  lpxPodGang.UID,
-		agentUIDs:   agentUIDs,
-	}
-	if !desired.hasCurrentLPXAttemptAnnotations(lpxPodGang, deployment) ||
-		!desired.hasCurrentLPXAttemptAnnotations(ordinaryPodGang, deployment) {
-		if incomplete == "" {
-			incomplete = "Waiting for Grove to publish current-generation PodGangs"
-		}
-	}
-
-	// A conductor needs complete identity; Cyborg can retain its reference while hashes converge.
-	cyborg, wait, retiring, err := r.observeLPXServingClique(
-		ctx,
-		deployment,
-		snapshot,
-		ordinaryPodGang.Name,
-		desired,
-		plan,
-	)
-	if err != nil || retiring != nil || (wait != "" && cyborg == nil) {
-		return nil, wait, retiring, err
-	}
-	identity.cyborgClique = cyborg
-	if wait != "" {
-		if incomplete == "" {
-			incomplete = wait
-		}
-	}
-	return identity, incomplete, nil, nil
-}
-
-func (r *graphReconciler) listLPXPublicationPodGangs(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	pcs *grovev1alpha1.PodCliqueSet,
-) ([]groveschedulerv1alpha1.PodGang, error) {
-	podGangs := make([]groveschedulerv1alpha1.PodGang, 0, 2)
-	if err := visitLifecycleObjectPages(
-		ctx,
-		r.apiReader,
-		&groveschedulerv1alpha1.PodGangList{},
-		func(object k8sruntime.Object) error {
-			podGang := object.(*groveschedulerv1alpha1.PodGang)
-			schedulerName := podGang.Labels[grovecommon.LabelSchedulerName]
-			if (schedulerName != lpx.SchedulerName && schedulerName != corev1.DefaultSchedulerName) ||
-				podGang.UID == "" || !podGang.DeletionTimestamp.IsZero() ||
-				!metav1.IsControlledBy(podGang, pcs) {
-				return nil
-			}
-			podGangs = append(podGangs, *podGang)
-			return nil
-		},
-		client.InNamespace(deployment.Namespace),
-		client.MatchingLabels{
-			grovecommon.LabelPartOfKey: pcs.Name,
-		},
-	); err != nil {
-		return nil, err
-	}
-	return podGangs, nil
 }
 
 func (r *graphReconciler) observeLPXPodCliqueSet(
@@ -1308,9 +917,6 @@ func (r *graphReconciler) observeLPXPodCliqueSet(
 	if noCurrentRequests && !metav1.IsControlledBy(pcs, deployment) {
 		return nil, "", fmt.Errorf("refusing to inspect PodCliqueSet %q without the exact LPXGraphDeployment controller owner", pcs.Name)
 	}
-	if noCurrentRequests && pcs.Spec.Replicas == 0 {
-		return nil, "The retired Grove attempt is held at zero; successor publication waits for post-retirement Grove synchronization", nil
-	}
 	if pcs.UID == "" || !pcs.DeletionTimestamp.IsZero() || !metav1.IsControlledBy(pcs, deployment) {
 		return nil, "The selected Grove PodCliqueSet lacks the exact LPXGraphDeployment owner identity", nil
 	}
@@ -1325,280 +931,4 @@ func (r *graphReconciler) observeLPXPodCliqueSet(
 		}
 	}
 	return pcs, incomplete, nil
-}
-
-func observedLPXPCSGenerationHash(pcs *grovev1alpha1.PodCliqueSet) (string, string) {
-	if pcs.Status.CurrentGenerationHash == nil || *pcs.Status.CurrentGenerationHash == "" {
-		return "", fmt.Sprintf(
-			"Waiting for Grove to publish PodCliqueSet %q generation identity",
-			pcs.Name,
-		)
-	}
-	return *pcs.Status.CurrentGenerationHash, ""
-}
-
-func hasCurrentLPXScalingGroupOwner(
-	clique *grovev1alpha1.PodClique,
-	scalingGroup *grovev1alpha1.PodCliqueScalingGroup,
-) bool {
-	owner := metav1.GetControllerOf(clique)
-	return owner != nil && owner.APIVersion == grovev1alpha1.SchemeGroupVersion.String() &&
-		owner.Kind == "PodCliqueScalingGroup" && owner.Name == scalingGroup.Name &&
-		owner.UID == scalingGroup.UID
-}
-
-func (r *graphReconciler) observeLPXServingClique(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	snapshot *lpxGroveSnapshot,
-	ordinaryPodGangName string,
-	desired *lpxMaterializing,
-	plan *lpx.MaterializationPlan,
-) (*lpxv1alpha1.CyborgPodCliqueReference, string, *lpxRetiring, error) {
-	// Every supported plan has exactly one ordinary-scheduler serving clique.
-	isCyborg := plan.CyborgClique != ""
-	name, role := plan.ConductorClique, lpxv1alpha1.PodRoleConductor
-	roleName, waitingRoleName := "Conductor", "conductor"
-	if isCyborg {
-		name, role = plan.CyborgClique, lpxv1alpha1.PodRoleCyborgWorker
-		roleName, waitingRoleName = "Cyborg", "Cyborg"
-	}
-
-	// Read the single serving witness and validate its shared scheduler identity.
-	clique := &grovev1alpha1.PodClique{}
-	key := types.NamespacedName{Namespace: deployment.Namespace, Name: name}
-	if err := r.apiReader.Get(ctx, key, clique); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, fmt.Sprintf("Waiting for %s PodClique %q", waitingRoleName, name), nil, nil
-		}
-		return nil, "", nil, err
-	}
-	if clique.UID == "" ||
-		clique.Labels[grovecommon.LabelPartOfKey] != snapshot.podCliqueSet.Name ||
-		clique.Labels[grovecommon.LabelPodCliqueScalingGroup] != plan.LPXScalingGroup ||
-		clique.Labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex] != strconv.FormatInt(int64(plan.ReplicaIndex), 10) ||
-		clique.Labels[grovecommon.LabelPodGang] != ordinaryPodGangName ||
-		clique.Spec.PodSpec.SchedulerName != corev1.DefaultSchedulerName ||
-		clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != role ||
-		!desired.hasCurrentLPXAttemptAnnotations(clique, deployment) ||
-		(!isCyborg && !hasCurrentLPXScalingGroupOwner(clique, snapshot.scalingGroup)) {
-		return nil, fmt.Sprintf(
-			"%s PodClique %q does not match the current ordinary-scheduler identity",
-			roleName, name,
-		), nil, nil
-	}
-	if !isCyborg {
-		if clique.Status.CurrentPodCliqueSetGenerationHash == nil || *clique.Status.CurrentPodCliqueSetGenerationHash != snapshot.generationHash {
-			return nil, fmt.Sprintf("Waiting for current conductor PodClique %q", clique.Name), nil, nil
-		}
-		return nil, "", nil, nil
-	}
-
-	// Cyborg publication additionally binds device claims and exact Grove revision hashes.
-	if !hasCurrentLPXScalingGroupOwner(clique, snapshot.scalingGroup) {
-		return nil, fmt.Sprintf(
-			"Cyborg PodClique %q lacks the current LPU scaling-group owner identity",
-			clique.Name,
-		), nil, nil
-	}
-	if !hasLPXCyborgDeviceIntent(clique.Spec.PodSpec) || !hasExpectedLPXCyborgClaimReferences(snapshot.podCliqueSet, clique, plan.CyborgTemplate) {
-		reason := fmt.Sprintf("Cyborg PodClique %q GPU intent or DRA Claim references changed during Grove materialization", clique.Name)
-		// Until Grove has accepted the PCS edit, differing references may still be its old engine.
-		pcs := snapshot.podCliqueSet
-		if pcs.Status.ObservedGeneration != nil && *pcs.Status.ObservedGeneration == pcs.Generation &&
-			clique.Status.CurrentPodCliqueSetGenerationHash != nil && *clique.Status.CurrentPodCliqueSetGenerationHash == snapshot.generationHash {
-			return nil, "", &lpxRetiring{retirementReason: reason}, nil
-		}
-		return nil, reason, nil, nil
-	}
-	reference := &lpxv1alpha1.CyborgPodCliqueReference{Name: clique.Name, UID: string(clique.UID)}
-
-	// Require Grove's selected PCS revision and pod-template identities. Deliberately
-	// do not require Cyborg ObservedGeneration: LPX must remain able to publish the
-	// provision request before Grove advances that compatibility signal.
-	if clique.Status.CurrentPodCliqueSetGenerationHash == nil ||
-		*clique.Status.CurrentPodCliqueSetGenerationHash != snapshot.generationHash ||
-		clique.Status.CurrentPodTemplateHash == nil ||
-		*clique.Status.CurrentPodTemplateHash == "" {
-		return reference, fmt.Sprintf(
-			"Waiting for Grove to materialize the current PodCliqueSet generation in Cyborg PodClique %q",
-			clique.Name,
-		), nil, nil
-	}
-	return reference, "", nil, nil
-}
-
-func selectLPXPublicationPodGangs(
-	namespace string,
-	podGangs []groveschedulerv1alpha1.PodGang,
-	plan *lpx.MaterializationPlan,
-	allAgentGroups map[string]struct{},
-) (*groveschedulerv1alpha1.PodGang, *groveschedulerv1alpha1.PodGang, string) {
-	var lpxCandidate, ordinaryCandidate *groveschedulerv1alpha1.PodGang
-	var lpxCandidateCount, ordinaryCandidateCount int
-	ordinaryGroup := plan.ConductorClique
-	if ordinaryGroup == "" {
-		ordinaryGroup = plan.CyborgClique
-	}
-	// Count every matching gang before reporting either scheduler's ambiguity.
-	for index := range podGangs {
-		podGang := &podGangs[index]
-		switch podGang.Labels[grovecommon.LabelSchedulerName] {
-		case lpx.SchedulerName:
-			if hasExactLPXAgentRows(namespace, podGang, plan) {
-				lpxCandidate = podGang
-				lpxCandidateCount++
-			}
-		case corev1.DefaultSchedulerName:
-			containsAgent, containsOrdinaryGroup := false, ordinaryGroup == ""
-			for _, group := range podGang.Spec.PodGroups {
-				if _, agent := allAgentGroups[group.Name]; agent {
-					containsAgent = true
-				}
-				if group.Name == ordinaryGroup {
-					containsOrdinaryGroup = true
-				}
-			}
-			if !containsAgent && containsOrdinaryGroup {
-				ordinaryCandidate = podGang
-				ordinaryCandidateCount++
-			}
-		}
-	}
-	if lpxCandidateCount != 1 {
-		return nil, nil, fmt.Sprintf(
-			"Waiting for one replica-%d LPX PodGang; found %d candidates",
-			plan.ReplicaIndex,
-			lpxCandidateCount,
-		)
-	}
-	if ordinaryCandidateCount != 1 {
-		return nil, nil, fmt.Sprintf(
-			"Waiting for one replica-%d ordinary-scheduler PodGang; found %d candidates",
-			plan.ReplicaIndex,
-			ordinaryCandidateCount,
-		)
-	}
-	return lpxCandidate, ordinaryCandidate, ""
-}
-
-func hasExactLPXAgentRows(
-	namespace string,
-	podGang *groveschedulerv1alpha1.PodGang,
-	plan *lpx.MaterializationPlan,
-) bool {
-	if len(podGang.Spec.PodGroups) != len(plan.Agents) {
-		return false
-	}
-	groups := make(map[string]*groveschedulerv1alpha1.PodGroup, len(podGang.Spec.PodGroups))
-	for index := range podGang.Spec.PodGroups {
-		group := &podGang.Spec.PodGroups[index]
-		if _, duplicate := groups[group.Name]; duplicate {
-			return false
-		}
-		groups[group.Name] = group
-	}
-	for _, agent := range plan.Agents {
-		group, found := groups[agent.CliqueName]
-		if !found || group.MinReplicas != int32(agent.Replicas) || len(group.PodReferences) != agent.Replicas {
-			return false
-		}
-		seen := make(map[types.NamespacedName]struct{}, agent.Replicas)
-		for _, reference := range group.PodReferences {
-			key := types.NamespacedName{Namespace: reference.Namespace, Name: reference.Name}
-			if reference.Namespace != namespace || strings.TrimSpace(reference.Name) == "" {
-				return false
-			}
-			if _, duplicate := seen[key]; duplicate {
-				return false
-			}
-			seen[key] = struct{}{}
-		}
-	}
-	return true
-}
-
-func hasExpectedLPXCyborgClaimReferences(
-	pcs *grovev1alpha1.PodCliqueSet,
-	cyborg *grovev1alpha1.PodClique,
-	templateName string,
-) bool {
-	var expected *corev1.PodSpec
-	for _, template := range pcs.Spec.Template.Cliques {
-		if template == nil || template.Name != templateName {
-			continue
-		}
-		if expected != nil {
-			return false
-		}
-		expected = &template.Spec.PodSpec
-	}
-	if expected == nil {
-		return false
-	}
-	observed := &cyborg.Spec.PodSpec
-	return apiequality.Semantic.DeepEqual(podLevelClaimReferences(expected), podLevelClaimReferences(observed)) &&
-		apiequality.Semantic.DeepEqual(expected.ResourceClaims, observed.ResourceClaims) &&
-		containerClaimReferencesEqual(expected.Containers, observed.Containers) &&
-		containerClaimReferencesEqual(expected.InitContainers, observed.InitContainers)
-}
-
-func podLevelClaimReferences(spec *corev1.PodSpec) []corev1.ResourceClaim {
-	if spec.Resources == nil {
-		return nil
-	}
-	return spec.Resources.Claims
-}
-
-func containerClaimReferencesEqual(expected, observed []corev1.Container) bool {
-	if len(expected) != len(observed) {
-		return false
-	}
-	for index := range expected {
-		if expected[index].Name != observed[index].Name ||
-			!apiequality.Semantic.DeepEqual(expected[index].Resources.Claims, observed[index].Resources.Claims) {
-			return false
-		}
-	}
-	return true
-}
-
-func hasLPXCyborgDeviceIntent(podSpec corev1.PodSpec) bool {
-	if len(podSpec.ResourceClaims) != 0 {
-		return true
-	}
-	for _, container := range podSpec.Containers {
-		if container.Name != consts.MainContainerName && container.Name != "cyborg" {
-			continue
-		}
-		gpuCount, err := lpx.EffectiveCyborgGPUCount(container.Resources)
-		if err != nil {
-			return false
-		}
-		if gpuCount > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// finalizeLPXRequests retires every exact owned publication for the shared Grove
-// attempt. A wait error keeps the DGD finalizer until LPX's own cleanup
-// finalizers have completed.
-func (r *graphReconciler) finalizeLPXRequests(
-	ctx context.Context,
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-) error {
-	requests, _, err := r.listOwnedLPXRequestsIfAvailable(ctx, deployment)
-
-	// Stop when listing fails or no publication remains.
-	if err != nil || len(requests) == 0 {
-		return err
-	}
-
-	// Start or continue retirement from the authoritative first request.
-	if _, err := r.retireLPXRequest(ctx, deployment, "", &requests[0], "LPXGraphDeployment is being deleted"); err != nil {
-		return err
-	}
-	return fmt.Errorf("waiting for LPX request %q to finish fail-closed retirement", requests[0].Name)
 }

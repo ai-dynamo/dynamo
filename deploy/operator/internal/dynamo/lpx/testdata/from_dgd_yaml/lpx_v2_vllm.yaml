@@ -27,6 +27,8 @@ metadata:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: dgd-lpx-v2-vllm-94cd-decode-3aba9d08778da54a
   namespace: inference-engine
 ---
@@ -185,6 +187,8 @@ metadata:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: dgd-lpx-v2-vllm-94cd-lpu-d73a69201a8e19d2
   namespace: inference-engine
 ---
@@ -195,6 +199,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
   labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
   name: dgd-lpx-v2-vllm-94cd
   namespace: inference-engine
@@ -207,6 +212,7 @@ spec:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: d73a69201a8e19d2013c560e1155903bacf71d3a2cbdaaf4f3aea4deafa8d033
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:cc75fd5ce4533f15c01b89d239027e6d9be0917011a7624ae79b6b66f1638398
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
         scheduling.lpu.nvidia.com/model: default
@@ -590,7 +596,7 @@ spec:
             - mountPath: /dev/shm
               name: shared-memory
           restartPolicy: Always
-          schedulerName: default-scheduler
+          schedulerName: lpx-scheduler
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch

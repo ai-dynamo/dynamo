@@ -16,40 +16,33 @@ import (
 
 func TestResolveLPX(t *testing.T) {
 	const (
-		lprPath        = "/apis/scheduling.lpu.nvidia.com/v1alpha1"
-		podGangPath    = "/apis/scheduler.grove.io/v1alpha1"
-		missingLPR     = "LPX is explicitly enabled in config but the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API was not detected in the cluster"
-		missingPodGang = "LPX is explicitly enabled in config but the scheduler.grove.io/v1alpha1 PodGang API was not detected in the cluster"
+		lprPath    = "/apis/scheduling.lpu.nvidia.com/v1alpha1"
+		missingLPR = "LPX is explicitly enabled in config but the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API was not detected in the cluster"
 	)
 	tests := []struct {
 		name, path        string
 		status            int
 		resource, wantErr string
 	}{
-		{name: "both APIs present"},
+		{name: "LPR API present"},
+		{name: "LPR group version absent", path: lprPath, status: http.StatusNotFound, wantErr: missingLPR},
 		{name: "LPR resource absent", path: lprPath, status: http.StatusOK, wantErr: missingLPR},
-		{name: "PodGang group version absent", path: podGangPath, status: http.StatusNotFound, wantErr: missingPodGang},
-		{name: "PodGang resource absent", path: podGangPath, status: http.StatusOK, wantErr: missingPodGang},
-		{name: "PodGang subresource alone is insufficient", path: podGangPath, status: http.StatusOK, resource: "podgangs/status", wantErr: missingPodGang},
-		{name: "PodGang discovery forbidden", path: podGangPath, status: http.StatusForbidden, wantErr: "discover scheduler.grove.io/v1alpha1 API resources: Forbidden"},
-		{name: "PodGang discovery fails", path: podGangPath, status: http.StatusInternalServerError, wantErr: "discover scheduler.grove.io/v1alpha1 API resources: Internal Server Error"},
+		{name: "LPR subresource alone is insufficient", path: lprPath, status: http.StatusOK, resource: "lpupipelinerequests/status", wantErr: missingLPR},
+		{name: "LPR discovery forbidden", path: lprPath, status: http.StatusForbidden, wantErr: "discover scheduling.lpu.nvidia.com/v1alpha1 API resources: Forbidden"},
+		{name: "LPR discovery fails", path: lprPath, status: http.StatusInternalServerError, wantErr: "discover scheduling.lpu.nvidia.com/v1alpha1 API resources: Internal Server Error"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Serve the exact LPX and PodGang API discovery paths")
+			t.Log("Serve the exact LPX API discovery path")
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				resource := "lpupipelinerequests"
-				switch r.URL.Path {
-				case lprPath:
-				case podGangPath:
-					resource = "podgangs"
-				default:
+				if r.URL.Path != lprPath {
 					t.Errorf("unexpected discovery path %q", r.URL.Path)
 					http.NotFound(w, r)
 					return
 				}
+				resource := "lpupipelinerequests"
 				status := http.StatusOK
-				if r.URL.Path == tt.path {
+				if tt.path != "" {
 					status, resource = tt.status, tt.resource
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -68,7 +61,7 @@ func TestResolveLPX(t *testing.T) {
 			}))
 			defer server.Close()
 
-			t.Log("Require both APIs and preserve discovery failures")
+			t.Log("Require the LPR API and preserve discovery failures")
 			enabled, err := resolveLPX(t.Context(), &rest.Config{Host: server.URL})
 			if enabled != (tt.wantErr == "") || (err == nil) != (tt.wantErr == "") {
 				t.Fatalf("resolveLPX() = %v, %v; want enabled=%v, error=%q", enabled, err, tt.wantErr == "", tt.wantErr)

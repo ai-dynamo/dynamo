@@ -76,7 +76,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
@@ -127,8 +126,6 @@ func initCRDSchemes() {
 	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
 	// operator only consumes them (creates/reads), it does not reconcile them.
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
-
-	utilruntime.Must(groveschedulerv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(lpxv1alpha1.AddToScheme(crdScheme))
 

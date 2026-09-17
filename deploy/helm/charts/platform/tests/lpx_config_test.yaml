@@ -3,7 +3,6 @@
 
 suite: LPX operator configuration and RBAC
 templates:
-  - templates/validate-values.yaml
   - charts/dynamo-operator/templates/operator-config.yaml
   - charts/dynamo-operator/templates/manager-rbac.yaml
   - charts/dynamo-operator/templates/validate-values.yaml
@@ -65,6 +64,5 @@ tests:
               - delete
               - get
               - list
-              - update
               - watch
         documentIndex: 0

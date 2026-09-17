@@ -122,6 +122,8 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-specdecode
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: node-local-v2-specdecode-63df-lpu-0b6c0b4b697c4048
   namespace: test
 ---
@@ -132,6 +134,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:75b46c16650574198e849b16926c63faebce97ca1ddffdfd4c7a54e0d7b1db81
   labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-specdecode
   name: node-local-v2-specdecode-63df
   namespace: test
@@ -144,6 +147,7 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a973a2e0a92065344cab16b5b6af504f9403288bc2b332785293de5f036bc404
         scheduling.lpu.nvidia.com/model: draft0
@@ -290,6 +294,7 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3061125e8a82194e7fadab40ddf2334081340728a740f3bd3d1231f72c061e1b
         scheduling.lpu.nvidia.com/model: draft1
@@ -436,6 +441,7 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:55b7f43000a720e9afec381ae28b43d4a1436b5b8a2b666c4706d692411d218e
         scheduling.lpu.nvidia.com/model: target
@@ -729,7 +735,7 @@ spec:
               name: ssh-secret
               readOnly: true
           restartPolicy: Always
-          schedulerName: default-scheduler
+          schedulerName: lpx-scheduler
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch

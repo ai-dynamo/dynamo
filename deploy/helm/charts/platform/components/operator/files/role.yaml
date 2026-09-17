@@ -358,14 +358,6 @@ rules:
   - update
   - watch
 - apiGroups:
-  - scheduler.grove.io
-  resources:
-  - podgangs
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - scheduling.lpu.nvidia.com
   resources:
   - lpupipelinerequests
@@ -374,7 +366,6 @@ rules:
   - delete
   - get
   - list
-  - update
   - watch
 - apiGroups:
   - scheduling.run.ai

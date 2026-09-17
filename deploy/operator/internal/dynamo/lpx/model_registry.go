@@ -31,16 +31,22 @@ const (
 	BuildSchemeGCS = "gs"
 )
 
-// ModelRegistry resolves build references and acquires their compiler metadata.
-type ModelRegistry struct {
+type defaultModelRegistry struct {
 	registryURL *url.URL
 	mxClient    modelpb.ModelServiceClient
+}
+
+// ModelRegistry resolves build references and acquires their compiler metadata.
+type ModelRegistry interface {
+	BuildURL(id string) (*url.URL, error)
+	EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error)
+	AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error)
 }
 
 // NewModelRegistry constructs a registry rooted at modelRegistryURL. An empty
 // URL is supported for absolute build references. mxClient may be nil when GCS
 // downloads are not required.
-func NewModelRegistry(modelRegistryURL string, mxClient modelpb.ModelServiceClient) (*ModelRegistry, error) {
+func NewModelRegistry(modelRegistryURL string, mxClient modelpb.ModelServiceClient) (ModelRegistry, error) {
 	var registryURL *url.URL
 
 	if modelRegistryURL != "" {
@@ -56,7 +62,7 @@ func NewModelRegistry(modelRegistryURL string, mxClient modelpb.ModelServiceClie
 		}
 	}
 
-	return &ModelRegistry{
+	return &defaultModelRegistry{
 		registryURL: registryURL,
 		mxClient:    mxClient,
 	}, nil
@@ -65,7 +71,7 @@ func NewModelRegistry(modelRegistryURL string, mxClient modelpb.ModelServiceClie
 // EnsureDownloaded ensures buildURL is locally available and reports whether
 // the download is complete. For GCS builds it may initiate or advance a
 // ModelExpress download. The receiver must be non-nil and is not mutated.
-func (r *ModelRegistry) EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error) {
+func (r *defaultModelRegistry) EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error) {
 	switch buildURL.Scheme {
 	case BuildSchemeFile:
 		return true, nil
@@ -117,7 +123,7 @@ func (r *ModelRegistry) EnsureDownloaded(ctx context.Context, buildURL url.URL) 
 
 // BuildURL resolves id against the configured registry URL. The receiver must
 // be non-nil and is not mutated.
-func (r *ModelRegistry) BuildURL(id string) (*url.URL, error) {
+func (r *defaultModelRegistry) BuildURL(id string) (*url.URL, error) {
 	refURL, err := parseBuildRef(id)
 	if err == nil {
 		return refURL, nil
@@ -184,7 +190,7 @@ func parseBuildRef(ref string) (*url.URL, error) {
 
 // readBuildFileBounded reads one relative file. The receiver and buildURL must
 // be non-nil, and maxBytes must be non-negative.
-func (r *ModelRegistry) readBuildFileBounded(
+func (r *defaultModelRegistry) readBuildFileBounded(
 	ctx context.Context,
 	buildURL *url.URL,
 	relativePath string,
@@ -309,7 +315,7 @@ func (r *ModelRegistry) readBuildFileBounded(
 	}
 }
 
-func (r *ModelRegistry) listBuildFiles(ctx context.Context, buildURL *url.URL) ([]string, error) {
+func (r *defaultModelRegistry) listBuildFiles(ctx context.Context, buildURL *url.URL) ([]string, error) {
 	var (
 		paths []string
 		err   error

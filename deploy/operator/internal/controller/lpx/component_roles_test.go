@@ -11,30 +11,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
-
-func TestLPXRoleDependenciesIncludeDraftAndConductor(t *testing.T) {
-	t.Log("Give both components consumed Agent claims and the conductor its own dependency")
-	source := newLPXSpecDecodeTestSource()
-	for _, component := range lpx.Components(source) {
-		pod := &component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
-		pod.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To(component.ComponentName + "-gpu")}}
-		pod.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
-	}
-	conductor := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor)
-	conductor.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To("conductor-gpu")}}
-	conductor.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
-	before := source.DeepCopy()
-
-	t.Log("Index each authored role's consumed claim without modifying the source")
-	require.ElementsMatch(t, []string{"draft-gpu", "lpx-gpu", "conductor-gpu"}, lpxDRAClaimReferences(true)(source))
-	require.Equal(t, before, source)
-}
 
 func TestSpecDecodeStatusCountsCompleteDraftInstances(t *testing.T) {
 	t.Log("Materialize two draft instances and one target in their single shared scaling group")

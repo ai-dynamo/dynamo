@@ -20,8 +20,6 @@ github.com/NYTimes/gziphandler v1.1.1 h1:ZUDjpQae29j0ryrS0u/B8HZfJBtBQHjqw2rQ2cq
 github.com/NYTimes/gziphandler v1.1.1/go.mod h1:n/CVRwUEOgIxrgPvAQhUUr9oeUtvrhMomdKFjzJNB0c=
 github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.13 h1:eVDVuyh5vDgWG6I2Mffs68g+25qW94VAG3EfDTxbhc0=
 github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.13/go.mod h1:csL4kgDc1MoD7Erjyu8QyVrbL/dv8fIZ3sYkJcc2nrQ=
-github.com/ai-dynamo/grove/scheduler/api v0.1.0-alpha.12-rc1 h1:9WJ/OFtVNQMozYVUl6OfXDz/jF4hFvdj7hL7SHauIOU=
-github.com/ai-dynamo/grove/scheduler/api v0.1.0-alpha.12-rc1/go.mod h1:72lQ5kc40jXxyOrfuAICc8qxV0/Mwy8k8woM8LUoo9E=
 github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f h1:PBmn3itAlMFHc0HgDOcr0IwV0uiUDQehcg7/aumIobU=
 github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f/go.mod h1:i7tIkusSEcMQqN4IDd3cXZ6EL0Kfke6F00Nn5WbuH3Y=
 github.com/ai-dynamo/snapshot/api v0.1.0 h1:S8HG6K+YhloUc/usu03wiJ8fTo3Mhju/oWQVFDYVw/o=

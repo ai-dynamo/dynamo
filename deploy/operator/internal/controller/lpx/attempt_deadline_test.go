@@ -8,6 +8,7 @@ package lpx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
@@ -38,31 +38,26 @@ func TestLPXAttemptIsPreparedBeforePublicationAndCannotBeRecreated(t *testing.T)
 	require.Nil(t, rejected)
 	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
 
-	classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err := reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	require.Equal(t, lpxAttemptPreparedReason, lpxResult(classification).Reason)
 	prepared := applyLPXAttemptTransition(t, dgd, classification)
 	require.NotEmpty(t, prepared.PodCliqueSetUID)
 	require.Empty(t, ownedLPXRequests(t, ctx, reconciler, dgd))
 
-	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	_, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	requests := ownedLPXRequests(t, ctx, reconciler, dgd)
 	require.Len(t, requests, 1)
-	require.Contains(t, requests[0].Finalizers, lpxAttemptRecordingFinalizer)
+	require.Empty(t, requests[0].Finalizers)
 	dgd.Status.Placement = nil
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	recovered := applyLPXAttemptTransition(t, dgd, classification)
 	require.Equal(t, requests[0].UID, recovered.Requests[0].UID, "publication reconciliation recovers the existing request")
-	dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: prepared}
+	dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: recovered}
 
 	require.NoError(t, reconciler.Delete(ctx, &requests[0]))
-	classification, _, _, err = reconciler.reconcileLPXAttemptDeadline(ctx, dgd, source)
-	require.NoError(t, err)
-	armed := applyLPXAttemptTransition(t, dgd, classification)
-	require.Equal(t, requests[0].UID, armed.Requests[0].UID)
-	require.True(t, armed.DeadlineAt.Time.Equal(requests[0].CreationTimestamp.Add(30*time.Second)))
 	classification, _, _, err = reconciler.reconcileLPXAttemptDeadline(ctx, dgd, source)
 	require.NoError(t, err)
 	require.Equal(t, lpxAttemptAuthorityLostReason, lpxResult(classification).Reason)
@@ -88,7 +83,10 @@ func TestLPXAttemptIsPreparedBeforePublicationAndCannotBeRecreated(t *testing.T)
 				attempt.DisarmedAt = ptr.To(metav1.Now())
 			}
 			objects := lpxMaterializedObjects(t, reconciler, deployment, source, desired)
-			objects = append(objects, deadlineTestRequest(deployment, "removed-engine", time.Now().Add(-time.Hour), lpxv1alpha1.RequestPhaseBound))
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			removed := deadlineTestRequest(deployment, pcs, "removed-engine", time.Now().Add(-time.Hour), lpxv1alpha1.RequestPhaseBound)
+			objects = append(objects, removed)
+			attempt.Requests = append(attempt.Requests, deadlineTestAttempt(deployment, removed, time.Now()).Requests...)
 			if test.terminating {
 				request := requests[0].DeepCopy()
 				request.DeletionTimestamp = ptr.To(metav1.Now())
@@ -96,31 +94,28 @@ func TestLPXAttemptIsPreparedBeforePublicationAndCannotBeRecreated(t *testing.T)
 				objects = append(objects, request)
 			}
 			r := newLPXTestReconciler(t, registry, deployment, source, objects...)
-			key := client.ObjectKeyFromObject(deployment)
-
-			t.Log("Full reconciliation repeatedly reports terminal authority loss without republishing or deleting the PCS")
-			for range 3 {
-				result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			t.Log("Terminal authority loss deletes the PCS before its requests")
+			var transition *lpxDeadlineTransition
+			for range 2 {
+				classification, _, _, err := r.reconcileLPXAttemptDeadline(ctx, deployment, source)
 				require.NoError(t, err)
-				require.NoError(t, r.Get(ctx, key, deployment))
-				failed := meta.FindStatusCondition(deployment.Status.Conditions, "Failed")
-				require.NotNil(t, failed)
-				require.Equal(t, metav1.ConditionTrue, failed.Status)
-				require.Equal(t, lpxAttemptAuthorityLostReason, failed.Reason)
-				live := ownedLPXRequests(t, ctx, r, deployment)
-				if test.terminating {
-					require.Len(t, live, 1)
-					require.Equal(t, requests[0].UID, live[0].UID)
-					require.False(t, live[0].DeletionTimestamp.IsZero())
-				} else {
-					require.Empty(t, live)
-					require.Zero(t, result.RequeueAfter)
-				}
-				pcs := &grovev1alpha1.PodCliqueSet{}
-				require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
-				require.Equal(t, armed.PodCliqueSetUID, pcs.UID)
-				require.Equal(t, int32(1), pcs.Spec.Replicas)
-				require.True(t, pcs.DeletionTimestamp.IsZero())
+				require.Equal(t, lpxAttemptAuthorityLostReason, lpxResult(classification).Reason)
+				transition = classification.(*lpxDeadlineTransition)
+				deployment.Status.Placement.LPXAttempt = transition.attempt
+			}
+			pcs = &grovev1alpha1.PodCliqueSet{}
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.PodCliqueSetName}, pcs)))
+			removed = getLPXRequest(t, ctx, r.Client, deployment.Namespace, "removed-engine")
+			require.NoError(t, r.Delete(ctx, removed), "emulate garbage collection in the fake client")
+			live := ownedLPXRequests(t, ctx, r, deployment)
+			if test.terminating {
+				require.Len(t, live, 1)
+				require.Equal(t, requests[0].UID, live[0].UID)
+				require.False(t, live[0].DeletionTimestamp.IsZero())
+				require.Equal(t, lpxRetirementRequeueAfter, transition.requeueAfter)
+			} else {
+				require.Empty(t, live)
+				require.Equal(t, lpxRetirementRequeueAfter, transition.requeueAfter)
 			}
 		})
 	}
@@ -179,7 +174,7 @@ func TestLPXAttemptPartialPublicationLossFencesEverySibling(t *testing.T) {
 	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
 
 	for range 3 {
-		classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+		classification, err := reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 		require.NoError(t, err)
 		applyLPXAttemptTransition(t, dgd, classification)
 	}
@@ -200,7 +195,7 @@ func TestLPXAttemptPartialPublicationLossFencesEverySibling(t *testing.T) {
 	classification, _, _, err = reconciler.reconcileLPXAttemptDeadline(ctx, dgd, source)
 	require.NoError(t, err)
 	require.Equal(t, lpxAttemptAuthorityLostReason, lpxResult(classification).Reason)
-	_, _ = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	_, _ = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.LessOrEqual(t, len(ownedLPXRequests(t, ctx, reconciler, dgd)), 1)
 }
 
@@ -209,14 +204,24 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 	source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
 	dgd := newLPXTestDeployment(t, source)
 	source.Spec.Scheduling = deadlineTestScheduling()
-	request := deadlineTestRequest(dgd, "attempt", time.Now().UTC().Truncate(time.Second), lpxv1alpha1.RequestPhaseBound)
-	running := deadlineTestRequest(dgd, "older-engine", time.Now().Add(-time.Hour), lpxv1alpha1.RequestPhaseBound)
-	request.Finalizers = []string{lpxAttemptRecordingFinalizer, "scheduling.lpu.nvidia.com/lpx-cleanup"}
 	pcs := deadlineTestPCS(dgd, "pcs-uid")
+	request := deadlineTestRequest(dgd, pcs, "attempt", time.Now().UTC().Truncate(time.Second), lpxv1alpha1.RequestPhaseBound)
+	running := deadlineTestRequest(dgd, pcs, "older-engine", time.Now().UTC().Truncate(time.Second).Add(-time.Hour), lpxv1alpha1.RequestPhaseBound)
+	group := &grovev1alpha1.PodCliqueScalingGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "engine-group", Namespace: dgd.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
+		},
+		Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 2},
+	}
+	request.Spec.MaterializationTarget.PodCliqueScalingGroupRef = &lpxv1alpha1.PodCliqueScalingGroupReference{Name: group.Name, ReplicaIndex: 1}
+	running.Spec.MaterializationTarget.PodCliqueScalingGroupRef = &lpxv1alpha1.PodCliqueScalingGroupReference{Name: group.Name, ReplicaIndex: 0}
+	request.Finalizers = []string{"scheduling.lpu.nvidia.com/lpx-cleanup"}
 	attempt := deadlineTestAttempt(dgd, request, time.Now().Add(time.Minute))
 	attempt.DeadlineAt, attempt.PodCliqueSetUID = nil, ""
 	dgd.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: attempt}
-	reconciler := newLPXTestReconciler(t, nil, dgd, source, request, running, pcs)
+	reconciler := newLPXTestReconciler(t, nil, dgd, source, request, running, pcs, group)
+	running = getLPXRequest(t, t.Context(), reconciler.Client, running.Namespace, running.Name)
 
 	t.Log("Recover the native deadline and record the Bound scheduling disposition")
 	classification, _, _, err := reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
@@ -237,7 +242,7 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 
 	t.Log("Resumed scheduling expires under the original elapsed deadline")
 	request.Status.Phase = lpxv1alpha1.RequestPhasePending
-	reconciler = newLPXTestReconciler(t, nil, dgd, source, request, running, pcs)
+	reconciler = newLPXTestReconciler(t, nil, dgd, source, request, running, pcs, group)
 	classification, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
 	require.NoError(t, err)
 	result := lpxResult(classification)
@@ -250,29 +255,33 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 	applyLPXAttemptTransition(t, dgd, classification)
 	require.True(t, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, request.Name).DeletionTimestamp.IsZero())
 
-	t.Log("Delete only the expired request, preserving the PCS and previously running engine")
+	t.Log("Scale down the failed engine before deleting its request, preserving the older engine")
+	_, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
+	require.NoError(t, err)
+	storedPCS := &grovev1alpha1.PodCliqueSet{}
+	pcsKey := client.ObjectKeyFromObject(pcs)
+	require.NoError(t, reconciler.Get(t.Context(), pcsKey, storedPCS))
+	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(group), group))
+	require.Equal(t, int32(1), group.Spec.Replicas)
+	require.True(t, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, request.Name).DeletionTimestamp.IsZero())
+	require.True(t, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, running.Name).DeletionTimestamp.IsZero())
+
+	t.Log("Retire only the failed request after Grove has accepted the lower scale")
 	_, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
 	require.NoError(t, err)
 	deleting := getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, request.Name)
 	require.False(t, deleting.DeletionTimestamp.IsZero())
-	storedPCS := &grovev1alpha1.PodCliqueSet{}
-	pcsKey := client.ObjectKeyFromObject(pcs)
-	require.NoError(t, reconciler.Get(t.Context(), pcsKey, storedPCS))
-	require.EqualValues(t, 1, storedPCS.Spec.Replicas)
-	require.Equal(t, pcs.UID, storedPCS.UID)
-	require.Equal(t, running.UID, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, running.Name).UID)
-
-	t.Log("Release the recording finalizer only after scheduler cleanup finishes")
-	deleting.Finalizers = []string{lpxAttemptRecordingFinalizer}
-	require.NoError(t, reconciler.Update(t.Context(), deleting))
+	require.Equal(t, running, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, running.Name))
 	_, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
 	require.NoError(t, err)
+
+	t.Log("The request disappears when scheduler cleanup releases its own finalizer")
+	deleting.Finalizers = nil
+	require.NoError(t, reconciler.Update(t.Context(), deleting))
 	_, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
 	require.NoError(t, err)
 	classification, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), dgd, source)
 	require.NoError(t, err)
-	require.NoError(t, reconciler.Get(t.Context(), pcsKey, storedPCS))
-	require.EqualValues(t, 1, storedPCS.Spec.Replicas)
 	require.True(t, apierrors.IsNotFound(reconciler.Get(t.Context(), client.ObjectKeyFromObject(request), &lpxv1alpha1.LPUPipelineRequest{})))
 	require.Zero(t, classification.(*lpxDeadlineTransition).requeueAfter)
 
@@ -291,7 +300,7 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(pcs), storedPCS))
 	require.Equal(t, int32(1), storedPCS.Spec.Replicas)
 
-	t.Log("A stale cached attempt cannot clean up siblings after a newer status records replacement")
+	t.Log("A stale cached attempt has no exact objects to clean up after replacement")
 	key := client.ObjectKeyFromObject(dgd)
 	require.NoError(t, reconciler.Get(t.Context(), key, dgd))
 	cached := dgd.DeepCopy()
@@ -304,7 +313,7 @@ func TestLPXAttemptDeadlineRaceUsesOnlyDurableDisposition(t *testing.T) {
 	cached.Status.Placement.LPXAttempt.Requests = append(cached.Status.Placement.LPXAttempt.Requests,
 		deadlineTestAttempt(cached, running, time.Now()).Requests[0])
 	_, _, _, err = reconciler.reconcileLPXAttemptDeadline(t.Context(), cached, source)
-	require.ErrorContains(t, err, "authority changed")
+	require.NoError(t, err)
 	require.True(t, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, running.Name).DeletionTimestamp.IsZero())
 	require.True(t, getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, replacement.Name).DeletionTimestamp.IsZero())
 
@@ -341,8 +350,9 @@ func TestLPXAttemptBatchEditsPreserveUnchangedEngines(t *testing.T) {
 			t.Log("Keep the existing engine and its deadline across a new source generation")
 			source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
 			deployment := newLPXTestDeployment(t, source)
+			pcs := deadlineTestPCS(deployment, "pcs-uid")
 			now := time.Now().UTC().Truncate(time.Second)
-			old := deadlineTestRequest(deployment, "old", now.Add(-time.Hour), tc.phase)
+			old := deadlineTestRequest(deployment, pcs, "old", now.Add(-time.Hour), tc.phase)
 			deadline := now.Add(time.Minute)
 			if tc.phase != lpxv1alpha1.RequestPhasePending {
 				deadline = now.Add(-time.Minute)
@@ -360,7 +370,7 @@ func TestLPXAttemptBatchEditsPreserveUnchangedEngines(t *testing.T) {
 				want.Requests[0].AttemptDigest = ""
 			}
 			if tc.add {
-				added := deadlineTestRequest(deployment, "new", now, lpxv1alpha1.RequestPhasePending)
+				added := deadlineTestRequest(deployment, pcs, "new", now, lpxv1alpha1.RequestPhasePending)
 				if tc.deleting {
 					added.DeletionTimestamp = ptr.To(metav1.Now())
 				}
@@ -397,23 +407,63 @@ func TestLPXAttemptBatchEditsPreserveUnchangedEngines(t *testing.T) {
 	}
 }
 
-func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
+func TestLPXAttemptReplacementAdoptsNewPodCliqueSetIdentity(t *testing.T) {
+	for _, timed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("timed=%t", timed), func(t *testing.T) {
+			t.Log("Record an active attempt after every old request has finished garbage collection")
+			source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
+			deployment := newLPXTestDeployment(t, source)
+			deployment.Generation = 2
+			current := &nvidiacomv1beta1.LPXAttemptStatus{
+				ObservedGeneration: 1,
+				PodCliqueSetUID:    "previous-pcs-uid",
+				Requests: []nvidiacomv1beta1.LPXAttemptRequestStatus{{
+					Name: "engine",
+				}},
+			}
+			var deadlineSeconds *int64
+			if timed {
+				current.DeadlineAt = ptr.To(metav1.NewTime(time.Now().Add(time.Minute)))
+				deadlineSeconds = ptr.To[int64](30)
+			}
+			deployment.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: current}
+			replacement := deadlineTestPCS(deployment, "replacement-pcs-uid")
+			reconciler := newLPXTestReconciler(t, nil, deployment, source, replacement)
+			want := &nvidiacomv1beta1.LPXAttemptStatus{
+				ObservedGeneration: deployment.Generation,
+				PodCliqueSetUID:    replacement.UID,
+				Requests: []nvidiacomv1beta1.LPXAttemptRequestStatus{{
+					Name: "engine", AttemptDigest: "sha256:replacement",
+				}},
+			}
+
+			t.Log("Move the preserved attempt to the replacement PCS before publishing its request")
+			transition := reconciler.reconcileLPXAttemptPreparation(
+				deployment,
+				deadlineSeconds,
+				want,
+				map[string]*lpxv1alpha1.LPUPipelineRequest{},
+			)
+			require.NotNil(t, transition)
+			next := applyLPXAttemptTransition(t, deployment, transition)
+			require.Equal(t, deployment.Generation, next.ObservedGeneration)
+			require.Equal(t, replacement.UID, next.PodCliqueSetUID)
+			require.Equal(t, current.DeadlineAt, next.DeadlineAt)
+			require.Equal(t, want.Requests, next.Requests)
+			require.NoError(t, reconciler.revalidateLPXAttemptPublication(t.Context(), deployment, replacement.Name))
+		})
+	}
+}
+
+func TestLPXAttemptScaleInCancellationPrecedesDeadline(t *testing.T) {
 	for _, tc := range []struct {
-		name                  string
-		phase                 lpxv1alpha1.RequestPhase
-		replacing, keepClique bool
-		settings              bool
+		name  string
+		phase lpxv1alpha1.RequestPhase
 	}{
-		{name: "scale-in", phase: lpxv1alpha1.RequestPhasePending},
-		{name: "completed-scale-in", phase: lpxv1alpha1.RequestPhaseBound},
-		{name: "native-replacement", phase: lpxv1alpha1.RequestPhasePending, replacing: true},
-		{name: "native-child-still-deleting", phase: lpxv1alpha1.RequestPhasePending, replacing: true, keepClique: true},
-		{name: "completed-native-replacement", phase: lpxv1alpha1.RequestPhaseBound, replacing: true},
-		{name: "settings-edit", phase: lpxv1alpha1.RequestPhasePending, settings: true},
-		{name: "completed-settings-edit", phase: lpxv1alpha1.RequestPhaseBound, settings: true},
+		{name: "pending", phase: lpxv1alpha1.RequestPhasePending},
+		{name: "completed", phase: lpxv1alpha1.RequestPhaseBound},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			replacing := tc.replacing || tc.settings
 			t.Log("Publish two engines, with only the second engine recorded in the scheduling batch")
 			ctx := t.Context()
 			deployment, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
@@ -421,12 +471,11 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 			r, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, source)
 			objects := lpxMaterializedObjects(t, r, deployment, source, desired)
 			createLPXTestObjects(t, ctx, r.Client, objects...)
-			_, err := r.reconcileSelectedLPX(ctx, deployment, desired)
-			require.NoError(t, err)
+			publishSelectedLPXForTest(t, ctx, r, deployment, desired)
 			running := getLPXRequest(t, ctx, r.Client, deployment.Namespace, desired.requests[0].requestName)
 			running.Status = newLPXNodeLocalBoundStatus(running.Generation, 1, "sha256:bound")
 			pending := getLPXRequest(t, ctx, r.Client, deployment.Namespace, desired.requests[1].requestName)
-			pending.Finalizers = []string{lpxAttemptRecordingFinalizer, "scheduler.example/cleanup"}
+			pending.Finalizers = []string{"scheduler.example/cleanup"}
 			pending.Status = &lpxv1alpha1.LPUPipelineRequestStatus{
 				Phase: lpxv1alpha1.RequestPhasePending, ObservedGeneration: ptr.To(pending.Generation),
 			}
@@ -436,17 +485,7 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 			deadline := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
 			deployment.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: deadlineTestAttempt(deployment, pending, deadline)}
 			source.Spec.Scheduling = deadlineTestScheduling()
-			if tc.settings {
-				source.Spec.Components[0].LPX.Settings.Raw = []byte(`{"prop_sync":false}`)
-				deployment.Generation++
-				running.Finalizers = []string{"scheduler.example/cleanup"}
-			} else if replacing {
-				clique := findLPXTestClique(t, objects, desired.plan.ForReplica(1).Agents[0].CliqueName)
-				clique.Finalizers = []string{"grove.example/cleanup"}
-				clique.DeletionTimestamp = ptr.To(metav1.Now())
-			} else {
-				source.Spec.Components[0].Replicas = ptr.To[int32](1)
-			}
+			source.Spec.Components[0].Replicas = ptr.To[int32](1)
 			objects = append(objects, running, pending)
 			r = newLPXTestReconciler(t, registry, deployment, source, objects...)
 			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
@@ -456,95 +495,52 @@ func TestLPXAttemptEmptyBatchRetirementPrecedesDeadline(t *testing.T) {
 			})
 			key := client.ObjectKeyFromObject(deployment)
 
-			t.Log("Persist cancellation, while pending native replacement retains its deadline")
-			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			t.Log("Persist cancellation before evaluating the expired deadline")
+			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			require.NoError(t, err)
 			require.NoError(t, r.Get(ctx, key, deployment))
 			attempt := currentLPXAttemptStatus(deployment)
-			require.Equal(t, replacing && tc.phase == lpxv1alpha1.RequestPhasePending, attempt.ExceededAt != nil)
-			if replacing {
-				require.Len(t, attempt.Requests, 1)
-				require.Equal(t, pending.UID, attempt.Requests[0].UID)
-				require.Empty(t, attempt.Requests[0].AttemptDigest)
-				if tc.phase == lpxv1alpha1.RequestPhaseBound {
-					require.NotNil(t, attempt.DisarmedAt)
-				}
-			} else {
-				require.Equal(t, []nvidiacomv1beta1.LPXAttemptRequestStatus{}, attempt.Requests)
-				require.NotNil(t, attempt.DisarmedAt)
-			}
+			require.Equal(t, []nvidiacomv1beta1.LPXAttemptRequestStatus{}, attempt.Requests)
+			require.Nil(t, attempt.ExceededAt)
+			require.NotNil(t, attempt.DisarmedAt)
 			require.True(t, deadline.Equal(attempt.DeadlineAt.Time))
-			if tc.replacing && !tc.keepClique {
-				t.Log("Grove can finish deleting the old clique before scheduler retirement resumes")
-				clique := &grovev1alpha1.PodClique{}
-				cliqueKey := client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.ForReplica(1).Agents[0].CliqueName}
-				require.NoError(t, r.Get(ctx, cliqueKey, clique))
-				clique.Finalizers = nil
-				require.NoError(t, r.Update(ctx, clique))
-			}
-			if !replacing {
-				t.Log("A source read failure on the next reconcile cannot expire the canceled batch")
-				readError := errors.New("temporary source observation failure")
-				original := r.Client
-				r.Client = interceptor.NewClient(original.(client.WithWatch), interceptor.Funcs{
-					Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
-						if _, source := object.(*nvidiacomv1beta1.DynamoGraphDeployment); source {
-							return readError
-						}
-						return delegated.Get(ctx, key, object, opts...)
-					},
-				})
-				_, readErr := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-				r.Client = original
-				require.NoError(t, r.Get(ctx, key, deployment))
-				require.Nil(t, currentLPXAttemptStatus(deployment).ExceededAt)
-				require.ErrorIs(t, readErr, readError)
-			}
 
-			t.Log("Cancellation completes, while native replacement still expires under the original clock")
-			for range 3 {
-				_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-				if tc.keepClique && err != nil {
-					t.Log("The next observation retries an optimistic concurrency conflict:", err)
-					require.True(t, apierrors.IsConflict(err))
-				} else {
-					require.NoError(t, err)
-				}
-				require.NoError(t, r.Get(ctx, key, deployment))
-				attempt = currentLPXAttemptStatus(deployment)
-				require.Equal(t, replacing && tc.phase == lpxv1alpha1.RequestPhasePending, attempt.ExceededAt != nil)
-				if tc.replacing && tc.phase == lpxv1alpha1.RequestPhaseBound {
-					require.Nil(t, attempt.DeadlineAt)
-				} else {
-					require.True(t, deadline.Equal(attempt.DeadlineAt.Time))
-				}
-			}
-			if replacing {
-				if tc.replacing {
-					require.Nil(t, attempt.DisarmedAt)
-				}
-				retiring := getLPXRequest(t, ctx, r.Client, deployment.Namespace, pending.Name)
-				require.False(t, retiring.DeletionTimestamp.IsZero())
-				retiring.Finalizers = []string{lpxAttemptRecordingFinalizer}
-				require.NoError(t, r.Update(ctx, retiring))
+			t.Log("A source read failure on the next reconcile cannot expire the canceled batch")
+			readError := errors.New("temporary source observation failure")
+			original := r.Client
+			r.Client = interceptor.NewClient(original.(client.WithWatch), interceptor.Funcs{
+				Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if _, source := object.(*nvidiacomv1beta1.DynamoGraphDeployment); source {
+						return readError
+					}
+					return delegated.Get(ctx, key, object, opts...)
+				},
+			})
+			_, readErr := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			r.Client = original
+			require.NoError(t, r.Get(ctx, key, deployment))
+			require.Nil(t, currentLPXAttemptStatus(deployment).ExceededAt)
+			require.ErrorIs(t, readErr, readError)
+
+			t.Log("Cancellation remains disarmed while only the removed request retires")
+			for range 4 {
 				_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 				require.NoError(t, err)
-				require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pending), &lpxv1alpha1.LPUPipelineRequest{})))
-			} else {
-				require.NotNil(t, attempt.DisarmedAt)
+				require.NoError(t, r.Get(ctx, key, deployment))
+				attempt = currentLPXAttemptStatus(deployment)
+				require.True(t, deadline.Equal(attempt.DeadlineAt.Time))
 			}
-			stored := getLPXRequest(t, ctx, r.Client, deployment.Namespace, running.Name)
-			require.Equal(t, running.UID, stored.UID)
-			require.Equal(t, tc.settings, !stored.DeletionTimestamp.IsZero())
+			require.Nil(t, attempt.ExceededAt)
+			require.NotNil(t, attempt.DisarmedAt)
 			pcs := &grovev1alpha1.PodCliqueSet{}
 			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
 			require.Equal(t, types.UID("pcs-uid"), pcs.UID)
-			require.Equal(t, int32(1), pcs.Spec.Replicas)
-			require.True(t, pcs.DeletionTimestamp.IsZero())
+			require.Equal(t, running, getLPXRequest(t, ctx, r.Client, deployment.Namespace, running.Name))
+			stored := getLPXRequest(t, ctx, r.Client, deployment.Namespace, pending.Name)
+			require.False(t, stored.DeletionTimestamp.IsZero())
 		})
 	}
 }
-
 func TestLPXAttemptRetryRequiresLaterEditAndCompletedCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -554,7 +550,8 @@ func TestLPXAttemptRetryRequiresLaterEditAndCompletedCleanup(t *testing.T) {
 			t.Log("Keep the failed batch fenced until both a later edit and exact-request cleanup")
 			source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
 			deployment := newLPXTestDeployment(t, source)
-			old := deadlineTestRequest(deployment, "old", time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending)
+			pcs := deadlineTestPCS(deployment, "pcs-uid")
+			old := deadlineTestRequest(deployment, pcs, "old", time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending)
 			old.Finalizers = []string{"scheduler.example/cleanup"}
 			attempt := deadlineTestAttempt(deployment, old, time.Now().Add(-time.Second))
 			attempt.ExceededAt = ptr.To(metav1.Now())
@@ -567,8 +564,11 @@ func TestLPXAttemptRetryRequiresLaterEditAndCompletedCleanup(t *testing.T) {
 				objects = append(objects, old)
 			}
 			r := newLPXTestReconciler(t, nil, deployment, source, objects...)
-			currents := lpxRequestsByName(ownedLPXRequests(t, t.Context(), r, deployment))
-			classification, err := r.continueTerminalLPXAttempt(t.Context(), deployment, attempt, currents, lpxSchedulingDeadlineExceededReason, "expired")
+			var requests []lpxv1alpha1.LPUPipelineRequest
+			if !tc.oldGone {
+				requests = []lpxv1alpha1.LPUPipelineRequest{*old}
+			}
+			classification, err := r.continueTerminalLPXAttempt(t.Context(), deployment, attempt, requests, lpxSchedulingDeadlineExceededReason, "expired")
 			require.NoError(t, err)
 			transition := classification.(*lpxDeadlineTransition)
 			if tc.laterEdit && tc.oldGone {
@@ -586,11 +586,12 @@ func TestLPXAttemptRecoversUIDWithoutTimeoutOrSource(t *testing.T) {
 		t.Log("Recover an already-published UID even when its timeout option or source is unavailable", sourceAvailable)
 		source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
 		deployment := newLPXTestDeployment(t, source)
-		request := deadlineTestRequest(deployment, "unrecorded", time.Now(), lpxv1alpha1.RequestPhasePending)
+		pcs := deadlineTestPCS(deployment, "pcs-uid")
+		request := deadlineTestRequest(deployment, pcs, "unrecorded", time.Now(), lpxv1alpha1.RequestPhasePending)
 		attempt := deadlineTestAttempt(deployment, request, time.Now())
 		attempt.DeadlineAt, attempt.Requests[0].UID = nil, ""
 		deployment.Status.Placement = &nvidiacomv1beta1.PlacementStatus{LPXAttempt: attempt}
-		r := newLPXTestReconciler(t, nil, deployment, source, request)
+		r := newLPXTestReconciler(t, nil, deployment, source, request, pcs)
 		if !sourceAvailable {
 			source = nil
 		}
@@ -622,17 +623,18 @@ func deadlineTestAttempt(dgd *nvidiacomv1alpha1.LPXGraphDeployment, request *lpx
 	}
 }
 
-func deadlineTestRequest(dgd *nvidiacomv1alpha1.LPXGraphDeployment, name string, created time.Time, phase lpxv1alpha1.RequestPhase) *lpxv1alpha1.LPUPipelineRequest {
+func deadlineTestRequest(dgd *nvidiacomv1alpha1.LPXGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, name string, created time.Time, phase lpxv1alpha1.RequestPhase) *lpxv1alpha1.LPUPipelineRequest {
 	generation := int64(1)
 	request := &lpxv1alpha1.LPUPipelineRequest{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: dgd.Namespace, UID: types.UID(name + "-uid"), ResourceVersion: "1",
 			Generation: generation, CreationTimestamp: metav1.NewTime(created),
+			Labels: map[string]string{lpxOwnerUIDLabel: string(dgd.UID)},
 			Annotations: map[string]string{
 				lpxAttemptDigestAnnotation: "sha256:attempt", lpxDeploymentUIDAnnotation: string(dgd.UID),
-				lpxPCSUIDAnnotation: "pcs-uid",
+				lpxPCSUIDAnnotation: string(pcs.UID),
 			},
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, nvidiacomv1alpha1.LPXGraphDeploymentGVK)},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
 		},
 		Spec:   lpxv1alpha1.LPUPipelineRequestSpec{ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal},
 		Status: &lpxv1alpha1.LPUPipelineRequestStatus{Phase: phase, ObservedGeneration: &generation},

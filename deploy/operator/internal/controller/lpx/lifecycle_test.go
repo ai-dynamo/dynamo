@@ -33,7 +33,6 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -42,7 +41,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -61,7 +59,7 @@ func newLPXTestScheme(t testing.TB) *k8sruntime.Scheme {
 	scheme := k8sruntime.NewScheme()
 	for _, add := range []func(*k8sruntime.Scheme) error{
 		corev1.AddToScheme, resourcev1.AddToScheme, nvidiacomv1alpha1.AddToScheme, nvidiacomv1beta1.AddToScheme,
-		grovev1alpha1.AddToScheme, groveschedulerv1alpha1.AddToScheme, lpxv1alpha1.AddToScheme,
+		grovev1alpha1.AddToScheme, lpxv1alpha1.AddToScheme,
 	} {
 		require.NoError(t, add(scheme))
 	}
@@ -69,12 +67,12 @@ func newLPXTestScheme(t testing.TB) *k8sruntime.Scheme {
 }
 
 type snapshotFailureRegistry struct {
-	*lpx.ModelRegistry
+	lpx.ModelRegistry
 	err error
 }
 
 type downloadOrderedLPXRegistry struct {
-	*lpx.ModelRegistry
+	lpx.ModelRegistry
 	buildURL   url.URL
 	downloaded bool
 	calls      []string
@@ -124,7 +122,7 @@ func requirePreparedLPX(
 
 func newPreparedLPXTestReconciler(
 	t *testing.T,
-	registry *lpx.ModelRegistry,
+	registry lpx.ModelRegistry,
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.LPXGraphDeployment,
 	source *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -160,13 +158,10 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	require.NotContains(t, group.Spec.CliqueNames, "")
 	cyborg := findLPXTestClique(t, objects, desired.plan.CyborgClique)
 	require.NotContains(t, cyborg.Spec.StartsAfter, "")
-	ordinaryPodGang := findLPXTestPodGang(t, objects, corev1.DefaultSchedulerName)
-	require.Len(t, ordinaryPodGang.Spec.PodGroups, 1)
-	require.Equal(t, desired.plan.CyborgClique, ordinaryPodGang.Spec.PodGroups[0].Name)
+	require.Equal(t, lpx.SchedulerName, cyborg.Spec.PodSpec.SchedulerName)
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
 
-	classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
+	classification := publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
 	require.IsType(t, &lpxOpen{}, classification)
 	request := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 	require.NotNil(t, request.Spec.CyborgPodCliqueRef)
@@ -225,8 +220,7 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 	objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
 
-	classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
+	classification := publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
 	require.IsType(t, &lpxOpen{}, classification)
 	requests, err := reconciler.listOwnedLPXRequests(ctx, dgd)
 	require.NoError(t, err)
@@ -236,13 +230,15 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 	for _, request := range requests {
 		model := request.Annotations[lpxModelAnnotation]
 		requestByModel[model] = request
+		require.Equal(t, string(dgd.UID), request.Labels[lpxOwnerUIDLabel])
 		require.Equal(t, model, request.Spec.NodeLocal.Model)
-		require.Equal(t, "selected-dgd-0-lpx-scheduler", request.Spec.PodGangRef.Name)
+		require.Equal(t, desired.plan.LPXScalingGroup, request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name)
 	}
 	for _, projection := range desired.requests {
 		request, found := requestByModel[projection.modelProjection.Model()]
 		require.True(t, found)
 		require.Equal(t, projection.modelProjection.Digest().String(), request.Annotations[lpx.WorkloadDigestAnnotation])
+		require.Equal(t, projection.modelProjection.CompilerSnapshotDigest(), request.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 	}
 
 	for index, expected := range desired.plan.Agents {
@@ -251,6 +247,7 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		require.Equal(t, int32(expected.Replicas), clique.Spec.Replicas)
 		require.Equal(t, ptr.To(int32(expected.Replicas)), clique.Spec.MinAvailable)
 		require.Equal(t, projection.modelProjection.Digest().String(), clique.Annotations[lpx.WorkloadDigestAnnotation])
+		require.Equal(t, projection.modelProjection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 		require.Equal(t, projection.modelProjection.Model(), clique.Annotations[lpxv1alpha1.PodModelAnnotation])
 		require.NotContains(t, clique.Annotations, lpxv1alpha1.PodPartitionIDAnnotation)
 		require.NotContains(t, clique.Annotations, lpxv1alpha1.PodRankInPartitionAnnotation)
@@ -268,244 +265,14 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		}},
 	}
 	require.NoError(t, reconciler.Update(ctx, target))
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	require.Equal(t, nvidiacomv1beta1.DGDStateFailed, lpxResult(classification).State)
 	require.Equal(t, "LPXUnsupported", lpxResult(classification).Reason)
 	require.Contains(t, lpxResult(classification).Message, "TargetUnsupported")
 }
 
-func TestLPXPublicationWitnessReadsOnlyNamedChildrenAndNoPods(t *testing.T) {
-	t.Log("Materialize two runtime replicas and preserve their distinct publication identities")
-	ctx := t.Context()
-	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-	source.Spec.Components[0].Replicas = ptr.To(int32(2))
-	source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
-	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
-	require.Equal(t, int32(2), desired.plan.Replicas)
-	require.Len(t, desired.requests, 2)
-	require.NotEqual(t, desired.requests[0].requestName, desired.requests[1].requestName)
-	for replicaIndex := int32(0); replicaIndex < 2; replicaIndex++ {
-		require.Equal(t, replicaIndex, desired.requests[replicaIndex].replicaIndex)
-	}
-
-	objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-	scalingGroup := findLPXTestScalingGroup(t, objects, desired.plan.LPXScalingGroup)
-	require.Equal(t, int32(2), scalingGroup.Spec.Replicas)
-
-	t.Log("Leave Agent status unobserved and drift generated-child replica counts")
-	replicaOneAgent := findLPXTestClique(t, objects, desired.plan.ForReplica(1).Agents[0].CliqueName)
-	replicaOneAgent.Status.ObservedGeneration = nil
-	replicaOneAgent.Status.Replicas = replicaOneAgent.Spec.Replicas
-	replicaOneAgent.Status.UpdatedReplicas = replicaOneAgent.Spec.Replicas
-	replicaOneAgent.Status.ScheduleGatedReplicas = replicaOneAgent.Spec.Replicas
-	replicaOneAgent.Status.ScheduledReplicas = 0
-	replicaOneAgent.Status.Conditions = nil
-	scalingGroup.Spec.Replicas = 9
-	agentClique := findLPXTestClique(t, objects, desired.plan.Agents[0].CliqueName)
-	agentClique.Spec.Replicas = 9
-	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
-
-	t.Log("Allow only deterministic engine-clique and parent-PCSG reads; reject Pods and broad clique lists")
-	reader, ok := reconciler.apiReader.(client.WithWatch)
-	require.True(t, ok)
-	cachedClient, ok := reconciler.Client.(client.WithWatch)
-	require.True(t, ok)
-	forbiddenReads := make([]string, 0)
-	podGangLists := 0
-	lifecycleRequestListCalls, dependencyListCalls := 0, 0
-	scalingGroupGets := 0
-	conductorGets := 0
-	cyborgGets := 0
-	agentGets := 0
-	forbidden := interceptor.Funcs{
-		Get: func(
-			ctx context.Context,
-			delegated client.WithWatch,
-			key client.ObjectKey,
-			object client.Object,
-			opts ...client.GetOption,
-		) error {
-			switch object.(type) {
-			case *corev1.Pod:
-				forbiddenReads = append(forbiddenReads, fmt.Sprintf("get %T %s", object, key))
-			case *grovev1alpha1.PodCliqueScalingGroup:
-				if key.Name != desired.plan.LPXScalingGroup {
-					forbiddenReads = append(forbiddenReads, fmt.Sprintf("get %T %s", object, key))
-				} else {
-					scalingGroupGets++
-				}
-			case *grovev1alpha1.PodClique:
-				known := false
-				for _, request := range desired.requests {
-					plan := desired.plan.ForReplica(request.replicaIndex)
-					for _, agent := range plan.Agents {
-						if key.Name == agent.CliqueName {
-							agentGets++
-							known = true
-						}
-					}
-					if key.Name == plan.ConductorClique {
-						conductorGets++
-						known = true
-						break
-					}
-					if key.Name == plan.CyborgClique {
-						cyborgGets++
-						known = true
-						break
-					}
-				}
-				if !known {
-					forbiddenReads = append(forbiddenReads, fmt.Sprintf("get %T %s", object, key))
-				}
-			}
-			return delegated.Get(ctx, key, object, opts...)
-		},
-		List: func(
-			ctx context.Context,
-			delegated client.WithWatch,
-			list client.ObjectList,
-			opts ...client.ListOption,
-		) error {
-			if _, request := list.(*lpxv1alpha1.LPUPipelineRequestList); request {
-				lifecycleRequestListCalls++
-			} else {
-				dependencyListCalls++
-			}
-			switch list.(type) {
-			case *groveschedulerv1alpha1.PodGangList:
-				podGangLists++
-			case *corev1.PodList, *grovev1alpha1.PodCliqueList,
-				*grovev1alpha1.PodCliqueScalingGroupList:
-				forbiddenReads = append(forbiddenReads, fmt.Sprintf("list %T", list))
-			}
-			return delegated.List(ctx, list, opts...)
-		},
-	}
-	reconciler.apiReader = interceptor.NewClient(reader, forbidden)
-	reconciler.Client = interceptor.NewClient(cachedClient, forbidden)
-
-	t.Log("Publish directly from the PCS and PodGang witness")
-	classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
-	require.IsType(t, &lpxOpen{}, classification)
-	require.Empty(t, forbiddenReads)
-	require.Equal(t, 1, podGangLists)
-	require.Equal(t, 1, scalingGroupGets)
-	require.Zero(t, conductorGets)
-	require.Equal(t, 2, cyborgGets)
-	require.Equal(t, 2, agentGets)
-	requests, err := reconciler.listOwnedLPXRequests(ctx, dgd)
-	require.NoError(t, err)
-	require.Len(t, requests, 2)
-	require.NotEqual(t, requests[0].Spec.PodGangRef.Name, requests[1].Spec.PodGangRef.Name)
-	require.NotNil(t, requests[0].Spec.CyborgPodCliqueRef)
-	require.NotNil(t, requests[1].Spec.CyborgPodCliqueRef)
-	require.NotEqual(t, requests[0].Spec.CyborgPodCliqueRef.Name, requests[1].Spec.CyborgPodCliqueRef.Name)
-	published := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-
-	t.Log("Repeat publication using the same witnesses and preserve the request")
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
-	require.IsType(t, &lpxOpen{}, classification)
-	require.Equal(t, published.UID, getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName).UID)
-	require.Empty(t, forbiddenReads)
-	require.Equal(t, 2, scalingGroupGets)
-	require.Zero(t, conductorGets)
-	require.Equal(t, 4, cyborgGets)
-	require.Equal(t, 4, agentGets)
-
-	t.Log("Leave unsupported generated-child replica mutations untouched")
-	require.NoError(t, cachedClient.Get(ctx, client.ObjectKeyFromObject(scalingGroup), scalingGroup))
-	require.Equal(t, int32(9), scalingGroup.Spec.Replicas)
-	require.NoError(t, cachedClient.Get(ctx, client.ObjectKeyFromObject(agentClique), agentClique))
-	require.Equal(t, int32(9), agentClique.Spec.Replicas)
-
-	t.Log("Retire the complete runtime while scheduler finalizers hold both requests")
-	for index := range requests {
-		requests[index].Finalizers = []string{"scheduling.lpu.nvidia.com/test-cleanup"}
-		require.NoError(t, reconciler.Update(ctx, &requests[index]))
-	}
-	_, err = reconciler.retireLPXRequest(ctx, dgd, desired.plan.PodCliqueSetName, &requests[0], "test group retirement")
-	require.NoError(t, err)
-	requests, err = reconciler.listOwnedLPXRequests(ctx, dgd)
-	require.NoError(t, err)
-	require.Len(t, requests, 2)
-	for index := range requests {
-		require.False(t, requests[index].DeletionTimestamp.IsZero())
-	}
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	require.NoError(t, reconciler.Get(ctx, types.NamespacedName{
-		Namespace: dgd.Namespace,
-		Name:      desired.plan.PodCliqueSetName,
-	}, pcs))
-	require.Zero(t, pcs.Spec.Replicas)
-
-	t.Log("Restore nonzero Grove scale while scheduler finalizers still hold both requests in deletion")
-	pcs.Spec.Replicas = 1
-	require.NoError(t, reconciler.Update(ctx, pcs))
-	lifecycleRequestListCalls, dependencyListCalls = 0, 0
-
-	t.Log("Re-establish scale-to-zero using only the authoritative attempt-wide request observation")
-	classification, err = reconciler.retireLPXRequest(ctx, dgd, desired.plan.PodCliqueSetName, &requests[0], "test group retirement")
-	require.NoError(t, err)
-	require.IsType(t, &lpxRetiring{}, classification)
-	require.Positive(t, lifecycleRequestListCalls)
-	require.Zero(t, dependencyListCalls)
-	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
-	require.Zero(t, pcs.Spec.Replicas)
-}
-
-func TestSelectedLPXObservesLimitsOnlyCyborgGPUIntent(t *testing.T) {
-	t.Log("Materialize a hybrid Cyborg whose classic GPU intent exists only in limits")
-	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-	cyborgPodSpec := &source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
-	cyborgPodSpec.ResourceClaims = nil
-	cyborgPodSpec.Containers[0].Resources = corev1.ResourceRequirements{
-		Limits: corev1.ResourceList{
-			corev1.ResourceName(consts.KubeResourceGPUNvidia): resource.MustParse("1"),
-		},
-	}
-	reconciler, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), dgd, source)
-	objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-	cyborg := findLPXTestClique(t, objects, desired.plan.CyborgClique)
-	cyborg.Spec.PodSpec = *cyborgPodSpec.DeepCopy()
-	cyborg.Spec.PodSpec.SchedulerName = corev1.DefaultSchedulerName
-	pcs := findLPXTestPodCliqueSet(t, objects)
-	for _, template := range pcs.Spec.Template.Cliques {
-		if template.Name == desired.plan.CyborgTemplate {
-			template.Spec.PodSpec = *cyborg.Spec.PodSpec.DeepCopy()
-		}
-	}
-	container := cyborg.Spec.PodSpec.Containers[0]
-	require.Empty(t, container.Resources.Requests)
-	require.NotEmpty(t, container.Resources.Limits)
-
-	t.Log("Observe the raw Grove PodSpec without relying on Kubernetes Pod request defaulting")
-	createLPXTestObjects(t, t.Context(), reconciler.Client, objects...)
-	classification, err := reconciler.reconcileSelectedLPX(t.Context(), dgd, desired)
-	require.NoError(t, err)
-	require.IsType(t, &lpxOpen{}, classification)
-
-	t.Log("Retire the published request if the live classic GPU intent disappears")
-	storedCyborg := &grovev1alpha1.PodClique{}
-	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(cyborg), storedCyborg))
-	storedCyborg.Spec.PodSpec.ResourceClaims = nil
-	for index := range storedCyborg.Spec.PodSpec.Containers {
-		if storedCyborg.Spec.PodSpec.Containers[index].Name == consts.MainContainerName ||
-			storedCyborg.Spec.PodSpec.Containers[index].Name == "cyborg" {
-			storedCyborg.Spec.PodSpec.Containers[index].Resources = corev1.ResourceRequirements{}
-		}
-	}
-	require.NoError(t, reconciler.Update(t.Context(), storedCyborg))
-	classification, err = reconciler.reconcileSelectedLPX(t.Context(), dgd, desired)
-	require.NoError(t, err)
-	require.IsType(t, &lpxClosed{}, classification)
-	requireLPXRequestNotFound(t, t.Context(), reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-}
-
-func TestLPXPublishedWorkloadFailurePreservesExistingEngines(t *testing.T) {
+func TestLPXPublishedWorkloadFailureRetirement(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		snapshotError error
@@ -520,8 +287,7 @@ func TestLPXPublishedWorkloadFailurePreservesExistingEngines(t *testing.T) {
 			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
 			createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
-			classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-			require.NoError(t, err)
+			classification := publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
 			require.IsType(t, &lpxOpen{}, classification)
 			requestBefore := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 			key := client.ObjectKeyFromObject(dgd)
@@ -550,7 +316,7 @@ func TestLPXPublishedWorkloadFailurePreservesExistingEngines(t *testing.T) {
 				dgd.Spec.InputRevision = revision
 				require.NoError(t, reconciler.Update(ctx, dgd))
 			}
-			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			pcs := &grovev1alpha1.PodCliqueSet{}
 			t.Log("Failed desired input must preserve the exact published request and PCS")
 			require.Equal(t, requestBefore, getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, requestBefore.Name))
@@ -570,96 +336,6 @@ func TestLPXPublishedWorkloadFailurePreservesExistingEngines(t *testing.T) {
 			require.Equal(t, dgd.Generation, failed.ObservedGeneration)
 			require.Equal(t, err.Error(), failed.Message)
 		})
-	}
-}
-
-func TestLPXAuthoritativeLifecycleListConsumesContinuePages(t *testing.T) {
-	t.Log("Create lifecycle objects spanning multiple authoritative pages")
-	ctx := t.Context()
-	source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
-	dgd := newLPXTestDeployment(t, source)
-	reconciler := newLPXTestReconciler(t, nil, dgd, source)
-	reader, ok := reconciler.apiReader.(client.WithWatch)
-	require.True(t, ok)
-
-	expected := make([]lpxv1alpha1.LPUPipelineRequest, lpxLifecycleListPageSize+1)
-	for index := range expected {
-		expected[index] = lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("request-%02d", index),
-			Namespace: dgd.Namespace,
-		}}
-	}
-	const nextPageToken = "lpx-request-page-2"
-
-	t.Log("Install a paginated reader that repopulates each supplied page in place")
-	requestGets := 0
-	requestListCalls := make([]client.ListOptions, 0, 2)
-	reconciler.apiReader = interceptor.NewClient(reader, interceptor.Funcs{
-		Get: func(
-			ctx context.Context,
-			delegated client.WithWatch,
-			key client.ObjectKey,
-			object client.Object,
-			opts ...client.GetOption,
-		) error {
-			if _, request := object.(*lpxv1alpha1.LPUPipelineRequest); request {
-				requestGets++
-			}
-			return delegated.Get(ctx, key, object, opts...)
-		},
-		List: func(
-			ctx context.Context,
-			delegated client.WithWatch,
-			list client.ObjectList,
-			opts ...client.ListOption,
-		) error {
-			requestList, request := list.(*lpxv1alpha1.LPUPipelineRequestList)
-			if !request {
-				return delegated.List(ctx, list, opts...)
-			}
-			options := *(&client.ListOptions{}).ApplyOptions(opts)
-			requestListCalls = append(requestListCalls, options)
-			switch options.Continue {
-			case "":
-				requestList.Items = append(requestList.Items[:0], expected[:lpxLifecycleListPageSize]...)
-				requestList.Continue = nextPageToken
-			case nextPageToken:
-				requestList.Items = append(requestList.Items[:0], expected[lpxLifecycleListPageSize:]...)
-				requestList.Continue = ""
-			default:
-				return fmt.Errorf("unexpected LPX request continuation token %q", options.Continue)
-			}
-			return nil
-		},
-	})
-
-	t.Log("Retain raw callback pointers until every continuation page is consumed")
-	retained := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(expected))
-	require.NoError(t, visitLifecycleObjectPages(
-		ctx,
-		reconciler.apiReader,
-		&lpxv1alpha1.LPUPipelineRequestList{},
-		func(object k8sruntime.Object) error {
-			request := object.(*lpxv1alpha1.LPUPipelineRequest)
-			retained = append(retained, request)
-			return nil
-		},
-		client.InNamespace(dgd.Namespace),
-	))
-
-	t.Log("Verify retained first-page objects and exact pagination options after traversal")
-	require.Len(t, retained, len(expected))
-	for index := range expected {
-		require.Equal(t, expected[index], *retained[index])
-	}
-	require.Zero(t, requestGets, "pagination must not fall back to per-object request Gets")
-	require.Len(t, requestListCalls, 2, "the authoritative list must make exactly one call per returned page")
-	require.Equal(t, "", requestListCalls[0].Continue)
-	require.Equal(t, nextPageToken, requestListCalls[1].Continue)
-	for _, call := range requestListCalls {
-		require.Equal(t, int64(lpxLifecycleListPageSize), call.Limit)
-		require.Equal(t, dgd.Namespace, call.Namespace)
-		require.Nil(t, call.LabelSelector)
 	}
 }
 
@@ -706,9 +382,10 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	})
 
 	t.Log("Only bookkeeping changes; root metadata additions, edits and removals are ignored")
-	synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, cached, desired)
+	modified, synced, err := commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, cached, desired, commoncontroller.WithPreservedListOrder(),
+	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 	require.True(t, modified)
 	require.Equal(t, 1, updates)
 	want := before.DeepCopy()
@@ -719,18 +396,20 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 
 	t.Log("Root metadata differences alone are a no-op once bookkeeping is current")
 	updates = 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, synced, desired)
+	modified, synced, err = commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, synced, desired, commoncontroller.WithPreservedListOrder(),
+	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 	require.False(t, modified)
 	require.Zero(t, updates)
 	require.Equal(t, want, synced)
 
 	t.Log("Template metadata still updates through Spec without changing root metadata or native controls")
 	desired.Spec.Template.Cliques[0].Annotations = map[string]string{"test.example/template": "next"}
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, synced, desired)
+	modified, synced, err = commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, synced, desired, commoncontroller.WithPreservedListOrder(),
+	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 	require.True(t, modified)
 	require.Equal(t, 1, updates)
 	want.Spec = desired.Spec
@@ -748,9 +427,10 @@ func TestLPXPodCliqueSetMetadataSyncUsesSuppliedObservation(t *testing.T) {
 	require.NoError(t, base.Update(ctx, concurrent))
 	desired.Spec.Replicas += 2
 	updates = 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, cached, desired)
+	modified, synced, err = commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, cached, desired, commoncontroller.WithPreservedListOrder(),
+	)
 	require.True(t, apierrors.IsConflict(err), "concurrent spec change must trigger a fresh reconciliation: %v", err)
-	require.Nil(t, retiring)
 	require.Nil(t, synced)
 	require.False(t, modified)
 	require.Equal(t, 1, updates)
@@ -770,9 +450,10 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 			desired.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers = []corev1.Container{
 				{Name: "setup", Image: "busybox"}, {Name: "migrate", Image: "busybox"},
 			}
-			observed, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
+			modified, observed, err := commoncontroller.SyncObservedResource(
+				ctx, reconciler, dgd, nil, desired.DeepCopy(), commoncontroller.WithPreservedListOrder(),
+			)
 			require.NoError(t, err)
-			require.Nil(t, retiring)
 			require.True(t, modified)
 
 			t.Log("Model API-defaulted live fields without changing the applied generation")
@@ -786,9 +467,10 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 			}
 
 			t.Log("Apply authored ordering changes but ignore unchanged desired specs")
-			synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, observed, desired)
+			modified, synced, err := commoncontroller.SyncObservedResource(
+				ctx, reconciler, dgd, observed, desired, commoncontroller.WithPreservedListOrder(),
+			)
 			require.NoError(t, err)
-			require.Nil(t, retiring)
 			require.Equal(t, reorder, modified)
 			require.Equal(t, desired.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers, synced.Spec.Template.Cliques[0].Spec.PodSpec.InitContainers)
 			require.Equal(t, before, observed, "synchronization must not mutate its observation")
@@ -797,15 +479,16 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 			}
 
 			t.Log("The next reconciliation is a no-op")
-			_, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, synced, desired)
+			modified, _, err = commoncontroller.SyncObservedResource(
+				ctx, reconciler, dgd, synced, desired, commoncontroller.WithPreservedListOrder(),
+			)
 			require.NoError(t, err)
-			require.Nil(t, retiring)
 			require.False(t, modified)
 		})
 	}
 }
 
-func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
+func TestLPXPublicationFencePrecedesPodCliqueSetWrite(t *testing.T) {
 	t.Log("Prepare a render for publication and observe writes across the authoritative fence")
 	ctx := t.Context()
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
@@ -839,39 +522,25 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	})
 
 	t.Log("A failed publication observation prevents initial creation")
-	synced, modified, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
+	currents, classification, err := reconciler.reconcileLPXPublicationFence(ctx, dgd, selected, true)
 	require.ErrorIs(t, err, fenceErr)
-	require.Nil(t, retiring)
-	require.False(t, modified)
-	require.Nil(t, synced)
+	require.Nil(t, classification)
+	require.Nil(t, currents)
 	require.Zero(t, writes)
 	require.Equal(t, 1, lists)
 	require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(desired), &grovev1alpha1.PodCliqueSet{})))
 
-	t.Log("Retire an owned request without creating a PCS while its finalizer holds deletion")
+	t.Log("Recover the observation and create the exact child-owned PCS")
 	failFence = false
-	request := deadlineTestRequest(dgd, "previous-attempt", time.Now(), lpxv1alpha1.RequestPhaseBound)
-	request.ResourceVersion = ""
-	request.Finalizers = []string{"test.example/scheduler"}
-	require.NoError(t, base.Create(ctx, request))
 	writes, lists = 0, 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
+	currents, classification, err = reconciler.reconcileLPXPublicationFence(ctx, dgd, selected, true)
 	require.NoError(t, err)
-	require.NotNil(t, retiring)
-	require.False(t, modified)
-	require.Nil(t, synced)
-	require.Zero(t, writes)
-	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(request), request))
-	require.NotNil(t, request.DeletionTimestamp)
-	require.True(t, apierrors.IsNotFound(base.Get(ctx, client.ObjectKeyFromObject(desired), &grovev1alpha1.PodCliqueSet{})))
-
-	t.Log("Finish request cleanup and create the exact child-owned PCS")
-	request.Finalizers = nil
-	require.NoError(t, base.Update(ctx, request))
-	writes, lists = 0, 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
+	require.Nil(t, classification)
+	require.Empty(t, currents)
+	modified, synced, err := commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, nil, desired.DeepCopy(), commoncontroller.WithPreservedListOrder(),
+	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 	require.True(t, modified)
 	require.Equal(t, 1, lists)
 	require.Equal(t, 1, writes)
@@ -888,9 +557,10 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	require.Equal(t, stored.ResourceVersion, synced.ResourceVersion)
 
 	t.Log("A stale missing observation does not adopt an already-created PCS")
-	_, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, nil, desired.DeepCopy())
+	modified, _, err = commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, nil, desired.DeepCopy(), commoncontroller.WithPreservedListOrder(),
+	)
 	require.True(t, apierrors.IsAlreadyExists(err), "create race must trigger a fresh reconciliation: %v", err)
-	require.Nil(t, retiring)
 	require.False(t, modified)
 
 	t.Log("An in-place update does not require listing every scheduler request")
@@ -901,9 +571,10 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	desired.Annotations[lpx.WorkloadDigestAnnotation] = "next"
 	failFence = true
 	writes, lists = 0, 0
-	synced, modified, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(ctx, dgd, lpx.ServingComponent(source).Replicas, live, desired)
+	modified, synced, err = commoncontroller.SyncObservedResource(
+		ctx, reconciler, dgd, live, desired, commoncontroller.WithPreservedListOrder(),
+	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 	require.True(t, modified)
 	require.Equal(t, live.UID, synced.UID)
 	require.Equal(t, 1, writes)
@@ -913,6 +584,126 @@ func TestLPXPodCliqueSetPublicationFence(t *testing.T) {
 	require.Equal(t, live.Annotations[lpx.WorkloadDigestAnnotation], stored.Annotations[lpx.WorkloadDigestAnnotation])
 }
 
+func TestLPXPublicationWaitsForRequestGarbageCollectionBeforeRecreatingPodCliqueSet(t *testing.T) {
+	ctx := t.Context()
+	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
+	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
+	publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
+	require.NoError(t, reconciler.Delete(ctx, pcs))
+
+	t.Log("Keep the replacement PCS fenced while its predecessor's request remains persisted")
+	currents, classification, err := reconciler.reconcileLPXPublicationFence(ctx, dgd, desired, true)
+	require.NoError(t, err)
+	require.Len(t, currents, 1)
+	require.IsType(t, &lpxRetiring{}, classification)
+
+	t.Log("Garbage collection alone cannot authorize replacing a recorded scheduling attempt")
+	request := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
+	require.NoError(t, reconciler.Delete(ctx, request))
+	currents, classification, err = reconciler.reconcileLPXPublicationFence(ctx, dgd, desired, true)
+	require.NoError(t, err)
+	require.Empty(t, currents)
+	require.IsType(t, &lpxRetiring{}, classification)
+}
+
+func TestLPXScaleDownDeletesOnlyStaleRequests(t *testing.T) {
+	ctx := t.Context()
+	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	source.Spec.Components[0].Replicas = ptr.To[int32](3)
+	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
+	objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
+	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
+	for _, projection := range desired.requests {
+		request := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, projection.requestName)
+		request.Status = &lpxv1alpha1.LPUPipelineRequestStatus{
+			Phase: lpxv1alpha1.RequestPhasePending, ObservedGeneration: ptr.To(request.Generation),
+		}
+		require.NoError(t, reconciler.Update(ctx, request))
+	}
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	pcsUID := pcs.UID
+	retainedUID := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName).UID
+
+	t.Log("Scale from three replicas to one while every request remains pending")
+	scaledDown := withLPXTestReplicas(t, desired, 1)
+	_, classification, err := reconciler.reconcileLPXPublicationFence(ctx, dgd, scaledDown, false)
+	require.NoError(t, err)
+	transition, ok := classification.(*lpxDeadlineTransition)
+	require.True(t, ok)
+	require.Len(t, transition.attempt.Requests, 1)
+	dgd.Status.Placement.LPXAttempt = transition.attempt
+	require.NoError(t, reconciler.Status().Update(ctx, dgd))
+
+	t.Log("Delete every stale LPR concurrently without replacing the shared PCS")
+	currents, classification, err := reconciler.reconcileLPXPublicationFence(ctx, dgd, scaledDown, false)
+	require.NoError(t, err)
+	require.IsType(t, &lpxRetiring{}, classification)
+	require.Len(t, currents, 1)
+	for _, projection := range desired.requests[1:] {
+		requireLPXRequestNotFound(t, ctx, reconciler.Client, dgd.Namespace, projection.requestName)
+	}
+	retained := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
+	require.Equal(t, retainedUID, retained.UID)
+	storedPCS := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), storedPCS))
+	require.Equal(t, pcsUID, storedPCS.UID)
+}
+
+func TestLPXScaleUpWaitsForTerminatingScaledDownRequest(t *testing.T) {
+	ctx := t.Context()
+	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	source.Spec.Components[0].Replicas = ptr.To[int32](2)
+	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
+	objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
+	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	pcsUID := pcs.UID
+	removed := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[1].requestName)
+	removedUID := removed.UID
+	removed.Finalizers = []string{"scheduler.example/cleanup"}
+	require.NoError(t, reconciler.Update(ctx, removed))
+
+	t.Log("Scale down and begin direct request deletion")
+	scaledDown := withLPXTestReplicas(t, desired, 1)
+	_, classification, err := reconciler.reconcileLPXPublicationFence(ctx, dgd, scaledDown, false)
+	require.NoError(t, err)
+	transition, ok := classification.(*lpxDeadlineTransition)
+	require.True(t, ok)
+	dgd.Status.Placement.LPXAttempt = transition.attempt
+	require.NoError(t, reconciler.Status().Update(ctx, dgd))
+	_, classification, err = reconciler.reconcileLPXPublicationFence(ctx, dgd, scaledDown, false)
+	require.NoError(t, err)
+	require.IsType(t, &lpxRetiring{}, classification)
+	terminating := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, removed.Name)
+	require.False(t, terminating.DeletionTimestamp.IsZero())
+
+	t.Log("Scale back up while the same request name is still terminating")
+	_, classification, err = reconciler.reconcileLPXPublicationFence(ctx, dgd, desired, false)
+	require.NoError(t, err)
+	require.IsType(t, &lpxRetiring{}, classification)
+	storedPCS := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), storedPCS))
+	require.Equal(t, pcsUID, storedPCS.UID)
+
+	t.Log("Recreate only the request after scheduler cleanup completes")
+	terminating.Finalizers = nil
+	require.NoError(t, reconciler.Update(ctx, terminating))
+	requireLPXRequestNotFound(t, ctx, reconciler.Client, dgd.Namespace, removed.Name)
+	classification = publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
+	require.IsType(t, &lpxOpen{}, classification)
+	recreated := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, removed.Name)
+	require.NotEqual(t, removedUID, recreated.UID)
+	require.Equal(t, pcsUID, metav1.GetControllerOf(recreated).UID)
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), storedPCS))
+	require.Equal(t, pcsUID, storedPCS.UID)
+}
+
 func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 	ctx := t.Context()
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
@@ -920,10 +711,7 @@ func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 
 	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
 	rendered := renderLPXTestPodCliqueSet(t, ctx, reconciler, dgd, source, desired)
-	_, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
-	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
+	publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
 	published := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 
 	pcsKey := types.NamespacedName{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}
@@ -934,15 +722,15 @@ func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 	require.NoError(t, reconciler.Update(ctx, drifted))
 	require.NoError(t, reconciler.Get(ctx, pcsKey, drifted))
 
-	_, _, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(
+	_, _, err := commoncontroller.SyncObservedResource(
 		ctx,
+		reconciler,
 		dgd,
-		lpx.ServingComponent(source).Replicas,
 		drifted,
 		rendered,
+		commoncontroller.WithPreservedListOrder(),
 	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 	require.Equal(t, published, getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, published.Name))
 
 	t.Log("Correct the spec in place without stopping the existing PCS")
@@ -956,7 +744,7 @@ func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 	require.NotEmpty(t, foreignPCS.OwnerReferences)
 	foreignPCS.OwnerReferences[0].UID = "foreign-owner"
 	foreignReconciler := newLPXTestReconciler(t, registry, dgd, source, foreignPCS)
-	_, err = foreignReconciler.reconcileSelectedLPXFromCurrentRequests(ctx, dgd, desired, nil, false)
+	_, err = foreignReconciler.reconcileSelectedLPXFromCurrentRequests(ctx, dgd, desired, nil)
 	require.EqualError(t, err, fmt.Sprintf("refusing to inspect PodCliqueSet %q without the exact LPXGraphDeployment controller owner", foreignPCS.Name))
 
 	t.Log("An explicitly stopped PCS still cannot publish another request")
@@ -978,23 +766,23 @@ func TestLPXPreflightPreservesRequestsDuringNativeGroveSync(t *testing.T) {
 			return errors.New("retired Grove observation must not read dependencies")
 		},
 	})
-	classification, err := reconciler.reconcileSelectedLPXFromCurrentRequests(ctx, dgd, desired, nil, false)
+	classification, err := reconciler.reconcileSelectedLPXFromCurrentRequests(ctx, dgd, desired, nil)
 	require.NoError(t, err)
 	closed := requireLPXClosed(t, classification)
-	require.Equal(t, "The retired Grove attempt is held at zero; successor publication waits for post-retirement Grove synchronization", closed.incomplete)
+	require.Equal(t, "The selected Grove PodCliqueSet has 0 replicas, want 1", closed.incomplete)
 	require.Equal(t, 1, pcsGets)
 	reconciler.apiReader = reader
 
 	t.Log("Restore the explicit hold in place without rotating the existing request")
-	_, _, retiring, err = reconciler.reconcileGrovePodCliqueSetForLPX(
+	_, _, err = commoncontroller.SyncObservedResource(
 		ctx,
+		reconciler,
 		dgd,
-		lpx.ServingComponent(source).Replicas,
 		drifted,
 		rendered,
+		commoncontroller.WithPreservedListOrder(),
 	)
 	require.NoError(t, err)
-	require.Nil(t, retiring)
 
 	recreated := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, reconciler.Get(ctx, pcsKey, recreated))
@@ -1014,7 +802,7 @@ func TestGroveSpecSyncPreservesWorkloadAfterTopologyRejection(t *testing.T) {
 	require.Nil(t, rejected)
 
 	oldPCS := findLPXTestPodCliqueSet(t, lpxMaterializedObjects(t, oldPrepareReconciler, oldDGD, oldSource, oldDesired))
-	published := deadlineTestRequest(oldDGD, oldDesired.requests[0].requestName, time.Now(), lpxv1alpha1.RequestPhaseBound)
+	published := deadlineTestRequest(oldDGD, oldPCS, oldDesired.requests[0].requestName, time.Now(), lpxv1alpha1.RequestPhaseBound)
 
 	const successorBuildID = "build-v2-successor"
 	successorRegistry := newLPXTestRegistryWithPartitionsAndMode(
@@ -1058,15 +846,15 @@ func TestGroveSpecSyncPreservesWorkloadAfterTopologyRejection(t *testing.T) {
 			return delegated.Update(ctx, object, opts...)
 		},
 	})
-	synced, changed, retiring, err := reconciler.reconcileGrovePodCliqueSetForLPX(
+	changed, synced, err := commoncontroller.SyncObservedResource(
 		ctx,
+		reconciler,
 		successorDGD,
-		lpx.ServingComponent(successorSource).Replicas,
 		pcs,
 		successorRendered,
+		commoncontroller.WithPreservedListOrder(),
 	)
 	require.ErrorIs(t, err, admissionErr)
-	require.Nil(t, retiring)
 	require.Nil(t, synced)
 	require.False(t, changed)
 
@@ -1096,18 +884,12 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	require.Nil(t, source.Spec.Scheduling)
 	require.NotContains(t, source.Annotations, consts.KubeAnnotationLPXSchedulerBackend)
 
-	t.Log("Materialize the selected runtime alongside an unrelated ordinary frontend group")
+	t.Log("Materialize the selected runtime")
 	objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-	ordinary := findLPXTestPodGang(t, objects, corev1.DefaultSchedulerName)
-	ordinary.Spec.PodGroups = append(ordinary.Spec.PodGroups, groveschedulerv1alpha1.PodGroup{
-		Name: "frontend", MinReplicas: 1,
-		PodReferences: []groveschedulerv1alpha1.NamespacedName{{Namespace: dgd.Namespace, Name: "frontend-0"}},
-	})
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
 
 	t.Log("Keep an otherwise-ready runtime gated before the exact request is Bound")
-	classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
+	classification := publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
 	require.IsType(t, &lpxOpen{}, classification)
 	runtimeReady := reconcileOutcome{
 		State:   nvidiacomv1beta1.DGDStateSuccessful,
@@ -1130,7 +912,7 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	require.Nil(t, rejected)
 	wantDigest := desired.requests[0].attemptDigest
 	desired = rederived
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err := reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	require.IsType(t, &lpxOpen{}, classification)
 	require.Equal(t, wantDigest, desired.requests[0].attemptDigest)
@@ -1141,7 +923,7 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	request.Status = newLPXNodeLocalBoundStatus(7, 3, "sha256:bound-plan")
 	require.NoError(t, reconciler.Update(ctx, request))
 
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	bound, ok := classification.(*lpxBound)
 	require.True(t, ok)
@@ -1155,19 +937,11 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	}
 	require.Equal(t, runtimePending, overlayLPXResult(runtimePending, bound))
 
-	t.Run("unknown backend arm is not bound", func(t *testing.T) {
-		t.Log("Reject an execution backend outside the scheduler API contract")
-		unknownBackend := request.DeepCopy()
-		unknownBackend.Spec.ExecutionBackend = "unknown"
-		unknownBackend.Status.Committed.Plan.Placement = lpxv1alpha1.PlanPlacement{ExecutionBackend: "unknown"}
-		require.IsType(t, &lpxSchedulerObserved{}, classifyPublishedLPX(unknownBackend))
-	})
-
 	t.Log("Keep runtime readiness gated when the Bound receipt belongs to an older generation")
 	request = getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 	request.Status.ObservedGeneration = ptr.To(int64(6))
 	require.NoError(t, reconciler.Update(ctx, request))
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	require.IsType(t, &lpxOpen{}, classification)
 	require.Equal(t, "LPXPublished", overlayLPXResult(runtimeReady, classification).Reason)
@@ -1175,89 +949,23 @@ func TestLPXRestartPreservesBoundProofAndFinalization(t *testing.T) {
 	t.Log("Stale failure diagnostics are not attributed to the current request generation")
 	request = getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 	request.Status.Phase = lpxv1alpha1.RequestPhaseUnsupported
-	request.Status.Committed = nil
 	request.Status.Diagnostics = []lpxv1alpha1.StatusDiagnostic{{
 		Code: "StaleUnsupported", Subject: "request/old", Detail: "belongs to an older generation",
 	}}
 	require.NoError(t, reconciler.Update(ctx, request))
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.NoError(t, err)
 	require.IsType(t, &lpxOpen{}, classification)
 	require.NotContains(t, lpxResult(classification).Message, "StaleUnsupported")
 
-	t.Log("Delete the stored child while scheduler cleanup holds its published request")
+	t.Log("The owner chain is sufficient for deletion without Dynamo finalizers")
 	request = getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-	request.Finalizers = []string{lpxAttemptRecordingFinalizer, "scheduling.lpu.nvidia.com/lpx-cleanup"}
-	require.NoError(t, reconciler.Update(ctx, request))
-	key := client.ObjectKeyFromObject(dgd)
-	require.NoError(t, reconciler.Get(ctx, key, dgd))
-	require.NoError(t, reconciler.Delete(ctx, dgd))
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-	waiting := fmt.Sprintf("waiting for LPX request %q to finish fail-closed retirement", request.Name)
-	require.EqualError(t, err, waiting)
-	request = getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, request.Name)
-	require.False(t, request.DeletionTimestamp.IsZero())
-	require.Equal(t, []string{lpxAttemptRecordingFinalizer, "scheduling.lpu.nvidia.com/lpx-cleanup"}, request.Finalizers)
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
-	require.Zero(t, pcs.Spec.Replicas, "child finalization must stop the workload before scheduler cleanup finishes")
-
-	t.Log("Keep the child finalizer until the scheduler releases the exact request")
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-	require.EqualError(t, err, waiting)
-	require.NoError(t, reconciler.Get(ctx, key, dgd))
-	require.Contains(t, dgd.Finalizers, lpxGraphDeploymentFinalizer)
-	request.Finalizers = []string{lpxAttemptRecordingFinalizer}
-	require.NoError(t, reconciler.Update(ctx, request))
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-	require.EqualError(t, err, waiting)
-	requireLPXRequestNotFound(t, ctx, reconciler.Client, dgd.Namespace, request.Name)
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-	require.NoError(t, err)
-	require.True(t, apierrors.IsNotFound(reconciler.Get(ctx, key, &nvidiacomv1alpha1.LPXGraphDeployment{})))
-}
-
-func TestLPXFinalizationAfterRequestAPIRemoval(t *testing.T) {
-	resource := lpxv1alpha1.GroupVersion.WithResource("lpupipelinerequests").GroupResource()
-	for _, scenario := range []struct {
-		name     string
-		listErr  error
-		finalize bool
-	}{
-		{"removed CRD", apierrors.NewNotFound(resource, ""), true},
-		{"forbidden", apierrors.NewForbidden(resource, "", errors.New("denied")), false},
-		{"transport error", errors.New("connection reset"), false},
-	} {
-		t.Run(scenario.name, func(t *testing.T) {
-			t.Log("Return a request-list error after the operator has discovered the API")
-			ctx := t.Context()
-			source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
-			child := newLPXTestDeployment(t, source)
-			r := newLPXTestReconciler(t, nil, child, source)
-			r.apiReader = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
-				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
-					return scenario.listErr
-				},
-			})
-
-			t.Log("Ordinary reconciliation must still fail when requests cannot be listed")
-			_, err := r.listOwnedLPXRequests(ctx, child)
-			require.Error(t, err)
-
-			t.Log("Allow deletion only when the request API is gone, not on operational errors")
-			key := client.ObjectKeyFromObject(child)
-			require.NoError(t, r.Delete(ctx, child))
-			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-			if scenario.finalize {
-				require.NoError(t, err)
-				require.True(t, apierrors.IsNotFound(r.Get(ctx, key, child)))
-			} else {
-				require.ErrorIs(t, err, scenario.listErr)
-				require.NoError(t, r.Get(ctx, key, child))
-				require.Contains(t, child.Finalizers, lpxGraphDeploymentFinalizer)
-			}
-		})
-	}
+	require.True(t, metav1.IsControlledBy(pcs, dgd))
+	require.True(t, metav1.IsControlledBy(request, pcs))
+	require.Empty(t, request.Finalizers)
+	require.Empty(t, dgd.Finalizers)
 }
 
 func TestSelectedNodeLocalLPXReadinessUsesOneFixedScalingGroup(t *testing.T) {
@@ -1344,55 +1052,13 @@ func TestSelectedNodeLocalLPXReadinessUsesOneFixedScalingGroup(t *testing.T) {
 	}
 }
 
-func TestLPXRequestReadinessDecisions(t *testing.T) {
-	t.Log("Keep staged publication ahead of Grove pending and retain nil continuation")
-	pending := &lpxClosed{incomplete: "Grove is incomplete"}
-	staged := &lpxClosed{incomplete: "The Grove publication identities are staged; LPX publication waits for Grove synchronization"}
-	for _, test := range []struct {
-		name      string
-		identity  *lpxGroveIdentity
-		published bool
-		pending   *lpxClosed
-		want      *lpxClosed
-	}{
-		{name: "staged before pending", identity: &lpxGroveIdentity{complete: true}, pending: pending, want: staged},
-		{name: "staged without pending", identity: &lpxGroveIdentity{complete: true}, want: staged},
-		{name: "published before pending", identity: &lpxGroveIdentity{complete: true}, published: true, pending: pending, want: pending},
-		{name: "incomplete identity", identity: &lpxGroveIdentity{}, pending: pending, want: pending},
-		{name: "missing identity", pending: pending, want: pending},
-		{name: "published continues", identity: &lpxGroveIdentity{complete: true}, published: true},
-		{name: "missing continues"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Resolve the requested replica without changing its current or desired request")
-			requests := []lpxModelMaterializing{{requestName: "engine", replicaIndex: 1}}
-			beforeRequests := slices.Clone(requests)
-			currents := map[string]*lpxv1alpha1.LPUPipelineRequest{}
-			if test.published {
-				currents["engine"] = deadlineTestRequest(&nvidiacomv1alpha1.LPXGraphDeployment{}, "engine", time.Now(), lpxv1alpha1.RequestPhaseBound)
-			}
-			before := currents["engine"].DeepCopy()
-			require.Equal(t, test.want, classifyLPXPublicationReadiness(requests, currents, []*lpxGroveIdentity{nil, test.identity}, test.pending))
-			var want lpxClassification = &lpxBound{}
-			if test.pending != nil {
-				want = test.pending
-			}
-			require.Equal(t, want, classifyLPXCurrentRequests(requests, currents, test.pending))
-			require.Equal(t, beforeRequests, requests)
-			require.Equal(t, before, currents["engine"])
-		})
-	}
-	require.Equal(t, &lpxClosed{incomplete: "Grove is incomplete"}, pending)
-}
-
 func TestLPXClassifiesCurrentSchedulerReceipts(t *testing.T) {
 	tests := []struct {
-		name          string
-		phase         lpxv1alpha1.RequestPhase
-		releaseReason *lpxv1alpha1.ReleaseReason
-		wantState     nvidiacomv1beta1.DGDState
-		wantReason    string
-		wantMessage   string
+		name        string
+		phase       lpxv1alpha1.RequestPhase
+		wantState   nvidiacomv1beta1.DGDState
+		wantReason  string
+		wantMessage string
 	}{
 		{name: "pending", phase: lpxv1alpha1.RequestPhasePending, wantState: nvidiacomv1beta1.DGDStatePending, wantReason: "LPXSchedulerPending"},
 		{name: "no fit", phase: lpxv1alpha1.RequestPhaseNoFit, wantState: nvidiacomv1beta1.DGDStatePending, wantReason: "LPXNoFit"},
@@ -1400,42 +1066,7 @@ func TestLPXClassifiesCurrentSchedulerReceipts(t *testing.T) {
 		{name: "planned", phase: lpxv1alpha1.RequestPhasePlanned, wantState: nvidiacomv1beta1.DGDStatePending, wantReason: "LPXPlanned"},
 		{name: "reserving", phase: lpxv1alpha1.RequestPhaseReserving, wantState: nvidiacomv1beta1.DGDStatePending, wantReason: "LPXReserving"},
 		{name: "binding", phase: lpxv1alpha1.RequestPhaseBinding, wantState: nvidiacomv1beta1.DGDStatePending, wantReason: "LPXBinding"},
-		{name: "degraded", phase: lpxv1alpha1.RequestPhaseDegraded, wantState: nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXDegraded"},
-		{
-			name: "failure release in progress", phase: lpxv1alpha1.RequestPhaseReleasing,
-			releaseReason: ptr.To(lpxv1alpha1.ReleaseReasonBindingFailed),
-			wantState:     nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXReleasing", wantMessage: "bindingFailed",
-		},
-		{
-			name: "request change release in progress", phase: lpxv1alpha1.RequestPhaseReleasing,
-			releaseReason: ptr.To(lpxv1alpha1.ReleaseReasonRequestChanged),
-			wantState:     nvidiacomv1beta1.DGDStatePending, wantReason: "LPXReleasing", wantMessage: "requestChanged",
-		},
-		{
-			name: "failure release complete", phase: lpxv1alpha1.RequestPhaseReleased,
-			releaseReason: ptr.To(lpxv1alpha1.ReleaseReasonDependencyChanged),
-			wantState:     nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXReleased", wantMessage: "dependencyChanged",
-		},
-		{
-			name: "deletion release complete", phase: lpxv1alpha1.RequestPhaseReleased,
-			releaseReason: ptr.To(lpxv1alpha1.ReleaseReasonRequestDeleted),
-			wantState:     nvidiacomv1beta1.DGDStatePending, wantReason: "LPXReleased", wantMessage: "requestDeleted",
-		},
-		{
-			name: "release without journal", phase: lpxv1alpha1.RequestPhaseReleasing,
-			wantState: nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXSchedulerStatusInvalid",
-			wantMessage: "without the required release journal",
-		},
-		{
-			name: "release with unknown reason", phase: lpxv1alpha1.RequestPhaseReleased,
-			releaseReason: ptr.To(lpxv1alpha1.ReleaseReason("futureReason")),
-			wantState:     nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXSchedulerStatusInvalid",
-			wantMessage: "unknown release reason",
-		},
-		{
-			name: "bound without exact proof", phase: lpxv1alpha1.RequestPhaseBound,
-			wantState: nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXSchedulerStatusInvalid", wantMessage: "without the exact current-generation plan proof",
-		},
+		{name: "degraded", phase: lpxv1alpha1.RequestPhaseDegraded, wantState: nvidiacomv1beta1.DGDStatePending, wantReason: "LPXDegraded"},
 		{
 			name: "unknown phase", phase: lpxv1alpha1.RequestPhase("future"),
 			wantState: nvidiacomv1beta1.DGDStateFailed, wantReason: "LPXSchedulerStatusInvalid", wantMessage: `unknown phase "future"`,
@@ -1455,13 +1086,6 @@ func TestLPXClassifiesCurrentSchedulerReceipts(t *testing.T) {
 						Code: "ExactDiagnostic", Subject: "requests/current", Detail: "the exact scheduler detail",
 					}},
 				},
-			}
-			if test.releaseReason != nil {
-				request.Status.Committed = &lpxv1alpha1.Committed{
-					Execution: lpxv1alpha1.CommittedExecution{
-						Release: &lpxv1alpha1.ReleaseJournal{Reason: *test.releaseReason, RequestedAtGeneration: 7},
-					},
-				}
 			}
 
 			t.Log("Classify the current receipt and preserve its phase, journal and diagnostic")
@@ -1485,14 +1109,13 @@ func TestLPXClassifiesCurrentSchedulerReceipts(t *testing.T) {
 			later.Status.Diagnostics[0].Detail = "a later scheduler receipt"
 			requests := []lpxModelMaterializing{{requestName: "open"}, {requestName: "observed"}, {requestName: "later"}}
 			currents := map[string]*lpxv1alpha1.LPUPipelineRequest{"open": {}, "observed": request, "later": later}
-			pending := &lpxClosed{incomplete: "Grove is incomplete"}
 			var want lpxClassification = &lpxOpen{}
 			if test.wantState == nvidiacomv1beta1.DGDStateFailed {
 				want = observed
 			}
-			require.Equal(t, want, classifyLPXCurrentRequests(requests, currents, pending))
+			require.Equal(t, want, classifyLPXCurrentRequests(requests, currents))
 			slices.Reverse(requests)
-			require.Equal(t, (*lpxSchedulerObserved)(later.Status), classifyLPXCurrentRequests(requests, currents, pending))
+			require.Equal(t, (*lpxSchedulerObserved)(later.Status), classifyLPXCurrentRequests(requests, currents))
 			require.Equal(t, before, request)
 		})
 	}
@@ -1513,86 +1136,6 @@ func TestLPXSchedulerDiagnosticMessageRespectsConditionLimit(t *testing.T) {
 	require.LessOrEqual(t, len(message), maxDGDConditionMessageSize)
 	require.True(t, utf8.ValidString(message))
 	require.True(t, strings.HasSuffix(message, "…"))
-}
-
-func TestLPXNativeRolloutPreservesOtherEngines(t *testing.T) {
-	for _, pipeline := range []lpx.Pipeline{lpx.PipelineSingle, lpx.PipelineLPX} {
-		t.Run(string(pipeline), func(t *testing.T) {
-			t.Log("Publish two engines and stage a third under the same PCS")
-			ctx := t.Context()
-			_, source, registry := newLPXTestDGD(t, pipeline)
-			source.Spec.Components[0].Replicas = ptr.To[int32](3)
-			deployment := newLPXTestDeployment(t, source)
-			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, source)
-			objects := lpxMaterializedObjects(t, reconciler, deployment, source, desired)
-			createLPXTestObjects(t, ctx, reconciler.Client, objects...)
-			allRequests := desired.requests
-			desired.requests = allRequests[:2]
-			_, err := reconciler.reconcileSelectedLPX(ctx, deployment, desired)
-			require.NoError(t, err)
-			desired.requests = allRequests
-			old := &lpxv1alpha1.LPUPipelineRequest{}
-			kept := &lpxv1alpha1.LPUPipelineRequest{}
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: allRequests[0].requestName}, old))
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: allRequests[1].requestName}, kept))
-			old.Finalizers = []string{"test.example/scheduler"}
-			require.NoError(t, reconciler.Update(ctx, old))
-			require.Nil(t, old.Status, "native identity changes must not require a scheduler receipt")
-
-			t.Log("Grove replaces engine zero; engine one remains old, while engine two is ready to publish")
-			pcs := findLPXTestPodCliqueSet(t, objects)
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
-			pcs.Status.CurrentGenerationHash = ptr.To("next-hash")
-			pcs.Status.ObservedGeneration = ptr.To[int64](0)
-			require.NoError(t, reconciler.Update(ctx, pcs))
-			for _, object := range objects {
-				clique, ok := object.(*grovev1alpha1.PodClique)
-				if !ok || clique.Labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex] == "1" {
-					continue
-				}
-				require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(clique), clique))
-				require.NoError(t, reconciler.Delete(ctx, clique))
-				clique.UID += "-replacement"
-				clique.ResourceVersion = ""
-				clique.Status.CurrentPodCliqueSetGenerationHash = ptr.To("next-hash")
-				require.NoError(t, reconciler.Create(ctx, clique))
-			}
-			_, err = reconciler.reconcileSelectedLPX(ctx, deployment, desired)
-			require.NoError(t, err)
-			live := &lpxv1alpha1.LPUPipelineRequest{}
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(old), live))
-			require.NotNil(t, live.DeletionTimestamp)
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(kept), kept))
-			require.Nil(t, kept.DeletionTimestamp)
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: allRequests[2].requestName}, &lpxv1alpha1.LPUPipelineRequest{}))
-
-			t.Log("Publish the replacement under its stable name after its own finalizer finishes")
-			live.Finalizers = nil
-			require.NoError(t, reconciler.Update(ctx, live))
-			_, err = reconciler.reconcileSelectedLPX(ctx, deployment, desired)
-			require.NoError(t, err)
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(old), live))
-			require.NotEqual(t, old.UID, live.UID)
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
-			require.Equal(t, types.UID("pcs-uid"), pcs.UID)
-
-			t.Log("An owned deleting Agent retires its request even while its PodGang is absent")
-			live.Finalizers = []string{"test.example/scheduler"}
-			require.NoError(t, reconciler.Update(ctx, live))
-			agent := findLPXTestClique(t, objects, desired.plan.Agents[0].CliqueName)
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(agent), agent))
-			agent.Finalizers = []string{"test.example/grove"}
-			require.NoError(t, reconciler.Update(ctx, agent))
-			require.NoError(t, reconciler.Delete(ctx, agent))
-			require.NoError(t, reconciler.Delete(ctx, &groveschedulerv1alpha1.PodGang{ObjectMeta: metav1.ObjectMeta{
-				Name: live.Spec.PodGangRef.Name, Namespace: deployment.Namespace,
-			}}))
-			_, err = reconciler.reconcileSelectedLPX(ctx, deployment, desired)
-			require.NoError(t, err)
-			require.False(t, getLPXRequest(t, ctx, reconciler.Client, deployment.Namespace, live.Name).DeletionTimestamp.IsZero())
-			require.Equal(t, kept.UID, getLPXRequest(t, ctx, reconciler.Client, deployment.Namespace, kept.Name).UID)
-		})
-	}
 }
 
 func TestLPXAttemptIdentityAndRetirementFence(t *testing.T) {
@@ -1637,87 +1180,20 @@ func TestLPXAttemptIdentityAndRetirementFence(t *testing.T) {
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
 
-	t.Log("Fence exact PCS and PodGang UID annotations")
+	t.Log("Fence the exact PCS owner and immutable attempt annotations")
 	projection := &desired.requests[0]
-	identity := &lpxGroveIdentity{pcsUID: "pcs-uid", podGangName: "podgang", podGangUID: "podgang-uid"}
+	identity := &lpxGroveIdentity{pcsUID: "pcs-uid", pcs: deadlineTestPCS(dgd, "pcs-uid"), plan: desired.plan}
 	current := &lpxv1alpha1.LPUPipelineRequest{
-		ObjectMeta: metav1.ObjectMeta{UID: "request-uid", Annotations: lpxRequestAnnotations(dgd, projection, identity)},
-		Spec:       projection.modelProjection.RequestSpec(dgd.Namespace, identity.podGangName, identity.cyborgClique),
+		ObjectMeta: metav1.ObjectMeta{UID: "request-uid", Annotations: lpxRequestAnnotations(dgd, projection, identity), OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(identity.pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}},
+		Spec:       projection.modelProjection.RequestSpec(identity.plan, projection.agentCliqueName),
 	}
 	require.NoError(t, validateCurrentLPXRequest(dgd, projection, identity, current))
 	changed := *identity
 	changed.pcsUID = "replacement-pcs-uid"
 	require.ErrorContains(t, validateCurrentLPXRequest(dgd, projection, &changed, current), "immutable annotation")
-	changed = *identity
-	changed.podGangUID = "replacement-podgang-uid"
-	require.ErrorContains(t, validateCurrentLPXRequest(dgd, projection, &changed, current), "immutable annotation")
 
-	t.Log("Resolve current intent from complete identities and preserve inputs while Grove is incomplete")
-	complete := *identity
-	complete.complete, complete.agentUIDs = true, []types.UID{"agent-uid"}
-	computed, intentChanged, err := resolveLPXCurrentRequestIntent(dgd, *projection, &complete, nil)
-	require.NoError(t, err)
-	require.False(t, intentChanged)
-	require.True(t, strings.HasPrefix(computed, "sha256:"))
-	intent := *projection
-	intent.attemptDigest = computed
-	current.Annotations = lpxRequestAnnotations(dgd, &intent, &complete)
-	intent.attemptDigest = "supplied-digest"
-	replacement := complete
-	replacement.agentUIDs = []types.UID{"replacement-agent-uid"}
-	for _, test := range []struct {
-		name        string
-		identity    *lpxGroveIdentity
-		live        *lpxv1alpha1.LPUPipelineRequest
-		drift       bool
-		wantDigest  string
-		wantChanged bool
-	}{
-		{name: "match", identity: &complete, live: current, wantDigest: computed},
-		{name: "new request", identity: &complete, wantDigest: computed},
-		{name: "spec drift", identity: &complete, live: current, drift: true, wantDigest: computed, wantChanged: true},
-		{name: "agent replacement", identity: &replacement, live: current, wantChanged: true},
-		{name: "incomplete with live request", identity: identity, live: current, drift: true, wantDigest: computed},
-		{name: "missing identity with live request", live: current, drift: true, wantDigest: computed},
-		{name: "incomplete without request", identity: identity, wantDigest: intent.attemptDigest},
-		{name: "missing identity and request", wantDigest: intent.attemptDigest},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Compare immutable intent without changing the supplied digest or observed request")
-			live := test.live.DeepCopy()
-			if test.drift {
-				live.Spec.PodGangRef.Name = "other-gang"
-			}
-			beforeLive, beforeDGD, beforeIntent := live.DeepCopy(), dgd.DeepCopy(), intent
-			beforeSpec := intent.modelProjection.RequestSpec(dgd.Namespace, complete.podGangName, nil)
-			var beforeIdentity *lpxGroveIdentity
-			if test.identity != nil {
-				copy := *test.identity
-				copy.agentUIDs = slices.Clone(copy.agentUIDs)
-				beforeIdentity = &copy
-			}
-			got, changed, err := resolveLPXCurrentRequestIntent(dgd, intent, test.identity, live)
-			require.NoError(t, err)
-			require.Equal(t, test.wantChanged, changed)
-			if test.wantDigest == "" {
-				require.NotEqual(t, computed, got, "replacement Agent identity changes the attempt digest")
-			} else {
-				require.Equal(t, test.wantDigest, got)
-			}
-			require.Equal(t, beforeLive, live)
-			require.Equal(t, beforeDGD, dgd)
-			require.Equal(t, beforeIntent, intent)
-			require.Equal(t, beforeIdentity, test.identity)
-			require.Equal(t, beforeSpec, intent.modelProjection.RequestSpec(dgd.Namespace, complete.podGangName, nil))
-		})
-	}
-
-	t.Log("Keep published requests when the deployment generation changes without intent drift")
 	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
-	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
-	_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
+	publishSelectedLPXForTest(t, ctx, reconciler, dgd, desired)
 
 	dgd.Generation++
 	classification, _, err := reconciler.reconcileLPXKnownIntentFence(ctx, dgd, source, nil)
@@ -1813,27 +1289,55 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilDeletion(t *testing.T) {
 				require.Equal(t, list, current)
 			}
 
-			t.Log("Explicit deletion still retires requests and releases the child finalizer while disabled")
+			t.Log("Deletion remains available while disabled and needs no controller finalizer")
 			if scenario.name == "LPX" {
 				r.runtimeConfig.Gate.LPX = false
 			} else {
 				r.runtimeConfig.Gate.Grove = false
 			}
 			r.modelRegistry = nil
+			require.Empty(t, child.Finalizers)
 			require.NoError(t, r.Delete(ctx, child))
-			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-			require.ErrorContains(t, err, "waiting for LPX request")
-			request := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
-			require.False(t, request.DeletionTimestamp.IsZero())
-			pcs := &grovev1alpha1.PodCliqueSet{}
-			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: dynamo.PCSNameForLPX(child)}, pcs))
-			require.Zero(t, pcs.Spec.Replicas)
-			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-			require.ErrorContains(t, err, "waiting for LPX request")
-			requireLPXRequestNotFound(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
 			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			require.NoError(t, err)
 			require.True(t, apierrors.IsNotFound(r.Get(ctx, key, &nvidiacomv1alpha1.LPXGraphDeployment{})))
+		})
+	}
+}
+
+func TestLPXFinalizationAfterRequestAPIRemoval(t *testing.T) {
+	resource := lpxv1alpha1.GroupVersion.WithResource("lpupipelinerequests").GroupResource()
+	for _, scenario := range []struct {
+		name    string
+		listErr error
+	}{
+		{"removed CRD", apierrors.NewNotFound(resource, "")},
+		{"forbidden", apierrors.NewForbidden(resource, "", errors.New("denied"))},
+		{"transport error", errors.New("connection reset")},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Log("Keep a legacy controller finalizer while the request API cannot be read")
+			ctx := t.Context()
+			source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
+			child := newLPXTestDeployment(t, source)
+			child.Finalizers = []string{legacyLPXGraphDeploymentFinalizer}
+			r := newLPXTestReconciler(t, nil, child, source)
+			r.apiReader = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+					return scenario.listErr
+				},
+			})
+
+			t.Log("Ordinary reconciliation still fails when requests cannot be listed")
+			_, err := r.listOwnedLPXRequests(ctx, child)
+			require.ErrorIs(t, err, scenario.listErr)
+
+			t.Log("Release the legacy finalizer without reading requests; owner garbage collection owns cleanup")
+			key := client.ObjectKeyFromObject(child)
+			require.NoError(t, r.Delete(ctx, child))
+			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			require.NoError(t, err)
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, key, child)))
 		})
 	}
 }
@@ -1843,358 +1347,15 @@ func TestLPXControllerPreservesPublishedWorkWhenProviderEditIsInvalid(t *testing
 	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), dgd, source)
 	createLPXTestObjects(t, t.Context(), reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
-	_, err := reconciler.reconcileSelectedLPX(t.Context(), dgd, desired)
-	require.NoError(t, err)
+	publishSelectedLPXForTest(t, t.Context(), reconciler, dgd, desired)
 
 	require.NoError(t, reconciler.Get(t.Context(), client.ObjectKeyFromObject(source), source))
 	source.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
 	require.NoError(t, reconciler.Update(t.Context(), source))
-	_, err = reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
 	require.ErrorContains(t, err, "LPX requires the Grove workload provider")
 	request := getLPXRequest(t, t.Context(), reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
 	require.Nil(t, request.DeletionTimestamp)
-}
-
-func TestLPUOnlyWaitsForCurrentConductorWitness(t *testing.T) {
-	tests := []struct{ name, defect, want string }{
-		{name: "stale owner", defect: "owner", want: "ordinary-scheduler identity"},
-		{name: "wrong PodGang", defect: "podgang", want: "ordinary-scheduler identity"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-			reconciler, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), dgd, source)
-			objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-			conductor := findLPXTestClique(t, objects, desired.plan.ConductorClique)
-			switch test.defect {
-			case "owner":
-				conductor.OwnerReferences[0].UID = "previous-scaling-group-uid"
-			case "podgang":
-				conductor.Labels[grovecommon.LabelPodGang] = "other-podgang"
-			}
-			createLPXTestObjects(t, t.Context(), reconciler.Client, objects...)
-			classification, err := reconciler.reconcileSelectedLPX(t.Context(), dgd, desired)
-			require.NoError(t, err)
-			closed := requireLPXClosed(t, classification)
-			require.Contains(t, closed.incomplete, test.want)
-			requireLPXRequestNotFound(t, t.Context(), reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-		})
-	}
-}
-
-func TestNodeLocalHybridPublishesAndFencesCurrentCyborgMaterialization(t *testing.T) {
-	tests := []struct {
-		name               string
-		generation         int64
-		observedGeneration *int64
-	}{
-		{
-			name:               "absent generation then claim drift",
-			generation:         1,
-			observedGeneration: nil,
-		},
-		{
-			name:               "lagging generation then UID replacement",
-			generation:         2,
-			observedGeneration: ptr.To(int64(1)),
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Arrange current Cyborg materialization evidence without an observed generation")
-			ctx := t.Context()
-			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
-			objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-			cyborg := findLPXTestClique(t, objects, desired.plan.CyborgClique)
-			cyborg.Generation = test.generation
-			cyborg.Status.ObservedGeneration = test.observedGeneration
-			createLPXTestObjects(t, ctx, reconciler.Client, objects...)
-
-			t.Log("Publish the NodeLocal request with the exact Cyborg name and UID")
-			classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-			require.NoError(t, err)
-			require.IsType(t, &lpxOpen{}, classification)
-			request := getLPXRequest(
-				t,
-				ctx,
-				reconciler.Client,
-				dgd.Namespace,
-				desired.requests[0].requestName,
-			)
-			require.NotNil(t, request.Spec.CyborgPodCliqueRef)
-			require.Equal(t, cyborg.Name, request.Spec.CyborgPodCliqueRef.Name)
-			require.Equal(t, string(cyborg.UID), request.Spec.CyborgPodCliqueRef.UID)
-			publishedUID := request.UID
-
-			storedCyborg := &grovev1alpha1.PodClique{}
-			require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(cyborg), storedCyborg))
-			if test.observedGeneration == nil {
-				t.Log("Drift a live Claim reference without an observed generation")
-				require.NotEmpty(t, storedCyborg.Spec.PodSpec.ResourceClaims)
-				storedCyborg.Generation++
-				storedCyborg.Spec.PodSpec.ResourceClaims[0].ResourceClaimTemplateName = ptr.To("stale-gpu")
-				require.NoError(t, reconciler.Update(ctx, storedCyborg))
-
-				t.Log("An unobserved PCS edit permits temporary old-child references without retiring the engine")
-				pcs := findLPXTestPodCliqueSet(t, objects)
-				require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
-				pcs.Generation++
-				require.NoError(t, reconciler.Update(ctx, pcs))
-				_, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-				require.NoError(t, err)
-				require.Equal(t, publishedUID, getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, request.Name).UID)
-				pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
-				require.NoError(t, reconciler.Update(ctx, pcs))
-			} else {
-				t.Log("Advance only the global generation without rotating the published request")
-				storedCyborg.Status.ObservedGeneration = ptr.To(test.generation)
-				require.NoError(t, reconciler.Update(ctx, storedCyborg))
-				classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-				require.NoError(t, err)
-				require.IsType(t, &lpxOpen{}, classification)
-				request = getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-				require.Equal(t, publishedUID, request.UID)
-
-				t.Log("Replace the Cyborg clique at the same name with a different UID")
-				require.NoError(t, reconciler.Delete(ctx, storedCyborg))
-				replacement := storedCyborg.DeepCopy()
-				replacement.ResourceVersion = ""
-				replacement.UID = "replacement-cyborg-uid"
-				replacement.DeletionTimestamp = nil
-				replacement.CreationTimestamp = metav1.Time{}
-				require.NoError(t, reconciler.Create(ctx, replacement))
-			}
-
-			t.Log("Retire the request when its exact published materialization no longer holds")
-			classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-			require.NoError(t, err)
-			require.IsType(t, &lpxClosed{}, classification)
-			requireLPXRequestNotFound(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-		})
-	}
-}
-
-func TestNodeLocalHybridWaitsForCurrentCyborgWitness(t *testing.T) {
-	tests := []struct {
-		name        string
-		defect      string
-		wantMessage string
-	}{
-		{
-			name:        "missing current scaling group",
-			defect:      "missing-scaling-group",
-			wantMessage: "current LPU PodCliqueScalingGroup",
-		},
-		{
-			name:        "stale scaling-group owner",
-			defect:      "stale-scaling-group-owner",
-			wantMessage: "current PodCliqueSet owner identity",
-		},
-		{
-			name:        "stale Cyborg owner",
-			defect:      "stale-cyborg-owner",
-			wantMessage: "current LPU scaling-group owner identity",
-		},
-		{
-			name:        "missing PCS generation hash",
-			defect:      "missing-pcs-hash",
-			wantMessage: "current PodCliqueSet generation",
-		},
-		{
-			name:        "mismatched PCS generation hash",
-			defect:      "mismatched-pcs-hash",
-			wantMessage: "current PodCliqueSet generation",
-		},
-		{
-			name:        "missing Pod template hash",
-			defect:      "missing-template-hash",
-			wantMessage: "current PodCliqueSet generation",
-		},
-		{
-			name:        "empty Pod template hash",
-			defect:      "empty-template-hash",
-			wantMessage: "current PodCliqueSet generation",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Arrange one incomplete hybrid Cyborg witness")
-			ctx := t.Context()
-			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
-			objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-			cyborg := findLPXTestClique(t, objects, desired.plan.CyborgClique)
-			switch test.defect {
-			case "missing-scaling-group":
-				scalingGroup := findLPXTestScalingGroup(t, objects, desired.plan.LPXScalingGroup)
-				objects = slices.DeleteFunc(objects, func(object client.Object) bool { return object == scalingGroup })
-			case "stale-scaling-group-owner":
-				scalingGroup := findLPXTestScalingGroup(t, objects, desired.plan.LPXScalingGroup)
-				require.NotEmpty(t, scalingGroup.OwnerReferences)
-				scalingGroup.OwnerReferences[0].UID = "previous-pcs-uid"
-			case "stale-cyborg-owner":
-				require.NotEmpty(t, cyborg.OwnerReferences)
-				cyborg.OwnerReferences[0].UID = "previous-scaling-group-uid"
-			case "missing-pcs-hash":
-				cyborg.Status.CurrentPodCliqueSetGenerationHash = nil
-			case "mismatched-pcs-hash":
-				cyborg.Status.CurrentPodCliqueSetGenerationHash = ptr.To("previous-pcs-generation")
-			case "missing-template-hash":
-				cyborg.Status.CurrentPodTemplateHash = nil
-			case "empty-template-hash":
-				cyborg.Status.CurrentPodTemplateHash = ptr.To("")
-			default:
-				require.FailNow(t, "unknown materialization defect", "defect: %s", test.defect)
-			}
-			createLPXTestObjects(t, ctx, reconciler.Client, objects...)
-
-			t.Log("Keep publication pending until a dependency watch supplies current evidence")
-			classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-			require.NoError(t, err)
-			closed := requireLPXClosed(t, classification)
-			require.Contains(t, closed.incomplete, test.wantMessage)
-			require.Equal(t, nvidiacomv1beta1.DGDStatePending, lpxResult(closed).State)
-			requireLPXRequestNotFound(
-				t,
-				ctx,
-				reconciler.Client,
-				dgd.Namespace,
-				desired.requests[0].requestName,
-			)
-		})
-	}
-}
-
-func TestLPXSchedulerScopedGangAndStartupWitnessesAreDisjoint(t *testing.T) {
-	const (
-		crossReplicaAgent = "other replica Agent enters ordinary gang"
-		missingLPXGang    = "Waiting for one replica-0 LPX PodGang; found 0 candidates"
-		missingOrdinary   = "Waiting for one replica-0 ordinary-scheduler PodGang; found 0 candidates"
-	)
-	tests := []struct {
-		name, wantMessage string
-	}{
-		{"LPX gang unavailable", missingLPXGang},
-		{"LPX gang is stale", "Waiting for Grove to publish current-generation PodGangs"},
-		{"LPX gang has incomplete references", missingLPXGang},
-		{"LPX gang has an extra group", missingLPXGang},
-		{"LPX gang is ambiguous", "Waiting for one replica-0 LPX PodGang; found 2 candidates"},
-		{"Agent enters ordinary gang", missingOrdinary},
-		{crossReplicaAgent, missingOrdinary},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Materialize the complete hybrid runtime and its scheduler-scoped gangs")
-			ctx := context.Background()
-			dgd, source, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-			if test.name == crossReplicaAgent {
-				source.Spec.Components[0].Replicas = ptr.To(int32(2))
-				source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(1))
-			}
-			reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
-			objects := lpxMaterializedObjects(t, reconciler, dgd, source, desired)
-
-			t.Log("Introduce only the selected gang or startup-witness defect")
-			gang := findLPXTestPodGang(t, objects, lpx.SchedulerName)
-			switch test.name {
-			case "LPX gang unavailable":
-				gang.Labels[grovecommon.LabelPartOfKey] = lpxTestOtherName
-			case "LPX gang is stale":
-				gang.Annotations[lpxDeploymentUIDAnnotation] = "different-lgd"
-			case "LPX gang has incomplete references":
-				gang.Spec.PodGroups[0].PodReferences = nil
-			case "LPX gang has an extra group":
-				gang.Spec.PodGroups = append(gang.Spec.PodGroups, groveschedulerv1alpha1.PodGroup{Name: "unexpected"})
-			case "LPX gang is ambiguous":
-				duplicate := gang.DeepCopy()
-				duplicate.Name, duplicate.UID, duplicate.ResourceVersion = duplicate.Name+"-duplicate", "duplicate-uid", ""
-				objects = append(objects, duplicate)
-			case "Agent enters ordinary gang", crossReplicaAgent:
-				ordinary := findLPXTestPodGang(t, objects, corev1.DefaultSchedulerName)
-				agent := desired.plan.Agents[0]
-				if test.name == crossReplicaAgent {
-					agent = desired.plan.ForReplica(1).Agents[0]
-				}
-				ordinary.Spec.PodGroups = append(ordinary.Spec.PodGroups, groveschedulerv1alpha1.PodGroup{
-					Name: agent.CliqueName, MinReplicas: 1,
-					PodReferences: []groveschedulerv1alpha1.NamespacedName{{Namespace: ordinary.Namespace, Name: agent.CliqueName + "-0"}},
-				})
-			}
-			createLPXTestObjects(t, ctx, reconciler.Client, objects...)
-
-			t.Log("Keep the invalid engine unpublished while allowing an independent sibling")
-			classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-			require.NoError(t, err)
-			requests, err := reconciler.listOwnedLPXRequests(ctx, dgd)
-			require.NoError(t, err)
-			requireLPXRequestNotFound(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
-			if test.name == crossReplicaAgent {
-				require.IsType(t, &lpxOpen{}, classification)
-				require.Len(t, requests, 1)
-				require.Equal(t, desired.requests[1].requestName, requests[0].Name)
-			} else {
-				require.IsType(t, &lpxClosed{}, classification)
-				require.Equal(t, test.wantMessage, classification.(*lpxClosed).incomplete)
-				require.Empty(t, requests)
-			}
-		})
-	}
-}
-
-func TestLPXLiveRequestSizeGrowthRetiresPublication(t *testing.T) {
-	ctx := context.Background()
-	dgd, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, dgd, source)
-	require.NotNil(t, desired)
-	createLPXTestObjects(t, ctx, reconciler.Client, lpxMaterializedObjects(t, reconciler, dgd, source, desired)...)
-
-	t.Log("Publish the request, then model API-server metadata growth")
-	classification, err := reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
-	require.IsType(t, &lpxOpen{}, classification)
-	storedClient := reconciler.Client
-	storedWithWatch, ok := storedClient.(client.WithWatch)
-	require.True(t, ok)
-	reconciler.apiReader = interceptor.NewClient(storedWithWatch, interceptor.Funcs{
-		List: func(
-			ctx context.Context,
-			delegated client.WithWatch,
-			list client.ObjectList,
-			opts ...client.ListOption,
-		) error {
-			if err := delegated.List(ctx, list, opts...); err != nil {
-				return err
-			}
-			requests, ok := list.(*lpxv1alpha1.LPUPipelineRequestList)
-			if !ok {
-				return nil
-			}
-			for index := range requests.Items {
-				request := &requests.Items[index]
-				if request.Name != desired.requests[0].requestName {
-					continue
-				}
-				request.ManagedFields = []metav1.ManagedFieldsEntry{{
-					Manager:    "metadata-growth-test",
-					FieldsType: "FieldsV1",
-					FieldsV1: &metav1.FieldsV1{
-						Raw: []byte(`{"padding":"` + strings.Repeat("x", 850*1024) + `"}`),
-					},
-				}}
-			}
-			return nil
-		},
-	})
-
-	t.Log("Retire the now-oversized publication")
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
-	require.NoError(t, err)
-	require.IsType(t, &lpxClosed{}, classification)
-	requireLPXRequestNotFound(t, ctx, storedClient, dgd.Namespace, desired.requests[0].requestName)
 }
 
 func TestLPXAttemptFenceRejectsForeignExactNameCollisionFromAuthoritativeList(t *testing.T) {
@@ -2207,6 +1368,7 @@ func TestLPXAttemptFenceRejectsForeignExactNameCollisionFromAuthoritativeList(t 
 			Name:      "z-foreign-request",
 			Namespace: dgd.Namespace,
 			UID:       "foreign-collision-uid",
+			Labels:    map[string]string{lpxOwnerUIDLabel: string(dgd.UID)},
 			OwnerReferences: []metav1.OwnerReference{{
 				APIVersion: nvidiacomv1beta1.GroupVersion.String(),
 				Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
@@ -2224,7 +1386,7 @@ func TestLPXAttemptFenceRejectsForeignExactNameCollisionFromAuthoritativeList(t 
 	reconciler := newLPXTestReconciler(t, nil, dgd, source)
 
 	t.Log("Complete an empty preflight fence before foreign requests occupy the desired names")
-	currents, retiring, err := reconciler.reconcileLPXAttemptFence(ctx, dgd, desired)
+	currents, retiring, err := reconciler.reconcileLPXPublicationFence(ctx, dgd, desired, true)
 	require.NoError(t, err)
 	require.Empty(t, currents)
 	require.Nil(t, retiring)
@@ -2240,7 +1402,7 @@ func TestLPXAttemptFenceRejectsForeignExactNameCollisionFromAuthoritativeList(t 
 	require.NoError(t, err)
 	require.Nil(t, classification)
 
-	t.Log("Observe exact-name collisions with one bounded authoritative list and no per-request Gets")
+	t.Log("Observe labeled exact-name collisions with one scoped authoritative list and no per-request Gets")
 	reader, ok := reconciler.apiReader.(client.WithWatch)
 	require.True(t, ok)
 	requestGets := 0
@@ -2271,18 +1433,19 @@ func TestLPXAttemptFenceRejectsForeignExactNameCollisionFromAuthoritativeList(t 
 		},
 	})
 
-	currents, retiring, err = reconciler.reconcileLPXAttemptFence(ctx, dgd, desired)
+	currents, retiring, err = reconciler.reconcileLPXPublicationFence(ctx, dgd, desired, true)
 	require.EqualError(t, err, fmt.Sprintf("LPX request name %q is occupied by a foreign owner", foreign.Name))
 	require.Nil(t, currents)
 	require.Nil(t, retiring)
 	require.Zero(t, requestGets, "exact-name collision detection must not issue one request Get per desired projection")
 	require.Len(t, requestListCalls, 1)
-	require.Equal(t, int64(lpxLifecycleListPageSize), requestListCalls[0].Limit)
+	require.Zero(t, requestListCalls[0].Limit)
+	require.Empty(t, requestListCalls[0].Continue)
 	require.Equal(t, dgd.Namespace, requestListCalls[0].Namespace)
-	require.True(t, requestListCalls[0].LabelSelector == nil || requestListCalls[0].LabelSelector.Empty())
+	require.Equal(t, lpxOwnerUIDLabel+"="+string(dgd.UID), requestListCalls[0].LabelSelector.String())
 
 	t.Log("Refresh publication state and refuse the foreign requests created after the empty preflight")
-	classification, err = reconciler.reconcileSelectedLPX(ctx, dgd, desired)
+	classification, err = reconcileSelectedLPXForTest(ctx, reconciler, dgd, desired)
 	require.ErrorContains(t, err, "occupied by a foreign owner")
 	require.Nil(t, classification)
 	require.Len(t, requestListCalls, 2, "final publication must refresh the authoritative request snapshot")
@@ -2305,28 +1468,8 @@ func requireLPXClosed(t *testing.T, classification lpxClassification) *lpxClosed
 	return closed
 }
 
-func newLPXNodeLocalBoundStatus(generation, revision int64, planDigest lpxv1alpha1.PlanDigest) *lpxv1alpha1.LPUPipelineRequestStatus {
-	// Construct a fresh exact-generation NodeLocal scheduler receipt.
-	return &lpxv1alpha1.LPUPipelineRequestStatus{
-		Phase:              lpxv1alpha1.RequestPhaseBound,
-		ObservedGeneration: ptr.To(generation),
-		LastPlanRevision:   revision,
-		Committed: &lpxv1alpha1.Committed{
-			Execution: lpxv1alpha1.CommittedExecution{
-				AcceptedGeneration: ptr.To(generation),
-				NodeLocal:          &lpxv1alpha1.NodeLocalExecution{},
-			},
-			Plan: lpxv1alpha1.CommittedPlan{
-				PlannedFromGeneration: generation,
-				Revision:              revision,
-				PlanDigest:            planDigest,
-				Placement: lpxv1alpha1.PlanPlacement{
-					ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal,
-					NodeLocal:        &lpxv1alpha1.NodeLocalPlacement{},
-				},
-			},
-		},
-	}
+func newLPXNodeLocalBoundStatus(generation, _ int64, _ lpxv1alpha1.PlanDigest) *lpxv1alpha1.LPUPipelineRequestStatus {
+	return &lpxv1alpha1.LPUPipelineRequestStatus{Phase: lpxv1alpha1.RequestPhaseBound, ObservedGeneration: &generation}
 }
 
 func findLPXTestClique(t *testing.T, objects []client.Object, name string) *grovev1alpha1.PodClique {
@@ -2348,17 +1491,6 @@ func findLPXTestScalingGroup(t *testing.T, objects []client.Object, name string)
 		}
 	}
 	t.Fatalf("PodCliqueScalingGroup %q not found", name)
-	return nil
-}
-
-func findLPXTestPodGang(t *testing.T, objects []client.Object, schedulerName string) *groveschedulerv1alpha1.PodGang {
-	t.Helper()
-	for _, object := range objects {
-		if gang, ok := object.(*groveschedulerv1alpha1.PodGang); ok && gang.Labels[grovecommon.LabelSchedulerName] == schedulerName {
-			return gang
-		}
-	}
-	t.Fatalf("PodGang for scheduler %q not found", schedulerName)
 	return nil
 }
 
@@ -2384,7 +1516,7 @@ func renderLPXTestPodCliqueSet(
 	return rendered
 }
 
-func newLPXTestDGD(t *testing.T, pipeline lpx.Pipeline) (*nvidiacomv1alpha1.LPXGraphDeployment, *nvidiacomv1beta1.DynamoGraphDeployment, *lpx.ModelRegistry) {
+func newLPXTestDGD(t *testing.T, pipeline lpx.Pipeline) (*nvidiacomv1alpha1.LPXGraphDeployment, *nvidiacomv1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
 	compilationMode := manifestcapnpv2.CompilationMode_lpuOnly
 	if pipeline == lpx.PipelineLPX {
@@ -2405,7 +1537,6 @@ func newLPXTestDeployment(t *testing.T, source *nvidiacomv1beta1.DynamoGraphDepl
 		ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace, UID: types.UID("lpx-" + string(source.UID)), Generation: 1,
 			Annotations:     map[string]string{lpx.DGDGenerationAnnotation: strconv.FormatInt(source.Generation, 10)},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, nvidiacomv1beta1.DynamoGraphDeploymentGVK)},
-			Finalizers:      []string{lpxGraphDeploymentFinalizer},
 		},
 		Spec: nvidiacomv1alpha1.LPXGraphDeploymentSpec{InputRevision: revision},
 	}
@@ -2481,7 +1612,7 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 	return source
 }
 
-func newLPXSpecDecodeTestDGD(t *testing.T) (*nvidiacomv1alpha1.LPXGraphDeployment, *nvidiacomv1beta1.DynamoGraphDeployment, *lpx.ModelRegistry) {
+func newLPXSpecDecodeTestDGD(t *testing.T) (*nvidiacomv1alpha1.LPXGraphDeployment, *nvidiacomv1beta1.DynamoGraphDeployment, lpx.ModelRegistry) {
 	t.Helper()
 	source := newLPXSpecDecodeTestSource()
 	root := t.TempDir()
@@ -2508,7 +1639,7 @@ func newLPXTestRegistryWithPartitionsAndMode(
 	buildID string,
 	partitionIDs []int,
 	compilationMode manifestcapnpv2.CompilationMode,
-) *lpx.ModelRegistry {
+) lpx.ModelRegistry {
 	t.Helper()
 	root := t.TempDir()
 	writeLPXTestBuild(t, root, buildID, partitionIDs, compilationMode)
@@ -2588,7 +1719,7 @@ func writeLPXTestBuild(
 
 func newLPXTestReconciler(
 	t *testing.T,
-	registry lpxModelRegistry,
+	registry lpx.ModelRegistry,
 	dgd *nvidiacomv1alpha1.LPXGraphDeployment,
 	source *nvidiacomv1beta1.DynamoGraphDeployment,
 	objects ...client.Object,
@@ -2605,11 +1736,6 @@ func newLPXTestReconciler(
 	base := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithIndex(&nvidiacomv1alpha1.LPXGraphDeployment{}, lpxSourceOwnerIndex, lpxSourceOwnerReferences).
-		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxTopologyBindingRefIndex, lpxTopologyBindingReferences).
-		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxResourceClaimRefIndex, lpxDRAClaimReferences(false)).
-		WithIndex(&nvidiacomv1beta1.DynamoGraphDeployment{}, lpxResourceClaimTemplateRefIndex, lpxDRAClaimReferences(true)).
-		WithIndex(&resourcev1.ResourceClaim{}, lpxDeviceClassRefIndex, lpxDeviceClassReferences).
-		WithIndex(&resourcev1.ResourceClaimTemplate{}, lpxDeviceClassRefIndex, lpxDeviceClassReferences).
 		WithStatusSubresource(&nvidiacomv1beta1.DynamoGraphDeployment{}, &nvidiacomv1alpha1.LPXGraphDeployment{}).
 		WithObjects(seed...).
 		Build()
@@ -2696,27 +1822,12 @@ func lpxMaterializedObjects(
 	group.Labels[grovecommon.LabelPodCliqueSetReplicaIndex] = "0"
 	objects := []client.Object{pcs, group}
 
-	// Each Grove replica owns independent cliques and one gang per scheduler.
+	// Each Grove replica owns independent cliques.
 	for replicaIndex := int32(0); replicaIndex < group.Spec.Replicas; replicaIndex++ {
-		gangs := make(map[string]*groveschedulerv1alpha1.PodGang, 2)
-		for _, scheduler := range []string{corev1.DefaultSchedulerName, lpx.SchedulerName} {
-			name := fmt.Sprintf("selected-dgd-%d-%s", replicaIndex, scheduler)
-			gangs[scheduler] = &groveschedulerv1alpha1.PodGang{
-				TypeMeta: metav1.TypeMeta{APIVersion: groveschedulerv1alpha1.SchemeGroupVersion.String(), Kind: "PodGang"},
-				ObjectMeta: metav1.ObjectMeta{
-					Name: name, Namespace: pcs.Namespace, UID: types.UID(name + "-uid"),
-					Labels: maps.Clone(pcs.Labels), Annotations: maps.Clone(pcs.Annotations),
-					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
-				},
-			}
-			gangs[scheduler].Labels[grovecommon.LabelPartOfKey] = pcs.Name
-			gangs[scheduler].Labels[grovecommon.LabelSchedulerName] = scheduler
-		}
 		parent := grovecommon.ResourceNameReplica{Name: group.Name, Replica: int(replicaIndex)}
 		for _, template := range pcs.Spec.Template.Cliques {
 			rendered := template.DeepCopy()
 			name := grovecommon.GeneratePodCliqueName(parent, rendered.Name)
-			gang := gangs[rendered.Spec.PodSpec.SchedulerName]
 			clique := &grovev1alpha1.PodClique{
 				TypeMeta: metav1.TypeMeta{APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodClique"},
 				ObjectMeta: metav1.ObjectMeta{
@@ -2731,26 +1842,32 @@ func lpxMaterializedObjects(
 				},
 			}
 			clique.Labels[grovecommon.LabelPartOfKey] = pcs.Name
-			clique.Labels[grovecommon.LabelPodGang] = gang.Name
 			clique.Labels[grovecommon.LabelPodCliqueScalingGroup] = group.Name
 			clique.Labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex] = strconv.FormatInt(int64(replicaIndex), 10)
 			for index, dependency := range clique.Spec.StartsAfter {
 				clique.Spec.StartsAfter[index] = grovecommon.GeneratePodCliqueName(parent, dependency)
 			}
 			objects = append(objects, clique)
-
-			// Gang references, not fake Pods, witness each clique's rendered cardinality.
-			podGroup := groveschedulerv1alpha1.PodGroup{Name: name, MinReplicas: ptr.Deref(clique.Spec.MinAvailable, clique.Spec.Replicas)}
-			for podIndex := int32(0); podIndex < clique.Spec.Replicas; podIndex++ {
-				podGroup.PodReferences = append(podGroup.PodReferences, groveschedulerv1alpha1.NamespacedName{
-					Namespace: pcs.Namespace, Name: fmt.Sprintf("%s-%d", name, podIndex),
-				})
-			}
-			gang.Spec.PodGroups = append(gang.Spec.PodGroups, podGroup)
 		}
-		objects = append(objects, gangs[corev1.DefaultSchedulerName], gangs[lpx.SchedulerName])
 	}
 	return objects
+}
+
+func withLPXTestReplicas(t *testing.T, desired *lpxMaterializing, replicas int32) *lpxMaterializing {
+	t.Helper()
+	require.NotNil(t, desired)
+	require.NotNil(t, desired.plan)
+	require.Positive(t, desired.plan.Replicas)
+	require.GreaterOrEqual(t, replicas, int32(0))
+	require.LessOrEqual(t, replicas, desired.plan.Replicas)
+	require.Zero(t, len(desired.requests)%int(desired.plan.Replicas))
+	requestsPerReplica := len(desired.requests) / int(desired.plan.Replicas)
+	next := *desired
+	next.requests = slices.Clone(desired.requests[:int(replicas)*requestsPerReplica])
+	plan := *desired.plan
+	plan.Replicas = replicas
+	next.plan = &plan
+	return &next
 }
 
 func createLPXTestObjects(t *testing.T, ctx context.Context, kubeClient client.Client, objects ...client.Object) {
@@ -2758,6 +1875,53 @@ func createLPXTestObjects(t *testing.T, ctx context.Context, kubeClient client.C
 	for _, object := range objects {
 		require.NoError(t, kubeClient.Create(ctx, object.DeepCopyObject().(client.Object)))
 	}
+}
+
+func reconcileSelectedLPXForTest(
+	ctx context.Context,
+	reconciler *graphReconciler,
+	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	desired *lpxMaterializing,
+) (lpxClassification, error) {
+	podCliqueSetMissing := false
+	if desired.plan != nil {
+		pcs := &grovev1alpha1.PodCliqueSet{}
+		err := reconciler.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: desired.plan.PodCliqueSetName}, pcs)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+		podCliqueSetMissing = apierrors.IsNotFound(err)
+	}
+	currents, classification, err := reconciler.reconcileLPXPublicationFence(ctx, deployment, desired, podCliqueSetMissing)
+	if classification != nil || err != nil {
+		return classification, err
+	}
+	return reconciler.reconcileSelectedLPXFromCurrentRequests(ctx, deployment, desired, currents)
+}
+
+func publishSelectedLPXForTest(
+	t *testing.T,
+	ctx context.Context,
+	reconciler *graphReconciler,
+	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
+	desired *lpxMaterializing,
+) lpxClassification {
+	t.Helper()
+	for range len(desired.requests) + 2 {
+		classification, err := reconcileSelectedLPXForTest(ctx, reconciler, deployment, desired)
+		require.NoError(t, err)
+		transition, preparing := classification.(*lpxDeadlineTransition)
+		if !preparing {
+			return classification
+		}
+		if deployment.Status.Placement == nil {
+			deployment.Status.Placement = &nvidiacomv1beta1.PlacementStatus{}
+		}
+		deployment.Status.Placement.LPXAttempt = transition.attempt
+		require.NoError(t, reconciler.Status().Update(ctx, deployment))
+	}
+	t.Fatal("LPX publication did not converge")
+	return nil
 }
 
 func getLPXRequest(t *testing.T, ctx context.Context, kubeClient client.Reader, namespace, name string) *lpxv1alpha1.LPUPipelineRequest {

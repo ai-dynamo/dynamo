@@ -13,14 +13,10 @@ import (
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -33,7 +29,6 @@ const (
 	lpxSchedulingDispositionObservedReason string = "LPXSchedulingDispositionObserved"
 	lpxSchedulingDeadlineExceededReason    string = "LPXSchedulingDeadlineExceeded"
 	lpxAttemptAuthorityLostReason          string = "LPXAttemptAuthorityLost"
-	lpxAttemptRecordingFinalizer                  = "scheduling.lpu.nvidia.com/dynamo-attempt-recording"
 )
 
 type lpxDeadlineTransition struct {
@@ -115,7 +110,7 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	}
 	if attempt.ExceededAt != nil {
 		state, err := r.continueTerminalLPXAttempt(
-			ctx, deployment, attempt, observed, lpxSchedulingDeadlineExceededReason,
+			ctx, deployment, attempt, requests, lpxSchedulingDeadlineExceededReason,
 			"LPX scheduling deadline exceeded; no retry is authorized",
 		)
 		return state, time.Time{}, nil, err
@@ -144,7 +139,7 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	}
 	if missing {
 		state, err := r.continueTerminalLPXAttempt(
-			ctx, deployment, attempt, observed, lpxAttemptAuthorityLostReason,
+			ctx, deployment, attempt, requests, lpxAttemptAuthorityLostReason,
 			"An exact LPX request disappeared; retiring its scheduling batch without replacement",
 		)
 		return state, time.Time{}, nil, err
@@ -162,69 +157,32 @@ func (r *graphReconciler) reconcileLPXAttemptDeadline(
 	return nil, deadlineAt, requests, nil
 }
 
-// retireLPXEngineRequest records intentional removal before deleting the exact request.
+// retireLPXEngineRequest records intentional removal before deleting the
+// request's owning PCS.
 func (r *graphReconciler) retireLPXEngineRequest(ctx context.Context, deployment *nvidiacomv1alpha1.LPXGraphDeployment, request *lpxv1alpha1.LPUPipelineRequest, reason string, intentional bool) (lpxClassification, error) {
 	// Persist batch membership before deletion can be mistaken for lost authority.
 	if current := currentLPXAttemptStatus(deployment); current != nil && intentional && current.ExceededAt == nil {
 		for i, row := range current.Requests {
 			if row.Name == request.Name && row.AttemptDigest != "" && (row.UID == request.UID || row.UID == "" && row.AttemptDigest == request.Annotations[lpxAttemptDigestAnnotation]) {
 				next := current.DeepCopy()
-				// Retain exact cleanup authority until a replacement digest can be prepared.
+				// Deleting the shared PCS replaces every request it owns.
 				next.Requests[i].UID = request.UID
-				next.Requests[i].AttemptDigest = ""
+				for j := range next.Requests {
+					next.Requests[j].AttemptDigest = ""
+				}
 				return newLPXDeadlineTransition(next, nvidiacomv1beta1.DGDStatePending,
 					lpxRetiringReason, reason, time.Nanosecond), nil
 			}
 		}
 	}
-	if err := r.validateLPXDeploymentAuthority(ctx, deployment); err != nil {
-		return nil, err
+	owner := metav1.GetControllerOf(request)
+	if owner == nil || owner.APIVersion != grovev1alpha1.SchemeGroupVersion.String() || owner.Kind != "PodCliqueSet" || owner.UID == "" {
+		return nil, fmt.Errorf("LPX request %q does not have an exact PodCliqueSet controller owner", request.Name)
 	}
-	if request.DeletionTimestamp.IsZero() {
-		uid, rv := request.UID, request.ResourceVersion
-		if err := r.Delete(ctx, request, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
-			return nil, err
-		}
-	}
-	// Invalid live intent needs exact Pod cleanup; native replacement already owns its Pods.
-	if !intentional {
-		if err := r.retireLPXAttemptPods(ctx, request); err != nil {
-			return nil, err
-		}
-	}
-	if err := r.releaseLPXAttemptRecordingFinalizer(ctx, request); err != nil {
+	if _, err := r.deleteLPXPodCliqueSet(ctx, deployment, owner.Name, owner.UID); err != nil {
 		return nil, err
 	}
 	return &lpxRetiring{retirementReason: reason}, nil
-}
-
-// retireLPXAttemptPods releases only Pods committed to this exact scheduling request.
-func (r *graphReconciler) retireLPXAttemptPods(ctx context.Context, request *lpxv1alpha1.LPUPipelineRequest) error {
-	if request.Status == nil || request.Status.Committed == nil || request.Status.Committed.Execution.NodeLocal == nil {
-		return nil
-	}
-	for _, partition := range request.Status.Committed.Execution.NodeLocal.PartitionSelections {
-		for _, row := range partition.SelectedRows {
-			refs := make([]lpxv1alpha1.ObjectReference, 0, 2)
-			if row.Current != nil {
-				refs = append(refs, row.Current.PodRef)
-			}
-			if row.Target != nil {
-				refs = append(refs, row.Target.PodRef)
-			}
-			for _, ref := range refs {
-				if ref.Namespace != request.Namespace || ref.Name == "" || ref.UID == "" {
-					return fmt.Errorf("LPX request %q contains an invalid committed Pod identity", request.Name)
-				}
-				uid := types.UID(ref.UID)
-				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: ref.Namespace, Name: ref.Name}}
-				if err := r.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-					return err
-				}
-			}
-		}
-	}
-	return nil
 }
 
 func (r *graphReconciler) reconcileLPXAttemptPreparation(
@@ -252,10 +210,16 @@ func (r *graphReconciler) reconcileLPXAttemptPreparation(
 		if active {
 			next = current.DeepCopy()
 		}
+
 		for _, row := range current.Requests {
 			if active || row.UID != "" && row.AttemptDigest == "" {
 				previous[row.Name] = row
 			}
+		}
+		// Move the preserved attempt clock to its replacement PCS once every old request is gone.
+		if active && lpxAttemptRequestsRetired(current.Requests) {
+			next.ObservedGeneration = want.ObservedGeneration
+			next.PodCliqueSetUID = want.PodCliqueSetUID
 		}
 	}
 	next.Requests = make([]nvidiacomv1beta1.LPXAttemptRequestStatus, 0, len(want.Requests))
@@ -300,6 +264,18 @@ func (r *graphReconciler) reconcileLPXAttemptPreparation(
 		next, nvidiacomv1beta1.DGDStatePending, lpxAttemptPreparedReason,
 		"Prepared the scheduling batch before publication", time.Nanosecond,
 	)
+}
+
+func lpxAttemptRequestsRetired(requests []nvidiacomv1beta1.LPXAttemptRequestStatus) bool {
+	if len(requests) == 0 {
+		return false
+	}
+	for _, request := range requests {
+		if request.UID != "" || request.AttemptDigest != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // revalidateLPXAttemptPublication fences live authority after preparation has
@@ -411,21 +387,6 @@ func lpxRequestsByName(requests []lpxv1alpha1.LPUPipelineRequest) map[string]*lp
 	return byName
 }
 
-func (r *graphReconciler) releaseLPXAttemptRecordingFinalizer(ctx context.Context, request *lpxv1alpha1.LPUPipelineRequest) error {
-	// The scheduler finishes cleanup and removes scheduling.lpu.nvidia.com/plan-protection
-	// independently, never waiting for lpxAttemptRecordingFinalizer. Dynamo releases
-	// its finalizer last to retain the request identity and terminal status during cleanup.
-	// Unknown finalizers block release; their owners must resolve them, not Dynamo.
-	if request.DeletionTimestamp.IsZero() || len(request.Finalizers) != 1 || request.Finalizers[0] != lpxAttemptRecordingFinalizer {
-		return nil
-	}
-	controllerutil.RemoveFinalizer(request, lpxAttemptRecordingFinalizer)
-	if err := r.Update(ctx, request); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("release LPX attempt recording finalizer on %q: %w", request.Name, err)
-	}
-	return nil
-}
-
 // exactLPXAttemptState reports aggregate request state; attempt must be nonnil.
 func exactLPXAttemptState(
 	attempt *nvidiacomv1beta1.LPXAttemptStatus,
@@ -468,41 +429,14 @@ func (r *graphReconciler) continueTerminalLPXAttempt(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	attempt *nvidiacomv1beta1.LPXAttemptStatus,
-	observed map[string]*lpxv1alpha1.LPUPipelineRequest,
+	requests []lpxv1alpha1.LPUPipelineRequest,
 	reason string,
 	message string,
 ) (lpxClassification, error) {
-	if err := r.validateLPXDeploymentAuthority(ctx, deployment); err != nil {
+	pending, err := r.retireLPXAttempt(ctx, deployment, attempt, requests)
+	if err != nil {
 		return nil, err
 	}
-	// Retire recorded identities in their canonical request order.
-	pending := false
-	for _, row := range attempt.Requests {
-		request := observed[row.Name]
-		if row.UID == "" || request == nil || request.UID != row.UID {
-			continue
-		}
-		pending = true
-		if !request.DeletionTimestamp.IsZero() {
-			if err := r.retireLPXAttemptPods(ctx, request); err != nil {
-				return nil, err
-			}
-			if err := r.releaseLPXAttemptRecordingFinalizer(ctx, request); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		uid, resourceVersion := request.UID, request.ResourceVersion
-		if err := r.Delete(ctx, request, &client.DeleteOptions{Preconditions: &metav1.Preconditions{
-			UID: &uid, ResourceVersion: &resourceVersion,
-		}}); err != nil && !apierrors.IsNotFound(err) {
-			return nil, fmt.Errorf("delete terminal LPX request %q: %w", request.Name, err)
-		}
-		if err := r.retireLPXAttemptPods(ctx, request); err != nil {
-			return nil, err
-		}
-	}
-	// A failed scheduling batch never scales down or deletes the shared PCS.
 	if !pending && attempt.ExceededAt != nil && deployment.Generation > attempt.ObservedGeneration {
 		return newLPXDeadlineTransition(nil, nvidiacomv1beta1.DGDStatePending,
 			lpxAttemptPreparedReason, "The failed batch is gone; a later edit permits scheduling", time.Nanosecond), nil

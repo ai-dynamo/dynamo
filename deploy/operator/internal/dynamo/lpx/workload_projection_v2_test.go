@@ -38,7 +38,7 @@ func TestProjectModelV2SubHostPartitionUsesWholeHostShape(t *testing.T) {
 	projection := projectionBatch[0]
 
 	t.Log("Verify the two-chip compiler partition reserves one C8 host and produces one Agent replica")
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.Partitions, 1)
 	require.Equal(t, lpxv1alpha1.Xt8888PartitionShapeC8, *spec.Partitions[0].XtShape)
 	require.NotNil(t, spec.NodeLocal)
@@ -109,14 +109,14 @@ func TestProjectModelV2UsesEffectivePropSyncSettings(t *testing.T) {
 	})
 	require.NoError(t, err)
 	defaulted := defaultedBatch[0]
-	defaultSpec := defaulted.RequestSpec("test", "agents", nil)
+	defaultSpec := defaulted.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, defaultSpec.Partitions, 2)
 	require.Len(t, defaultSpec.PropSyncConnectors, 1)
 	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
 
 	t.Log("Enable prop sync and project its effective connector offset")
 	projection := projectTestBuild(t, normalized, PipelineSingle, `{"prop_sync":true,"prop_sync_multiple_load_sets":true}`)
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.PropSyncConnectors, 1)
 	require.Equal(t, int64(3), *spec.PropSyncConnectors[0].Requirement.MaxInterPartitionOffset)
 
@@ -130,7 +130,7 @@ func TestProjectModelV2UsesEffectivePropSyncSettings(t *testing.T) {
 	disabledBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	disabled := disabledBatch[0]
-	require.Len(t, disabled.RequestSpec("test", "agents", nil).PropSyncConnectors, 1)
+	require.Len(t, disabled.RequestSpec(&MaterializationPlan{}, "agents").PropSyncConnectors, 1)
 
 	t.Log("Require manifest-selected evidence when revision 2 enables prop sync")
 	build.SelectedPropSyncChains = nil
@@ -154,12 +154,12 @@ func TestProjectModelV2SingleEmbeddingPlacementFromModelSettings(t *testing.T) {
 
 	t.Log("Omit source partition zero when CPU embeddings are enabled")
 	offLPU := projectTestBuild(t, normalized, PipelineSingle, `{"cpu_embeddings":true}`)
-	require.Equal(t, int64(1), offLPU.RequestSpec("test", "agents", nil).Partitions[0].CompilerPartitionID)
+	require.Equal(t, int64(1), offLPU.RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].CompilerPartitionID)
 
 	t.Log("Retain source partition zero when CPU embeddings are disabled")
 	onLPU := projectTestBuild(t, normalized, PipelineSingle, `{"cpu_embeddings":false}`)
 	require.Equal(t, 4, onLPU.agentReplicas)
-	require.Equal(t, int64(0), onLPU.RequestSpec("test", "agents", nil).Partitions[0].CompilerPartitionID)
+	require.Equal(t, int64(0), onLPU.RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].CompilerPartitionID)
 }
 
 func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
@@ -176,7 +176,7 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	t.Log("Keep Cyborg's partition zero regardless of the Nova CPU-embedding setting")
 	for _, settings := range []string{"", `{"cpu_embeddings":false}`, `{"cpu_embeddings":true}`} {
 		projection := projectTestBuild(t, normalized, PipelineLPX, settings)
-		spec := projection.RequestSpec("test", "agents", nil)
+		spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 		require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
 		require.Len(t, spec.Partitions, 2)
 		require.Equal(t, int64(0), spec.Partitions[0].CompilerPartitionID)
@@ -212,7 +212,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	projection := projectTestBuild(t, normalized, PipelineSingle, `{"prop_sync":false}`)
 
 	t.Log("Preserve only the source-selected connector and partition identities")
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.Partitions, 2)
 	require.Len(t, spec.PropSyncConnectors, 1)
 	require.Equal(t, int64(7), spec.Partitions[0].CompilerPartitionID)
@@ -254,7 +254,7 @@ func TestProjectModelV2PrioritizesSelectedChainWhenPropSyncIsEnabled(t *testing.
 	projection := projectTestBuild(t, normalized, PipelineLPX, "")
 
 	t.Log("Project all physical scheduler partitions and only the selected connector")
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.Partitions, 3)
 	require.Len(t, spec.PropSyncConnectors, 1)
 	require.Equal(t, spec.Partitions[0].ID, spec.PropSyncConnectors[0].FromPartitionID)
@@ -312,7 +312,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	projection := projectTestBuild(t, normalized, PipelineLPX, "")
 
 	t.Log("Keep all physical scheduler partitions while collapsing their Agent runtime projection")
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.Partitions, 3)
 	for index, partition := range spec.Partitions {
 		require.Equal(t, int64(index), partition.CompilerPartitionID)
@@ -347,7 +347,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	projection := projectTestBuild(t, normalized, PipelineLPX, "")
 
 	t.Log("Preserve both physical scheduler partitions and Agent replicas")
-	require.Len(t, projection.RequestSpec("test", "agents", nil).Partitions, 2)
+	require.Len(t, projection.RequestSpec(&MaterializationPlan{}, "agents").Partitions, 2)
 	require.Equal(t, 2, projection.agentReplicas)
 
 	t.Log("Keep both physical Agent endpoints in the collapsed C4 runtime partition")

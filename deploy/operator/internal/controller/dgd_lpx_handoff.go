@@ -31,7 +31,7 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 		return nil, err
 	}
 	exists := err == nil
-	if exists && !exactLPXSourceOwner(child, source) {
+	if exists && !metav1.IsControlledBy(child, source) {
 		return nil, fmt.Errorf("LPXGraphDeployment %q belongs to a different source; adoption is not supported", child.Name)
 	}
 	if !source.HasLPXComponent() {
@@ -72,13 +72,6 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 	return child, err
 }
 
-func exactLPXSourceOwner(child *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment) bool {
-	owner := metav1.GetControllerOf(child)
-	return child.Name == source.Name && child.Namespace == source.Namespace &&
-		owner != nil && owner.Kind == "DynamoGraphDeployment" && owner.APIVersion == v1beta1.GroupVersion.String() &&
-		owner.Name == source.Name && owner.UID == source.UID
-}
-
 func (r *dgdLPXHandoff) deleteChild(ctx context.Context, child *v1alpha1.LPXGraphDeployment) error {
 	if !child.DeletionTimestamp.IsZero() {
 		return nil
@@ -92,7 +85,7 @@ func (r *dgdLPXHandoff) Finalize(ctx context.Context, source *v1beta1.DynamoGrap
 	if err := r.client.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil {
 		return client.IgnoreNotFound(err)
 	}
-	if !exactLPXSourceOwner(child, source) {
+	if !metav1.IsControlledBy(child, source) {
 		// It is not our dependent; do not delete it and do not wait for it.
 		return nil
 	}

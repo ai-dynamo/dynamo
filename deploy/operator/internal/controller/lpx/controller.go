@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -27,7 +26,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -35,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-const lpxGraphDeploymentFinalizer = "nvidia.com/lpx-graph-deployment"
+const legacyLPXGraphDeploymentFinalizer = "nvidia.com/lpx-graph-deployment"
 
 func lpxSourceKey(deployment *v1alpha1.LPXGraphDeployment) (client.ObjectKey, error) {
 	owner := metav1.GetControllerOf(deployment)
@@ -70,7 +68,7 @@ type graphReconciler struct {
 	recorder              events.EventRecorder
 	apiReader             client.Reader
 	runtimeConfig         *commoncontroller.RuntimeConfig
-	modelRegistry         lpxModelRegistry
+	modelRegistry         lpx.ModelRegistry
 	Config                *configv1alpha1.OperatorConfiguration
 	DockerSecretRetriever dynamo.SecretsRetriever
 }
@@ -81,7 +79,7 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 
 // Setup registers the LPX controller and its dependencies.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig, secrets dynamo.SecretsRetriever) error {
-	// Disabled integration still serves child status and explicit deletion.
+	// Disabled integration still serves child status; deletion uses owner garbage collection.
 	r := &graphReconciler{
 		Client:                mgr.GetClient(),
 		recorder:              mgr.GetEventRecorder("lpxgraphdeployment"),
@@ -113,7 +111,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 }
 
 // unavailableReason owns the LPX activation policy; an empty reason means enabled.
-// Status and explicit deletion remain available regardless of this policy.
+// Status remains available regardless of this policy.
 func (r *graphReconciler) unavailableReason() string {
 	if !r.runtimeConfig.Gate.Enabled(features.Grove) {
 		return "Grove is disabled"
@@ -127,8 +125,7 @@ func (r *graphReconciler) unavailableReason() string {
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=scheduler.grove.io,resources=podgangs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;update;delete
+// +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
 
 func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	deployment := &v1alpha1.LPXGraphDeployment{}
@@ -136,7 +133,10 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !deployment.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, r.finalize(ctx, deployment)
+		if controllerutil.RemoveFinalizer(deployment, legacyLPXGraphDeploymentFinalizer) {
+			return ctrl.Result{}, r.Update(ctx, deployment)
+		}
+		return ctrl.Result{}, nil
 	}
 
 	unavailableReason := r.unavailableReason()
@@ -204,11 +204,6 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		state = lpxResult(rejected)
 		return r.retireInvalidWorkload(ctx, deployment, rejected.reason)
 	}
-	if !controllerutil.ContainsFinalizer(deployment, lpxGraphDeploymentFinalizer) {
-		controllerutil.AddFinalizer(deployment, lpxGraphDeploymentFinalizer)
-		return ctrl.Result{RequeueAfter: time.Nanosecond}, r.Update(ctx, deployment)
-	}
-
 	selected, classification, err := r.reconcileLPXSafetyPreflight(ctx, deployment, source, nil)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -245,9 +240,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment, selected *lpxMaterializing) (reconcileOutcome, ctrl.Result, error) {
 	state := reconcileOutcome{State: v1beta1.DGDStatePending, Reason: "LPXPending", Message: "Waiting for the current LPX engine"}
 
-	// Pair retirement with the authoritative PCS, not a cached roster predating current requests.
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.apiReader.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.PodCliqueSetName}, pcs); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.PodCliqueSetName}, pcs); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return state, ctrl.Result{}, err
 		}
@@ -260,52 +254,52 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
 		return state, ctrl.Result{}, err
 	}
-	// Retire obsolete scheduler intent before changing its runtime or engine count.
-	rosterChanged := pcs != nil && metav1.IsControlledBy(pcs, deployment) && !slices.EqualFunc(
-		pcs.Spec.Template.PodCliqueScalingGroupConfigs, desired.Spec.Template.PodCliqueScalingGroupConfigs,
-		func(a, b grovev1alpha1.PodCliqueScalingGroupConfig) bool {
-			return a.Name == b.Name && slices.Equal(a.CliqueNames, b.CliqueNames)
-		})
-	transition, err := r.retireChangedLPXRequests(ctx, deployment, selected, rosterChanged)
+	// Scale the live Grove group before stale request retirement. LPX scheduler
+	// finalizers may wait for Grove to remove the corresponding pods, so the
+	// publication fence must not block this write.
+	if err := r.reconcileLPXScalingGroupScale(ctx, source, pcs, selected.plan.LPXScalingGroup, true); err != nil {
+		return state, ctrl.Result{}, err
+	}
+	currents, classification, err := r.reconcileLPXPublicationFence(ctx, deployment, selected, pcs == nil)
 	if err != nil {
 		return state, ctrl.Result{}, err
 	}
-	if transition != nil {
-		return lpxResult(transition), projectLPXLifecycleStatus(deployment, transition), nil
+	if classification != nil {
+		state = lpxResult(classification)
+		return state, projectLPXLifecycleStatus(deployment, classification), nil
 	}
 	for _, resource := range resources {
 		if err := r.syncLPXResource(ctx, deployment, resource); err != nil {
 			return state, ctrl.Result{}, err
 		}
 	}
-	synced, changed, retiring, err := r.reconcileGrovePodCliqueSetForLPX(ctx, deployment, lpx.ServingComponent(source).Replicas, pcs, desired)
+	// Grove seeds native scale only at creation; preserve that seed when replicas are omitted.
+	if pcs != nil && lpx.ServingComponent(source).Replicas == nil {
+		group := &desired.Spec.Template.PodCliqueScalingGroupConfigs[0]
+		for _, existing := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
+			if existing.Name == group.Name {
+				group.Replicas = existing.Replicas
+				break
+			}
+		}
+	}
+
+	changed, synced, err := commoncontroller.SyncObservedResource(
+		ctx,
+		r,
+		deployment,
+		pcs,
+		desired,
+		commoncontroller.WithPreservedListOrder(),
+	)
 	if err != nil {
 		return state, ctrl.Result{}, err
-	}
-	if retiring != nil {
-		return lpxResult(retiring), projectLPXLifecycleStatus(deployment, retiring), nil
 	}
 	if err := r.reconcileEndpoint(ctx, deployment, source); err != nil {
 		return state, ctrl.Result{}, err
 	}
-	// Grove seeds scaling groups once; only explicit component replicas override native scale.
-	if replicas := lpx.ServingComponent(source).Replicas; replicas != nil {
-		group := &grovev1alpha1.PodCliqueScalingGroup{}
-		if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.LPXScalingGroup}, group); err != nil {
-			if !apierrors.IsNotFound(err) {
-				return state, ctrl.Result{}, err
-			}
-		} else if !metav1.IsControlledBy(group, synced) || !group.DeletionTimestamp.IsZero() {
-			return state, ctrl.Result{}, fmt.Errorf("LPX scaling group lacks the current PCS owner")
-		} else if group.Spec.Replicas != *replicas {
-			scale := &autoscalingv1.Scale{
-				ObjectMeta: metav1.ObjectMeta{ResourceVersion: group.ResourceVersion},
-				Spec:       autoscalingv1.ScaleSpec{Replicas: *replicas},
-			}
-			if err := r.SubResource("scale").Update(ctx, group, client.WithSubResourceBody(scale)); err != nil {
-				return state, ctrl.Result{}, err
-			}
-		}
+	if err := r.reconcileLPXScalingGroupScale(ctx, source, synced, selected.plan.LPXScalingGroup, false); err != nil {
+		return state, ctrl.Result{}, err
 	}
 	readiness, err := dynamo.EvaluateLPXGroveReadiness(ctx, r.Client, source, deployment, synced)
 	if err != nil {
@@ -328,12 +322,46 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 		}
 		state.State = v1beta1.DGDStateSuccessful
 	}
-	classification, err := r.reconcileSelectedLPX(ctx, deployment, selected)
+	classification, err = r.reconcileSelectedLPXFromCurrentRequests(ctx, deployment, selected, currents)
 	if err != nil {
 		return state, ctrl.Result{}, err
 	}
 	state = overlayLPXResult(state, classification)
 	return state, projectLPXLifecycleStatus(deployment, classification), nil
+}
+
+// reconcileLPXScalingGroupScale applies explicit component replicas to the
+// Grove group. Grove seeds this group once, so later replica changes use its
+// scale subresource without rewriting the PCS template.
+func (r *graphReconciler) reconcileLPXScalingGroupScale(
+	ctx context.Context,
+	source *v1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
+	groupName string,
+	scaleDownOnly bool,
+) error {
+	replicas := lpx.ServingComponent(source).Replicas
+	if replicas == nil || pcs == nil {
+		return nil
+	}
+	group := &grovev1alpha1.PodCliqueScalingGroup{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: pcs.Namespace, Name: groupName}, group); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if !metav1.IsControlledBy(group, pcs) || !group.DeletionTimestamp.IsZero() {
+		return fmt.Errorf("LPX scaling group lacks the current PCS owner")
+	}
+	if group.Spec.Replicas == *replicas || scaleDownOnly && group.Spec.Replicas < *replicas {
+		return nil
+	}
+	scale := &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{ResourceVersion: group.ResourceVersion},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: *replicas},
+	}
+	return r.SubResource("scale").Update(ctx, group, client.WithSubResourceBody(scale))
 }
 
 // projectLPXLifecycleStatus transfers reconcile-owned results to the same child before returning.
@@ -360,17 +388,6 @@ func (r *graphReconciler) retireInvalidWorkload(ctx context.Context, deployment 
 		return ctrl.Result{RequeueAfter: lpxRetirementRequeueAfter}, nil
 	}
 	return ctrl.Result{}, nil
-}
-
-func (r *graphReconciler) finalize(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment) error {
-	if !controllerutil.ContainsFinalizer(deployment, lpxGraphDeploymentFinalizer) {
-		return nil
-	}
-	if err := r.finalizeLPXRequests(ctx, deployment); err != nil {
-		return err
-	}
-	controllerutil.RemoveFinalizer(deployment, lpxGraphDeploymentFinalizer)
-	return r.Update(ctx, deployment)
 }
 
 // Publication is an identity-sensitive write boundary: an uncached read fences
@@ -451,16 +468,20 @@ func (r *graphReconciler) deleteStaleLPXConfigMaps(ctx context.Context, deployme
 
 	// Discover obsolete ConfigMaps rooted in this exact LPX child.
 	stale := make([]client.Object, 0)
-	if err := visitLifecycleObjectPages(ctx, r.apiReader, &corev1.ConfigMapList{}, func(object k8sruntime.Object) error {
-		configMap := object.(client.Object)
+	configMaps := &corev1.ConfigMapList{}
+	if err := r.apiReader.List(ctx, configMaps,
+		client.InNamespace(deployment.Namespace),
+		client.MatchingLabels{lpxOwnerUIDLabel: string(deployment.UID)},
+	); err != nil {
+		return err
+	}
+	for index := range configMaps.Items {
+		configMap := &configMaps.Items[index]
 		if metav1.IsControlledBy(configMap, deployment) {
 			if _, desired := desiredNames[configMap.GetName()]; !desired {
 				stale = append(stale, configMap)
 			}
 		}
-		return nil
-	}, client.InNamespace(deployment.Namespace)); err != nil {
-		return err
 	}
 	if len(stale) == 0 {
 		return nil
@@ -515,7 +536,8 @@ func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1a
 	if err != nil {
 		return err
 	}
-	// Keep the endpoint on this materialization even when another child shares the source.
+	// Keep cleanup and pod selection scoped to this materialization.
+	service.Labels[lpxOwnerUIDLabel] = string(deployment.UID)
 	service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
 	service.Spec.Selector[grovecommon.LabelPartOfKey] = pcsName
 	return r.syncLPXResource(ctx, deployment, service)

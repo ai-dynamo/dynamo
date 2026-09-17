@@ -54,7 +54,7 @@ func newLPXRenderDeployment(t *testing.T, source *v1beta1.DynamoGraphDeployment)
 
 func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 	t.Log("Resolve a real LPU workload including inherited scheduler metadata")
-	payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/node-local-v2-lpu-only.input.yaml")
+	payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/node-local-v2-lpu-only.input.yaml")
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, source))
@@ -100,7 +100,7 @@ func TestLPXHybridPreservesKVTransferTopology(t *testing.T) {
 	for _, fixture := range []string{"node-local-v2-hybrid", "node-local-v3-hx-hybrid"} {
 		t.Run(fixture, func(t *testing.T) {
 			t.Log("Resolve a hybrid engine using a real ClusterTopologyBinding for KV transfer")
-			payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
+			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
 			require.NoError(t, err)
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
@@ -178,7 +178,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Resolve the authored engine and its exact child without changing either input")
 			fixture := test.name
-			payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
+			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
 			require.NoError(t, err)
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
@@ -250,16 +250,12 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 
 			t.Log("Project every model into the expected scheduler family, mode and physical Agent shape")
 			require.Equal(t, lpx.BuildFamily(test.wantFamily), selected.BuildFamily())
-			var cyborgRef *lpxv1alpha1.CyborgPodCliqueReference
-			if hybrid {
-				cyborgRef = &lpxv1alpha1.CyborgPodCliqueReference{Name: "cyborg", UID: "uid"}
-			}
 			projections := selected.ModelProjections()
 			require.Len(t, plan.Agents, len(projections))
 			projectionIndices := make(map[string]int, len(projections))
 			for index, projection := range projections {
 				projectionIndices[plan.Agents[index].TemplateName] = index
-				request := projection.RequestSpec(source.Namespace, "agents", cyborgRef)
+				request := projection.RequestSpec(plan, "agents")
 				require.Equal(t, lpxv1alpha1.ExecutionBackendNodeLocal, request.ExecutionBackend)
 				require.NotNil(t, request.NodeLocal)
 				require.Equal(t, test.wantFamily, request.TargetFamily)
@@ -453,7 +449,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	t.Log("Give the speculative components distinct authored Agent and conductor commands")
 	registry := newTestDataModelRegistry(t, t.TempDir())
-	payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/node-local-v3-hx-specdecode.input.yaml")
+	payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/node-local-v3-hx-specdecode.input.yaml")
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, source))
@@ -521,7 +517,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	require.Equal(t, before, source)
 }
 
-func newTestDataModelRegistry(t *testing.T, registryRoot string) *lpx.ModelRegistry {
+func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegistry {
 	t.Helper()
 
 	v2Builds := map[string]testV2GraphManifestFixture{
@@ -812,7 +808,7 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 	t.Log("Render manifest-derived, equivalent explicit, and overridden runtime settings")
 	configs := make([]renderedConfig, 0, 3)
 	for _, settingsJSON := range []string{"", `{"batch_size":1,"swa":{"chunked":false}}`, `{"sequence_length":65536}`} {
-		payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/single_v2.input.yaml")
+		payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/single_v2.input.yaml")
 		require.NoError(t, err)
 
 		var deployment v1beta1.DynamoGraphDeployment
@@ -995,7 +991,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 	for _, name := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Log("Load the authored input before selection")
-			b, err := os.ReadFile("../../dynamo/testdata/" + name + ".input.yaml")
+			b, err := os.ReadFile("../../dynamo/lpx/testdata/" + name + ".input.yaml")
 			require.NoError(t, err)
 
 			var dynamoDeployment v1beta1.DynamoGraphDeployment
@@ -1082,7 +1078,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				normalizedHash := lpx.LPUConfigMapHash(normalized)
 				replacements = append(replacements, actualHash, normalizedHash, actualHash[:16], normalizedHash[:16])
 			}
-			goldenPath, err := filepath.Abs("../../dynamo/testdata/" + name + ".yaml")
+			goldenPath, err := filepath.Abs("../../dynamo/lpx/testdata/" + name + ".yaml")
 			require.NoError(t, err)
 			const header = "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n" +
 				"# SPDX-License-Identifier: Apache-2.0\n\n"
@@ -1093,7 +1089,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 
 func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *testing.T) {
 	t.Log("Load the pre-scheduler V2 hybrid DGD shape without scheduler intent and with an authored runtime command")
-	payload, err := os.ReadFile(filepath.Join("../../dynamo/testdata", "from_dgd_yaml", "node-local-v2-hybrid.input.yaml"))
+	payload, err := os.ReadFile(filepath.Join("../../dynamo/lpx/testdata", "from_dgd_yaml", "node-local-v2-hybrid.input.yaml"))
 	require.NoError(t, err)
 	dgd := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, dgd))
@@ -1161,7 +1157,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Empty(t, plan.ConductorTemplate)
 	require.Len(t, plan.Agents, 1)
 	require.Equal(t, 6, plan.Agents[0].Replicas)
-	request := projection.RequestSpec(dgd.Namespace, "test", nil)
+	request := projection.RequestSpec(plan, "test")
 	require.Len(t, request.Partitions, 3)
 	for index, partition := range request.Partitions {
 		require.Equal(t, int64(index), partition.CompilerPartitionID)
@@ -1404,7 +1400,7 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 
 	for _, mode := range modes {
 		t.Run(mode.name, func(t *testing.T) {
-			payload, err := os.ReadFile(filepath.Join("../../dynamo/testdata", "from_dgd_yaml", mode.file))
+			payload, err := os.ReadFile(filepath.Join("../../dynamo/lpx/testdata", "from_dgd_yaml", mode.file))
 			require.NoError(t, err)
 
 			for _, intent := range intents {
@@ -1547,7 +1543,7 @@ func getResource[T any](t *testing.T, resources []client.Object, name string) T 
 
 func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	t.Log("Load an authored hybrid engine and override its independent leader template")
-	payload, err := os.ReadFile(filepath.Join("../../dynamo/testdata", "from_dgd_yaml", "node-local-v2-hybrid.input.yaml"))
+	payload, err := os.ReadFile(filepath.Join("../../dynamo/lpx/testdata", "from_dgd_yaml", "node-local-v2-hybrid.input.yaml"))
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, source))

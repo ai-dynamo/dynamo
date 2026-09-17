@@ -84,18 +84,23 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Seed conflicting runtime annotations and a nondefault mount")
 			projection := projectRenderFixture(t, test.family, test.pipeline, test.snapshot)
+			require.NotEqual(t, projection.Digest().String(), projection.CompilerSnapshotDigest())
 			pcs := renderTestPCS(test.pipeline == PipelineLPX)
 			pcs.Annotations = map[string]string{
 				ExecutionBackendAnnotation: "stale",
 			}
 			for _, clique := range pcs.Spec.Template.Cliques {
-				clique.Annotations = map[string]string{ExecutionBackendAnnotation: "stale"}
+				clique.Annotations = map[string]string{
+					ExecutionBackendAnnotation:                   "stale",
+					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
+				}
 			}
 			template := corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 					"user":                         "kept",
 					lpxv1alpha1.PodModelAnnotation: "spoofed",
-					ExecutionBackendAnnotation:     "stale",
+					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
+					ExecutionBackendAnnotation:                   "stale",
 				}},
 				Spec: renderTestPodSpec(),
 			}
@@ -118,10 +123,16 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.NotContains(t, rendered.Annotations, ExecutionBackendAnnotation)
 			for _, clique := range rendered.Spec.Template.Cliques {
 				require.NotContains(t, clique.Annotations, ExecutionBackendAnnotation)
+				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
+					require.Equal(t, projection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
+				} else {
+					require.NotContains(t, clique.Annotations, lpxv1alpha1.CompilerSnapshotDigestAnnotation)
+				}
 			}
 			agent := namedClique(t, rendered, testAgentTemplateName)
 			require.Equal(t, projection.Model(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
 			require.Equal(t, projection.Digest().String(), agent.Annotations[WorkloadDigestAnnotation])
+			require.Equal(t, projection.CompilerSnapshotDigest(), agent.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 
 			t.Log("Resolve runtime mounts using the authored storage path")
 			if test.family == lpxv1alpha1.TargetFamilyXt8888 {

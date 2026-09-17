@@ -130,7 +130,7 @@ func TestAcquireLocalBuildSnapshotCancellation(t *testing.T) {
 			}
 
 			t.Log("Reject the acquisition without returning a snapshot")
-			registry := &ModelRegistry{}
+			registry := &defaultModelRegistry{}
 			snapshot, err := registry.AcquireBuildSnapshot(ctx, buildDir)
 			require.ErrorIs(t, err, tt.wantErr)
 			require.Nil(t, snapshot)
@@ -146,7 +146,7 @@ func TestAcquireLocalBuildSnapshotRejectsFIFOManifest(t *testing.T) {
 		t.Log("Reject the FIFO manifest while the acquisition context is still active")
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
-		snapshot, err := (&ModelRegistry{}).AcquireBuildSnapshot(ctx, buildDir)
+		snapshot, err := (&defaultModelRegistry{}).AcquireBuildSnapshot(ctx, buildDir)
 		require.ErrorContains(t, err, "not a regular file")
 		require.ErrorContains(t, err, gbuildManifestV2CapnpFile)
 		require.Nil(t, snapshot)
@@ -305,7 +305,7 @@ func TestReadBuildFileBoundsLocalFileAtAcquisition(t *testing.T) {
 	const metadataFile = "metadata.bin"
 	require.NoError(t, os.WriteFile(filepath.Join(buildDir, metadataFile), []byte("12345"), 0o600))
 	buildURL := &url.URL{Scheme: BuildSchemeFile, Path: buildDir}
-	registry := &ModelRegistry{}
+	registry := &defaultModelRegistry{}
 
 	t.Log("Read the file at the inclusive acquisition limit")
 	data, err := registry.readBuildFileBounded(t.Context(), buildURL, metadataFile, 5)
@@ -334,7 +334,7 @@ func TestReadBuildFileBoundsGCSAccumulatedChunks(t *testing.T) {
 			{chunks: modelFileChunks(metadataFile, "12", "345")},
 		},
 	}
-	registry := &ModelRegistry{mxClient: client}
+	registry := &defaultModelRegistry{mxClient: client}
 	buildURL := &url.URL{Scheme: BuildSchemeGCS, Host: "bucket", Path: "/model/build"}
 
 	t.Log("Reject the accumulated stream before accepting oversized metadata")
@@ -509,7 +509,7 @@ func TestRegistryEnsureDownloadedReturnsFirstStatus(t *testing.T) {
 					},
 				},
 			}
-			registry := &ModelRegistry{mxClient: client}
+			registry := &defaultModelRegistry{mxClient: client}
 			buildURL := mustParseURL(t, "gs://bucket/models/build")
 
 			t.Log("Classify the first Model Express download status")
@@ -544,7 +544,7 @@ func TestRegistryEnsureDownloadedPropagatesTransportFailures(t *testing.T) {
 			if scenario.rpc {
 				client.err = scenario.err
 			}
-			registry := &ModelRegistry{mxClient: client}
+			registry := &defaultModelRegistry{mxClient: client}
 
 			t.Log("Reject the failed or empty stream before classifying readiness")
 			ready, err := registry.EnsureDownloaded(t.Context(), mustParseURL(t, "gs://bucket/models/build"))

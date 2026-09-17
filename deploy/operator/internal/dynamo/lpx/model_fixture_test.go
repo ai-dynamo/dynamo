@@ -22,7 +22,7 @@ const registryTestTopology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA
 
 const gbuildManifestJSONFile = "manifest.json"
 
-func normalizeRegistryFixtureBuild(ctx context.Context, registry *ModelRegistry, id string) (*Build, error) {
+func normalizeRegistryFixtureBuild(ctx context.Context, registry ModelRegistry, id string) (*Build, error) {
 	snapshot, err := registry.AcquireBuildSnapshot(ctx, id)
 	if err != nil {
 		return nil, err

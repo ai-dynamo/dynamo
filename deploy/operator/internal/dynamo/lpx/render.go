@@ -176,6 +176,7 @@ func RenderSelectedNodeLocal(
 		annotations := roleAnnotations(template.Annotations, lpxv1alpha1.PodRoleAgent, projection.Digest().String())
 		annotations[commonconsts.AnnotationExtraResourcesHash] = configHash
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
+		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
 		agent := plan.Agents[index]
 		replicas := int32(agent.Replicas)
@@ -239,6 +240,11 @@ func RenderSelectedNodeLocal(
 		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
 	}}
 
+	// Select Grove's LPX backend for the complete engine, including its KAI fallback.
+	for _, clique := range pcs.Spec.Template.Cliques {
+		clique.Spec.PodSpec.SchedulerName = SchedulerName
+	}
+
 	explicit := grovev1alpha1.CliqueStartupTypeExplicit
 	pcs.Spec.Template.StartupType = &explicit
 	return extraResources, nil
@@ -287,6 +293,7 @@ func roleAnnotations(
 	for _, key := range []string{
 		ExecutionBackendAnnotation,
 		WorkloadModeAnnotation,
+		lpxv1alpha1.CompilerSnapshotDigestAnnotation,
 		lpxv1alpha1.PodModelAnnotation,
 		lpxv1alpha1.PodPartitionIDAnnotation,
 		lpxv1alpha1.PodRankInPartitionAnnotation,

@@ -44,8 +44,8 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	require.Equal(t, projection.Digest(), digest, "one model is the aggregate digest base case")
 
 	t.Log("Project only the two LPU artifacts and their selected chain into the hybrid scheduler request")
-	cyborgRef := &lpxv1alpha1.CyborgPodCliqueReference{Name: "decode", UID: "decode-uid"}
-	spec := projection.RequestSpec("test", "agents", cyborgRef)
+	cyborgRef := &lpxv1alpha1.PodCliqueReference{Name: "decode"}
+	spec := projection.RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents")
 	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxStrictHybrid, spec.WorkloadMode)
 	require.Len(t, spec.Partitions, 2)
 	require.Equal(t, int64(1), spec.Partitions[0].CompilerPartitionID)
@@ -55,8 +55,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	require.Equal(t, spec.Partitions[1].ID, spec.PropSyncConnectors[0].ToPartitionID)
 
 	t.Log("Bind workload references while mapping compiler IDs to model ordinals")
-	require.Equal(t, "agents", spec.PodGangRef.Name)
-	require.Equal(t, "test", *spec.PodGangRef.Namespace)
+	require.Equal(t, "agents", spec.NodeLocal.AgentPodCliqueRef.Name)
 	require.Equal(t, "default", spec.NodeLocal.Model)
 	require.Equal(t, cyborgRef, spec.CyborgPodCliqueRef)
 	require.Len(t, spec.NodeLocal.PartitionMappings, 2)
@@ -74,8 +73,8 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	spec.AllocationMetadata.Raw[0] = ' '
 	spec.CyborgPodCliqueRef.Name = "changed"
 	require.Equal(t, before.CyborgPodCliqueRef, cyborgRef)
-	require.Equal(t, *before, projection.RequestSpec("test", "agents", cyborgRef))
-	require.Nil(t, projection.RequestSpec("test", "agents", nil).CyborgPodCliqueRef)
+	require.Equal(t, *before, projection.RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents"))
+	require.Nil(t, projection.RequestSpec(&MaterializationPlan{}, "agents").CyborgPodCliqueRef)
 
 	t.Log("Remove the manifest's selected chain without synthesizing hybrid connectors")
 	fixture.selectedPropSyncChains = nil
@@ -84,7 +83,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	projectionBatch, err = appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection = projectionBatch[0]
-	require.Empty(t, projection.RequestSpec("test", "agents", nil).PropSyncConnectors)
+	require.Empty(t, projection.RequestSpec(&MaterializationPlan{}, "agents").PropSyncConnectors)
 }
 
 func TestProjectModelV3RejectsInvalidPropSyncChains(t *testing.T) {
@@ -175,7 +174,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	projection := projectionBatch[0]
 
 	t.Log("Project both partitions and one HX prop-sync connector")
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.Partitions, 2)
 	require.Len(t, spec.PropSyncConnectors, 1)
 	connector := spec.PropSyncConnectors[0]
@@ -235,7 +234,7 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	projection = projectionBatch[0]
 
 	t.Log("Advance each native scheduler connector to the next physical partition")
-	spec = projection.RequestSpec("test", "agents", nil)
+	spec = projection.RequestSpec(&MaterializationPlan{}, "agents")
 	require.Len(t, spec.PropSyncConnectors, 2)
 	require.Equal(t, "partition-000", spec.PropSyncConnectors[0].FromPartitionID)
 	require.Equal(t, "partition-001", spec.PropSyncConnectors[0].ToPartitionID)
@@ -262,7 +261,7 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 	projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineSingle, "")
 
 	t.Log("Project logical connections from the source partition's final node")
-	spec := projection.RequestSpec("test", "agents", nil)
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 	connections := *spec.PropSyncConnectors[0].Requirement.Connections
 	require.Equal(t, lpxv1alpha1.HxLogicalConnection{FromLogicalDevice: 16, ToLogicalDevice: 0}, connections[0])
 	require.Equal(t, lpxv1alpha1.HxLogicalConnection{FromLogicalDevice: 31, ToLogicalDevice: 15}, connections[15])
@@ -288,7 +287,7 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	t.Log("Retain the acquired locator and exact single-partition allocation metadata")
 	require.Equal(t, "file://"+buildDir, intent.BuildSnapshot.build.Path)
 	require.Equal(t, intent.BuildSnapshot.build.Path, first.configuredBuild.Path)
-	firstSpec := first.RequestSpec("test", "agents", nil)
+	firstSpec := first.RequestSpec(&MaterializationPlan{}, "agents")
 	require.JSONEq(t, `{
 		"arch":"lp30",
 		"topology":"lyra",
@@ -314,7 +313,7 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	t.Log("Track the immutable manifest change in snapshot and projection digests")
 	require.NotEqual(t, firstSnapshot.contentID, secondSnapshot.contentID)
 	require.NotEqual(t, first.Digest(), second.Digest())
-	secondSpec := second.RequestSpec("test", "agents", nil)
+	secondSpec := second.RequestSpec(&MaterializationPlan{}, "agents")
 
 	t.Log("Project each manifest extent and the updated runtime partition data")
 	require.Equal(t, []int64{16, 1, 1, 1}, *firstSpec.Partitions[0].Extent)

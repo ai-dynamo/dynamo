@@ -32,14 +32,8 @@ const (
 	modelDownloadCheckTimeout    = 30 * time.Second
 )
 
-type lpxModelRegistry interface {
-	BuildURL(id string) (*url.URL, error)
-	EnsureDownloaded(ctx context.Context, buildURL url.URL) (bool, error)
-	AcquireBuildSnapshot(ctx context.Context, id string) (*lpx.BuildSnapshot, error)
-}
-
 // newLPXModelRegistry constructs a registry from the non-nil operator configuration.
-func newLPXModelRegistry(config *configv1alpha1.OperatorConfiguration) (*lpx.ModelRegistry, error) {
+func newLPXModelRegistry(config *configv1alpha1.OperatorConfiguration) (lpx.ModelRegistry, error) {
 	// Configure the optional Model Express client.
 	var mxClient modelpb.ModelServiceClient
 	var err error
@@ -102,7 +96,7 @@ func (r *graphReconciler) reconcileModelDownloads(
 func ensureModelsDownloaded(
 	ctx context.Context,
 	dgd *v1beta1.DynamoGraphDeployment,
-	registry lpxModelRegistry,
+	registry lpx.ModelRegistry,
 ) ([]string, bool, error) {
 	builds, err := collectBuilds(dgd, registry)
 	if err != nil {
@@ -115,7 +109,7 @@ func ensureModelsDownloaded(
 		build := buildURL.String()
 		buildCtx := ctx
 		cancel := func() {}
-		if deadline, ok := ctx.Deadline(); ok {
+		if deadline, ok := ctx.Deadline(); ok && i < len(builds)-1 {
 			perBuildTimeout := time.Until(deadline) / time.Duration(len(builds)-i)
 			buildCtx, cancel = context.WithTimeout(ctx, perBuildTimeout)
 		}
@@ -135,7 +129,7 @@ func ensureModelsDownloaded(
 	return downloaded, len(downloaded) == len(builds), errors.Join(downloadErrors...)
 }
 
-func collectBuilds(dgd *v1beta1.DynamoGraphDeployment, registry lpxModelRegistry) ([]url.URL, error) {
+func collectBuilds(dgd *v1beta1.DynamoGraphDeployment, registry lpx.ModelRegistry) ([]url.URL, error) {
 	buildsByKey := make(map[string]url.URL)
 
 	for _, component := range dgd.Spec.Components {

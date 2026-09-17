@@ -83,7 +83,7 @@ func renderPodCliqueSet(
 	return pcs, resources, nil
 }
 
-// stampLPXIdentity propagates stable ownership, never source revision, into Pod templates.
+// stampLPXIdentity propagates stable ownership labels and annotations, never source revision.
 func stampLPXIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, resources []client.Object) {
 	// Preflight validates the exact source controller owner before rendering resources.
 	sourceOwner := metav1.GetControllerOf(deployment)
@@ -99,7 +99,16 @@ func stampLPXIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha
 		delete(*annotations, dynamolpx.DGDGenerationAnnotation)
 		maps.Copy(*annotations, identity)
 	}
+	stampOwnerLabel := func(object client.Object) {
+		labels := object.GetLabels()
+		if labels == nil {
+			labels = make(map[string]string)
+		}
+		labels[lpxOwnerUIDLabel] = string(deployment.UID)
+		object.SetLabels(labels)
+	}
 	stamp(&pcs.Annotations)
+	stampOwnerLabel(pcs)
 	for _, clique := range pcs.Spec.Template.Cliques {
 		stamp(&clique.Annotations)
 	}
@@ -110,5 +119,6 @@ func stampLPXIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha
 		annotations := resource.GetAnnotations()
 		stamp(&annotations)
 		resource.SetAnnotations(annotations)
+		stampOwnerLabel(resource)
 	}
 }

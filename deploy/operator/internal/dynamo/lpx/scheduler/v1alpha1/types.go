@@ -21,14 +21,15 @@ const (
 var GroupVersion = schema.GroupVersion{Group: APIGroup, Version: APIVersion}
 
 const (
-	PodRoleAnnotation            = "scheduling.lpu.nvidia.com/role"
-	PodModelAnnotation           = "scheduling.lpu.nvidia.com/model"
-	PodPartitionIDAnnotation     = "scheduling.lpu.nvidia.com/partition-id"
-	PodRankInPartitionAnnotation = "scheduling.lpu.nvidia.com/rank-in-partition"
-	PodRoleAgent                 = "agent"
-	PodRoleConductor             = "conductor"
-	PodRoleCyborgWorker          = "cyborg-worker"
-	MaxModelAnnotationBytes      = 261054
+	PodRoleAnnotation                = "scheduling.lpu.nvidia.com/role"
+	PodModelAnnotation               = "scheduling.lpu.nvidia.com/model"
+	CompilerSnapshotDigestAnnotation = "scheduling.lpu.nvidia.com/compiler-snapshot-digest"
+	PodPartitionIDAnnotation         = "scheduling.lpu.nvidia.com/partition-id"
+	PodRankInPartitionAnnotation     = "scheduling.lpu.nvidia.com/rank-in-partition"
+	PodRoleAgent                     = "agent"
+	PodRoleConductor                 = "conductor"
+	PodRoleCyborgWorker              = "cyborg-worker"
+	MaxModelAnnotationBytes          = 261054
 )
 
 func ParsePodRole(value string) (string, error) {
@@ -367,9 +368,10 @@ const (
 )
 
 type ConsumerBinding struct {
-	ConsumerID string          `json:"consumerId"`
-	Current    *CurrentBinding `json:"current,omitempty"`
-	Target     *BindingTarget  `json:"target,omitempty"`
+	ConsumerID string               `json:"consumerId"`
+	Current    *CurrentBinding      `json:"current,omitempty"`
+	PodClique  PodCliqueIncarnation `json:"podClique"`
+	Target     *BindingTarget       `json:"target,omitempty"`
 }
 
 func (in *ConsumerBinding) DeepCopyInto(out *ConsumerBinding) {
@@ -377,6 +379,7 @@ func (in *ConsumerBinding) DeepCopyInto(out *ConsumerBinding) {
 	if in.Current != nil {
 		out.Current = in.Current.DeepCopy()
 	}
+	in.PodClique.DeepCopyInto(&out.PodClique)
 	if in.Target != nil {
 		out.Target = in.Target.DeepCopy()
 	}
@@ -392,10 +395,10 @@ func (in *ConsumerBinding) DeepCopy() *ConsumerBinding {
 }
 
 type ConsumerRequest struct {
-	ClaimNames []string       `json:"claimNames"`
-	EndpointID *string        `json:"endpointId,omitempty"`
-	ID         string         `json:"id"`
-	PodRef     NamespacedName `json:"podRef"`
+	ClaimNames   []string           `json:"claimNames"`
+	EndpointID   *string            `json:"endpointId,omitempty"`
+	ID           string             `json:"id"`
+	PodCliqueRef PodCliqueReference `json:"podCliqueRef"`
 }
 
 func (in *ConsumerRequest) DeepCopyInto(out *ConsumerRequest) {
@@ -407,7 +410,7 @@ func (in *ConsumerRequest) DeepCopyInto(out *ConsumerRequest) {
 		value := *in.EndpointID
 		out.EndpointID = &value
 	}
-	in.PodRef.DeepCopyInto(&out.PodRef)
+	in.PodCliqueRef.DeepCopyInto(&out.PodCliqueRef)
 }
 
 func (in *ConsumerRequest) DeepCopy() *ConsumerRequest {
@@ -420,13 +423,13 @@ func (in *ConsumerRequest) DeepCopy() *ConsumerRequest {
 }
 
 type ConsumerSlot struct {
-	Claims                      []ClaimReference `json:"claims"`
-	ConsumerID                  string           `json:"consumerId"`
-	EffectiveNodeRequests       map[string]int64 `json:"effectiveNodeRequests"`
-	EndpointID                  string           `json:"endpointId"`
-	GroveLineage                *GroveLineage    `json:"groveLineage,omitempty"`
-	NodeName                    string           `json:"nodeName"`
-	SchedulingConstraintsDigest string           `json:"schedulingConstraintsDigest"`
+	Claims                      []ClaimReference   `json:"claims"`
+	ConsumerID                  string             `json:"consumerId"`
+	EffectiveNodeRequests       map[string]int64   `json:"effectiveNodeRequests"`
+	EndpointID                  string             `json:"endpointId"`
+	NodeName                    string             `json:"nodeName"`
+	PodCliqueRef                PodCliqueReference `json:"podCliqueRef"`
+	SchedulingConstraintsDigest string             `json:"schedulingConstraintsDigest"`
 }
 
 func (in *ConsumerSlot) DeepCopyInto(out *ConsumerSlot) {
@@ -443,9 +446,7 @@ func (in *ConsumerSlot) DeepCopyInto(out *ConsumerSlot) {
 			out.EffectiveNodeRequests[key] = value
 		}
 	}
-	if in.GroveLineage != nil {
-		out.GroveLineage = in.GroveLineage.DeepCopy()
-	}
+	in.PodCliqueRef.DeepCopyInto(&out.PodCliqueRef)
 }
 
 func (in *ConsumerSlot) DeepCopy() *ConsumerSlot {
@@ -472,24 +473,6 @@ func (in *CurrentBinding) DeepCopy() *CurrentBinding {
 		return nil
 	}
 	out := new(CurrentBinding)
-	in.DeepCopyInto(out)
-	return out
-}
-
-type CyborgPodCliqueReference struct {
-	Name string `json:"name"`
-	UID  string `json:"uid"`
-}
-
-func (in *CyborgPodCliqueReference) DeepCopyInto(out *CyborgPodCliqueReference) {
-	*out = *in
-}
-
-func (in *CyborgPodCliqueReference) DeepCopy() *CyborgPodCliqueReference {
-	if in == nil {
-		return nil
-	}
-	out := new(CyborgPodCliqueReference)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -542,27 +525,6 @@ const (
 	ExecutionBackendRemoteDra ExecutionBackend = "remoteDra"
 	ExecutionBackendNodeLocal ExecutionBackend = "nodeLocal"
 )
-
-type GroveLineage struct {
-	PodCliqueRef             ObjectReference `json:"podCliqueRef"`
-	PodCliqueSetReplicaIndex int64           `json:"podCliqueSetReplicaIndex"`
-	PodIndex                 int64           `json:"podIndex"`
-	PodTemplateHash          string          `json:"podTemplateHash"`
-}
-
-func (in *GroveLineage) DeepCopyInto(out *GroveLineage) {
-	*out = *in
-	in.PodCliqueRef.DeepCopyInto(&out.PodCliqueRef)
-}
-
-func (in *GroveLineage) DeepCopy() *GroveLineage {
-	if in == nil {
-		return nil
-	}
-	out := new(GroveLineage)
-	in.DeepCopyInto(out)
-	return out
-}
 
 type GroveSlotDigest string
 
@@ -656,17 +618,17 @@ func (in *LPUPartitionPlacement) DeepCopy() *LPUPartitionPlacement {
 }
 
 type LPUPipelineRequestSpec struct {
-	AllocationMetadata runtime.RawExtension       `json:"allocationMetadata"`
-	CyborgPodCliqueRef *CyborgPodCliqueReference  `json:"cyborgPodCliqueRef,omitempty"`
-	ExecutionBackend   ExecutionBackend           `json:"executionBackend"`
-	NodeLocal          *NodeLocalRequest          `json:"nodeLocal,omitempty"`
-	Partitions         []PartitionRequest         `json:"partitions"`
-	PodGangRef         NamespacedName             `json:"podGangRef"`
-	PropSyncConnectors []PropSyncConnectorRequest `json:"propSyncConnectors"`
-	RemoteDra          *RemoteDraRequest          `json:"remoteDra,omitempty"`
-	RepairPolicy       *RepairPolicy              `json:"repairPolicy,omitempty"`
-	TargetFamily       TargetFamily               `json:"targetFamily"`
-	WorkloadMode       WorkloadMode               `json:"workloadMode"`
+	AllocationMetadata    runtime.RawExtension       `json:"allocationMetadata"`
+	CyborgPodCliqueRef    *PodCliqueReference        `json:"cyborgPodCliqueRef,omitempty"`
+	ExecutionBackend      ExecutionBackend           `json:"executionBackend"`
+	MaterializationTarget MaterializationTarget      `json:"materializationTarget"`
+	NodeLocal             *NodeLocalRequest          `json:"nodeLocal,omitempty"`
+	Partitions            []PartitionRequest         `json:"partitions"`
+	PropSyncConnectors    []PropSyncConnectorRequest `json:"propSyncConnectors"`
+	RemoteDra             *RemoteDraRequest          `json:"remoteDra,omitempty"`
+	RepairPolicy          *RepairPolicy              `json:"repairPolicy,omitempty"`
+	TargetFamily          TargetFamily               `json:"targetFamily"`
+	WorkloadMode          WorkloadMode               `json:"workloadMode"`
 }
 
 func (in *LPUPipelineRequestSpec) DeepCopyInto(out *LPUPipelineRequestSpec) {
@@ -675,6 +637,7 @@ func (in *LPUPipelineRequestSpec) DeepCopyInto(out *LPUPipelineRequestSpec) {
 	if in.CyborgPodCliqueRef != nil {
 		out.CyborgPodCliqueRef = in.CyborgPodCliqueRef.DeepCopy()
 	}
+	in.MaterializationTarget.DeepCopyInto(&out.MaterializationTarget)
 	if in.NodeLocal != nil {
 		out.NodeLocal = in.NodeLocal.DeepCopy()
 	}
@@ -684,7 +647,6 @@ func (in *LPUPipelineRequestSpec) DeepCopyInto(out *LPUPipelineRequestSpec) {
 			in.Partitions[i].DeepCopyInto(&out.Partitions[i])
 		}
 	}
-	in.PodGangRef.DeepCopyInto(&out.PodGangRef)
 	if in.PropSyncConnectors != nil {
 		out.PropSyncConnectors = make([]PropSyncConnectorRequest, len(in.PropSyncConnectors))
 		for i := range in.PropSyncConnectors {
@@ -758,24 +720,53 @@ func (in *LPUPipelineRequestStatus) DeepCopy() *LPUPipelineRequestStatus {
 	return out
 }
 
-type NamespacedName struct {
-	Name      string  `json:"name"`
-	Namespace *string `json:"namespace,omitempty"`
+type MaterializationScope struct {
+	CompilerSnapshotDigest   string                      `json:"compilerSnapshotDigest"`
+	CyborgPodCliqueRef       *PodCliqueReference         `json:"cyborgPodCliqueRef,omitempty"`
+	DynamoGraphDeploymentRef ObjectReference             `json:"dynamoGraphDeploymentRef"`
+	PodCliqueScalingGroupRef *PodCliqueScalingGroupScope `json:"podCliqueScalingGroupRef,omitempty"`
+	PodCliqueSetRef          ObjectReference             `json:"podCliqueSetRef"`
+	PodCliqueSetReplicaIndex int64                       `json:"podCliqueSetReplicaIndex"`
 }
 
-func (in *NamespacedName) DeepCopyInto(out *NamespacedName) {
+func (in *MaterializationScope) DeepCopyInto(out *MaterializationScope) {
 	*out = *in
-	if in.Namespace != nil {
-		value := *in.Namespace
-		out.Namespace = &value
+	if in.CyborgPodCliqueRef != nil {
+		out.CyborgPodCliqueRef = in.CyborgPodCliqueRef.DeepCopy()
 	}
+	in.DynamoGraphDeploymentRef.DeepCopyInto(&out.DynamoGraphDeploymentRef)
+	if in.PodCliqueScalingGroupRef != nil {
+		out.PodCliqueScalingGroupRef = in.PodCliqueScalingGroupRef.DeepCopy()
+	}
+	in.PodCliqueSetRef.DeepCopyInto(&out.PodCliqueSetRef)
 }
 
-func (in *NamespacedName) DeepCopy() *NamespacedName {
+func (in *MaterializationScope) DeepCopy() *MaterializationScope {
 	if in == nil {
 		return nil
 	}
-	out := new(NamespacedName)
+	out := new(MaterializationScope)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type MaterializationTarget struct {
+	PodCliqueScalingGroupRef *PodCliqueScalingGroupReference `json:"podCliqueScalingGroupRef,omitempty"`
+	PodCliqueSetReplicaIndex int64                           `json:"podCliqueSetReplicaIndex"`
+}
+
+func (in *MaterializationTarget) DeepCopyInto(out *MaterializationTarget) {
+	*out = *in
+	if in.PodCliqueScalingGroupRef != nil {
+		out.PodCliqueScalingGroupRef = in.PodCliqueScalingGroupRef.DeepCopy()
+	}
+}
+
+func (in *MaterializationTarget) DeepCopy() *MaterializationTarget {
+	if in == nil {
+		return nil
+	}
+	out := new(MaterializationTarget)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -831,12 +822,14 @@ func (in *NodeLocalEndpoint) DeepCopy() *NodeLocalEndpoint {
 }
 
 type NodeLocalExecution struct {
+	Materialization     NodeLocalMaterialization      `json:"materialization"`
 	PartitionSelections []NodeLocalPartitionExecution `json:"partitionSelections"`
 	PlanReplacement     *NodeLocalPlanReplacement     `json:"planReplacement,omitempty"`
 }
 
 func (in *NodeLocalExecution) DeepCopyInto(out *NodeLocalExecution) {
 	*out = *in
+	in.Materialization.DeepCopyInto(&out.Materialization)
 	if in.PartitionSelections != nil {
 		out.PartitionSelections = make([]NodeLocalPartitionExecution, len(in.PartitionSelections))
 		for i := range in.PartitionSelections {
@@ -853,6 +846,50 @@ func (in *NodeLocalExecution) DeepCopy() *NodeLocalExecution {
 		return nil
 	}
 	out := new(NodeLocalExecution)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type NodeLocalMaterialization struct {
+	Current NodeLocalMaterializationIncarnation  `json:"current"`
+	Target  *NodeLocalMaterializationIncarnation `json:"target,omitempty"`
+}
+
+func (in *NodeLocalMaterialization) DeepCopyInto(out *NodeLocalMaterialization) {
+	*out = *in
+	in.Current.DeepCopyInto(&out.Current)
+	if in.Target != nil {
+		out.Target = in.Target.DeepCopy()
+	}
+}
+
+func (in *NodeLocalMaterialization) DeepCopy() *NodeLocalMaterialization {
+	if in == nil {
+		return nil
+	}
+	out := new(NodeLocalMaterialization)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type NodeLocalMaterializationIncarnation struct {
+	AgentPodClique  PodCliqueIncarnation  `json:"agentPodClique"`
+	CyborgPodClique *PodCliqueIncarnation `json:"cyborgPodClique,omitempty"`
+}
+
+func (in *NodeLocalMaterializationIncarnation) DeepCopyInto(out *NodeLocalMaterializationIncarnation) {
+	*out = *in
+	in.AgentPodClique.DeepCopyInto(&out.AgentPodClique)
+	if in.CyborgPodClique != nil {
+		out.CyborgPodClique = in.CyborgPodClique.DeepCopy()
+	}
+}
+
+func (in *NodeLocalMaterializationIncarnation) DeepCopy() *NodeLocalMaterializationIncarnation {
+	if in == nil {
+		return nil
+	}
+	out := new(NodeLocalMaterializationIncarnation)
 	in.DeepCopyInto(out)
 	return out
 }
@@ -925,21 +962,23 @@ func (in *NodeLocalPartitionSelection) DeepCopy() *NodeLocalPartitionSelection {
 }
 
 type NodeLocalPlacement struct {
-	CompilerMetadataDigest      string                        `json:"compilerMetadataDigest"`
-	ConnectorEvidence           []NodeLocalConnectorEvidence  `json:"connectorEvidence,omitempty"`
-	EffectiveNodeRequests       map[string]int64              `json:"effectiveNodeRequests"`
-	InventoryRevision           string                        `json:"inventoryRevision"`
-	Model                       string                        `json:"model"`
-	NativeRepairBase            *string                       `json:"nativeRepairBase,omitempty"`
-	Objective                   PlanObjective                 `json:"objective"`
-	PartitionSelections         []NodeLocalPartitionSelection `json:"partitionSelections"`
-	PodGangRef                  ObjectReference               `json:"podGangRef"`
-	SchedulingConstraintsDigest string                        `json:"schedulingConstraintsDigest"`
-	WorkloadMode                WorkloadMode                  `json:"workloadMode"`
+	AgentPodCliqueRef              PodCliqueReference            `json:"agentPodCliqueRef"`
+	CompilerMetadataDigest         string                        `json:"compilerMetadataDigest"`
+	ConnectorEvidence              []NodeLocalConnectorEvidence  `json:"connectorEvidence,omitempty"`
+	EffectiveNodeRequests          map[string]int64              `json:"effectiveNodeRequests"`
+	InventoryRevision              string                        `json:"inventoryRevision"`
+	Model                          string                        `json:"model"`
+	NativeRepairBase               *string                       `json:"nativeRepairBase,omitempty"`
+	Objective                      PlanObjective                 `json:"objective"`
+	PartitionSelections            []NodeLocalPartitionSelection `json:"partitionSelections"`
+	PodSchedulingDeclarationDigest string                        `json:"podSchedulingDeclarationDigest"`
+	SchedulingConstraintsDigest    string                        `json:"schedulingConstraintsDigest"`
+	WorkloadMode                   WorkloadMode                  `json:"workloadMode"`
 }
 
 func (in *NodeLocalPlacement) DeepCopyInto(out *NodeLocalPlacement) {
 	*out = *in
+	in.AgentPodCliqueRef.DeepCopyInto(&out.AgentPodCliqueRef)
 	if in.ConnectorEvidence != nil {
 		out.ConnectorEvidence = make([]NodeLocalConnectorEvidence, len(in.ConnectorEvidence))
 		for i := range in.ConnectorEvidence {
@@ -963,7 +1002,6 @@ func (in *NodeLocalPlacement) DeepCopyInto(out *NodeLocalPlacement) {
 			in.PartitionSelections[i].DeepCopyInto(&out.PartitionSelections[i])
 		}
 	}
-	in.PodGangRef.DeepCopyInto(&out.PodGangRef)
 }
 
 func (in *NodeLocalPlacement) DeepCopy() *NodeLocalPlacement {
@@ -1018,12 +1056,14 @@ func (in *NodeLocalRepairAuthorization) DeepCopy() *NodeLocalRepairAuthorization
 }
 
 type NodeLocalRequest struct {
+	AgentPodCliqueRef PodCliqueReference          `json:"agentPodCliqueRef"`
 	Model             string                      `json:"model"`
 	PartitionMappings []NodeLocalPartitionMapping `json:"partitionMappings"`
 }
 
 func (in *NodeLocalRequest) DeepCopyInto(out *NodeLocalRequest) {
 	*out = *in
+	in.AgentPodCliqueRef.DeepCopyInto(&out.AgentPodCliqueRef)
 	if in.PartitionMappings != nil {
 		out.PartitionMappings = make([]NodeLocalPartitionMapping, len(in.PartitionMappings))
 		for i := range in.PartitionMappings {
@@ -1042,6 +1082,7 @@ func (in *NodeLocalRequest) DeepCopy() *NodeLocalRequest {
 }
 
 type NodeLocalRowExecution struct {
+	AdoptedTarget   bool                          `json:"adoptedTarget,omitempty"`
 	Current         *CurrentBinding               `json:"current,omitempty"`
 	RankInPartition int64                         `json:"rankInPartition"`
 	Repair          *NodeLocalRepairAuthorization `json:"repair,omitempty"`
@@ -1072,7 +1113,6 @@ func (in *NodeLocalRowExecution) DeepCopy() *NodeLocalRowExecution {
 
 type NodeLocalSelectedRow struct {
 	Endpoint        NodeLocalEndpoint `json:"endpoint"`
-	GroveLineage    *GroveLineage     `json:"groveLineage,omitempty"`
 	NodeRef         NodeReference     `json:"nodeRef"`
 	RankInPartition int64             `json:"rankInPartition"`
 }
@@ -1080,9 +1120,6 @@ type NodeLocalSelectedRow struct {
 func (in *NodeLocalSelectedRow) DeepCopyInto(out *NodeLocalSelectedRow) {
 	*out = *in
 	in.Endpoint.DeepCopyInto(&out.Endpoint)
-	if in.GroveLineage != nil {
-		out.GroveLineage = in.GroveLineage.DeepCopy()
-	}
 	in.NodeRef.DeepCopyInto(&out.NodeRef)
 }
 
@@ -1246,13 +1283,15 @@ func (in *PlanObjective) DeepCopy() *PlanObjective {
 }
 
 type PlanPlacement struct {
-	ExecutionBackend ExecutionBackend    `json:"executionBackend"`
-	NodeLocal        *NodeLocalPlacement `json:"nodeLocal,omitempty"`
-	RemoteDra        *RemoteDraPlacement `json:"remoteDra,omitempty"`
+	ExecutionBackend     ExecutionBackend     `json:"executionBackend"`
+	MaterializationScope MaterializationScope `json:"materializationScope"`
+	NodeLocal            *NodeLocalPlacement  `json:"nodeLocal,omitempty"`
+	RemoteDra            *RemoteDraPlacement  `json:"remoteDra,omitempty"`
 }
 
 func (in *PlanPlacement) DeepCopyInto(out *PlanPlacement) {
 	*out = *in
+	in.MaterializationScope.DeepCopyInto(&out.MaterializationScope)
 	if in.NodeLocal != nil {
 		out.NodeLocal = in.NodeLocal.DeepCopy()
 	}
@@ -1271,6 +1310,79 @@ func (in *PlanPlacement) DeepCopy() *PlanPlacement {
 }
 
 type PlanReplacementAbortFence string
+
+type PodCliqueIncarnation struct {
+	PodTemplateHash string `json:"podTemplateHash"`
+	UID             string `json:"uid"`
+}
+
+func (in *PodCliqueIncarnation) DeepCopyInto(out *PodCliqueIncarnation) {
+	*out = *in
+}
+
+func (in *PodCliqueIncarnation) DeepCopy() *PodCliqueIncarnation {
+	if in == nil {
+		return nil
+	}
+	out := new(PodCliqueIncarnation)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type PodCliqueReference struct {
+	Name string `json:"name"`
+}
+
+func (in *PodCliqueReference) DeepCopyInto(out *PodCliqueReference) {
+	*out = *in
+}
+
+func (in *PodCliqueReference) DeepCopy() *PodCliqueReference {
+	if in == nil {
+		return nil
+	}
+	out := new(PodCliqueReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type PodCliqueScalingGroupReference struct {
+	Name         string `json:"name"`
+	ReplicaIndex int64  `json:"replicaIndex"`
+}
+
+func (in *PodCliqueScalingGroupReference) DeepCopyInto(out *PodCliqueScalingGroupReference) {
+	*out = *in
+}
+
+func (in *PodCliqueScalingGroupReference) DeepCopy() *PodCliqueScalingGroupReference {
+	if in == nil {
+		return nil
+	}
+	out := new(PodCliqueScalingGroupReference)
+	in.DeepCopyInto(out)
+	return out
+}
+
+type PodCliqueScalingGroupScope struct {
+	Name         string `json:"name"`
+	ReplicaIndex int64  `json:"replicaIndex"`
+	SpecDigest   string `json:"specDigest"`
+	UID          string `json:"uid"`
+}
+
+func (in *PodCliqueScalingGroupScope) DeepCopyInto(out *PodCliqueScalingGroupScope) {
+	*out = *in
+}
+
+func (in *PodCliqueScalingGroupScope) DeepCopy() *PodCliqueScalingGroupScope {
+	if in == nil {
+		return nil
+	}
+	out := new(PodCliqueScalingGroupScope)
+	in.DeepCopyInto(out)
+	return out
+}
 
 type PropSyncConnectorKind string
 
@@ -1451,7 +1563,6 @@ type RemoteDraPlacement struct {
 	Objective              PlanObjective                  `json:"objective"`
 	PartitionConductors    []PartitionConductorAssignment `json:"partitionConductors"`
 	PartitionPlacements    []LPUPartitionPlacement        `json:"partitionPlacements"`
-	PodGangRef             ObjectReference                `json:"podGangRef"`
 	WorkloadMode           WorkloadMode                   `json:"workloadMode"`
 }
 
@@ -1493,7 +1604,6 @@ func (in *RemoteDraPlacement) DeepCopyInto(out *RemoteDraPlacement) {
 			in.PartitionPlacements[i].DeepCopyInto(&out.PartitionPlacements[i])
 		}
 	}
-	in.PodGangRef.DeepCopyInto(&out.PodGangRef)
 }
 
 func (in *RemoteDraPlacement) DeepCopy() *RemoteDraPlacement {

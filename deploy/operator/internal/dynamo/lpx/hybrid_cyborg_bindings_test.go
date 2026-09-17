@@ -128,14 +128,12 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX, `{"prop_sync":false}`)
 			projection.stage = testRenderComponentName
 
-			t.Log("Keep every physical scheduler partition and Agent, including chain followers")
-			require.Len(t, projection.RequestSpec("test", "agents", nil).Partitions, test.partitions)
-			require.Equal(t, 2*test.partitions, projection.agentReplicas)
-
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
 			workload := &SelectedWorkload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
 			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
+			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
+			require.Equal(t, 2*test.partitions, projection.agentReplicas)
 			configMap, err := workload.RenderCyborgConfigMap("test", plan, renderTestPodSpec())
 			require.NoError(t, err)
 			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"

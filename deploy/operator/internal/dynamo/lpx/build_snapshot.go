@@ -52,7 +52,7 @@ type BuildSnapshot struct {
 
 // AcquireBuildSnapshot fences the required manifest-v2 compiler metadata with inventories
 // and duplicate reads. The receiver must be non-nil and is not mutated.
-func (r *ModelRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error) {
+func (r *defaultModelRegistry) AcquireBuildSnapshot(ctx context.Context, id string) (*BuildSnapshot, error) {
 	// Bound all metadata RPCs for one snapshot acquisition.
 	ctx, cancel := context.WithTimeout(ctx, buildSnapshotTimeout)
 	defer cancel()

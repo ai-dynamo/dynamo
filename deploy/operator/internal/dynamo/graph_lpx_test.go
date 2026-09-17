@@ -364,7 +364,7 @@ func TestLPXInputRevisionTracksIndirectRenderMetadata(t *testing.T) {
 	for _, change := range []string{"epp-presence", "alpha-label", "alpha-annotation", "alpha-subtype"} {
 		t.Run(change, func(t *testing.T) {
 			t.Log("Capture the GPU role metadata derived from the complete source graph")
-			payload, err := os.ReadFile("testdata/from_dgd_yaml/node-local-v2-hybrid.input.yaml")
+			payload, err := os.ReadFile("lpx/testdata/from_dgd_yaml/node-local-v2-hybrid.input.yaml")
 			require.NoError(t, err)
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
@@ -428,7 +428,7 @@ func TestLPXRestartTokenPreservesDeliveredTokenOnCancellation(t *testing.T) {
 
 func TestLPXInputRevisionIgnoresUnrelatedConvertedMetadata(t *testing.T) {
 	t.Log("Keep EPP discovery enabled while editing only its independent workload")
-	payload, err := os.ReadFile("testdata/from_dgd_yaml/node-local-v2-hybrid.input.yaml")
+	payload, err := os.ReadFile("lpx/testdata/from_dgd_yaml/node-local-v2-hybrid.input.yaml")
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(payload, source))

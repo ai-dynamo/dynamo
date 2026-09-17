@@ -7,7 +7,6 @@ require (
 	emperror.dev/errors v0.8.1
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.13
-	github.com/ai-dynamo/grove/scheduler/api v0.1.0-alpha.12-rc1
 	github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f
 	github.com/ai-dynamo/snapshot/api v0.1.0
 	github.com/bsm/gomega v1.27.10

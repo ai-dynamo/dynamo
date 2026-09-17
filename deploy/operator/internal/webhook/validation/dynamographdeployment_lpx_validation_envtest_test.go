@@ -457,7 +457,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					consts.KubeAnnotationLPXSchedulerBackend: "ignored-scheduler",
 					consts.KubeAnnotationLPXExecutionBackend: "ignored-execution",
 				}
-				dgd.Spec.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(30))}
 				component := &dgd.Spec.Components[0]
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
@@ -471,7 +470,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "selected v1alpha1 LPX derives SpecDecode from two models",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(30))}
 				setAlphaLPXSpecDec(dgd, nil)
 			}),
 		},

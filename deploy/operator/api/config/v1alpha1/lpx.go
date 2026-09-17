@@ -6,8 +6,8 @@ package v1alpha1
 // LPXConfiguration holds LPX scheduler integration and model-registry settings.
 type LPXConfiguration struct {
 	// Enabled opts the operator into LPX request production. When true, startup
-	// requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and
-	// scheduler.grove.io/v1alpha1 PodGang APIs to be installed separately.
+	// requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to
+	// be installed separately.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled"`
 

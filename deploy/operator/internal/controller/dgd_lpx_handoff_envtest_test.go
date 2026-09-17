@@ -26,11 +26,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	groveschedulerv1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -116,30 +116,21 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 			if err := lpxv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 				return err
 			}
-			if err := groveschedulerv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
-				return err
-			}
 			return setupProductionWebhooks(mgr, opts)
 		},
 	}).RunT(t)
-	dependencies := make([]*apiextensionsv1.CustomResourceDefinition, 0, 2)
-	for _, dependency := range []struct{ group, kind, plural string }{
-		{lpxv1alpha1.APIGroup, "LpuPipelineRequest", "lpupipelinerequests"},
-		{groveschedulerv1alpha1.SchemeGroupVersion.Group, "PodGang", "podgangs"},
-	} {
-		dependencies = append(dependencies, &apiextensionsv1.CustomResourceDefinition{
-			ObjectMeta: metav1.ObjectMeta{Name: dependency.plural + "." + dependency.group},
-			Spec: apiextensionsv1.CustomResourceDefinitionSpec{
-				Group: dependency.group, Scope: apiextensionsv1.NamespaceScoped,
-				Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: dependency.kind, ListKind: dependency.kind + "List", Plural: dependency.plural},
-				Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
-					Name: "v1alpha1", Served: true, Storage: true,
-					Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: ptr.To(true)}},
-				}},
-			},
-		})
+	lprCRD := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "lpupipelinerequests." + lpxv1alpha1.APIGroup},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: lpxv1alpha1.APIGroup, Scope: apiextensionsv1.NamespaceScoped,
+			Names: apiextensionsv1.CustomResourceDefinitionNames{Kind: "LpuPipelineRequest", ListKind: "LpuPipelineRequestList", Plural: "lpupipelinerequests"},
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{{
+				Name: "v1alpha1", Served: true, Storage: true,
+				Schema: &apiextensionsv1.CustomResourceValidation{OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{Type: "object", XPreserveUnknownFields: ptr.To(true)}},
+			}},
+		},
 	}
-	_, err = envtest.InstallCRDs(env.RESTConfig(), envtest.CRDInstallOptions{CRDs: dependencies})
+	_, err = envtest.InstallCRDs(env.RESTConfig(), envtest.CRDInstallOptions{CRDs: []*apiextensionsv1.CustomResourceDefinition{lprCRD}})
 	require.NoError(t, err)
 
 	t.Log("Deny Grove publication with real namespace quota admission, not a mocked client")
@@ -307,4 +298,102 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		}
 		assert.Equal(c, ptr.To(true), configMap.Immutable)
 	}, 20*time.Second, 50*time.Millisecond)
+}
+
+func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
+	t.Log("Install the real CRDs in an isolated API server; no runtime controllers or cluster workloads")
+	env := operatorenv.New(operatorenv.Options{SetupWebhooks: setupProductionWebhooks}).RunT(t)
+	require.True(t, env.Client().Scheme().Recognizes(v1alpha1.LPXGraphDeploymentGVK))
+	require.False(t, env.Client().Scheme().Recognizes(v1beta1.GroupVersion.WithKind("LPXGraphDeployment")))
+	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
+	source.Namespace, source.UID, source.Generation = env.Namespace(), "", 0
+	require.NoError(t, env.Client().Create(t.Context(), source))
+
+	t.Log("Persist the pending component projection using the real DGD status schema")
+	result := &ReconcileResult{}
+	projectLPXChildStatus(source, nil, result, &source.Status)
+	source.Status.Components = result.ComponentStatus
+	source.Status.State = result.State
+	require.NoError(t, env.Client().Status().Update(t.Context(), source))
+	require.Equal(t, v1beta1.ComponentKindPodCliqueScalingGroup, source.Status.Components["lpx"].ComponentKind)
+	require.False(t, source.Status.Components["lpx"].Ready)
+
+	t.Log("Hand off the beta source to one independently observed alpha child with its beta DGD owner")
+	handoff := &dgdLPXHandoff{client: env.Client()}
+	child, err := handoff.Reconcile(t.Context(), source)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), child.Generation)
+	require.NotEmpty(t, child.UID)
+	require.NotEqual(t, source.UID, child.UID)
+	require.Equal(t, metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK), metav1.GetControllerOf(child))
+	require.NoError(t, dynamo.ValidateLPXSource(child, source))
+
+	t.Log("Project the observed download payload and its actionable failure")
+	child.Status.ObservedGeneration = child.Generation
+	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
+	child.Status.Conditions = []metav1.Condition{{Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation,
+		LastTransitionTime: metav1.Now(), Reason: "PublicationDenied", Message: "Check the namespace quota"}}
+	require.NoError(t, env.Client().Status().Update(t.Context(), child))
+	projected := v1beta1.DynamoGraphDeploymentStatus{}
+	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
+	projectLPXChildStatus(source, child, result, &projected)
+	require.Equal(t, v1beta1.DGDStateFailed, result.State)
+	require.Equal(t, Reason(child.Status.Conditions[0].Reason), result.Reason)
+	require.Equal(t, Message(child.Status.Conditions[0].Message), result.Message)
+	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
+
+	t.Log("Ordinary source metadata does not advance the child generation or frozen source identity")
+	source.Labels = map[string]string{"unrelated": "metadata"}
+	require.NoError(t, env.Client().Update(t.Context(), source))
+	unchanged, err := handoff.Reconcile(t.Context(), source)
+	require.NoError(t, err)
+	require.Equal(t, child.ResourceVersion, unchanged.ResourceVersion)
+	require.Equal(t, child.Annotations, unchanged.Annotations)
+	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
+	projectLPXChildStatus(source, unchanged, result, &projected)
+	require.Equal(t, v1beta1.DGDStateFailed, result.State)
+	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
+
+	t.Log("An LPX template edit advances the real child generation and invalidates the old observation")
+	dynamolpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "lpu-runtime:next"
+	require.NoError(t, env.Client().Update(t.Context(), source))
+	updated, err := handoff.Reconcile(t.Context(), source)
+	require.NoError(t, err)
+	require.Equal(t, child.Generation+1, updated.Generation)
+	require.NotEqual(t, child.Spec.InputRevision, updated.Spec.InputRevision)
+	require.NoError(t, dynamo.ValidateLPXSource(updated, source))
+	require.Equal(t, child.Status.ObservedGeneration, updated.Status.ObservedGeneration)
+	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
+	projectLPXChildStatus(source, updated, result, &projected)
+	require.Equal(t, v1beta1.DGDStatePending, result.State)
+	require.Equal(t, Reason("LPXChildPending"), result.Reason)
+	require.Nil(t, projected.LPX)
+
+	t.Log("Reject malformed revision hashes in the API server")
+	invalid := updated.DeepCopy()
+	invalid.Spec.InputRevision = "unversioned"
+	require.True(t, apierrors.IsInvalid(env.Client().Update(t.Context(), invalid)))
+
+	t.Log("The status subresource retains child observations without rewriting source DGD status")
+	updated.Status.ObservedGeneration = updated.Generation
+	updated.Status.Conditions[0].ObservedGeneration = updated.Generation
+	require.NoError(t, env.Client().Status().Update(t.Context(), updated))
+	stored := &v1alpha1.LPXGraphDeployment{}
+	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(updated), stored))
+	require.Equal(t, updated.Status, stored.Status)
+	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
+	projectLPXChildStatus(source, stored, result, &projected)
+	require.Equal(t, v1beta1.DGDStateFailed, result.State)
+	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
+	storedSource := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(source), storedSource))
+	require.Equal(t, source.Status, storedSource.Status)
+
+	t.Log("An empty scheduling batch must persist as an array, not null")
+	stored.Status.Placement = &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{ObservedGeneration: stored.Generation}}
+	require.True(t, apierrors.IsInvalid(env.Client().Status().Update(t.Context(), stored)))
+	stored.Status.Placement.LPXAttempt.Requests = []v1beta1.LPXAttemptRequestStatus{}
+	require.NoError(t, env.Client().Status().Update(t.Context(), stored))
+	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(stored), stored))
+	require.Equal(t, []v1beta1.LPXAttemptRequestStatus{}, stored.Status.Placement.LPXAttempt.Requests)
 }

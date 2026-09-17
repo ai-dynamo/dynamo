@@ -42,7 +42,7 @@ import (
 // newLPXHandoffSource loads a fresh authored workload without compiler or child-controller fixtures.
 func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeployment {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join("../dynamo/testdata/from_dgd_yaml", fixture+".input.yaml"))
+	data, err := os.ReadFile(filepath.Join("../dynamo/lpx/testdata/from_dgd_yaml", fixture+".input.yaml"))
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(data, source))
@@ -179,7 +179,6 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 	handoff := &dgdLPXHandoff{client: kube}
 	child, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
-	require.True(t, exactLPXSourceOwner(child, source))
 	require.NotEmpty(t, child.Spec.InputRevision)
 	require.NoError(t, dynamo.ValidateLPXSource(child, source))
 	require.NotContains(t, child.Annotations, "lpx.nvidia.com/podcliqueset-name")

@@ -12,8 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
-
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
 const (
@@ -22,10 +20,6 @@ const (
 	modelProjectionDigestVersion = "dynamo-node-local-compilation/v1"
 	workloadSetDigestVersion     = "dynamo-lpx-compilation-set/v1"
 	maxLPXPartitions             = 256
-	// LPX reserves 192 KiB of the Kubernetes 1 MiB object ceiling for
-	// lifecycle status. Its pre-solve admission charges the status-free
-	// request plus a deterministic echo of every connector requirement.
-	maxLPXPlannedRequestObjectBytes = (1024 - 192) * 1024
 )
 
 // appendModelProjections appends one component's immutable model projections to
@@ -79,36 +73,6 @@ func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
 		transcript.field("compilation-digest", projection.digest[:])
 	}
 	return transcript.sum(), nil
-}
-
-// ValidateRequestSize applies the pinned LPX scheduler's pre-solve size
-// accounting to a non-nil compiler-produced or API-decoded request with valid
-// raw JSON fields. The request is not mutated.
-func ValidateRequestSize(request *lpxv1alpha1.LPUPipelineRequest) error {
-	projectedBytes := requestWithRequirementEchoBytes(request)
-	if projectedBytes > maxLPXPlannedRequestObjectBytes {
-		return fmt.Errorf(
-			"status-free request plus connector-requirement echo is %d bytes; maximum is %d",
-			projectedBytes,
-			maxLPXPlannedRequestObjectBytes,
-		)
-	}
-	return nil
-}
-
-func requestWithRequirementEchoBytes(request *lpxv1alpha1.LPUPipelineRequest) int {
-	statusFree := *request
-	statusFree.Status = nil
-	if statusFree.ResourceVersion != "" {
-		statusFree.ResourceVersion = "0"
-	}
-	requestBytes, _ := json.Marshal(&statusFree)
-	requirements := make([]lpxv1alpha1.PropSyncConnectorRequirement, 0, len(request.Spec.PropSyncConnectors))
-	for _, connector := range request.Spec.PropSyncConnectors {
-		requirements = append(requirements, connector.Requirement)
-	}
-	echoBytes, _ := json.Marshal(requirements)
-	return len(requestBytes) + len(echoBytes)
 }
 
 // canonicalModelSettings canonicalizes an API-validated optional JSON object.

@@ -143,15 +143,16 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		transcript.field("allocation-metadata", allocationMetadata)
 
 		dst = append(dst, &ModelProjection{
-			digest:             transcript.sum(),
-			runtimeBuildRef:    intent.RuntimeBuildRef,
-			model:              intent.Models[index],
-			pipeline:           intent.Pipeline,
-			configuredBuild:    configured,
-			allocationMetadata: allocationMetadata,
-			partitions:         partitions,
-			connectors:         connectors,
-			agentReplicas:      agentReplicas,
+			digest:                 transcript.sum(),
+			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
+			runtimeBuildRef:        intent.RuntimeBuildRef,
+			model:                  intent.Models[index],
+			pipeline:               intent.Pipeline,
+			configuredBuild:        configured,
+			allocationMetadata:     allocationMetadata,
+			partitions:             partitions,
+			connectors:             connectors,
+			agentReplicas:          agentReplicas,
 		})
 	}
 	return dst, nil
