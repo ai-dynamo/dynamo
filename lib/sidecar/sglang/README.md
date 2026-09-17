@@ -36,11 +36,78 @@ serving the native gRPC path without advertising `/generate`.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 
-SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
+SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder`: native SGLang language servers own encoder dispatch through `--language-only --encoder-urls`, as described below. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
 
 The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
 
 Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a 30-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
+
+## Native encoder disaggregation (E+PD and E+P+D)
+
+Multimodal `/v1/chat/completions` requests use the engine's native HTTP
+`/generate` endpoint, carrying the frontend-rendered prompt and image/video/audio
+sources. SGLang tokenizes and expands the multimodal prompt, as in native serving.
+The sidecar converts incremental output IDs, finish reasons, usage, and logprobs
+back into Dynamo's token stream. Text-only requests continue to use gRPC.
+Both paths use gRPC for discovery and cancellation.
+
+```mermaid
+sequenceDiagram
+    participant F as Dynamo frontend
+    participant S as P/PD sidecar
+    participant P as Native SGLang P/PD
+    participant E as Native SGLang encoder
+    F->>S: Rendered prompt + media URLs/data URIs
+    S->>P: HTTP /generate
+    P->>E: Native encode dispatch
+    E-->>P: Native embedding transfer
+    P->>P: Prefill
+    Note over F,P: With separate D, Dynamo routes the P/D bootstrap rendezvous;
+    Note over F,P: SGLang transfers KV directly and D generates tokens.
+    P-->>S: Incremental token IDs (E+PD)
+    S-->>F: Dynamo token stream
+```
+
+Start an encoder with `--encoder-only`. Configure **P or PD** with
+`--language-only --encoder-urls http://encoder:30000` and the same
+`--encoder-transfer-backend` as E. With separate decode, configure D as a
+normal native `--disaggregation-mode decode` server, without encoder URLs.
+Only P/PD and D need Dynamo sidecars. E does not register with Dynamo, and
+there is no frontend `encoder_result` handoff.
+
+All language servers need `--grpc-port` and `--incremental-streaming-output`.
+Their HTTP endpoints must be reachable from their sidecars at the discovered
+host and port. Use SGLang v0.5.19+ for the launch example. Encoder dispatch,
+batching, cache behavior, supported models/modalities, and embedding transport
+remain governed by the installed SGLang version. The default example uses
+`zmq_to_scheduler`; `ENCODER_TRANSFER_BACKEND=mooncake` requires the matching
+native SGLang Mooncake environment and interconnect.
+
+```bash
+# Build the sidecar, and activate an environment containing Dynamo and SGLang.
+cargo build --release -p dynamo-sglang-sidecar
+export PATH="$PWD/target/release:$PATH"
+
+# E + aggregated PD, two GPUs. etcd and NATS must already be running.
+bash lib/sidecar/sglang/launch/epd.sh
+
+# E + P + D, three GPUs. NIXL transfers the P/D KV cache.
+bash lib/sidecar/sglang/launch/epd.sh --disaggregated
+```
+
+The launcher defaults to `Qwen/Qwen3-VL-2B-Instruct`. Set `MODEL` to override
+it; additional command-line options apply to the language servers. Use ordinary
+OpenAI image content parts against the Dynamo frontend. Multiple encoder URLs
+can be configured directly on a manually launched native language server.
+
+Use frontend URL passthrough (the default), not `--frontend-decoding`.
+Pre-decoded RDMA media, UUID-only media, user-supplied multimodal UUIDs,
+`mm_processor_kwargs`, `media_io_kwargs`, and frontend `encoder_result` payloads are rejected on
+this typed multimodal path. Sampling retains the sidecar's existing supported
+parameter set. Explicit token-input multimodal requests are forwarded as token IDs and require
+a native SGLang processor/EPD receiver that supports that input form (the Qwen
+EPD path in v0.5.19 requires rendered text). Native Dynamo `/generate` continues to forward SGLang payloads
+opaquely for callers needing the installed engine's full request surface.
 
 ## SGLang-managed module contract
 

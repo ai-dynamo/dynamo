@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opaque transport for SGLang's native streaming `/generate` API.
+//! Streaming `/generate` transport for native pass-through and multimodal requests.
 
 use std::{collections::HashMap, io, time::Duration};
 
@@ -19,7 +19,7 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-use crate::{client, client::Discovery, protocol};
+use crate::{client, client::Discovery, multimodal, protocol};
 
 const PAYLOAD_KEY: &str = "sglang_tito";
 const MAX_EVENT_BYTES: usize = 64 * 1024 * 1024;
@@ -28,10 +28,12 @@ pub(crate) struct NativeRequest {
     body: Value,
     is_prefill: bool,
     prefill_handoff: Option<Value>,
+    token_output: bool,
+    return_tokens_as_ids: bool,
 }
 
-/// Rebuild the installed SGLang version's request from the opaque frontend
-/// envelope, replacing only fields owned by Dynamo routing.
+/// Lower a multimodal request or rebuild an opaque native frontend envelope,
+/// replacing fields owned by Dynamo routing.
 pub(crate) fn request(
     request: &PreprocessedRequest,
     request_id: &str,
@@ -39,25 +41,49 @@ pub(crate) fn request(
     bootstrap_host: Option<&str>,
     bootstrap_port: Option<u16>,
 ) -> Result<Option<NativeRequest>, DynamoError> {
-    let Some(payload) = request
+    let payload = request
         .extra_args
         .as_ref()
         .and_then(Value::as_object)
-        .and_then(|extra| extra.get(PAYLOAD_KEY))
-    else {
-        return Ok(None);
+        .and_then(|extra| extra.get(PAYLOAD_KEY));
+    let token_output = payload.is_none();
+    let mut body = match payload {
+        Some(payload) => payload
+            .as_object()
+            .cloned()
+            .ok_or_else(|| client::invalid_arg("extra_args.sglang_tito must be a JSON object"))?,
+        None => match multimodal::request_body(
+            request,
+            request_id,
+            mode,
+            bootstrap_host,
+            bootstrap_port,
+        )? {
+            Some(body) => body,
+            None => return Ok(None),
+        },
     };
-    let mut body = payload
-        .as_object()
-        .cloned()
-        .ok_or_else(|| client::invalid_arg("extra_args.sglang_tito must be a JSON object"))?;
     if request.token_ids.is_empty() || request.prompt_embeds.is_some() {
         return Err(client::invalid_arg(
             "native SGLang Generate requires token input",
         ));
     }
 
-    body.insert("input_ids".into(), serde_json::json!(request.token_ids));
+    // Native EPD processors may require the rendered text when rebuilding
+    // the expanded multimodal prompt. The frontend already supplies it;
+    // preserve explicit token-input requests instead of re-rendering them.
+    let rendered_prompt = request.extra_args.as_ref().and_then(|extra| {
+        if token_output && extra.pointer("/nvext/token_in").and_then(Value::as_bool) != Some(true) {
+            extra.get("formatted_prompt").and_then(Value::as_str)
+        } else {
+            None
+        }
+    });
+    if let Some(prompt) = rendered_prompt {
+        body.insert("text".into(), Value::String(prompt.to_string()));
+    } else {
+        body.insert("input_ids".into(), serde_json::json!(request.token_ids));
+    }
     body.insert("rid".into(), Value::String(request_id.to_string()));
     body.insert("stream".into(), Value::Bool(true));
 
@@ -126,6 +152,11 @@ pub(crate) fn request(
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
         prefill_handoff,
+        token_output,
+        return_tokens_as_ids: request
+            .output_options
+            .return_tokens_as_token_ids
+            .unwrap_or(false),
     }))
 }
 
@@ -354,7 +385,17 @@ impl NativeHttp {
                     return;
                 }
                 let has_output = response_has_output(&response);
-                let (mut output, terminal) = output(response, &mut prefill_handoff);
+                let (mut output, terminal) = if request.token_output {
+                    match multimodal::output(response, is_prefill, request.return_tokens_as_ids) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                } else {
+                    output(response, &mut prefill_handoff)
+                };
                 if !first_output_seen && has_output && (!is_prefill || terminal) {
                     ctx.notify_first_token();
                     first_output_seen = true;
@@ -546,6 +587,86 @@ mod tests {
     }
 
     #[test]
+    fn multimodal_uses_rendered_prompt_without_overriding_explicit_token_input() {
+        use dynamo_backend_common::MultimodalData;
+        let mut canonical = canonical_request();
+        canonical.multi_modal_data = Some(std::collections::HashMap::from([(
+            "image_url".into(),
+            vec![MultimodalData::RawUrl("https://example.com/a.png".into())],
+        )]));
+        canonical.extra_args = Some(json!({"formatted_prompt": "<image>Describe."}));
+        let native = request(
+            &canonical,
+            "req",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(native.body["text"], "<image>Describe.");
+        assert!(native.body.get("input_ids").is_none());
+        canonical.extra_args.as_mut().unwrap()["nvext"] = json!({"token_in": true});
+        let native = request(
+            &canonical,
+            "req",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(native.body["input_ids"], json!([1, 2, 3]));
+        assert!(native.body.get("text").is_none());
+    }
+
+    #[tokio::test]
+    async fn multimodal_http_stream_returns_token_deltas_and_prefill_handoff() {
+        use dynamo_backend_common::{FinishReason, MultimodalData};
+        let body = concat!(
+            "data: {\"output_ids\":[101],\"meta_info\":{\"prompt_tokens\":256,\"completion_tokens\":1,\"finish_reason\":null}}\n\n",
+            "data: {\"output_ids\":[102],\"meta_info\":{\"prompt_tokens\":256,\"completion_tokens\":2,\"finish_reason\":{\"type\":\"length\"}}}\n\n"
+        );
+        for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Prefill] {
+            let mut canonical = canonical_request();
+            canonical.multi_modal_data = Some(std::collections::HashMap::from([(
+                "image_url".into(),
+                vec![MultimodalData::RawUrl("data:image/png;base64,YQ==".into())],
+            )]));
+            let native = request(&canonical, "req", mode, Some("p"), Some(8998))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                native.body["image_data"],
+                json!(["data:image/png;base64,YQ=="])
+            );
+            assert_eq!(native.body["input_ids"], json!([1, 2, 3]));
+            assert!(native.token_output);
+            let (port, server) = serve_once(body.into(), "200 OK").await;
+            let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+            let mut stream = native_http(port).generate(native, ctx, CancellationToken::new());
+            let first = stream.next().await.unwrap().unwrap();
+            if mode.is_prefill() {
+                let handoff = first.disaggregated_params.unwrap();
+                assert_eq!(handoff["bootstrap_host"], "p");
+                assert_eq!(handoff["bootstrap_port"], 8998);
+                assert!(first.token_ids.is_empty());
+            } else {
+                assert_eq!(first.token_ids, [101]);
+            }
+            let last = stream.next().await.unwrap().unwrap();
+            assert_eq!(last.finish_reason, Some(FinishReason::Length));
+            assert_eq!(
+                last.token_ids,
+                if mode.is_prefill() { vec![] } else { vec![102] }
+            );
+            assert!(last.engine_data.is_none());
+            assert!(stream.next().await.is_none());
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
     fn discovery_requires_incremental_streaming() {
         let grpc = GrpcEndpoint::parse("127.0.0.1:30001", "test").unwrap();
         assert!(
@@ -601,6 +722,8 @@ mod tests {
         );
         let mut stream = native_http(port).generate(
             NativeRequest {
+                token_output: false,
+                return_tokens_as_ids: false,
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
                 prefill_handoff: None,
@@ -622,6 +745,8 @@ mod tests {
         let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
         let mut stream = native_http(port).generate(
             NativeRequest {
+                token_output: false,
+                return_tokens_as_ids: false,
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: true,
                 prefill_handoff: Some(json!({
@@ -654,6 +779,8 @@ mod tests {
             let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
             let mut stream = native_http(port).generate(
                 NativeRequest {
+                    token_output: false,
+                    return_tokens_as_ids: false,
                     body: json!({"input_ids": [1], "stream": true}),
                     is_prefill: true,
                     prefill_handoff: Some(json!({
@@ -701,6 +828,8 @@ mod tests {
         let ctx = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
         let mut stream = native_http(port).generate(
             NativeRequest {
+                token_output: false,
+                return_tokens_as_ids: false,
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: true,
                 prefill_handoff: Some(json!({
@@ -750,6 +879,8 @@ mod tests {
         let ctx = GenerateContext::new(context, None);
         let mut stream = native_http(30000).generate(
             NativeRequest {
+                token_output: false,
+                return_tokens_as_ids: false,
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: false,
                 prefill_handoff: None,

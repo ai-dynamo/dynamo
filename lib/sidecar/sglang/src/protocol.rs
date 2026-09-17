@@ -21,6 +21,23 @@ pub(crate) fn build_generate_request(
     bootstrap_host: Option<&str>,
     bootstrap_port: Option<u16>,
 ) -> Result<pb::GenerateRequest, DynamoError> {
+    if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
+        return Err(client::invalid_arg(
+            "multimodal payloads require SGLang's native HTTP /generate endpoint",
+        ));
+    }
+    build_generate_fields(request, request_id, mode, bootstrap_host, bootstrap_port)
+}
+
+/// Fields shared by native gRPC generation and multimodal HTTP generation.
+/// Media is lowered separately because the released gRPC proto has no media fields.
+pub(crate) fn build_generate_fields(
+    request: &PreprocessedRequest,
+    request_id: &str,
+    mode: DisaggregationMode,
+    bootstrap_host: Option<&str>,
+    bootstrap_port: Option<u16>,
+) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(request)?;
     let input_ids = request
         .token_ids
@@ -162,11 +179,6 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_arg(
             "prompt_embeds are not supported by SGLang's native gRPC proto",
-        ));
-    }
-    if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
-        return Err(client::invalid_arg(
-            "multimodal payloads are not supported by SGLang's native Generate RPC",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
