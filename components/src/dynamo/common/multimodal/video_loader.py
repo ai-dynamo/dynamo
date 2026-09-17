@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import asyncio
+import functools
 import logging
 import os
+import re
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
@@ -43,6 +45,34 @@ from dynamo.common.multimodal.nvdec_decoder import (
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
+
+
+def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
+    """Identify OpenCV errors without relabeling failures from other video backends."""
+    if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
+        return True
+    return (
+        isinstance(exc, ValueError)
+        and str(exc) == "Could not open video stream"
+        and (getattr(media_io, "kwargs", None) or {}).get("backend", "opencv")
+        == "opencv"
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _cv2_lacks_video_backend() -> bool:
+    """Return whether OpenCV is broken or lacks FFmpeg and GStreamer."""
+    try:
+        import cv2
+    except ImportError:
+        return False
+    except Exception:  # noqa: BLE001 - a broken import has no usable video backend
+        return True
+    build_info = cv2.getBuildInformation()
+    return not any(
+        re.search(rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE | re.IGNORECASE)
+        for backend in ("FFMPEG", "GSTREAMER")
+    )
 
 
 URL_VARIANT_KEY: Final = "Url"
@@ -165,13 +195,8 @@ class VideoLoader:
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        The runtime images purge the software decode wheels (opencv/av/decord/
-        torchcodec) for codec compliance, so the software fallback only
-        resolves where a decoder was installed separately. When it is absent,
-        vLLM's lazy import surfaces a bare ``No module named 'cv2'`` with no
-        codec and no remedy -- convert that into the actionable
-        unsupported-codec error, which can name the codec because the probe
-        already ran here.
+        vLLM ships OpenCV for still images without video backends. Translate
+        its decode failures into install guidance; preserve other backends.
 
         The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
         frames come back -- ``num_frames`` and ``fps`` -- because it samples
@@ -198,8 +223,21 @@ class VideoLoader:
         try:
             return await asyncio.to_thread(media_io.load_bytes, content)
         except ImportError as exc:
+            if not _attributable_to_cv2(exc):
+                raise
             raise video_decoder_missing(
                 "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
+            ) from exc
+        except (OSError, SystemError, ValueError) as exc:
+            # Confirm both the error source and missing video support.
+            if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
+                raise
+            raise video_decoder_missing(
+                "vllm",
+                "opencv-python-headless",
+                "cv2",
+                codec,
+                cause=str(exc),
             ) from exc
 
     def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:
