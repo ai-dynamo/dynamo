@@ -106,8 +106,9 @@ fn validate_parser_version_for_mode(
             let tool_parser_is_v2 = tool_call_parser.is_none_or(|parser| {
                 V2_FAMILIES.contains(&parser) || UNIFIED_FAMILIES.contains(&parser) || qwen3_unified
             });
-            let reasoning_parser_is_v2 =
-                reasoning_parser.is_none_or(|parser| qwen3_unified && parser == "qwen3");
+            let reasoning_parser_is_v2 = reasoning_parser.is_none_or(|parser| {
+                UNIFIED_FAMILIES.contains(&parser) || qwen3_unified && parser == "qwen3"
+            });
             if !(configured.is_empty() || tool_parser_is_v2 && reasoning_parser_is_v2) {
                 anyhow::bail!(
                     "{}=v2 was requested, but the configured parser has no compatible v2 implementation",
@@ -1518,6 +1519,17 @@ mod tests {
         assert!(
             validate_parser_version_for_mode(ParserVersion::V2, Some("qwen3_coder"), Some("qwen3"))
                 .is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(ParserVersion::V2, None, Some("muse_glimmer")).is_ok()
+        );
+        assert!(
+            validate_parser_version_for_mode(
+                ParserVersion::V2,
+                Some("muse_glimmer"),
+                Some("muse_glimmer")
+            )
+            .is_ok()
         );
         assert!(
             validate_parser_version_for_mode(
