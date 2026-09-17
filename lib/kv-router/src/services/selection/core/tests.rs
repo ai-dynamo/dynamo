@@ -783,6 +783,77 @@ async fn injected_lora_filter_narrows_candidates() {
     }
 }
 
+#[rstest::rstest]
+#[case::shutdown(true)]
+#[case::completes(false)]
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_shared_cache_wait(#[case] shutdown: bool) {
+    #[derive(Default)]
+    struct PausedSharedCache {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl SharedKvCache for PausedSharedCache {
+        async fn check_blocks(
+            &self,
+            _: &[u32],
+            _: u32,
+            _: Option<&str>,
+        ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(SharedCacheHits::from_hits(&[false]))
+        }
+    }
+
+    let shared = Arc::new(PausedSharedCache::default());
+    let core = Arc::new(core_with_host(SelectionHost {
+        cache: HostCache {
+            shared: Some(shared.clone()),
+            ..HostCache::default()
+        },
+        ..SelectionHost::default()
+    }));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let entry = core.entry(&default_key()).unwrap();
+    let request = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            core.select_and_reserve(reserve_request("shared-wait"))
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), shared.entered.notified())
+        .await
+        .expect("request did not reach the shared-cache wait");
+    assert!(!entry.scheduler.has_request("shared-wait"));
+    assert!(core.reservation_index.read().contains_key("shared-wait"));
+    if shutdown {
+        core.shutdown();
+    } else {
+        shared.release.notify_one();
+    }
+    let result = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("request did not finish after shutdown or shared-cache release")
+        .unwrap();
+    if shutdown {
+        assert!(matches!(
+            result,
+            Err(SelectionError::Scheduler(
+                KvSchedulerError::SubscriberShutdown
+            ))
+        ));
+        assert!(core.reservation_index.read().get("shared-wait").is_none());
+        assert!(!entry.scheduler.has_request("shared-wait"));
+    } else {
+        result.expect("live request should complete normally");
+        core.free_reservation("shared-wait").await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn shared_cache_hits_reach_worker_selection() {
     let calls: SharedCacheCalls = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -1372,6 +1443,150 @@ async fn dropped_selection_future_frees_its_booking() {
     })
     .await;
     assert!(core.reservation_index.read().get("dropped").is_none());
+}
+
+#[rstest::rstest]
+#[case::lookup_shutdown(true, false, true, false)]
+#[case::lookup_completes(true, false, false, false)]
+#[case::record_shutdown(false, false, true, false)]
+#[case::record_completes(false, false, false, false)]
+#[case::explicit_record_shutdown(false, true, true, false)]
+#[case::explicit_record_completes(false, true, false, false)]
+#[case::record_error(false, false, false, true)]
+#[case::explicit_record_error(false, true, false, true)]
+#[tokio::test(start_paused = true)]
+async fn shutdown_interrupts_indexer_waits(
+    #[case] block_lookup: bool,
+    #[case] explicit: bool,
+    #[case] shutdown: bool,
+    #[case] record_error: bool,
+) {
+    use crate::services::indexer::backend::RemotePrimary;
+
+    struct PausedIndexer {
+        block_lookup: bool,
+        record_error: bool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl RemotePrimary for PausedIndexer {
+        async fn find_matches_by_tier(
+            &self,
+            _: Vec<LocalBlockHash>,
+            _: bool,
+        ) -> anyhow::Result<TieredMatchDetails> {
+            if self.block_lookup {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(TieredMatchDetails::default())
+        }
+
+        async fn record_routing_decision(
+            &self,
+            _: WorkerWithDpRank,
+            _: RoutingDecisionHashes,
+        ) -> anyhow::Result<()> {
+            if !self.block_lookup {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            if self.record_error {
+                anyhow::bail!("injected routing-record failure");
+            }
+            Ok(())
+        }
+
+        fn use_kv_events(&self) -> bool {
+            false
+        }
+    }
+
+    struct PausedIngress(Arc<PausedIndexer>);
+    #[async_trait::async_trait]
+    impl KvEventIngress for PausedIngress {
+        fn open(&self, _: &WorkerRegistry, _: &RoutingPartitionId, _: u32) -> Indexer {
+            Indexer::Remote {
+                primary: self.0.clone(),
+                approx: None,
+                primary_records_routing_decisions: true,
+            }
+        }
+    }
+
+    let indexer = Arc::new(PausedIndexer {
+        block_lookup,
+        record_error,
+        entered: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    let core = Arc::new(core_with(
+        test_config(false),
+        SelectionHost {
+            cache: HostCache {
+                index: KvIndexSource::Owned(Arc::new(PausedIngress(indexer.clone()))),
+                shared: None,
+            },
+            ..SelectionHost::default()
+        },
+        None,
+        WorkerType::Aggregated,
+        None,
+    ));
+    core.upsert_worker(worker(1)).await.unwrap();
+    let entry = core.entry(&default_key()).unwrap();
+    let request = {
+        let core = core.clone();
+        tokio::spawn(async move {
+            if explicit {
+                core.create_reservation(ReservationRequest {
+                    worker_id: Some(1),
+                    prompt: prompt(),
+                    ..replay_reservation("in-flight")
+                })
+                .await
+                .map(|_| ())
+            } else {
+                core.select_and_reserve(reserve_request("in-flight"))
+                    .await
+                    .map(|_| ())
+            }
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), indexer.entered.notified())
+        .await
+        .expect("request did not reach the indexer wait");
+    assert_eq!(entry.scheduler.has_request("in-flight"), !block_lookup);
+    assert!(core.reservation_index.read().contains_key("in-flight"));
+
+    if shutdown {
+        core.shutdown();
+    } else {
+        indexer.release.notify_one();
+    }
+    let result = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("request did not finish after shutdown or indexer release")
+        .unwrap();
+    if shutdown {
+        assert!(matches!(
+            result,
+            Err(SelectionError::Scheduler(
+                KvSchedulerError::SubscriberShutdown
+            ))
+        ));
+        wait_until("cancelled booking release", || {
+            !entry.scheduler.has_request("in-flight")
+        })
+        .await;
+        assert!(core.reservation_index.read().get("in-flight").is_none());
+    } else {
+        result.expect("live request should complete normally");
+        assert!(entry.scheduler.has_request("in-flight"));
+        core.free_reservation("in-flight").await.unwrap();
+    }
 }
 
 /// The routing-decision record is an await between the booking (and the
