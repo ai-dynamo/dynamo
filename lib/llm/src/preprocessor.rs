@@ -2430,10 +2430,12 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
-        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
-            tool_call_parser.as_deref(),
-            mdc.runtime_config.reasoning_parser.as_deref(),
-        )?;
+        if mdc.model_type.supports_chat() {
+            crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+            )?;
+        }
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
@@ -4919,6 +4921,15 @@ impl OpenAIPreprocessor {
 
         if !should_jail {
             return Ok(ToolProcessingRoute::PassThrough);
+        }
+
+        if selected_version == dynamo_runtime::config::ParserVersion::V2
+            && effective_tool_call_parser.is_none()
+        {
+            anyhow::bail!(
+                "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
+                env_llm::DYN_PARSER_VERSION
+            );
         }
 
         if let Some(parser_name) = effective_tool_call_parser.as_deref()
@@ -8022,6 +8033,144 @@ mod tests {
         assert!(
             !OpenAIPreprocessor::guided_tool_streaming_release(false, true),
             "no installed grammar means nothing to release incrementally, rollback or not"
+        );
+    }
+
+    fn parser_route_test_request(
+        tool_choice: ChatCompletionToolChoiceOption,
+    ) -> NvCreateChatCompletionRequest {
+        NvCreateChatCompletionRequest {
+            inner: dynamo_protocols::types::CreateChatCompletionRequestArgs::default()
+                .model("test")
+                .messages(vec![dynamo_protocols::types::ChatCompletionRequestMessage::User(
+                    dynamo_protocols::types::ChatCompletionRequestUserMessage {
+                        content: dynamo_protocols::types::ChatCompletionRequestUserMessageContent::Text(
+                            "test".to_string(),
+                        ),
+                        name: None,
+                    },
+                )])
+                .tools(vec![dynamo_protocols::types::ChatCompletionTool {
+                    r#type: dynamo_protocols::types::ChatCompletionToolType::Function,
+                    function: dynamo_protocols::types::FunctionObject {
+                        name: "get_weather".to_string(),
+                        description: None,
+                        parameters: None,
+                        strict: None,
+                    },
+                }])
+                .tool_choice(tool_choice)
+                .build()
+                .unwrap(),
+            common: Default::default(),
+            nvext: None,
+            chat_template_args: None,
+            thinking: None,
+            media_io_kwargs: None,
+            return_tokens_as_token_ids: None,
+            unsupported_fields: Default::default(),
+        }
+    }
+
+    #[test]
+    fn qwen3_coder_auto_selects_v2_by_default() {
+        const CHILD: &str = "DYNAMO_PARSER_VERSION_TEST_DEFAULT_V2";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "preprocessor::tests::qwen3_coder_auto_selects_v2_by_default",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env_remove(env_llm::DYN_PARSER_VERSION)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.runtime_config.tool_call_parser = Some("qwen3_coder".to_string());
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Auto);
+        let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
+            &request,
+            Some("qwen3_coder"),
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            preprocessor
+                .tool_processing_route(&request, &constraint)
+                .unwrap(),
+            ToolProcessingRoute::ParserV2("qwen3_coder".to_string())
+        );
+    }
+
+    #[test]
+    fn explicit_v2_rejects_modes_that_require_the_v1_jail() {
+        const CHILD: &str = "DYNAMO_PARSER_VERSION_TEST_EXPLICIT_V2";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "preprocessor::tests::explicit_v2_rejects_modes_that_require_the_v1_jail",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env(env_llm::DYN_PARSER_VERSION, "v2")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models/mock-llama-3.1-8b-instruct");
+        for (parser, structural_tag) in [
+            ("muse_glimmer", false),
+            ("muse_glimmer", true),
+            ("qwen3_coder", false),
+            ("qwen3_coder", true),
+        ] {
+            let mut card = ModelDeploymentCard::load_from_disk(model_path.clone(), None).unwrap();
+            card.runtime_config.tool_call_parser = Some(parser.to_string());
+            let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+            let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
+            let constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
+                &request,
+                Some(parser),
+                None,
+                structural_tag,
+            )
+            .unwrap();
+            let error = preprocessor
+                .tool_processing_route(&request, &constraint)
+                .expect_err("explicit v2 must not silently select the v1 jail");
+            assert!(
+                error.to_string().contains("requires the v1 tool-call jail"),
+                "parser={parser}, structural_tag={structural_tag}: {error:#}"
+            );
+        }
+
+        let card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
+        let constraint =
+            crate::preprocessor::tool_choice::guided_tool_constraint(&request, None, None, false)
+                .unwrap();
+        assert!(
+            preprocessor
+                .tool_processing_route(&request, &constraint)
+                .expect_err("explicit v2 must not construct an unconfigured immediate jail")
+                .to_string()
+                .contains("requires the v1 tool-call jail")
         );
     }
 
