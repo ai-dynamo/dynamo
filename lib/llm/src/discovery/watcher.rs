@@ -617,9 +617,6 @@ impl ModelWatcher {
             let prefill_chooser = if needs_preprocessed_routing
                 && effective_worker_type(card.worker_type, card.model_type) == WorkerType::Decode
             {
-                let mut prefill_config = router_config.kv_router_config.clone();
-                prefill_config.router_track_active_blocks = false;
-
                 // Fallback only: a prefill worker that declares its own
                 // `router_config` overrides this at activation time.
                 Some(PrefillRouter::new_with_selection_policy(
@@ -627,7 +624,7 @@ impl ModelWatcher {
                     self.manager.clone(),
                     router_config.router_mode,
                     card.kv_cache_block_size,
-                    Some(prefill_config),
+                    Some(router_config.kv_router_config.clone()),
                     self.selection_policy.clone(),
                     self.prefill_load_estimator.clone(),
                     router_config.session_affinity_ttl_secs,

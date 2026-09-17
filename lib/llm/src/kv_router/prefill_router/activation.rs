@@ -48,6 +48,18 @@ struct PrefillAdvertisement {
     kv_cache_block_size: u32,
 }
 
+fn normalize_prefill_kv_config(kv_router_config: Option<KvRouterConfig>) -> Option<KvRouterConfig> {
+    kv_router_config.map(|mut config| {
+        // The prefill hop tracks prompt work through prefill-token load and
+        // deliberately avoids router-side active-sequence reservations. Output
+        // tracking requires those reservations and advances with streamed decode
+        // output, so neither applies to this prefill-only router.
+        config.router_track_active_blocks = false;
+        config.router_track_output_blocks = false;
+        config
+    })
+}
+
 /// A prefill worker that declares its own `router_config` governs this hop;
 /// one that declares nothing inherits `decode_router_mode`. That is what lets a
 /// deployment run KV-routed prefill in front of round-robin decode.
@@ -199,6 +211,7 @@ impl PrefillRouter {
         parent_token: tokio_util::sync::CancellationToken,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
+        let kv_router_config = normalize_prefill_kv_config(kv_router_config);
         let cancel_token = parent_token.child_token();
         let (target_tx, target_rx) = watch::channel(None);
         let conditional_disagg_policy = make_conditional_disagg_policy(kv_router_config.as_ref());
@@ -329,16 +342,11 @@ impl PrefillRouter {
 
         // A prefill card that declares a mode may declare KV tuning alongside it;
         // honoring only half of its `RouterConfig` would be a trap. Whichever
-        // config wins, `router_track_active_blocks` stays off: prefill routing is
-        // prompt-side, and crediting decode blocks here would double-count load.
+        // config wins, active-sequence and output-block tracking stay off for
+        // this prefill-only hop.
         let advertised_kv_tuning = advertisement.kv_router_config.is_some();
-        let prefill_kv_config = match advertisement.kv_router_config {
-            Some(mut advertised) => {
-                advertised.router_track_active_blocks = false;
-                Some(advertised)
-            }
-            None => kv_router_config,
-        };
+        let prefill_kv_config =
+            normalize_prefill_kv_config(advertisement.kv_router_config.or(kv_router_config));
 
         // Logged once per activation, and deliberately the *resolved* values
         // rather than what the card asked for. An advertisement replaces the
@@ -716,6 +724,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn prefill_config_disables_active_and_output_block_tracking() {
+        let config = KvRouterConfig {
+            router_track_active_blocks: true,
+            router_track_output_blocks: true,
+            router_temperature: 0.5,
+            ..Default::default()
+        };
+
+        let normalized = normalize_prefill_kv_config(Some(config)).expect("config remains set");
+        assert!(!normalized.router_track_active_blocks);
+        assert!(!normalized.router_track_output_blocks);
+        assert_eq!(normalized.router_temperature, 0.5);
+    }
+
     struct PrefillWorker(u32);
 
     #[async_trait::async_trait]
@@ -866,7 +889,8 @@ mod tests {
             .collect();
         let kv_config = KvRouterConfig {
             use_kv_events: false,
-            router_track_active_blocks: false,
+            router_track_active_blocks: true,
+            router_track_output_blocks: true,
             ..Default::default()
         };
         let target = |generation, block_size, admitted_ids| {
@@ -916,6 +940,8 @@ mod tests {
             .kv_router_if_enabled()
             .expect("selected KV mode must override raw RR cards");
         assert_eq!(chooser.block_size(), 64);
+        assert!(!chooser.kv_router_config().router_track_active_blocks);
+        assert!(!chooser.kv_router_config().router_track_output_blocks);
         for _ in 0..6 {
             assert_eq!(prefilled_worker(&router).await, 0);
         }
