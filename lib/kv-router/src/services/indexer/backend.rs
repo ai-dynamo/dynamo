@@ -760,6 +760,7 @@ impl Indexer {
                 primary.flush_and_wait().await?;
                 lower_tier
             }
+            Indexer::Remote { .. } | Indexer::None => return Ok(()),
         };
 
         for indexer in lower_tier.all() {
