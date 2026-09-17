@@ -243,13 +243,20 @@ def _ensure_reasoning_parser_output_capable(
     parser_name: str,
     parser_class: type[ReasoningParser],
     tokenizer: TokenizerLike,
+    chat_template_kwargs: dict[str, Any],
+    model_config: Any,
 ) -> None:
     # vLLM ships boundary-only parsers (e.g. GptOssReasoningParser) that raise
     # NotImplementedError from every output-parsing method, while this
     # processor calls extract_reasoning_streaming per request. Probe once here
     # so the combination is rejected at engine setup instead of failing every
-    # request with a 500 (issue #14936).
-    probe = parser_class(tokenizer)
+    # request with a 500 (issue #14936). The probe constructor mirrors the
+    # production construction sites (chat_template_kwargs, model_config).
+    probe = parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
     try:
         inspect.signature(probe.extract_reasoning_streaming).bind(
             "", "", "", [], [], []
@@ -1266,7 +1273,11 @@ class EngineFactory:
                 reasoning_parser_name
             )
             _ensure_reasoning_parser_output_capable(
-                reasoning_parser_name, reasoning_parser_class, tokenizer
+                reasoning_parser_name,
+                reasoning_parser_class,
+                tokenizer,
+                getattr(self.flags, "default_chat_template_kwargs", None) or {},
+                model_config,
             )
         else:
             reasoning_parser_class = None

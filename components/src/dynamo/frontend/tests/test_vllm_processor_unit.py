@@ -1026,7 +1026,7 @@ class TestReasoningParserOutputCapability:
 
         with pytest.raises(RuntimeError, match="boundary detection"):
             _ensure_reasoning_parser_output_capable(
-                "openai_gptoss", BoundaryOnlyParser, object()
+                "openai_gptoss", BoundaryOnlyParser, object(), {}, None
             )
 
     def test_output_capable_parser_accepted(self):
@@ -1041,7 +1041,7 @@ class TestReasoningParserOutputCapability:
             def extract_reasoning_streaming(self, *args):
                 return None
 
-        _ensure_reasoning_parser_output_capable("fake", WorkingParser, object())
+        _ensure_reasoning_parser_output_capable("fake", WorkingParser, object(), {}, None)
 
     def test_probe_tolerates_other_empty_input_failures(self):
         from dynamo.frontend.vllm_processor import (
@@ -1055,7 +1055,7 @@ class TestReasoningParserOutputCapability:
             def extract_reasoning_streaming(self, *args):
                 raise IndexError("empty input")
 
-        _ensure_reasoning_parser_output_capable("fake", PickyParser, object())
+        _ensure_reasoning_parser_output_capable("fake", PickyParser, object(), {}, None)
 
     def test_incompatible_signature_rejected(self):
         from dynamo.frontend.vllm_processor import (
@@ -1071,7 +1071,7 @@ class TestReasoningParserOutputCapability:
 
         with pytest.raises(RuntimeError, match="signature"):
             _ensure_reasoning_parser_output_capable(
-                "fake", WrongSignatureParser, object()
+                "fake", WrongSignatureParser, object(), {}, None
             )
 
     def test_real_gptoss_parser_rejected(self):
@@ -1085,7 +1085,7 @@ class TestReasoningParserOutputCapability:
         parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
         with pytest.raises(RuntimeError, match="openai_gptoss"):
             _ensure_reasoning_parser_output_capable(
-                "openai_gptoss", parser_class, object()
+                "openai_gptoss", parser_class, object(), {}, None
             )
 
 
