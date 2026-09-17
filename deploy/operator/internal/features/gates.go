@@ -113,10 +113,12 @@ const (
 	// Default: true when provider is istio and DestinationRule is detected; false otherwise
 	Istio Name = "istio"
 
-	// ElasticEPRayPoC enforces the elastic-EP single-replica admission rule: an elastic-EP
-	// leader (--enable-elastic-ep with --data-parallel-backend ray) may declare at most one
-	// replica, because one follower and one "<leader>-ray" Service are derived per
-	// component and two leader replicas would share one DNS name. Ratcheted, so enabling it
+	// ElasticEPRayPoC enforces the elastic-EP single-replica admission rule: a single-node
+	// elastic-EP WORKER component (--enable-elastic-ep with --data-parallel-backend ray) may
+	// declare at most one replica, because one follower and one "<leader>-ray" Service are
+	// derived per component and two leader replicas would share one DNS name. It fires on
+	// exactly the shapes that derive a follower -- a multinode component (LWS path) or a
+	// non-worker component carrying the flags is left alone. Ratcheted, so enabling it
 	// on a live cluster does not freeze an existing violating object against every edit.
 	//
 	// It governs NOTHING ELSE, and that is deliberate rather than an oversight. The

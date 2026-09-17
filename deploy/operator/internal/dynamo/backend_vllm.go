@@ -36,10 +36,11 @@ const (
 // on purpose: the leader's Ray head shipped in #12943, so a default-off gate arriving with
 // an operator upgrade would strip the Ray head and POD_IP from every live elastic-EP
 // leader and roll a serving deployment nobody edited; the follower's Ray-join fires only
-// on the operator-set follower annotation that gated synthesis alone writes -- so plumbing
-// the gate to this level would only invite someone to apply it. The gate governs what this
-// PoC adds (follower synthesis, the non-Grove Service, the single-replica rule), not what
-// it inherited. See injectElasticEPRayLaunchFlags and IsSinglePodElasticEPShape.
+// on the operator-set follower annotation that synthesis alone writes -- so plumbing the
+// gate to this level would only invite someone to apply it. The gate governs exactly one
+// thing, the single-replica admission rule in internal/webhook/validation; synthesis, both
+// "<leader>-ray" Services and this render are ungated. See injectElasticEPRayLaunchFlags
+// and IsSinglePodElasticEPShape.
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 }
@@ -108,11 +109,12 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// provider.
 		followerReplicas := elasticEPSynthesizedFollowers(annotations)
 
-		// Pin the leader to one local rank BEFORE the command is wrapped -- the other half
-		// of the sizing rule synthesis derives the follower count from ("one pod is one
-		// node is one rank"). Order matters: injectElasticEPRayLaunchFlags below collapses
-		// Command and Args into one shell string, after which the flag scan can no longer
-		// see them and this injection silently does nothing. Without it
+		// Pin the leader to one local rank -- the other half of the sizing rule synthesis
+		// derives the follower count from ("one pod is one node is one rank"). Done before
+		// injectElasticEPRayLaunchFlags collapses Command and Args into one shell string,
+		// so the flag is appended to the plain arg list rather than spliced into the middle
+		// of that string; the flag scan itself survives the wrap either way, since
+		// getExpandedCommandLine re-splits the collapsed string. Without the pin,
 		// vLLM's create_dp_placement_groups puts EVERY rank on the DP master and aborts
 		//   ValueError: Not enough resources to allocate N DP ranks on DP master node
 		//               <ip>, possible to fit 1 DP ranks.
@@ -151,14 +153,18 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 	} else if role == RoleFollower && IsElasticEPRayLaunch(container) {
 		// No gate term here either -- see the VLLMBackend doc. RoleFollower comes from the
-		// follower annotation only gated synthesis writes; a follower DCD outliving a gate
-		// flip would skip the Ray-join rewrite and run the leader's full serve command,
-		// carried verbatim from the deep copy that created it. It also fails the leader
-		// predicate by construction (zero replicas), inheriting its leader's guarantee.
+		// follower annotation only synthesis writes; a follower that reached this render
+		// without it would skip the Ray-join rewrite and run the leader's full serve
+		// command, carried verbatim from the deep copy that created it.
+		//
+		// Nothing else can mistake a follower for a leader: both the Service emitter and
+		// the role choice test that same annotation explicitly (generateElasticEPHeadlessService,
+		// generateDeployment) rather than inferring from the replica count -- a dp=2
+		// follower rests at replicas 1 and does satisfy IsSinglePodElasticEPShape.
 		//
 		// The leader's Service name is carried on the follower rather than rebuilt here.
 		// Its absence means synthesis and rendering are out of step; guessing an address
-		// would leave a pod polling a hostname nothing backs for three hours, so fail.
+		// would leave a pod polling a hostname nothing backs for thirty minutes, so fail.
 		leaderService := annotations[commonconsts.KubeAnnotationElasticEPLeaderService]
 		if leaderService == "" {
 			return fmt.Errorf(
@@ -622,7 +628,8 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		// joined -- on gb300 the same manifest reached 4 nodes on one attempt and 2 on the
 		// next. Counted in nodes, not GPUs: the sizing rule is one pod per node per rank,
 		// the same rule ElasticEPFollowerReplicas uses, so both agree on "full width".
-		// Emitted only above one rank, so dp=1 deployments render exactly as before.
+		// Emitted only when synthesis actually created a follower -- so dp=1, and every
+		// other shape that derives none (Grove, replicas > 1), renders exactly as before.
 		widthGate := ""
 		if role == RoleMain {
 			// dp is the number of PODS the engine will span: this leader plus its

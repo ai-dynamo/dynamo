@@ -36,7 +36,8 @@ import (
 // replica count above one for the feature to work at all.
 //
 // Mutation check: dropping !isElasticEPFollower from the guard in
-// validateDynamoComponentDeploymentSpec fails every scaled-follower subtest.
+// validateDynamoComponentDeploymentSpec fails the "a follower scaled to three is accepted"
+// subtest -- the only one above the rule's own replicas <= 1 early return.
 func TestElasticEPSingleReplicaAppliesToLeadersOnly(t *testing.T) {
 	elasticArgs := []string{
 		"python3 -m dynamo.vllm --model test --enable-elastic-ep --enable-eplb " +

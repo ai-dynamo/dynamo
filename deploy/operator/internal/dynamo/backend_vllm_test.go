@@ -1418,18 +1418,6 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_ElasticEPRayPoCGateOffLeavesContainerUntouched covers the half of the
-// upgrade-safety property that generation-level tests cannot reach.
-//
-// TestElasticEPRayPoCGateIsUpgradeSafe proves the gate derives no follower and leaves the
-// leader's DCD spec alone, but the Ray-head wrapper is applied later, when a DCD is
-// rendered into a pod. That rewrite replaces Command with /bin/sh -c and rebuilds Args,
-// which changes the pod template and therefore rolls a serving deployment -- the exact
-// thing an operator upgrade must not do on its own.
-//
-// Verified by mutation: dropping the gate from VLLMBackend.elasticEPRayLaunch fails this
-// on the command assertion. If you change what this asserts, re-run that check -- a guard
-// that no longer fails when the gate is removed is decoration, not coverage.
 // TestVLLMBackend_ElasticEPRayPoCGateDoesNotChangeLeaderRender is the upgrade-safety
 // test for the PoC gate, and it varies the axis that matters.
 //
@@ -1548,13 +1536,13 @@ func TestVLLMBackend_ElasticEPRayPoCGateDoesNotChangeLeaderRender(t *testing.T) 
 // annotation rather than to the PoC gate.
 //
 // RoleFollower is assigned from the operator-set follower annotation with no gate term,
-// and only gated synthesis ever writes that annotation. If the launch rewrite re-checked
-// the gate, a follower DCD that outlived a gate flip would render without its Ray join
+// and only synthesis ever writes that annotation. If the launch rewrite re-checked the
+// gate, a follower DCD that outlived a gate flip would render without its Ray join
 // and run the leader's full serve command instead -- it carries that command verbatim
 // from the deep copy that created it.
 //
-// Mutation check: restoring `b.ElasticEPRayPoCEnabled &&` in elasticEPRayLaunch fails
-// the gate-off subtest.
+// Mutation check: adding a features.ElasticEPRayPoC term to the RoleFollower arm in
+// VLLMBackend.UpdateContainer fails the gate-off subtest.
 func TestVLLMBackend_FollowerRayJoinIsNotGated(t *testing.T) {
 	for _, gate := range []bool{false, true} {
 		t.Run(fmt.Sprintf("gate=%t", gate), func(t *testing.T) {

@@ -462,7 +462,8 @@ func ElasticEPFollowerReplicas(leaderContainer *corev1.Container) int32 {
 }
 
 // synthesizeElasticEPFollowerDCD derives the follower DCD for an elastic-EP leader, or nil
-// when the leader is not a single-pod elastic-EP Ray launch. The follower is a deep copy of
+// when the leader is not a single-pod elastic-EP Ray launch or declares no explicit
+// Command (see the body for why the second case gets no follower). The follower is a deep copy of
 // the leader (same image, GPU, model args) seeded at the declared launch width -- N-1 for
 // --data-parallel-size N -- and rendered as RoleFollower rather than a serve. Its component
 // identity is "<leader>-flw", so its Deployment, Service, and
@@ -473,7 +474,8 @@ func ElasticEPFollowerReplicas(leaderContainer *corev1.Container) int32 {
 // declared width, not extra capacity the PoC invents. --data-parallel-size 4 asks for four
 // ranks, which is four pods, so a gated-off operator would silently render a quarter of the
 // requested engine and the leader would wait forever for ranks nothing created. The gate
-// governs only whether that count may later *change* -- see preserveExistingDCDState.
+// does not govern this count either: once the follower object exists, preserveExistingDCDState
+// keeps the live value at BOTH gate positions -- see that function.
 //
 // Gated on IsSinglePodElasticEPShape, not the launch flags alone: a follower is only useful
 // where a leader Service exists to join, and the rejected shapes never get one -- replicas >
@@ -1145,8 +1147,9 @@ type ComponentServiceParams struct {
 	Annotations     map[string]string
 	IsK8sDiscovery  bool
 	// DCDSelector, when set, narrows the selector to one DCD generation via
-	// KubeLabelDynamoSelector. Only the elastic-EP leader Service uses it: it must address
-	// exactly one Ray head, and component labels alone match every generation.
+	// KubeLabelDynamoSelector. Only the non-Grove elastic-EP leader Service sets it: it must
+	// address exactly one Ray head, and component labels alone match every generation. The
+	// Grove emitter publishes one Service per component and does not narrow.
 	DCDSelector string
 }
 
@@ -1519,9 +1522,10 @@ const (
 	RoleMain       Role = "main"
 	RoleCheckpoint Role = "checkpoint"
 	RoleGMS        Role = "gms"
-	// RoleFollower is an on-demand elastic-EP follower: a single-pod clique resting at
-	// zero replicas that joins the leader's Ray cluster and lends its GPU as an extra
-	// data-parallel rank.
+	// RoleFollower is an on-demand elastic-EP follower: a separate single-pod DCD --
+	// rendered as its own Deployment rather than a Grove clique, see expandRolesForComponent
+	// -- seeded at the leader's declared width minus one, that joins the leader's Ray
+	// cluster and lends its GPU as an extra data-parallel rank.
 	RoleFollower Role = "follower"
 )
 

@@ -196,8 +196,10 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
 	// The single-replica rule is new here, and it only describes the topology the PoC
 	// renderer manages: one follower and one <leader>-ray Service are derived per
-	// component, so two leader replicas would share one DNS name. Gated off nothing is
-	// derived, so the rule must not outlive the feature it protects.
+	// component, so two leader replicas would share one DNS name. Gated because it is the
+	// only new RESTRICTION this PoC adds, and an operator that has not opted in must not
+	// start rejecting manifests the merge base accepted. Generation itself is ungated, so
+	// the follower and the Service are still derived at either gate position.
 	//
 	// It applies to LEADERS only. A follower is a deep copy of its leader and therefore
 	// carries the same --enable-elastic-ep flags, so an unscoped rule reads it as a

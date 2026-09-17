@@ -99,10 +99,10 @@ type DynamoComponentDeploymentReconciler struct {
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
-// Listing nodes answers one question for the elastic-EP follower: does any node
-// advertise an NVLink partition (nvidia.com/gpu.clique)? Without it the renderer
-// cannot tell a cluster that can satisfy the follower placement from one where it
-// would leave the pod Pending forever.
+// Reading the leader's node answers one question for the elastic-EP follower: does the
+// node running this follower's leader advertise an NVLink partition
+// (nvidia.com/gpu.clique)? Without it the renderer cannot tell a placement it can
+// satisfy from one that would leave the pod Pending forever.
 //+kubebuilder:rbac:groups=core,resources=nodes,verbs=get
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -844,13 +844,14 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	// numberOfNodes > 1 publishes workers as if they were the head.
 	//
 	// Deliberately not gated even though this Service is new here. A follower's launch
-	// resolves the leader through this name -- it polls <leader>-ray:9090/live and then
-	// joins <leader>-ray:6379 -- so deleting it on a gate flip strands every follower
-	// that the emptiness guard just went out of its way to keep alive. Caught on a
-	// cluster: with the gate turned off, the follower survived at replicas 1 while its
-	// Service disappeared, leaving the pod polling a name that resolves to nothing until
-	// its three-hour deadline. Gate-off means the follower count stops changing, not that
-	// running followers lose their leader.
+	// resolves the leader through this name -- it waits for <leader>-ray:6379 to accept
+	// connections, then joins it with `ray start --address` -- so deleting it on a gate
+	// flip would strand every follower that the emptiness guard just went out of its way
+	// to keep alive. Caught on a cluster: with the gate turned off, the follower survived
+	// at replicas 1 while its Service disappeared, leaving the pod polling a name that
+	// resolves to nothing until its 30-minute deadline. The gate governs only the
+	// single-replica admission rule; nothing on this path reads it, and a gate flip must
+	// not take a running follower's leader address away.
 	if !dynamo.IsSinglePodElasticEPShape(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		return deleteStub, true, nil
 	}

@@ -61,8 +61,9 @@ func elasticEPComponent() *v1beta1.DynamoComponentDeploymentSharedSpec {
 	return vllmComponent("--enable-elastic-ep", "--data-parallel-backend", "ray")
 }
 
-// The follower is NOT a Grove clique: Grove rejects minAvailable:0 (grove#676), so a
-// follower that rests at zero would gang-block the leader. expandRolesForComponent must
+// The follower is NOT a Grove clique: Grove rejects minAvailable:0 (grove#676), and a
+// follower must be able to rest at zero -- a single-rank leader seeds one there, and any
+// follower can be scaled there -- which would gang-block the leader. expandRolesForComponent must
 // therefore emit only the leader role; the follower is rendered on the non-Grove pathway
 // (synthesizeElasticEPFollowerDCD). Revisit once grove#686 lands.
 func TestExpandRolesForComponent_NeverEmitsFollower(t *testing.T) {
@@ -375,7 +376,10 @@ func TestSynthesizeElasticEPFollowerDCD_DerivesADistinctIdentity(t *testing.T) {
 		t.Errorf("follower component label = %q, want %q (keeps the leader's headless Service from selecting it)", got, wantSuffixed)
 	}
 
-	t.Log("it rests at zero replicas so it never gang-blocks the leader, and is scaled on demand")
+	// This leader declares no --data-parallel-size, so its declared width is one rank and
+	// the follower is seeded at zero. A leader that declares dp=N seeds it at N-1 instead --
+	// see TestSynthesizeElasticEPFollowerDCD_SeedsDeclaredWidth.
+	t.Log("with no declared width the follower is seeded at zero and scaled on demand")
 	if follower.Spec.Replicas == nil || *follower.Spec.Replicas != 0 {
 		t.Errorf("follower Replicas = %v, want 0", follower.Spec.Replicas)
 	}
@@ -619,9 +623,10 @@ func TestSynthesizeElasticEPFollowerDCD_DoesNotTouchASingleRankLeader(t *testing
 //     follower is derived either
 //
 // tests/fault_tolerance/deploy/templates/vllm/moe_elastic_ep_demo.yaml is the first shape
-// exactly: one pod, 4 GPUs, --data-parallel-size 2, no enable-grove annotation. Keyed on
-// the flag, that manifest waited 20 minutes for a second Ray node nothing would ever
-// create and then exited 1 -- a working deployment turned into a CrashLoopBackOff.
+// exactly: one pod, --data-parallel-size 2, and no enable-grove opt-out, so Grove is its
+// provider and no follower is ever synthesized. Keyed on the flag, that manifest waited
+// 20 minutes for a second Ray node nothing would ever create and then exited 1 -- a
+// working deployment turned into a CrashLoopBackOff.
 //
 // So the trigger is the follower count synthesis actually stamped, and its absence must
 // render the leader exactly as it rendered before any of this.

@@ -66,10 +66,11 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 		RollingUpdateContext{NewWorkerHash: dgdWorkerHashPlaceholderValue},
 	)
 	// Generation now synthesizes a follower unconditionally, so one is produced here too.
-	// The hash is unaffected: participatesInWorkerSpecHash excludes followers, so the
-	// synthesized DCD is discarded below. That exclusion is what keeps the worker hash --
-	// and therefore every worker pod -- from moving when an administrator flips
-	// features.ElasticEPRayPoC.
+	// The synthesized DCD itself is discarded below: participatesInWorkerSpecHash excludes
+	// followers. The stamp synthesis leaves on the LEADER is kept out separately, by the two
+	// strips further down. Together they are what keeps the worker hash -- and therefore
+	// every worker pod -- from moving the moment an operator carrying this feature rolls
+	// out over one that does not.
 	if err != nil {
 		return "", err
 	}

@@ -368,14 +368,6 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 	}
 }
 
-// TestDynamoGraphDeploymentSkipsElasticEPRulesWhenGated proves the review's third
-// gate-off requirement: a gated-off operator applies no Ray-specific admission rules.
-//
-// It matters because both rules would otherwise reject a deployment that works. Gated
-// off nothing wraps the user's command and no Service or follower is derived, so vLLM
-// starts a private in-process Ray and the component serves normally. Rejecting it would
-// break a running deployment to enforce a rule about a feature nobody enabled -- and on
-// update it would freeze the object, since admission runs over the whole spec.
 // TestDynamoGraphDeploymentElasticEPRuleGating pins which of the two elastic-EP rules
 // the PoC gate governs, and which it must not.
 //
@@ -385,9 +377,11 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 // logs -- gating this rule would make that silent no-op reachable, leaving elastic EP
 // accepted and simply absent, with no error, event or condition anywhere.
 //
-// validateElasticEPSingleReplica is new in this PoC and describes only the topology the
-// PoC renderer manages -- one follower and one <leader>-ray Service are derived per
-// component -- so it is gated and must not outlive the feature it protects.
+// validateElasticEPSingleReplica is new in this PoC and is the only new RESTRICTION it
+// adds -- one follower and one <leader>-ray Service are derived per component -- so it is
+// gated: an operator that has not opted in must not start rejecting manifests the merge
+// base accepted. Generation is ungated, so the follower and the Service are derived at
+// either gate position.
 //
 // Mutation check: moving validateElasticEPRequiresCommand back inside the gate block
 // fails the first subtest.

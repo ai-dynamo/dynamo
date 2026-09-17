@@ -280,8 +280,10 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
-	// GroveRoleSuffixFollower names the on-demand elastic-EP follower clique.
-	// Kept to three characters to preserve the combined Grove name budget.
+	// GroveRoleSuffixFollower names the on-demand elastic-EP follower. It is not a Grove
+	// clique -- the follower renders as its own Deployment on the non-Grove pathway -- but
+	// the suffix matches the other role suffixes and is kept to three characters to
+	// preserve the combined Grove name budget.
 	GroveRoleSuffixFollower = "flw"
 
 	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove

@@ -821,7 +821,8 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.NotEqual(t, service.Name, lws.Name)
 }
 
-// The non-Grove twin of the Grove leader-Service gate (isSinglePodElasticEPLeader). The
+// The non-Grove twin of the Grove leader-Service shape check: both pathways now call
+// dynamo.IsSinglePodElasticEPShape. The
 // Service selects every pod with the component labels, so it addresses one Ray head only
 // while the component is one pod; anything else must emit a delete stub rather than a
 // Service pointed at the wrong pods.
@@ -841,15 +842,16 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 		},
 		{
 			// The Service follows the component's shape, not the gate -- the same rule as
-			// its Grove twin. A follower resolves its leader through this name: it polls
-			// <leader>-ray:9090/live and then joins <leader>-ray:6379. Deleting it on a
+			// its Grove twin. A follower resolves its leader through this name: it waits
+			// for <leader>-ray:6379 to accept connections, then joins it. Deleting it on a
 			// gate flip therefore strands every follower the emptiness guard just kept
 			// alive, which is what a cluster run showed -- the follower survived at
 			// replicas 1 while its Service disappeared, leaving the pod polling a name
-			// that resolves to nothing until its three-hour deadline.
+			// that resolves to nothing until its 30-minute deadline.
 			//
-			// Gate-off means the follower count stops changing, not that running
-			// followers lose their leader.
+			// The gate governs only the single-replica admission rule; nothing on this
+			// path reads it, and a gate flip must not take a running follower's leader
+			// address away.
 			name:       "keeps the Service when the ElasticEPRayPoC gate is off",
 			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
 			gateOff:    true,
@@ -999,8 +1001,7 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 			// it places the pod, and a Pending pod is retried until it can be placed, so
 			// a leader that is merely not scheduled yet resolves itself. Dropping the
 			// term here would convert that transient into a permanent loss of the
-			// guarantee -- and the follower rests at zero replicas, so nothing is
-			// Pending during the window anyway.
+			// guarantee.
 			name:            "leader not scheduled yet: keep the term, the scheduler will wait",
 			leaderNodeLabel: true,
 			leaderScheduled: false,

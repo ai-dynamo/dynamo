@@ -21,13 +21,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
-// TestDeleteOrphanedElasticEPFollowers covers the review's last gate-off requirement:
-// turning the gate from on to off must clean up what it previously synthesized.
+// TestDeleteOrphanedElasticEPFollowers covers the sweep itself: a follower that generation
+// no longer produces must be cleaned up.
 //
 // Nothing else would. The rollout path prunes worker DCDs by comparing their hash label
-// against the current worker generation, and a follower's label still matches, because
-// the hash is deliberately gate-independent. A follower left behind is owned by no one:
-// generation no longer produces it, so no reconcile will ever touch it again.
+// against the current worker generation, and a follower's label still matches, because it
+// deep-copies its leader and carries that leader's current hash. A follower left behind is
+// owned by no one: generation no longer produces it, so no reconcile will ever touch it
+// again.
 func TestDeleteOrphanedElasticEPFollowers(t *testing.T) {
 	s := scheme.Scheme
 	require.NoError(t, nvidiacomv1beta1.AddToScheme(s))
@@ -168,8 +169,8 @@ func TestDeleteOrphanedElasticEPFollowersProvesOwnership(t *testing.T) {
 // restart=0 with inference stopped; DYN-2660 records the orphaned placement group then
 // blocking every later scale-up until the pod restarts, which no gate flip undoes.
 //
-// This is also what makes "turning the gate off stops scaling" mean stop rather than
-// tear down: running capacity is left alone and the operator says so.
+// So an orphaning must leave running capacity alone rather than tear it down, and the
+// operator says so.
 //
 // Mutation check: removing the replicas>0 guard fails the non-empty subtest.
 func TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower(t *testing.T) {
@@ -247,8 +248,8 @@ func TestDeleteOrphanedElasticEPFollowersRefusesANonEmptyFollower(t *testing.T) 
 // is the value to seed at creation, not to re-assert forever -- the scale client owns it
 // after that.
 //
-// This is also what makes "turning the gate off stops scaling" mean stop rather than
-// snap back: the operator simply stops writing the field.
+// So an external scale is kept rather than snapped back: the operator simply stops
+// writing the field.
 //
 // Mutation check: deleting the follower branch in preserveExistingDCDState fails every
 // scaled subtest below.
@@ -337,14 +338,13 @@ func TestPreserveExistingDCDStateKeepsFollowerReplicas(t *testing.T) {
 	// A running follower freezes wherever it is, in BOTH directions, whatever the declared
 	// width says: scaled up 3 -> 5 stays 5, scaled down 3 -> 1 stays 1.
 	//
-	// This is what "turning the gate off stops scaling" literally means -- the count stops
-	// changing, rather than the operator dragging it back to the declared width. Dragging
-	// it back is the worse failure either way. Downward it deletes pods that may hold live
-	// engine ranks, with nothing having called scale_elastic_ep to drain them (DYN-3838,
+	// The operator does not drag the count back to the declared width. Dragging it back is
+	// the worse failure either way. Downward it deletes pods that may hold live engine
+	// ranks, with nothing having called scale_elastic_ep to drain them (DYN-3838,
 	// DYN-2660). Upward it re-adds capacity an operator deliberately removed.
 	//
-	// The reconciler therefore does not read the gate at all, and these cases assert the
-	// behaviour directly rather than per gate position.
+	// The reconciler does not read the gate at all, so the freeze is unconditional; these
+	// cases assert the behaviour directly rather than per gate position.
 	//
 	// Mutation check: restoring a `desired`-wins branch for either direction fails the
 	// matching subtest below.

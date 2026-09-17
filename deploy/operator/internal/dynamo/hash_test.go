@@ -291,9 +291,10 @@ func TestComputeBetaDGDWorkersSpecHash_ExcludesSynthesizedElasticEPFollower(t *t
 // hash onto every worker pod. Measured before the fix -- an unchanged Grove dp=2 component
 // moved b61319fa -> 9761526a.
 //
-// The stamp reaches the hash by TWO routes, and dropping either strip alone fails this test:
-// workerHashSpec covers spec.podTemplate.annotations, and GetDCDKubeAnnotations copies the
-// pod-template annotations into the separate Annotations field of the hashed struct.
+// The stamp reaches the hash by TWO routes: workerHashSpec covers spec.podTemplate.annotations,
+// and GetDCDKubeAnnotations copies the pod-template annotations into the separate Annotations
+// field of the hashed struct. This test calls workerHashSpec directly, so it pins the first
+// route only; the second is covered by the end-to-end measurement recorded below.
 func TestComputeBetaDGDWorkersSpecHash_DerivedFollowerCountDoesNotRoll(t *testing.T) {
 	// The annotation cannot arrive from user input any more -- generation strips the
 	// operator-owned elastic-EP keys before synthesis (stripOperatorOwnedElasticEPAnnotations).

@@ -305,9 +305,9 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	// transitional code that the group work deletes.
 	//
 	// Synthesis restamps the declared launch width (`--data-parallel-size` minus the
-	// leader's own rank) every pass, but that is a creation value, not a target -- at either
-	// gate position (see the type doc); "gate off" freezes the count rather than dragging it
-	// back to the declared width. Dragging it back would delete pods that may hold live
+	// leader's own rank) every pass, but that is a creation value, not a target. The freeze
+	// below carries no gate term, so the live count is kept rather than dragged back to the
+	// declared width at either gate position (see the type doc). Dragging it back would delete pods that may hold live
 	// engine ranks (nothing calls scale_elastic_ep to drain them first; DYN-3838 / DYN-2660
 	// record what that leaves behind), or re-add capacity an operator deliberately removed.
 	// And without preserving at all, generation classifies any external scale as a manual
@@ -322,11 +322,15 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 
 // deleteOrphanedElasticEPFollowers removes synthesized elastic-EP follower DCDs that
 // generation no longer produces. A follower is derived, never declared, and the rollout
-// path's hash-label pruning misses it (a follower's hash label is deliberately
-// gate-independent, so it still matches), so nothing else would ever clean it up. Three
-// things strand one: disabling features.ElasticEPRayPoC, removing the elastic-EP flags from
-// the leader, and deleting the leader component outright. Comparing against what generation
-// actually produced covers all three.
+// path's hash-label pruning misses it -- it deep-copies its leader, so it carries the
+// current worker hash and its label still matches -- so nothing else would ever clean it
+// up. Three things strand one: the leader ceasing to qualify under IsSinglePodElasticEPShape
+// (replicas > 1, multinode, or a non-worker type), removing the elastic-EP flags or the
+// leader's explicit Command, and deleting the leader component outright. Comparing against
+// what generation actually produced covers all three.
+//
+// Flipping features.ElasticEPRayPoC is NOT one of them: synthesis is ungated, so a gated-off
+// operator produces the same follower and it is never orphaned.
 func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -376,8 +380,8 @@ func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
 		// restarts, and DYN-3686 classifies that state as a recovery-path fault, not a
 		// scale-down signal. A follower now launches at its declared width rather than at
 		// zero, so this guard is load-bearing from the first reconcile: it is the precondition
-		// a Phase 7 drain will satisfy, and it makes "gate off stops scaling" leave running
-		// capacity alone instead of tearing it out.
+		// a Phase 7 drain will satisfy, and it makes an orphaning caused by a shape change or
+		// a deleted leader leave running capacity alone instead of tearing it out.
 		if replicas := existing.Spec.Replicas; replicas != nil && *replicas > 0 {
 			logger.Info(
 				"Refusing to delete an elastic-EP follower that still has replicas; scale it to zero first",

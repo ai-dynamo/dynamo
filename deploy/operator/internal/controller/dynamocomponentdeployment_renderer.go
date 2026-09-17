@@ -403,7 +403,7 @@ func (r *dcdWorkloadRenderer) leaderNVLinkSupport(
 			// carry a cluster-scoped Node rule at all.
 			if k8serrors.IsNotFound(err) || k8serrors.IsForbidden(err) {
 				log.FromContext(ctx).V(1).Info(
-					"cannot read the elastic-EP leader's node; scheduling the follower without partition affinity",
+					"cannot read the elastic-EP leader's node; keeping the follower's partition affinity",
 					"node", nodeName, "reason", err.Error(),
 				)
 				continue
