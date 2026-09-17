@@ -148,10 +148,7 @@ func validateSelectedConductor(
 		if pipeline == PipelineSpecDecode {
 			return fmt.Errorf("%w: the shared speculative runtime requires LPU-only builds", ErrUnsupportedRuntime)
 		}
-		template := component.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent).PodTemplate
-		if conductor != nil && conductor.PodTemplate != nil {
-			template = conductor.PodTemplate
-		}
+		template := conductor.PodTemplate
 		container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 		count, err := EffectiveCyborgGPUCount(container.Resources)
 		if err != nil {
@@ -168,47 +165,24 @@ func validateSelectedConductor(
 		return nil
 	}
 
-	// An omitted conductor role or template inherits the serving agent's template.
-	role := conductor
-	if role == nil || role.PodTemplate == nil {
-		role = component.ComponentRole(dynamov1beta1.ComponentRoleLPXAgent)
-	}
-
-	// Preserve the authored component and role path when reporting inherited collisions.
+	// Preserve authored indices when reporting conductor name collisions.
 	componentIndex := slices.IndexFunc(dgd.Spec.Components, func(candidate dynamov1beta1.DynamoComponentDeploymentSharedSpec) bool {
 		return candidate.ComponentName == component.ComponentName
 	})
 	roleIndex := slices.IndexFunc(component.Roles, func(candidate dynamov1beta1.ComponentRoleSpec) bool {
-		return candidate.Name == role.Name
+		return candidate.Name == conductor.Name
 	})
 	podSpecPath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec")
 
 	// Check both container lists before a selected workload can be published.
-	if err := validateRolePodSpecContainerNames(&role.PodTemplate.Spec, podSpecPath, "conductor").ToAggregate(); err != nil {
+	if err := validateRolePodSpecContainerNames(&conductor.PodTemplate.Spec, podSpecPath, dynamov1beta1.ComponentRoleLPXConductor).ToAggregate(); err != nil {
 		return err
 	}
 
-	// Preserve explicit conductor replica and launch validation after checking inherited names.
-	if conductor == nil {
-		return nil
-	}
+	// An LPU-only conductor is a singleton even when the engine replica count is larger.
 	if ptr.Deref(conductor.Replicas, 1) != 1 {
 		return fmt.Errorf("%w: component %q conductor replicas must be one for LPU-only execution", ErrUnsupportedRuntime, component.ComponentName)
 	}
-	if conductor.PodTemplate == nil {
-		return nil
-	}
 
-	// Explicit LPU conductors receive the same appended launch arguments as inherited templates.
-	for containerIndex := range conductor.PodTemplate.Spec.Containers {
-		container := &conductor.PodTemplate.Spec.Containers[containerIndex]
-		if container.Name != commonconsts.MainContainerName {
-			continue
-		}
-		containerPath := podSpecPath.Child("containers").Index(containerIndex)
-		if err := validateAllocationInjectionTargetFields(container, containerPath).ToAggregate(); err != nil {
-			return err
-		}
-	}
 	return nil
 }

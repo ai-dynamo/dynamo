@@ -370,7 +370,12 @@ func newModelDownloadDGD(buildIDs ...string) *v1beta1.DynamoGraphDeployment {
 			}}}},
 		}
 		if i == len(buildIDs)-1 {
-			component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor})
+			component.Roles = append(component.Roles, v1beta1.ComponentRoleSpec{
+				Name: v1beta1.ComponentRoleLPXConductor,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "lpu-runtime", Command: []string{"/bin/nova"}}},
+				}},
+			})
 		} else {
 			component.ComponentName = "draft"
 		}

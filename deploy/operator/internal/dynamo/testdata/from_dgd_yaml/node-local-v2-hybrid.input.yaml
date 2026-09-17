@@ -29,9 +29,38 @@ spec:
             - name: main
               image: example.invalid/gpu-runtime:test
               command:
+              - /usr/local/bin/cyborg-entrypoint
+              - --expand-hosts
+              - --
               - /opt/gpu-runtime
               args:
               - serve
+              env:
+              - name: RDMA_PORT
+                value: '19877'
+              - name: SERVER_HOSTS_FILE
+                value: /tmp/lpu_servers
+              startupProbe:
+                failureThreshold: 720
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe:
+                failureThreshold: 3
+                httpGet:
+                  path: /health
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 4
+              livenessProbe:
+                failureThreshold: 1
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 5
+                timeoutSeconds: 4
               volumeMounts:
               - name: config
                 mountPath: /configs
@@ -60,6 +89,35 @@ spec:
               resources:
                 limits:
                   lpu.nvidia.com/devices: '1'
+              startupProbe:
+                failureThreshold: 60
+                httpGet:
+                  path: /readyz
+                  port: 19878
+                  scheme: HTTP
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              readinessProbe:
+                failureThreshold: 6
+                httpGet:
+                  path: /readyz
+                  port: 19878
+                  scheme: HTTP
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              env:
+              - name: GLUE_RDMA_PATH_MTU
+                value: '1024'
+              - name: NIC_NAME
+                value: mlx5_0
+              - name: UCX_TLS
+                value: tcp
+              - name: RDMA_PORT
+                value: '19877'
+              - name: READINESS_PORT
+                value: '19878'
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage

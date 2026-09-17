@@ -55,8 +55,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			_, err := RenderSelectedNodeLocal(pcs, workload, plan, RenderInput{
-				Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
-				SSHSecretName: "ssh-secret",
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			if test.wantError {
 				require.ErrorContains(t, err, "materialized Cyborg Pod hostname")
@@ -106,14 +105,15 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	decode.Spec.PodSpec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 	}
-	decode.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
+	decode.Spec.PodSpec.Containers[0].Command = []string{"/custom-cyborg", "--wrapper-option"}
+	decode.Spec.PodSpec.Containers[0].Args = []string{"argument with spaces", "literal $HOME", ""}
 	decode.Spec.PodSpec.Containers[0].Env = append(
 		decode.Spec.PodSpec.Containers[0].Env,
 		corev1.EnvVar{Name: "RDMA_PORT", Value: "12345"},
 		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
 	)
 	input := RenderInput{
-		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, SSHSecretName: "ssh-secret",
+		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
 	rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
@@ -136,12 +136,12 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
 	})
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name: "RDMA_PORT", Value: "19877",
+		Name: "RDMA_PORT", Value: "12345",
 	})
 	require.Contains(t, cyborg.Spec.PodSpec.Volumes, renderTestPodSpec().Volumes[0])
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, renderTestPodSpec().Containers[0].VolumeMounts[0])
-	require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, cyborg.Spec.PodSpec.Containers[0].Command)
-	require.Equal(t, []string{"--expand-hosts", "--swa-batch-ids", "--", "/usr/local/bin/dynamo_main"}, cyborg.Spec.PodSpec.Containers[0].Args)
+	require.Equal(t, []string{"/custom-cyborg", "--wrapper-option"}, cyborg.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"argument with spaces", "literal $HOME", ""}, cyborg.Spec.PodSpec.Containers[0].Args)
 
 	t.Log("Preserve an image-owned entrypoint")
 	imageEntrypointPCS := renderTestPCS(true)
@@ -154,11 +154,12 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
 	)
 
-	t.Log("Render the agreed Cyborg binary when the command is omitted")
+	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
 	_, err = renderSelectedForTest(imageEntrypointPCS, []*ModelProjection{projection}, input)
 	require.NoError(t, err)
-	require.Equal(t, []string{"/usr/local/bin/cyborg", "serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args[3:])
+	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
+	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
 
 	t.Log("Reject incomplete endpoint and fanout coverage of the same split-I/O runtime")
 
@@ -178,7 +179,7 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}, SSHSecretName: "ssh-secret",
+				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			require.ErrorContains(t, err, test.wantError)
 		})

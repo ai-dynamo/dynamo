@@ -257,7 +257,7 @@ vLLM and SGLang take tensor/pipeline/data parallelism as CLI flags (covered in t
 
 You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover or multinode TensorRT-LLM.
 
-For an XT LPU-only deployment, declare separate Agent and Nova conductor templates in a `type: lpx` component:
+For LPX deployments, declare independent `agent` and `conductor` role templates. Every LPX graph requires exactly one explicit conductor template, including a graph with a single LPX component. This fragment shows the role structure only; the placeholder images use their own entrypoints:
 
 ```yaml
 spec:
@@ -272,72 +272,20 @@ spec:
         spec:
           containers:
           - name: main
-            image: <lpu-runtime-image>
-            volumeMounts:
-            - name: config
-              mountPath: /configs
-            - name: host-dev
-              mountPath: /dev
-            - name: host-sys
-              mountPath: /sys
-            - name: hugepages
-              mountPath: /dev/hugepages
-            - name: ssh-secret
-              mountPath: /ssh-pk
-              readOnly: true
-            - name: model-storage
-              mountPath: /models
-          volumes:
-          - name: host-dev
-            hostPath:
-              path: /dev
-              type: Directory
-          - name: host-sys
-            hostPath:
-              path: /sys
-              type: Directory
-          - name: hugepages
-            emptyDir:
-              medium: HugePages
-          - name: ssh-secret
-            secret:
-              secretName: mpi-run-ssh-secret
-              defaultMode: 0644
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
+            image: <agent-runtime-image>
     - name: conductor
       podTemplate:
         spec:
           containers:
           - name: main
-            image: <lpu-runtime-image>
-            volumeMounts:
-            - name: config
-              mountPath: /configs
-            - name: single-v2-ssh-key
-              mountPath: /tmp/dynamo-lpu-ssh
-            - name: model-storage
-              mountPath: /models
-          volumes:
-          - name: ssh-secret
-            secret:
-              secretName: mpi-run-ssh-secret
-              defaultMode: 0600
-          - name: single-v2-ssh-key
-            emptyDir: {}
-          - name: model-storage
-            persistentVolumeClaim:
-              claimName: model-storage
+            image: <conductor-runtime-image>
 ```
 
-Create the `model-storage` PVC in the DGD's namespace with storage accessible to all LPX Pods. Replace `my-model/build` with an XT LPU-only build available through the configured LPX model registry and `<lpu-runtime-image>` with its compatible runtime image.
+For LP20 and LP30, supply compatible builds and images, static arguments and environment settings, init containers, health probes, volumes, and mounts in the role templates. The operator uses the image's entrypoint unless the template supplies `command`; it does not generate runtime launchers, SSH-key preparation, or probes. Hardware policy still replaces the main-container `securityContext` for XT agents and direct-hybrid agents with privileged root settings, discarding other authored container security fields. Direct-hybrid Pods also force root user and group settings.
 
-Declare static volumes and every LPX runtime container mount in its role's `podTemplate`, including the conductor's SSH source and destination volumes. Use the configured MPI SSH Secret name; `mpi-run-ssh-secret` is the chart default. The operator generates the `config` volume with its content-based ConfigMap name and init containers with their own mounts. Keep the `hugepages` volume and mount for XT Agents and HX hybrid Agents; omit both for HX LPU-only and speculative-decoding Agents. For a hybrid engine, configure the hybrid runtime's template, volumes, and mounts on the conductor role.
+The operator supplies generated configuration, model and hardware bindings, and the LPU conductor's `LPX_ALLOCATION` value. A Nova conductor must include `--allocation` and `$(LPX_ALLOCATION)` in its authored arguments, along with its other runtime options. Mount the generated `config` volume and model storage where the selected runtime expects them. SSH-based startup must declare its own Secret volume, key preparation, and mounts.
 
-Runtime configuration and scratch files use the container's writable `/tmp`; a separate volume is optional. For a read-only root filesystem, mount a writable `emptyDir` at `/tmp`. The conductor's separate `/tmp/dynamo-lpu-ssh` mount shares its prepared key with the init container and is still required.
-
-For LPU+LPU speculative decoding, declare separate draft and target LPX components: the draft has only an `agent` role; the target has `conductor` and `agent` roles. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components. See [LPX component fields](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference) for replica counts and template requirements.
+For LPU+LPU speculative decoding, declare separate draft and target LPX components: the draft has only an `agent` role; the target has `conductor` and `agent` roles. A hybrid engine places its GPU runtime in the conductor template. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components. See [LPX component fields](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference) for replica counts and template requirements.
 
 For per-backend setup and tuning, see [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md), [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md), and [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md).
 

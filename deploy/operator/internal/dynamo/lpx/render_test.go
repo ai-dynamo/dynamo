@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"encoding/json"
-	"slices"
 	"strings"
 	"testing"
 
@@ -29,44 +28,6 @@ const (
 	testAgentTemplateName   = "agt"
 	testTargetStageName     = "target"
 )
-
-func TestHybridSSHMountFollowsRuntimePartitionSize(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		family   BuildFamily
-		physical int
-		runtime  int
-		agents   int
-		wantErr  bool
-	}{
-		{"XT independent single-node", BuildFamilyXT, 2, 2, 2, false},
-		{"XT multi-node", BuildFamilyXT, 1, 1, 2, true},
-		{"XT collapsed chain", BuildFamilyXT, 2, 1, 2, true},
-		{"HX independent single-node", BuildFamilyHX, 2, 0, 2, false},
-		{"HX multi-node", BuildFamilyHX, 1, 0, 2, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Supply resolved runtime counts and an Agent without an SSH mount")
-			workload := &SelectedWorkload{modelProjections: []*ModelProjection{{
-				pipeline: PipelineLPX, agentReplicas: test.agents,
-				partitions:      make([]BuildPartition, test.physical),
-				configuredBuild: Build{Family: test.family, Partitions: make([]BuildPartition, test.runtime)},
-			}}}
-			pod := renderTestPodSpec()
-			pod.Containers[0].VolumeMounts = slices.DeleteFunc(pod.Containers[0].VolumeMounts, func(mount corev1.VolumeMount) bool {
-				return mount.Name == runtimeSSHVolumeName
-			})
-
-			t.Log("Require SSH only when a runtime partition spans multiple Agents")
-			err := configureLPURolePods(&pod, nil, workload, "config", "allocation", "ssh-secret")
-			if test.wantErr {
-				require.ErrorContains(t, err, `requires volume "ssh-secret" mounted at "/ssh-pk"`)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
 
 func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*ModelProjection, input RenderInput) (*grovev1alpha1.PodCliqueSet, error) {
 	// Attach test projections to their authored stage without inventing templates.
@@ -148,8 +109,8 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 
 			t.Log("Render into the fresh PCS without retaining stale runtime identity")
 			rendered, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
-				Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
-				SSHSecretName: "ssh-secret",
+				Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: template},
+				Conductor: template.DeepCopy(),
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
@@ -228,20 +189,20 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 
 	t.Log("Render conductor and Agent roles from the base PodSpec")
 	rendered, err := renderSelectedForTest(renderTestPCS(false), []*ModelProjection{projection}, RenderInput{
-		Stages:        map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
-		SSHSecretName: "ssh-secret",
+		Stages:    map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: conductorPodSpec}},
+		Conductor: &corev1.PodTemplateSpec{Spec: *conductorPodSpec.DeepCopy()},
 	})
 	require.NoError(t, err)
 
 	t.Log("Verify conductor-owned placement and entrypoint behavior")
 	conductor := namedClique(t, rendered, "cond")
-	require.Nil(t, conductor.Spec.PodSpec.Affinity)
+	require.Equal(t, conductorPodSpec.Affinity, conductor.Spec.PodSpec.Affinity)
 	require.Equal(t, conductorPodSpec.NodeSelector, conductor.Spec.PodSpec.NodeSelector)
 	require.Equal(t, []string{"/bin/bash"}, conductor.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[:2])
 	require.Equal(t, modelAnnotationSource, conductor.Spec.PodSpec.Containers[0].Env[0].ValueFrom)
 	require.Empty(t, conductor.Spec.PodSpec.Containers[0].Env[0].Value)
-	requireFlagValue(t, conductor.Spec.PodSpec.Containers[0].Args, "--allocation", "agt")
+	require.Equal(t, "agt", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt"}, conductor.Spec.StartsAfter)
 
 	t.Log("Verify Agent-owned affinity and logical model binding")
@@ -267,7 +228,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	targetFixture.pipelineName = runtimeModelTarget
 	targetSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, targetFixture))
 
-	t.Log("Keep independent draft and target templates, with the conductor seeded by target")
+	t.Log("Keep independent draft, target and conductor templates")
 	draft := testLPXComponent(draftStageName, "draft-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
@@ -277,7 +238,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 		"setup":{"agent_connect_timeout":"30s","agent_setup_timeout":"180s"}
 	}`)}
 	target := testLPXComponent(testTargetStageName, "target-build",
-		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	source := newSelectedTestDGD(t, "specdecode", draft, target)
@@ -289,6 +250,10 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 		template.Spec.Containers[0].Image = component.ComponentName + "-runtime"
 		stages[component.ComponentName] = *template.DeepCopy()
 	}
+	conductorTemplate := source.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
+	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
+	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
+	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
@@ -300,7 +265,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
 	require.NoError(t, err)
 	extraResources, err := RenderSelectedNodeLocal(pcs, selected, plan, RenderInput{
-		Stages: stages, SSHSecretName: "ssh-secret",
+		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
 	})
 	require.NoError(t, err)
 
@@ -316,9 +281,9 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	firstAgent := namedClique(t, pcs, plan.Agents[0].TemplateName)
 	secondAgent := namedClique(t, pcs, plan.Agents[1].TemplateName)
 	conductor := namedClique(t, pcs, plan.ConductorTemplate)
-	require.Equal(t, "target-runtime", conductor.Spec.PodSpec.Containers[0].Image)
-	require.Equal(t, testTargetStageName, conductor.Labels["owner"])
-	require.Equal(t, testTargetStageName, conductor.Annotations["owner"])
+	require.Equal(t, "conductor-runtime", conductor.Spec.PodSpec.Containers[0].Image)
+	require.Equal(t, "conductor", conductor.Labels["owner"])
+	require.Equal(t, "conductor", conductor.Annotations["owner"])
 	secondAgentBefore := secondAgent.Spec.PodSpec.DeepCopy()
 	conductorBefore := conductor.Spec.PodSpec.DeepCopy()
 	require.NotEmpty(t, firstAgent.Spec.PodSpec.Containers[0].Env)
@@ -343,7 +308,7 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	require.Equal(t, before, source)
 
 	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
-	requireFlagValue(t, conductor.Spec.PodSpec.Containers[0].Args, "--allocation", "agt0:agt1:agt2")
+	require.Equal(t, "agt0:agt1:agt2", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
 	var datacenter struct {
 		Datacenters struct {
@@ -399,7 +364,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 					{Name: "model-storage", VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"}}},
 				},
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
-					{Name: selectedCyborgServerHostsFileEnv, Value: "/tmp/lpu_servers"},
+					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
 				}, VolumeMounts: []corev1.VolumeMount{
 					{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
 					{Name: "model-storage", MountPath: "/models"},
@@ -422,7 +387,7 @@ func renderTestPodSpec() corev1.PodSpec {
 				ClaimName: "model-storage",
 			}},
 		},
-			{Name: conductorSSHKeyVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+			{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 			{Name: "ssh-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "ssh-secret"}}},
 			{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
 			{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
@@ -432,8 +397,8 @@ func renderTestPodSpec() corev1.PodSpec {
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "model-storage", MountPath: "/models"},
 				{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
-				{Name: conductorSSHKeyVolumeName, MountPath: conductorSSHKeyDir},
-				{Name: runtimeSSHVolumeName, MountPath: runtimeSSHSecretMountPath, ReadOnly: true},
+				{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
+				{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
 			},
 			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
 				corev1.ResourceName("lpu.nvidia.com/devices"): resource.MustParse("1"),

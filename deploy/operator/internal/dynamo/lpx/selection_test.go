@@ -75,7 +75,7 @@ func TestSelectedModelNames(t *testing.T) {
 	dgd := &dynamov1beta1.DynamoGraphDeployment{Spec: dynamov1beta1.DynamoGraphDeploymentSpec{
 		Components: []dynamov1beta1.DynamoComponentDeploymentSharedSpec{
 			testLPXComponent("small", "draft-build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft")}),
-			testLPXComponent("large", "target-build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor}, dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target")}),
+			testLPXComponent("large", "target-build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")}, dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target")}),
 		},
 	}}
 	dgd.Spec.Components[0].Replicas = &draftReplicas
@@ -97,9 +97,8 @@ func TestSelectedModelNames(t *testing.T) {
 		_, err = SelectedModelNames(dgd)
 		require.ErrorIs(t, err, ErrUnsupportedRuntime)
 	}
-	t.Log("Derive the existing default runtime identity with an implicit conductor")
+	t.Log("Derive the default runtime identity for a single serving component")
 	dgd.Spec.Components = dgd.Spec.Components[1:]
-	dgd.Spec.Components[0].Roles = dgd.Spec.Components[0].Roles[1:]
 	names, err = SelectedModelNames(dgd)
 	require.NoError(t, err)
 	require.Equal(t, []string{"default"}, names)
@@ -126,31 +125,26 @@ func TestSelectedMinAvailableOwnership(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
-		name              string
-		draftMin          *int32
-		targetMin         *int32
-		singleton         bool
-		implicitConductor bool
-		wantErr           bool
+		name      string
+		draftMin  *int32
+		targetMin *int32
+		singleton bool
+		wantErr   bool
 	}{
 		{name: "omitted draft"},
 		{name: "default draft", draftMin: ptr.To(int32(1))},
 		{name: "nondefault draft", draftMin: ptr.To(int32(2)), wantErr: true},
 		{name: "target", targetMin: ptr.To(int32(1))},
 		{name: "singleton", targetMin: ptr.To(int32(2)), singleton: true},
-		{name: "implicit singleton conductor", targetMin: ptr.To(int32(2)), singleton: true, implicitConductor: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Put a non-LPX component before the target and reverse the authored LPX order")
 			target := testLPXComponent("target", "target-build",
-				dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor},
+				dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")},
 				dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target")})
 			target.MinAvailable = test.targetMin
 			if test.singleton {
 				target.Replicas = ptr.To(int32(2))
-			}
-			if test.implicitConductor {
-				target.Roles = target.Roles[1:]
 			}
 			dgd := newSelectedTestDGD(t, "min-available",
 				dynamov1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", MinAvailable: ptr.To(int32(1))}, target)

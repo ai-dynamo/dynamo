@@ -41,7 +41,7 @@ func lpxTopologyBindingReferences(obj client.Object) []string {
 // Extraction uses only source intent, including references not yet created.
 func lpxDRAClaimReferences(template bool) client.IndexerFunc {
 	return func(obj client.Object) []string {
-		// Index every authored role, including Agent templates used by conductor fallback.
+		// Index dependencies from every independently authored role.
 		source := obj.(*nvidiacomv1beta1.DynamoGraphDeployment)
 		references := sets.New[string]()
 		for index := range source.Spec.Components {

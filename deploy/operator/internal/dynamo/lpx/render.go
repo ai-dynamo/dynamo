@@ -40,11 +40,9 @@ type RenderInput struct {
 	// Stages contains an independently merged LPU template for every projected stage.
 	Stages map[string]corev1.PodTemplateSpec
 	// Conductor supplies a fresh, independently merged template for the shared LPU
-	// conductor. Nil reuses the serving component's agent template. Hybrid pipelines
-	// do not emit this conductor.
+	// conductor. Required for non-hybrid pipelines; hybrid pipelines leave it nil
+	// and supply their independently rendered Cyborg clique in pcs.
 	Conductor *corev1.PodTemplateSpec
-	// SSHSecretName names the Secret containing runtime SSH credentials.
-	SSHSecretName string
 }
 
 // RenderSelectedNodeLocal consumes fresh graph and render inputs. pcs, workload,
@@ -84,11 +82,15 @@ func RenderSelectedNodeLocal(
 
 	// The serving component owns conductor metadata and storage independently of model order.
 	conductorStage := projections[len(projections)-1].stage
-	conductorTemplate := input.Stages[conductorStage]
-	if input.Conductor != nil {
-		conductorTemplate = *input.Conductor
+	conductorTemplate := input.Conductor
+	storageTemplate := input.Stages[conductorStage]
+	if !hybrid {
+		if conductorTemplate == nil {
+			return nil, fmt.Errorf("LPX rendering requires an explicit conductor template")
+		}
+		storageTemplate = *conductorTemplate
 	}
-	modelStorage, err := lpuModelStorageBinding(conductorTemplate.Spec)
+	modelStorage, err := lpuModelStorageBinding(storageTemplate.Spec)
 	if err != nil {
 		return nil, err
 	}
@@ -116,14 +118,9 @@ func RenderSelectedNodeLocal(
 
 	configHash := LPUConfigMapHash(configMap)
 
-	// Consume an explicit conductor; separate an inherited one before consuming its Agent.
+	// Consume the independently rendered conductor without copying Agent startup or placement.
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
 	if conductorTemplateName != "" {
-		conductorSpec := conductorTemplate.Spec
-		if input.Conductor == nil {
-			conductorSpec = *conductorSpec.DeepCopy()
-			conductorSpec.Affinity = nil
-		}
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
 		annotations[commonconsts.AnnotationExtraResourcesHash] = configHash
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
@@ -132,7 +129,7 @@ func RenderSelectedNodeLocal(
 			Annotations: annotations,
 			Spec: grovev1alpha1.PodCliqueSpec{
 				RoleName:     conductorTemplateName,
-				PodSpec:      conductorSpec,
+				PodSpec:      conductorTemplate.Spec,
 				Replicas:     1,
 				MinAvailable: ptr.To(int32(1)),
 				StartsAfter:  agentTemplateNames,
@@ -158,7 +155,7 @@ func RenderSelectedNodeLocal(
 			if stage == conductorStage && conductor != nil {
 				conductorSpec = &conductor.Spec.PodSpec
 			}
-			if err := configureLPURolePods(&template.Spec, conductorSpec, workload, configMap.Name, allocation, input.SSHSecretName); err != nil {
+			if err := configureLPURolePods(&template.Spec, conductorSpec, workload, configMap.Name, allocation); err != nil {
 				return nil, fmt.Errorf("stage %s: %w", stage, err)
 			}
 		}
@@ -209,7 +206,7 @@ func RenderSelectedNodeLocal(
 			return nil, err
 		}
 
-		// HX Cyborg may inherit its Agent's configuration mount.
+		// Bind the authored HX Cyborg configuration mount to the generated ConfigMap.
 		container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 		if cyborgConfigMap == nil && slices.ContainsFunc(container.VolumeMounts,
 			func(mount corev1.VolumeMount) bool { return mount.Name == lpuConfigVolumeName }) {
@@ -249,7 +246,7 @@ func RenderSelectedNodeLocal(
 
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
 // specs. Agent and workload are nonnil; nil conductor means no emitted launcher.
-func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *SelectedWorkload, configMapName, allocation, sshSecretName string) error {
+func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *SelectedWorkload, configMapName, allocation string) error {
 	if err := withLPUConfigVolume(agentPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
 		return err
 	}
@@ -264,37 +261,16 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 	}
 	if workload.Pipeline() == PipelineSpecDecode || workload.Pipeline() == PipelineLPX {
 		agent := common.FindContainerByName(agentPodSpec.Containers, commonconsts.MainContainerName)
-		setContainerEnv(agent, false, corev1.EnvVar{Name: lpuModelNameEnvVar})
+		setContainerEnv(agent, corev1.EnvVar{Name: lpuModelNameEnvVar})
 	}
 
 	if workload.Pipeline() == PipelineLPX {
-		// Extra Agents beyond one per runtime partition imply multi-node SSH setup.
-		projection := workload.modelProjections[0]
-		partitionCount := len(projection.partitions)
-		if workload.BuildFamily() == BuildFamilyXT {
-			partitionCount = len(projection.configuredBuild.Partitions)
-		}
-		if err := configureDirectHybridAgentRuntime(
-			agentPodSpec,
-			configMapName,
-			sshSecretName,
-			projection.agentReplicas > partitionCount,
-		); err != nil {
-			return err
-		}
+		configureDirectHybridAgentRuntime(agentPodSpec, configMapName)
 	} else {
-		// Both node-local roles use the operator-managed key, including an agent-only draft.
-		if strings.TrimSpace(sshSecretName) == "" {
-			return fmt.Errorf("node-local LPU runtime requires an MPI SSH secret name")
-		}
 		if conductorPodSpec != nil {
-			if err := configureNodeLocalConductorRuntime(conductorPodSpec, workload.BuildFamily(), allocation, sshSecretName); err != nil {
-				return err
-			}
+			configureNodeLocalConductorRuntime(conductorPodSpec, workload.BuildFamily(), allocation)
 		}
-		if err := configureNodeLocalAgentRuntime(agentPodSpec, workload.BuildFamily(), workload.Pipeline() == PipelineSingle, sshSecretName); err != nil {
-			return err
-		}
+		configureNodeLocalAgentRuntime(agentPodSpec, workload.BuildFamily())
 	}
 
 	ensureLPUNodeTolerations(agentPodSpec)

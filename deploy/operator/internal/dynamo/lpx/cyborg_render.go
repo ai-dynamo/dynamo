@@ -7,8 +7,6 @@ package lpx
 
 import (
 	"fmt"
-	"slices"
-	"strconv"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -46,24 +44,11 @@ func configureHybridCyborg(
 	if err != nil {
 		return err
 	}
-	if projection.configuredBuild.Family == BuildFamilyXT {
-		setContainerEnv(container, false, corev1.EnvVar{Name: "RDMA_PORT", Value: strconv.Itoa(lpuRDMAPort)})
-	}
 	applyCyborgRuntimeIO(container, cyborgBatchSize, ioFPGACount)
 	applyCyborgSWACacheIDs(container, cyborgBatchSize)
 	if err := applyCyborgManifestPath(container, projection, modelStorage.mount.MountPath); err != nil {
 		return err
 	}
-	configFile := ""
-	if cyborgConfigMap != nil && slices.ContainsFunc(container.Env, func(variable corev1.EnvVar) bool {
-		return variable.Name == selectedCyborgServerHostsFileEnv && variable.Value == runtimeTemporaryStorageMountPath+"/lpu_servers" && variable.ValueFrom == nil
-	}) {
-		configFile = "lpu_servers"
-		if err := validateRuntimeConfigStorage(&cyborg.Spec.PodSpec, container, configFile); err != nil {
-			return err
-		}
-	}
-	wrapCyborgStartup(container, cyborgBatchSize, configFile)
 
 	cyborg.Spec.PodSpec.SchedulerName = "default-scheduler"
 	delete(cyborg.Labels, commonconsts.KubeLabelKaiSchedulerQueue)

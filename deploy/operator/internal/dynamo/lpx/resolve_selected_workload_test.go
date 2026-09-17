@@ -23,7 +23,7 @@ import (
 
 func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")
-	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}))
+	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}))
 	dgd.Annotations = nil
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "ordinary-decode", ComponentType: v1beta1.ComponentTypeDecode,
@@ -56,7 +56,7 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	}
 	dgd.Spec.Components[0].Replicas = nil
 
-	t.Log("Require hybrid conductor resources in either the explicit or inherited template")
+	t.Log("Require resources on the independently authored hybrid conductor")
 	fixture := newV2CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	fixture.selectedPropSyncChains = nil
@@ -65,7 +65,6 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	source := staticBuildSnapshotSource{"build": snapshot}
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
 	require.ErrorContains(t, err, "requires resourceClaims or a positive nvidia.com/gpu request")
-	dgd.Spec.Components[0].Roles = append(dgd.Spec.Components[0].Roles, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor})
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
@@ -100,16 +99,6 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	require.Equal(t, plan, scheduledPlan)
 	require.Empty(t, scheduledPlan.ConductorTemplate)
 
-	t.Log("Use the same agent template when the standalone conductor role is omitted")
-	agent := *dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXAgent)
-	agent.PodTemplate = conductor.PodTemplate.DeepCopy()
-	dgd.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{agent}
-	before := dgd.DeepCopy()
-	implicit, err := ResolveSelectedWorkload(t.Context(), dgd, source)
-	require.NoError(t, err)
-	require.Equal(t, xt, implicit)
-	require.Same(t, &dgd.Spec.Components[0], ServingComponent(dgd))
-	require.Equal(t, before, dgd)
 }
 
 func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
@@ -145,7 +134,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Build a selected SpecDecode DGD for the fixture's manifest generation")
 			dgd := newSelectedTestDGD(t, "specdecode",
-				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
+				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 			)
 			dgd.Spec.Components[0].LPX.Settings = settings
@@ -278,26 +267,29 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 	}
 }
 
-func TestResolveConductorLaunchErrorUsesAuthoredRolePath(t *testing.T) {
-	t.Log("Place the target first and author a conductor argument owned by the operator")
+func TestResolveSelectedWorkloadPreservesAuthoredLaunch(t *testing.T) {
+	t.Log("Author independent wrappers without exposing launch syntax to the operator")
 	conductor := testLPXPodTemplate("conductor-runtime")
-	conductor.Spec.Containers[0].Args = []string{"--allocation=forged"}
-	dgd := newSelectedTestDGD(t, "specdecode",
-		testLPXComponent("large", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("target-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor}),
-		testLPXComponent("small", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("draft-runtime")}),
-	)
+	conductor.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
+	conductor.Spec.Containers[0].Args = []string{"exec custom-conductor --workers \"$LPX_ALLOCATION\"", "--"}
+	agent := testLPXPodTemplate("agent-runtime")
+	agent.Spec.Containers[0].Command = []string{"/custom-worker", "--"}
+	agent.Spec.Containers[0].Args = []string{"--allocation=application-owned"}
+	dgd := newSelectedTestDGD(t, "selected", testLPXComponent("lpx", "build",
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: agent},
+		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: conductor},
+	))
 	snapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	before := dgd.DeepCopy()
 
-	t.Log("Report the authored target and conductor indices after canonical build selection")
+	t.Log("Validate placement and role ownership without parsing either command line")
 	_, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": snapshot})
-	require.ErrorContains(t, err, "spec.components[0].roles[1].podTemplate.spec.containers[0].args")
-	require.ErrorContains(t, err, "must not set --allocation")
+	require.NoError(t, err)
 	require.Equal(t, before, dgd)
 }
 
 func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *testing.T) {
-	t.Log("Author independent launch and placement errors on both roles")
+	t.Log("Author placement and container identity errors on both roles")
 	agent, conductor := testLPXPodTemplate("agent"), testLPXPodTemplate("conductor")
 	agent.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
 	agent.Spec.Containers[0].Args = []string{"--allocation=forged", "--"}
@@ -316,9 +308,6 @@ func TestResolveSelectedWorkloadRejectsInvalidRolesBeforeBuildAcquisition(t *tes
 	t.Log("Aggregate every actionable error at its authored path before acquiring a build")
 	_, err := ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
 	for _, message := range []string{
-		"spec.components[0].roles[0].podTemplate.spec.containers[0].args: Forbidden: selected LPX main container must not set --allocation; Dynamo renders the immutable Agent clique list",
-		"spec.components[0].roles[0].podTemplate.spec.containers[0].args: Forbidden: selected LPX main container must not terminate arguments before Dynamo appends --allocation",
-		"spec.components[0].roles[0].podTemplate.spec.containers[0].command: Forbidden: selected LPX main container cannot use a shell because Dynamo appends --allocation",
 		"spec.components[0].roles[0].podTemplate.spec.hostname: Forbidden: LPX owns role addressing and placement",
 		`spec.components[0].roles[0].podTemplate.spec.containers[1].name: Forbidden: LPX reserves "agent" for the materialized role container`,
 		`spec.components[0].roles[0].podTemplate.spec.initContainers[0].name: Forbidden: LPX reserves "agent" for the materialized role container`,
@@ -344,7 +333,7 @@ func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t 
 	hybridFixture.partitions = append(hybridFixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
 	hybridSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, hybridFixture))
 
-	t.Log("Cover explicit, inherited, draft and hybrid template ownership")
+	t.Log("Cover independent serving, draft and hybrid template ownership")
 	tests := []struct {
 		name                 string
 		conductor            *v1beta1.ComponentRoleSpec
@@ -354,12 +343,6 @@ func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t 
 		hybrid               bool
 		wantForbidden        bool
 	}{
-		{name: "omitted conductor role", wantForbidden: true},
-		{
-			name:          "conductor with omitted template",
-			conductor:     &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
-			wantForbidden: true,
-		},
 		{
 			name: "independent conductor template",
 			conductor: &v1beta1.ComponentRoleSpec{
@@ -375,22 +358,10 @@ func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t 
 			wantForbidden:        true,
 		},
 		{
-			name:          "target with omitted conductor template",
-			conductor:     &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
-			addDraft:      true,
-			wantForbidden: true,
-		},
-		{
 			name:             "draft does not supply the conductor template",
-			conductor:        &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
+			conductor:        &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")},
 			addDraft:         true,
 			containerInDraft: true,
-		},
-		{name: "hybrid with omitted conductor role", hybrid: true},
-		{
-			name:      "hybrid with omitted conductor template",
-			conductor: &v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor},
-			hybrid:    true,
 		},
 		{
 			name: "hybrid with explicit conductor template",

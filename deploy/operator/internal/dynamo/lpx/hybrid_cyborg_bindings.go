@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	selectedCyborgServerHostsFileEnv = "SERVER_HOSTS_FILE"
-	selectedCyborgTokenizerDirEnv    = "TOKENIZER_DIR"
-	selectedCyborgTotalReplicasEnv   = "TOTAL_REPLICAS"
+	selectedCyborgTokenizerDirEnv  = "TOKENIZER_DIR"
+	selectedCyborgTotalReplicasEnv = "TOTAL_REPLICAS"
 )
 
 // ApplySelectedCyborgContainerDefaults installs the operator-owned V2 Cyborg
@@ -68,10 +67,6 @@ func ApplySelectedCyborgContainerDefaults(
 	if err := applyCyborgManifestPath(container, projection, modelStoragePath); err != nil {
 		return err
 	}
-	container.Env = append(container.Env, corev1.EnvVar{
-		Name:  selectedCyborgServerHostsFileEnv,
-		Value: runtimeTemporaryStorageMountPath + "/lpu_servers",
-	})
 	return nil
 }
 

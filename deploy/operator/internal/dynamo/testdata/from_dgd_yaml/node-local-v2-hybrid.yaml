@@ -265,12 +265,12 @@ spec:
         podSpec:
           containers:
           - args:
-            - --expand-hosts
-            - --
-            - /opt/gpu-runtime
             - serve
             command:
             - /usr/local/bin/cyborg-entrypoint
+            - --expand-hosts
+            - --
+            - /opt/gpu-runtime
             env:
             - name: CYBORG_BATCH_SIZE
               value: "1"

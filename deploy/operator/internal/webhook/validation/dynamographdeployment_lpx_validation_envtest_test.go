@@ -15,15 +15,18 @@ import (
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
 func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
+	const conductorRoleErr = "spec.components: Forbidden: LPX components must declare exactly one conductor role"
+	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
+	const alphaConductorRoleErr = "spec.services: Forbidden: LPX components must declare exactly one conductor role"
+	const alphaConductorTemplateErr = "spec.services[lpx].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	return []dgdAdmissionTestCase{
 		{
-			name: "singleton LPX with implicit conductor preserves omitted replicas",
+			name: "singleton LPX with explicit conductor preserves omitted replicas",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Replicas = nil
-				component.Roles = component.Roles[:1]
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"},
@@ -144,7 +147,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "LPX shell allocation target validation is deferred to the child controller",
+			name: "LPX permits template-owned shell commands",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				container := &dgd.Spec.Components[0].Roles[0].PodTemplate.Spec.Containers[0]
 				container.Command = []string{"/usr/bin/env"}
@@ -166,13 +169,17 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles[1].Name = "unknown"
 			}),
-			wantWebhookErrs: []string{`spec.components[0].roles[1].name: Unsupported value: "unknown": supported values: "conductor", "agent"`},
+			wantWebhookErrs: []string{
+				`spec.components[0].roles[1].name: Unsupported value: "unknown": supported values: "conductor", "agent"`,
+				conductorRoleErr,
+			},
 		},
 		{
-			name: "v1alpha1 LPX image errors aggregate at the authored role indices",
+			name: "v1alpha1 LPX image and conductor template errors aggregate at the authored role indices",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				component := dgd.Spec.Services["lpx"]
 				component.Roles[0], component.Roles[1] = component.Roles[1], component.Roles[0]
+				component.Roles[0].PodTemplate = nil
 				spec := &component.Roles[1].PodTemplate.Spec
 				spec.Containers = append(spec.Containers, corev1.Container{Name: "sidecar"})
 				spec.InitContainers = []corev1.Container{{Name: "init"}}
@@ -180,6 +187,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{
 				"spec.components[0].roles[1].podTemplate.spec.containers[1].image: Required value: must specify a non-empty image",
 				"spec.components[0].roles[1].podTemplate.spec.initContainers[0].image: Required value: must specify a non-empty image",
+				"spec.services[lpx].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate",
 			},
 		},
 		{
@@ -203,7 +211,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "LPX defers implicit conductor name checks until build mode is known",
+			name: "LPX rejects a missing conductor role on CREATE despite a conductor-named sidecar",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Roles = component.Roles[:1]
@@ -212,9 +220,10 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					corev1.Container{Name: "conductor", Image: "sidecar"},
 				)
 			}),
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
-			name: "v1alpha1 LPX defers inherited conductor init names until build mode is known",
+			name: "v1alpha1 LPX allows an Agent init container named conductor with an explicit conductor template",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				component := dgd.Spec.Services["lpx"]
 				component.Roles[0].PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "setup"}}
@@ -302,6 +311,106 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Services["lpx"].LPX.BuildID = " "
 			}),
 		},
+		// Conductor startup is explicit on both source API versions and on every update.
+		{
+			name: "LPX rejects a missing conductor template on CREATE",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[1].PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{conductorTemplateErr},
+		},
+		{
+			name: "v1alpha1 LPX rejects a missing conductor role on CREATE",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services["lpx"]
+				component.Roles = component.Roles[:1]
+			}),
+			wantWebhookErrs: []string{alphaConductorRoleErr},
+		},
+		{
+			name: "v1alpha1 LPX rejects a missing conductor template on CREATE",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{alphaConductorTemplateErr},
+		},
+		{
+			name: "v1alpha1 LPX conductor template error identifies the service key and authored role index",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(1)))
+				target := dgd.Spec.Services["target"]
+				target.Roles[0], target.Roles[1] = target.Roles[1], target.Roles[0]
+				target.Roles[0].PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{"spec.services[target].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate"},
+		},
+		{
+			name:          "LPX rejects removing the conductor template on UPDATE",
+			oldDeployment: betaLPXDGDForAdmission(nil),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[1].PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{conductorTemplateErr},
+		},
+		{
+			name:          "v1alpha1 LPX rejects removing the conductor role on UPDATE",
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				component := dgd.Spec.Services["lpx"]
+				component.Roles = component.Roles[:1]
+			}),
+			wantWebhookErrs: []string{alphaConductorRoleErr},
+		},
+		{
+			name:          "v1alpha1 LPX rejects removing the conductor template on UPDATE",
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
+			}),
+			wantWebhookErrs: []string{alphaConductorTemplateErr},
+		},
+		{
+			name:               "LPX rejects retaining an absent conductor template on an unrelated UPDATE",
+			seedWithoutWebhook: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[1].PodTemplate = nil
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Roles[1].PodTemplate = nil
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
+			}),
+			wantWebhookErrs: []string{conductorTemplateErr},
+		},
+		{
+			name:               "v1alpha1 LPX rejects retaining an absent conductor template on an unrelated UPDATE",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
+			}),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
+				dgd.Spec.Services["lpx"].Replicas = k8sptr.To(int32(3))
+			}),
+			wantWebhookErrs: []string{alphaConductorTemplateErr},
+		},
+		{
+			name: "LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, k8sptr.To(int32(1)))
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, k8sptr.To(int32(2)))
+			}),
+		},
+		{
+			name: "v1alpha1 LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
+			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(1)))
+			}),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(2)))
+			}),
+		},
 		// Selected LPX workload shapes.
 		{
 			name: "LPX roles reject provider overrides",
@@ -311,11 +420,12 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{"spec.components[0].roles[0].providerOverride: Forbidden: LPX roles do not support provider overrides"},
 		},
 		{
-			name:          "LPX can remove an explicit conductor and retain its implicit fallback",
+			name:          "LPX rejects removing the conductor role on UPDATE",
 			oldDeployment: betaLPXDGDForAdmission(nil),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles = dgd.Spec.Components[0].Roles[:1]
 			}),
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
 			name:          "LPX provider override support on update is deferred to the child controller",
@@ -398,14 +508,20 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Roles = nil
 			}),
-			wantWebhookErrs: []string{`spec.components[0].roles: Required value: must contain the "agent" role`},
+			wantWebhookErrs: []string{
+				`spec.components[0].roles: Required value: must contain the "agent" role`,
+				conductorRoleErr,
+			},
 		},
 		{
 			name: "v1alpha1 lpx requires an agent role",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Roles = nil
 			}),
-			wantWebhookErrs: []string{`spec.components[0].roles: Required value: must contain the "agent" role`},
+			wantWebhookErrs: []string{
+				`spec.components[0].roles: Required value: must contain the "agent" role`,
+				alphaConductorRoleErr,
+			},
 		},
 		{
 			name: "v1alpha1 lpx requires lpx",
@@ -423,12 +539,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantCELErr: "spec.services[lpx]: Invalid value: lpx may only be set when componentType is lpx",
 		},
 		{
-			name: "LPX shared leader composition is deferred to the child controller",
+			name: "LPX rejects more than one conductor across components",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				second := dgd.Spec.Components[0]
 				second.ComponentName = "lpx-2"
 				dgd.Spec.Components = append(dgd.Spec.Components, second)
 			}),
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
 			name: "shared LPX draft does not consume the target Grove name budget",
@@ -444,12 +561,13 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name: "implicit LPX conductor name overflow validation is deferred to the child controller",
+			name: "LPX rejects a missing conductor role independently of component name length",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.ComponentName = longLPXComponentName
 				component.Roles = component.Roles[:1]
 			}),
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		// Ordinary components have no LPX child to reject controller-owned scheduler selection.
 		{
@@ -496,7 +614,9 @@ func betaLPXDGDForAdmission(
 					{Name: nvidiacomv1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
-					{Name: nvidiacomv1beta1.ComponentRoleLPXConductor},
+					{Name: nvidiacomv1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/nova"}}},
+					}}},
 				},
 			},
 		}
@@ -520,7 +640,9 @@ func alphaLPXDGDForAdmission(
 					{Name: nvidiacomv1alpha1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "lpu-runtime"}},
 					}}},
-					{Name: nvidiacomv1alpha1.ComponentRoleLPXConductor},
+					{Name: nvidiacomv1alpha1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "conductor-runtime", Command: []string{"/bin/nova"}}},
+					}}},
 				},
 			},
 		}

@@ -97,7 +97,7 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&imageEntrypointComponentDefaults{ComponentDefaults: NewWorkerDefaults()}, nil)
+				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}, nil)
 			require.NoError(t, err)
 
 			t.Log("Retain authored security context and default only an absent one")
@@ -153,8 +153,8 @@ func TestLPXPCSNamePreservesReadablePrefixWithinGroveBudget(t *testing.T) {
 	}{
 		{name: "c", prefix: "c"},
 		{name: "gpt-oss-120b-production", prefix: "gpt-oss-120b-production"},
-		{name: "apaprotskyi-llama3-8b-lp20", prefix: "apaprotskyi-llama3-8b-lp20"},
-		{name: "apaprotskyi-gpt-oss-20b-lp20-b300", prefix: "apaprotskyi-gpt-oss-20b-lp20-b300"},
+		{name: "test-models-llama3-8b-lp20", prefix: "test-models-llama3-8b-lp20"},
+		{name: "test-models-gpt-oss-20b-lp20-b300", prefix: "test-models-gpt-oss-20b-lp20-b300"},
 		{name: "chat.example", prefix: "chat-example"},
 		{name: "120b-chat", prefix: "lpx-120b-chat"},
 		{name: strings.Repeat("a", 33), prefix: strings.Repeat("a", 33)},

@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -70,7 +69,6 @@ func validateLPXComposition(dgd *dynamov1beta1.DynamoGraphDeployment, componentC
 		return field.ErrorList{field.Forbidden(componentsPath, "requires one complete LPX component or a shared draft and target pair")}
 	}
 	allErrs := field.ErrorList{}
-	conductorCount := 0
 	for index := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[index]
 		if !component.IsLPX() {
@@ -78,9 +76,6 @@ func validateLPXComposition(dgd *dynamov1beta1.DynamoGraphDeployment, componentC
 		}
 		componentPath := componentsPath.Index(index)
 		conductor := component.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor)
-		if conductor != nil {
-			conductorCount++
-		}
 		if componentCount != 2 {
 			continue
 		}
@@ -101,9 +96,7 @@ func validateLPXComposition(dgd *dynamov1beta1.DynamoGraphDeployment, componentC
 			allErrs = append(allErrs, field.Invalid(componentPath.Child("replicas"), replicas, "shared target replicas must be one"))
 		}
 	}
-	if componentCount == 2 && conductorCount != 1 {
-		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must declare exactly one conductor role"))
-	}
+	allErrs = append(allErrs, ValidateConductorRoles(&dgd.Spec, componentsPath, componentsPath.Index)...)
 	return allErrs
 }
 
@@ -131,16 +124,42 @@ func validateSelectedLPXComponent(component *dynamov1beta1.DynamoComponentDeploy
 		allErrs = append(allErrs, field.Required(configPath.Child("buildId"), "LPX component requires a buildId"))
 	}
 	for index, role := range component.Roles {
+		rolePath := componentPath.Child("roles").Index(index)
 		if role.PodTemplate == nil {
 			continue
 		}
-		rolePath := componentPath.Child("roles").Index(index)
-		main, mainPath, errs := validateSelectedRuntimeContainer(role.PodTemplate, "LPX "+role.Name, rolePath)
-		allErrs = append(allErrs, errs...)
-		if main != nil && role.Name == dynamov1beta1.ComponentRoleLPXAgent {
-			allErrs = append(allErrs, validateAllocationInjectionTargetFields(main, mainPath)...)
-		}
+		allErrs = append(allErrs, validateSelectedRuntimeContainer(role.PodTemplate, "LPX "+role.Name, rolePath)...)
 		allErrs = append(allErrs, validateLPXRolePlacement(&role.PodTemplate.Spec, rolePath.Child("podTemplate", "spec"), role.Name == dynamov1beta1.ComponentRoleLPXAgent)...)
+	}
+	return allErrs
+}
+
+// ValidateConductorRoles requires one explicit serving template across LPX components.
+// Draft components remain Agent-only. Arguments must be non-nil; spec is not mutated.
+// componentsPath and componentPath locate the collection and each component in the source API.
+func ValidateConductorRoles(spec *dynamov1beta1.DynamoGraphDeploymentSpec, componentsPath *field.Path, componentPath func(int) *field.Path) field.ErrorList {
+	// Inspect authored roles so admission and preflight enforce the same snapshot-independent shape.
+	allErrs := field.ErrorList{}
+	hasLPX, conductorCount := false, 0
+	for componentIndex := range spec.Components {
+		component := &spec.Components[componentIndex]
+		if !component.IsLPX() {
+			continue
+		}
+		hasLPX = true
+		for roleIndex, role := range component.Roles {
+			if role.Name != dynamov1beta1.ComponentRoleLPXConductor {
+				continue
+			}
+			conductorCount++
+			if role.PodTemplate == nil {
+				rolePath := componentPath(componentIndex).Child("roles").Index(roleIndex)
+				allErrs = append(allErrs, field.Required(rolePath.Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
+			}
+		}
+	}
+	if hasLPX && conductorCount != 1 {
+		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must declare exactly one conductor role"))
 	}
 	return allErrs
 }
@@ -172,7 +191,7 @@ func ValidateAgentContainerNames(dgd *dynamov1beta1.DynamoGraphDeployment) field
 // validateRolePodSpecContainerNames checks both lists that share the Pod's name space.
 // spec and fldPath must be non-nil.
 func validateRolePodSpecContainerNames(spec *corev1.PodSpec, fldPath *field.Path, reservedName string) field.ErrorList {
-	// Both lists must avoid renamed main and generated init-container names.
+	// Both lists must avoid the materialized role container name.
 	allErrs := field.ErrorList{}
 	for _, group := range []struct {
 		name       string
@@ -236,60 +255,19 @@ func validateSelectedRuntimeContainer(
 	template *corev1.PodTemplateSpec,
 	role string,
 	rolePath *field.Path,
-) (*corev1.Container, *field.Path, field.ErrorList) {
+) field.ErrorList {
 	containersPath := rolePath.Child("podTemplate", "spec", "containers")
 	for index := range template.Spec.Containers {
 		container := &template.Spec.Containers[index]
 		if container.Name != commonconsts.MainContainerName {
 			continue
 		}
-		containerPath := containersPath.Index(index)
-		return container, containerPath, nil
+		return nil
 	}
-	return nil, nil, field.ErrorList{
+	return field.ErrorList{
 		field.Required(
 			containersPath,
 			fmt.Sprintf("%s component requires a %q runtime container", role, commonconsts.MainContainerName),
 		),
 	}
-}
-
-// validateAllocationInjectionTargetFields requires nonnil container and containerPath.
-func validateAllocationInjectionTargetFields(container *corev1.Container, containerPath *field.Path) field.ErrorList {
-	// Classify Command and Args once before reporting violations in contract order.
-	var hasAllocation, terminatesArguments, hasShell [2]bool
-	for vector, values := range [2][]string{container.Command, container.Args} {
-		for _, value := range values {
-			hasAllocation[vector] = hasAllocation[vector] || value == "--allocation" ||
-				strings.HasPrefix(value, "--allocation=")
-			terminatesArguments[vector] = terminatesArguments[vector] || value == "--"
-			if !hasShell[vector] {
-				switch path.Base(value) {
-				case "ash", "bash", "dash", "ksh", "sh", "zsh":
-					hasShell[vector] = true
-				}
-			}
-		}
-	}
-
-	allErrs := field.ErrorList{}
-	if hasAllocation[0] {
-		allErrs = append(allErrs, field.Forbidden(containerPath.Child("command"), "selected LPX main container must not set --allocation; Dynamo renders the immutable Agent clique list"))
-	}
-	if hasAllocation[1] {
-		allErrs = append(allErrs, field.Forbidden(containerPath.Child("args"), "selected LPX main container must not set --allocation; Dynamo renders the immutable Agent clique list"))
-	}
-	if terminatesArguments[0] {
-		allErrs = append(allErrs, field.Forbidden(containerPath.Child("command"), "selected LPX main container must not terminate arguments before Dynamo appends --allocation"))
-	}
-	if terminatesArguments[1] {
-		allErrs = append(allErrs, field.Forbidden(containerPath.Child("args"), "selected LPX main container must not terminate arguments before Dynamo appends --allocation"))
-	}
-	if hasShell[0] {
-		allErrs = append(allErrs, field.Forbidden(containerPath.Child("command"), "selected LPX main container cannot use a shell because Dynamo appends --allocation"))
-	}
-	if hasShell[1] {
-		allErrs = append(allErrs, field.Forbidden(containerPath.Child("args"), "selected LPX main container cannot use a shell because Dynamo appends --allocation"))
-	}
-	return allErrs
 }

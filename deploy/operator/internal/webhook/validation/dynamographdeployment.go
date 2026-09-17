@@ -393,6 +393,17 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		)...)
 	}
 
+	// Conversion preserves alpha service keys in ComponentName; report conductor errors at their source paths.
+	conductorComponentsPath := componentsPath
+	componentPath := componentsPath.Index
+	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
+		conductorComponentsPath = fldPath.Child("services")
+		componentPath = func(index int) *field.Path {
+			return conductorComponentsPath.Key(spec.Components[index].ComponentName)
+		}
+	}
+	allErrs = append(allErrs, dynamolpx.ValidateConductorRoles(spec, conductorComponentsPath, componentPath)...)
+
 	if spec.Restart != nil {
 		allErrs = append(allErrs, v.validateRestart(spec.Restart, fldPath.Child("restart"), components)...)
 	}

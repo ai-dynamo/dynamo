@@ -529,13 +529,26 @@ func TestLPXPublishedWorkloadFailurePreservesExistingEngines(t *testing.T) {
 			pcsBefore := &grovev1alpha1.PodCliqueSet{}
 			require.NoError(t, reconciler.Get(ctx, pcsKey, pcsBefore))
 
-			t.Log("Fail the actual snapshot dependency or remove required runtime SSH configuration")
-			message := "node-local LPU runtime requires an MPI SSH secret name"
+			t.Log("Fail the actual snapshot dependency or break cross-role model storage")
+			message := "must use the Conductor model-storage mount path"
 			if test.snapshotError != nil {
 				reconciler.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: test.snapshotError}
 				message = test.snapshotError.Error()
 			} else {
-				reconciler.Config.MPI.SSHSecretName = ""
+				require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(source), source))
+				conductor := source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor)
+				for index := range conductor.PodTemplate.Spec.Containers[0].VolumeMounts {
+					mount := &conductor.PodTemplate.Spec.Containers[0].VolumeMounts[index]
+					if mount.Name == consts.ModelStorageVolumeName {
+						mount.MountPath = "/different-model-storage"
+					}
+				}
+				require.NoError(t, reconciler.Update(ctx, source))
+				require.NoError(t, reconciler.Get(ctx, key, dgd))
+				revision, revisionErr := dynamo.LPXInputRevision(source, "")
+				require.NoError(t, revisionErr)
+				dgd.Spec.InputRevision = revision
+				require.NoError(t, reconciler.Update(ctx, dgd))
 			}
 			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			pcs := &grovev1alpha1.PodCliqueSet{}
@@ -2441,6 +2454,12 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 			}},
 		},
 	}
+	// Each role authors its own startup; the conductor cannot inherit the Agent command.
+	agentTemplate := source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXAgent).PodTemplate
+	agentTemplate.Spec.Containers[0].Command = []string{"/bin/quasar-entrypoint"}
+	conductorTemplate := agentTemplate.DeepCopy()
+	conductorTemplate.Spec.Containers[0].Command = []string{"/bin/nova"}
+	source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor).PodTemplate = conductorTemplate
 	if pipeline == lpx.PipelineLPX {
 		*source.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) = nvidiacomv1beta1.ComponentRoleSpec{
 			Name:     nvidiacomv1beta1.ComponentRoleLPXConductor,
@@ -2626,7 +2645,6 @@ func newLPXTestReconciler(
 	recorder := events.NewFakeRecorder(100)
 	config := &configv1alpha1.OperatorConfiguration{
 		LPX: configv1alpha1.LPXConfiguration{Enabled: true},
-		MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 	}
 	runtimeConfig := &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, DRA: true, LPX: true}}
 	return &graphReconciler{

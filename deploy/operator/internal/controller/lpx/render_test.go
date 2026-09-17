@@ -63,7 +63,7 @@ func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 	require.NoError(t, err)
 	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
 	require.NoError(t, err)
-	config := &configv1alpha1.OperatorConfiguration{MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"}}
+	config := &configv1alpha1.OperatorConfiguration{}
 	kube := newTestLPXClient(t)
 	runtimeConfig := &controller_common.RuntimeConfig{}
 	pcs, _, err := renderPodCliqueSet(t.Context(), source, config, runtimeConfig, kube, nil,
@@ -121,7 +121,7 @@ func TestLPXHybridPreservesKVTransferTopology(t *testing.T) {
 			require.NoError(t, err)
 			plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
 			require.NoError(t, err)
-			config := &configv1alpha1.OperatorConfiguration{MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"}}
+			config := &configv1alpha1.OperatorConfiguration{}
 			pcs, _, err := renderPodCliqueSet(t.Context(), source, config, &controller_common.RuntimeConfig{}, kube, nil, selected, plan, child)
 			require.NoError(t, err)
 
@@ -173,12 +173,11 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 		{"node-local-v2-specdecode", lpxv1alpha1.TargetFamilyXt8888, lpxv1alpha1.WorkloadModeV2LPUOnly},
 		{"node-local-v3-hx-lpu-only", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxLPUOnly},
 		{"node-local-v3-hx-hybrid", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxStrictHybrid},
-		{"node-local-v3-hx-hybrid-inherited", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxStrictHybrid},
 		{"node-local-v3-hx-specdecode", lpxv1alpha1.TargetFamilyHx16x8x2x3, lpxv1alpha1.WorkloadModeV3HxLPUOnly},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Resolve the authored engine and its exact child without changing either input")
-			fixture := strings.TrimSuffix(test.name, "-inherited")
+			fixture := test.name
 			payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
 			require.NoError(t, err)
 			source := &v1beta1.DynamoGraphDeployment{}
@@ -215,12 +214,6 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			component.ModelRef = &v1beta1.ModelReference{Name: "test/model"}
 			component.MinAvailable = ptr.To(int32(1))
 			hybrid := strings.HasSuffix(fixture, "-hybrid")
-			inherited := fixture != test.name
-			if inherited {
-				t.Log("Let the HX GPU conductor inherit the Agent template and its authored config mount")
-				component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
-				component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Resources.Limits["nvidia.com/gpu"] = resource.MustParse("1")
-			}
 			singleXT := test.name == "node-local-v2-lpu-only"
 			if hybrid {
 				component.Replicas = ptr.To(int32(3))
@@ -252,7 +245,6 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
 			require.NoError(t, err)
 			config := &configv1alpha1.OperatorConfiguration{
-				MPI:       configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 				Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 			}
 
@@ -397,7 +389,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 				require.Equal(t, "from-component", clique.Labels["shared-label"])
 				require.Equal(t, "false", clique.Annotations[commonconsts.KubeAnnotationEnableMetrics])
 				require.Equal(t, "kubernetes", clique.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend])
-				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleCyborgWorker || test.wantFamily == lpxv1alpha1.TargetFamilyXt8888 || inherited {
+				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] != lpxv1alpha1.PodRoleCyborgWorker || test.wantFamily == lpxv1alpha1.TargetFamilyXt8888 {
 					t.Log("Bind the generated immutable ConfigMap alongside authored volumes and mounts")
 					configIndex := slices.IndexFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "config" })
 					require.GreaterOrEqual(t, configIndex, 0)
@@ -459,89 +451,74 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 }
 
 func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
-	t.Log("Create immutable native builds for the explicit and inherited conductor cases")
+	t.Log("Give the speculative components distinct authored Agent and conductor commands")
 	registry := newTestDataModelRegistry(t, t.TempDir())
-
-	for _, explicit := range []bool{false, true} {
-		t.Run(fmt.Sprintf("explicit=%t", explicit), func(t *testing.T) {
-			t.Log("Give the speculative components distinct templates and select the target conductor")
-			payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/node-local-v3-hx-specdecode.input.yaml")
-			require.NoError(t, err)
-			source := &v1beta1.DynamoGraphDeployment{}
-			require.NoError(t, yaml.Unmarshal(payload, source))
-			for _, component := range lpx.Components(source) {
-				agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
-				agent.Spec.Containers[0].Image = component.ComponentName + "-runtime"
-				agent.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "AGENT_ONLY", Value: "kept"}}
-			}
-			target := lpx.ServingComponent(source)
-			wantImage := target.ComponentName + "-runtime"
-			target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
-			template := target.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
-			if explicit {
-				template = template.DeepCopy()
-				wantImage = "independent-conductor-runtime"
-				template.Spec.Containers[0].Image = wantImage
-				template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "CONDUCTOR_ONLY", Value: "kept"}}
-				template.Labels = map[string]string{"owner": "explicit-conductor"}
-				template.Spec.NodeSelector = map[string]string{"runtime-role": "conductor"}
-				template.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-						MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "pool", Operator: corev1.NodeSelectorOpIn, Values: []string{"conductor"}}},
-					}}},
-				}}
-				target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = template
-			}
-			template.Spec.Containers[0].VolumeMounts = append(template.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"})
-			template.Spec.Volumes = append(template.Spec.Volumes, corev1.Volume{Name: "single-v2-ssh-key", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
-			before := source.DeepCopy()
-			selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, registry)
-			require.NoError(t, err)
-			plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
-			require.NoError(t, err)
-
-			t.Log("Render one shared conductor without changing either component's Agent template")
-			pcs, _, err := renderPodCliqueSet(t.Context(), source,
-				&configv1alpha1.OperatorConfiguration{MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"}},
-				&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected, plan, newLPXRenderDeployment(t, source))
-			require.NoError(t, err)
-
-			t.Log("Preserve independent role fields while retaining the Nova launch")
-			require.Len(t, pcs.Spec.Template.Cliques, len(plan.Agents)+1)
-			conductors := 0
-			for _, clique := range pcs.Spec.Template.Cliques {
-				container := clique.Spec.PodSpec.Containers[0]
-				for _, mount := range container.VolumeMounts {
-					require.True(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool {
-						return volume.Name == mount.Name
-					}), "%s mount %s requires a volume", clique.Name, mount.Name)
-				}
-				if clique.Name == plan.ConductorTemplate {
-					conductors++
-					require.Equal(t, wantImage, container.Image)
-					require.Equal(t, []string{"/bin/nova"}, container.Command)
-					configFlag := slices.Index(container.Args, "--datacenter-config-filepath")
-					require.GreaterOrEqual(t, configFlag, 0)
-					require.Equal(t, "/configs/datacenter.toml", container.Args[configFlag+1])
-					if explicit {
-						template := target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
-						require.Equal(t, "explicit-conductor", clique.Labels["owner"])
-						require.Equal(t, template.Spec.NodeSelector, clique.Spec.PodSpec.NodeSelector)
-						require.Equal(t, template.Spec.Affinity, clique.Spec.PodSpec.Affinity)
-						require.Contains(t, container.Env, corev1.EnvVar{Name: "CONDUCTOR_ONLY", Value: "kept"})
-						require.NotContains(t, container.Env, corev1.EnvVar{Name: "AGENT_ONLY", Value: "kept"})
-					}
-				} else {
-					component := clique.Labels[commonconsts.KubeLabelDynamoComponent]
-					require.Equal(t, component+"-runtime", container.Image)
-					require.Contains(t, container.Env, corev1.EnvVar{Name: "AGENT_ONLY", Value: "kept"})
-					require.NotContains(t, container.Env, corev1.EnvVar{Name: "CONDUCTOR_ONLY", Value: "kept"})
-				}
-			}
-			require.Equal(t, 1, conductors)
-			require.Equal(t, before, source)
-		})
+	payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/node-local-v3-hx-specdecode.input.yaml")
+	require.NoError(t, err)
+	source := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, yaml.Unmarshal(payload, source))
+	for _, component := range lpx.Components(source) {
+		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
+		agent.Spec.Containers[0].Image = component.ComponentName + "-runtime"
+		agent.Spec.Containers[0].Command = []string{"/bin/quasar-entrypoint"}
+		agent.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "AGENT_ONLY", Value: "kept"}}
 	}
+	target := lpx.ServingComponent(source)
+	template := target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
+	template.Spec.Containers[0].Image = "independent-conductor-runtime"
+	template.Spec.Containers[0].Command = []string{"/bin/nova"}
+	template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "CONDUCTOR_ONLY", Value: "kept"}}
+	template.Labels = map[string]string{"owner": "explicit-conductor"}
+	template.Spec.NodeSelector = map[string]string{"runtime-role": "conductor"}
+	template.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+			MatchExpressions: []corev1.NodeSelectorRequirement{{Key: "pool", Operator: corev1.NodeSelectorOpIn, Values: []string{"conductor"}}},
+		}}},
+	}}
+	before := source.DeepCopy()
+	selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, registry)
+	require.NoError(t, err)
+	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
+	require.NoError(t, err)
+
+	t.Log("Render one shared conductor without changing either component's Agent template")
+	pcs, _, err := renderPodCliqueSet(t.Context(), source,
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected, plan, newLPXRenderDeployment(t, source))
+	require.NoError(t, err)
+
+	t.Log("Keep Nova separate from Quasar and preserve each role's metadata and storage")
+	require.Len(t, pcs.Spec.Template.Cliques, len(plan.Agents)+1)
+	conductors := 0
+	for _, clique := range pcs.Spec.Template.Cliques {
+		container := clique.Spec.PodSpec.Containers[0]
+		for _, mount := range container.VolumeMounts {
+			require.True(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool {
+				return volume.Name == mount.Name
+			}), "%s mount %s requires a volume", clique.Name, mount.Name)
+		}
+		if clique.Name == plan.ConductorTemplate {
+			conductors++
+			require.Equal(t, "independent-conductor-runtime", container.Image)
+			require.Equal(t, []string{"/bin/nova"}, container.Command)
+			configFlag := slices.Index(container.Args, "--datacenter-config-filepath")
+			require.GreaterOrEqual(t, configFlag, 0)
+			require.Equal(t, "/configs/datacenter.toml", container.Args[configFlag+1])
+			require.Equal(t, "explicit-conductor", clique.Labels["owner"])
+			require.Equal(t, template.Spec.NodeSelector, clique.Spec.PodSpec.NodeSelector)
+			require.Equal(t, template.Spec.Affinity, clique.Spec.PodSpec.Affinity)
+			require.Contains(t, container.Env, corev1.EnvVar{Name: "CONDUCTOR_ONLY", Value: "kept"})
+			require.NotContains(t, container.Env, corev1.EnvVar{Name: "AGENT_ONLY", Value: "kept"})
+		} else {
+			component := clique.Labels[commonconsts.KubeLabelDynamoComponent]
+			require.Equal(t, component+"-runtime", container.Image)
+			require.Equal(t, []string{"/bin/quasar-entrypoint"}, container.Command)
+			require.Contains(t, container.Env, corev1.EnvVar{Name: "AGENT_ONLY", Value: "kept"})
+			require.NotContains(t, container.Env, corev1.EnvVar{Name: "CONDUCTOR_ONLY", Value: "kept"})
+		}
+	}
+	require.Equal(t, 1, conductors)
+	require.Equal(t, before, source)
 }
 
 func newTestDataModelRegistry(t *testing.T, registryRoot string) *lpx.ModelRegistry {
@@ -821,7 +798,6 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 		Orchestrators: configv1alpha1.OrchestratorConfiguration{
 			Grove: configv1alpha1.GroveConfiguration{TerminationDelay: metav1.Duration{Duration: 15 * time.Minute}},
 		},
-		MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 	}
 	const buildID = "single-v2-manifest-defaults/build_manifest_defaults"
 	registryRoot := t.TempDir()
@@ -836,7 +812,7 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 	t.Log("Render manifest-derived, equivalent explicit, and overridden runtime settings")
 	configs := make([]renderedConfig, 0, 3)
 	for _, settingsJSON := range []string{"", `{"batch_size":1,"swa":{"chunked":false}}`, `{"sequence_length":65536}`} {
-		payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/single_v2_manifest_defaults.input.yaml")
+		payload, err := os.ReadFile("../../dynamo/testdata/from_dgd_yaml/single_v2.input.yaml")
 		require.NoError(t, err)
 
 		var deployment v1beta1.DynamoGraphDeployment
@@ -844,6 +820,7 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 		require.Len(t, deployment.Spec.Components, 1)
 		require.NotNil(t, deployment.Spec.Components[0].LPX)
 		require.Len(t, deployment.Spec.Components[0].Roles, 2)
+		deployment.Spec.Components[0].LPX = &v1beta1.LPXConfig{BuildID: buildID}
 		if settingsJSON != "" {
 			deployment.Spec.Components[0].LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(settingsJSON)}
 		}
@@ -997,7 +974,6 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			},
 		},
 		LPX: configv1alpha1.LPXConfiguration{Enabled: true},
-		MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 	}
 
 	registryRoot := t.TempDir()
@@ -1116,7 +1092,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 }
 
 func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *testing.T) {
-	t.Log("Load the pre-scheduler V2 hybrid DGD shape without scheduler intent or an image-owned command")
+	t.Log("Load the pre-scheduler V2 hybrid DGD shape without scheduler intent and with an authored runtime command")
 	payload, err := os.ReadFile(filepath.Join("../../dynamo/testdata", "from_dgd_yaml", "node-local-v2-hybrid.input.yaml"))
 	require.NoError(t, err)
 	dgd := &v1beta1.DynamoGraphDeployment{}
@@ -1144,7 +1120,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	sidecar := corev1.Container{Name: "cyborg", Image: "sidecar", Args: []string{"observe"}}
 	cyborgRole.PodTemplate.Spec.Containers = append(cyborgRole.PodTemplate.Spec.Containers, sidecar)
 
-	t.Log("Customize Agent metadata and placement while leaving its launch to the runtime")
+	t.Log("Customize Agent metadata and placement with an image ENTRYPOINT and authored arguments")
 	agentTemplate := lpxComponent.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate
 	agentMain := &agentTemplate.Spec.Containers[0]
 	require.NotEmpty(t, agentMain.Command)
@@ -1193,7 +1169,6 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd", NATSAddress: "nats"},
-		MPI:            configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
 		Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		LPX:            configv1alpha1.LPXConfiguration{Enabled: true},
 	}
@@ -1203,7 +1178,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	)
 	require.NoError(t, err)
 
-	t.Log("Verify LPX places the worker while the generated backend owns the complete process contract")
+	t.Log("Verify LPX places the worker while retaining the authored process contract")
 	var agent, cyborg *grovev1alpha1.PodCliqueTemplateSpec
 	serving := 0
 	for _, clique := range pcs.Spec.Template.Cliques {
@@ -1234,9 +1209,8 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 
 	main := agent.Spec.PodSpec.Containers[0]
 	require.Equal(t, "agent", main.Name)
-	require.Equal(t, []string{"/bin/hydra-entrypoint"}, main.Command)
-	require.Equal(t, []string{"start"}, main.Args)
-	require.NotContains(t, main.Args, "--agent-env-vars")
+	require.Nil(t, main.Command)
+	require.Equal(t, agentMain.Args, main.Args)
 	require.NotNil(t, main.SecurityContext)
 	require.True(t, *main.SecurityContext.Privileged)
 	require.False(t, main.Stdin)
@@ -1293,8 +1267,8 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Contains(t, cyborg.Spec.PodSpec.Containers, sidecar)
 	require.NotEmpty(t, cyborg.Spec.PodSpec.Containers)
 	cyborgMain := cyborg.Spec.PodSpec.Containers[0]
-	require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, cyborgMain.Command)
-	require.Equal(t, []string{"--expand-hosts", "--swa-batch-ids", "--", "/opt/gpu-runtime", "serve"}, cyborgMain.Args)
+	require.Equal(t, authoredCyborgMain.Command, cyborgMain.Command)
+	require.Equal(t, authoredCyborgMain.Args, cyborgMain.Args)
 	require.Contains(t, cyborgMain.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/configs"})
 	require.True(t, slices.ContainsFunc(cyborgMain.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.Name == "infiniband" }))
 
@@ -1362,19 +1336,22 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, decodeHash, cyborg.Annotations[commonconsts.AnnotationExtraResourcesHash])
 }
 
-func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testing.T) {
+func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.T) {
 	t.Log("Share the immutable build registry across entrypoint cases")
 	registry := newTestDataModelRegistry(t, t.TempDir())
 	kubeClient := newTestLPXClient(t)
 	modes := []struct {
-		name   string
-		file   string
-		hybrid bool
-		single bool
+		name            string
+		file            string
+		hybrid          bool
+		conductorConfig bool
+		hx              bool
 	}{
-		{name: "Single V2", file: "single_v2.input.yaml", single: true},
-		{name: "V2 LPU-only", file: "node-local-v2-lpu-only.input.yaml", single: true},
-		{name: "V2 hybrid", file: "node-local-v2-hybrid.input.yaml", hybrid: true},
+		{name: "Single V2", file: "single_v2.input.yaml", conductorConfig: true},
+		{name: "V2 LPU-only", file: "node-local-v2-lpu-only.input.yaml", conductorConfig: true},
+		{name: "V2 hybrid", file: "node-local-v2-hybrid.input.yaml", hybrid: true, conductorConfig: true},
+		{name: "HX LPU-only", file: "node-local-v3-hx-lpu-only.input.yaml", conductorConfig: true, hx: true},
+		{name: "HX hybrid", file: "node-local-v3-hx-hybrid.input.yaml", hybrid: true, hx: true},
 	}
 	intents := []struct {
 		name          string
@@ -1386,8 +1363,10 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 		configPath    *string
 		configRole    int
 		envFrom       bool
+		customProbes  bool
 	}{
 		{name: "image entrypoint and image command"},
+		{name: "custom exec health probes", command: []string{"/opt/custom-runtime"}, customProbes: true},
 		{name: "default startup without config mount", configPath: ptr.To(""), configRole: 1},
 		{name: "default startup with misplaced config mount", configPath: ptr.To("/custom"), configRole: 1},
 		{name: "default Agent without config mount", configPath: ptr.To("")},
@@ -1396,6 +1375,11 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 		{name: "image entrypoint with user arguments", args: []string{"serve"}},
 		{name: "explicit executable with image arguments", command: []string{"/opt/custom-runtime"}},
 		{name: "explicit executable and arguments", command: []string{"/opt/custom-runtime"}, args: []string{"serve"}},
+		{name: "allocation flag in arguments", args: []string{"--allocation", "template-target"}},
+		{name: "allocation flag in command", command: []string{"/opt/custom-runtime", "--allocation=template-target"}},
+		{name: "allocation environment expansion", args: []string{"--allocation", "$(LPX_ALLOCATION)"}},
+		{name: "argument terminator", command: []string{"/opt/custom-runtime"}, args: []string{"--", "literal argument"}},
+		{name: "shell command", command: []string{"/bin/sh", "-c"}, args: []string{"exec /opt/custom-runtime --allocation $LPX_ALLOCATION"}},
 		{
 			name:          "explicit Cyborg shell remains user-owned",
 			command:       []string{"/opt/custom-runtime"},
@@ -1424,7 +1408,7 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 			require.NoError(t, err)
 
 			for _, intent := range intents {
-				if intent.hybridOnly && !mode.hybrid {
+				if intent.hybridOnly && !mode.hybrid || intent.configPath != nil && intent.configRole == 1 && !mode.conductorConfig {
 					continue
 				}
 				t.Run(intent.name, func(t *testing.T) {
@@ -1446,6 +1430,22 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 						}
 						main.Command = slices.Clone(command)
 						main.Args = slices.Clone(args)
+						main.StartupProbe, main.LivenessProbe, main.ReadinessProbe = nil, nil, nil
+						if intent.customProbes {
+							main.StartupProbe = &corev1.Probe{
+								ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/custom-health", fmt.Sprint(roleIndex), "started"}}},
+								FailureThreshold: 12, PeriodSeconds: 4, TimeoutSeconds: 2,
+							}
+							main.LivenessProbe = &corev1.Probe{
+								ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/custom-health", fmt.Sprint(roleIndex), "live"}}},
+								FailureThreshold: 4, PeriodSeconds: 6, TimeoutSeconds: 3,
+							}
+							main.ReadinessProbe = &corev1.Probe{
+								ProbeHandler:     corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/custom-health", fmt.Sprint(roleIndex), "ready"}}},
+								FailureThreshold: 2, PeriodSeconds: 5, TimeoutSeconds: 1,
+							}
+						}
+						main.Env = append(main.Env, corev1.EnvVar{Name: "LPX_ALLOCATION", Value: "forged-allocation"})
 						if intent.envFrom && roleIndex == 0 {
 							main.EnvFrom = []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "unrelated-env"}}}}
 						}
@@ -1461,14 +1461,13 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 						}
 					}
 
+					before := dgd.DeepCopy()
 					selected, err := lpx.ResolveSelectedWorkload(t.Context(), dgd, registry)
 					require.NoError(t, err)
 					pcs, _, err := renderPodCliqueSet(
 						t.Context(),
 						dgd,
-						&configv1alpha1.OperatorConfiguration{
-							MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
-						},
+						&configv1alpha1.OperatorConfiguration{},
 						&controller_common.RuntimeConfig{},
 						kubeClient,
 						nil,
@@ -1476,65 +1475,38 @@ func TestGenerateGrovePodCliqueSet_V2NodeLocalPreservesImageEntrypoint(t *testin
 						mustPlanSelectedLPX(t, dgd, selected),
 						newLPXRenderDeployment(t, dgd),
 					)
-					if intent.configPath != nil {
-						require.ErrorContains(t, err, `requires a volume mounted at "/configs"`)
-						return
-					}
-					if mode.single && len(intent.command) == 0 && len(intent.args) > 0 {
-						require.ErrorContains(t, err, "only supports --instance-model-name")
+					require.Equal(t, before, dgd)
+					if mode.hx && intent.configPath != nil && *intent.configPath != "" {
+						require.ErrorContains(t, err, `reserves volume "config" at "/configs"`)
 						return
 					}
 					require.NoError(t, err)
 
-					t.Log("Verify explicit commands are preserved and direct Agents receive their launch defaults")
+					t.Log("Verify every role preserves authored startup and health probes, including omission")
 					var agents, conductors, cyborgs int
 					for _, clique := range pcs.Spec.Template.Cliques {
 						main := clique.Spec.PodSpec.Containers[0]
+						authored := templates[1].Spec.Containers[0]
+						if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
+							authored = templates[0].Spec.Containers[0]
+						}
+						require.Equal(t, authored.Command, main.Command, "%s command", clique.Name)
+						require.True(t, slices.Equal(authored.Args, main.Args), "%s args", clique.Name)
+						require.Equal(t, authored.StartupProbe, main.StartupProbe, "%s startup", clique.Name)
+						require.Equal(t, authored.LivenessProbe, main.LivenessProbe, "%s liveness", clique.Name)
+						require.Equal(t, authored.ReadinessProbe, main.ReadinessProbe, "%s readiness", clique.Name)
 						switch clique.Annotations[lpxv1alpha1.PodRoleAnnotation] {
 						case lpxv1alpha1.PodRoleAgent:
 							agents++
 							require.False(t, slices.ContainsFunc(clique.Spec.PodSpec.Volumes, func(volume corev1.Volume) bool { return volume.Name == "tmp" }))
-							if len(intent.command)+len(intent.args) == 0 {
-								if mode.hybrid {
-									require.Equal(t, []string{"/bin/hydra-entrypoint"}, main.Command)
-									require.Equal(t, []string{"start"}, main.Args)
-								} else {
-									require.Equal(t, []string{"/bin/quasar-entrypoint"}, main.Command)
-									require.Equal(t, []string{"--partition-metadata"}, main.Args)
-								}
-							} else {
-								wantCommand := intent.command
-								require.Equal(t, wantCommand, main.Command)
-								require.True(t, slices.Equal(intent.args, main.Args))
-							}
 						case lpxv1alpha1.PodRoleConductor:
 							conductors++
-							command := intent.command
-							if len(command) == 0 {
-								command = []string{"/bin/nova"}
-							}
-							require.Equal(t, command, main.Command)
-							require.True(t, slices.Equal(intent.args, main.Args[:len(intent.args)]))
-							allocation := slices.Index(main.Args, "--allocation")
-							require.GreaterOrEqual(t, allocation, 0)
-							require.Equal(t, strings.Join(clique.Spec.StartsAfter, ","), main.Args[allocation+1])
+							require.Contains(t, main.Env, corev1.EnvVar{
+								Name: "LPX_ALLOCATION", Value: strings.Join(clique.Spec.StartsAfter, ","),
+							})
+							require.NotContains(t, main.Env, corev1.EnvVar{Name: "LPX_ALLOCATION", Value: "forged-allocation"})
 						case lpxv1alpha1.PodRoleCyborgWorker:
 							cyborgs++
-							wantCommand := intent.command
-							wantArgs := intent.args
-							if intent.cyborgCommand != nil {
-								wantCommand = intent.cyborgCommand
-								wantArgs = intent.cyborgArgs
-							}
-							if len(wantCommand) == 0 {
-								wantCommand = []string{"/usr/local/bin/cyborg"}
-							}
-							require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, main.Command)
-							require.Equal(t, []string{"--expand-hosts", "--"}, main.Args[:2])
-							require.Equal(t, append(slices.Clone(wantCommand), wantArgs...), main.Args[2:])
-							require.NotNil(t, main.LivenessProbe)
-							require.NotNil(t, main.ReadinessProbe)
-							require.NotNil(t, main.StartupProbe)
 							require.NotEmpty(t, main.Ports)
 						}
 					}
@@ -1602,9 +1574,7 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	require.NoError(t, err)
 	plan := mustPlanSelectedLPX(t, source, selected)
 	pcs, _, err := renderPodCliqueSet(t.Context(), source,
-		&configv1alpha1.OperatorConfiguration{
-			MPI: configv1alpha1.MPIConfiguration{SSHSecretName: "ssh-secret"},
-		},
+		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected,
 		plan, newLPXRenderDeployment(t, source))
 	require.NoError(t, err)
@@ -1637,9 +1607,7 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	require.Equal(t, "9", env["TOTAL_REPLICAS"])
 	require.Equal(t, "/custom-servers", env["SERVER_HOSTS_FILE"])
 
-	t.Log("Select only SWA initialization while preserving the authored command and host-file override")
-	require.Equal(t, []string{"/usr/local/bin/cyborg-entrypoint"}, main.Command)
-	wantArgs := append([]string{"--swa-batch-ids", "--"}, leader.Spec.Containers[0].Command...)
-	wantArgs = append(wantArgs, leader.Spec.Containers[0].Args...)
-	require.Equal(t, wantArgs, main.Args)
+	t.Log("Preserve the authored command and host-file override without adding a launcher")
+	require.Equal(t, leader.Spec.Containers[0].Command, main.Command)
+	require.Equal(t, leader.Spec.Containers[0].Args, main.Args)
 }

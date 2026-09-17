@@ -276,9 +276,8 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, []*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
-		MinAvailable:  p.component.MinAvailable,
-		Stages:        make(map[string]corev1.PodTemplateSpec),
-		SSHSecretName: p.operatorConfig.MPI.SSHSecretName,
+		MinAvailable: p.component.MinAvailable,
+		Stages:       make(map[string]corev1.PodTemplateSpec),
 	}
 
 	// Resolve preserved alpha metadata once for all independently rendered roles.
@@ -292,7 +291,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		alphaComponent := alphaComponents[component.ComponentName]
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-		lpuDefaults := &imageEntrypointComponentDefaults{ComponentDefaults: &BaseComponentDefaults{}}
+		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, lpuDefaults, nil)
 		if err != nil {
@@ -306,34 +305,28 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 			continue
 		}
 
-		// Non-hybrid conductors use their own template, or the Agent fallback in LPX lowering.
+		// The serving role owns its startup independently of the Agent template.
 		if workload.Pipeline() != dynamolpx.PipelineLPX {
-			if conductor != nil && conductor.PodTemplate != nil {
-				role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
-				input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-					p.discoveryContext, lpuDefaults, nil)
-				if err != nil {
-					return nil, nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
-				}
-				input.Conductor.Labels[dynamolpx.StageLabel] = component.ComponentName
-				input.Conductor.Labels[dynamolpx.ExecutionRoleLabel] = "lpu"
+			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
+			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
+				p.discoveryContext, lpuDefaults, nil)
+			if err != nil {
+				return nil, nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
+			input.Conductor.Labels[dynamolpx.StageLabel] = component.ComponentName
+			input.Conductor.Labels[dynamolpx.ExecutionRoleLabel] = "lpu"
 			continue
 		}
 
-		// Keep the existing hybrid execution path; only its authored template location changes.
-		template, replicas := agent.PodTemplate, int32(1)
-		if conductor != nil {
-			replicas = ptr.Deref(conductor.Replicas, 1)
-			if conductor.PodTemplate != nil {
-				template = conductor.PodTemplate
-			}
-		}
+		// Hybrid conductors use their authored GPU template and replica count.
+		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, 1)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		role.Replicas = ptr.To(replicas)
 		role.MinAvailable = nil
-		defaults := ComponentDefaultsFactory(string(v1beta1.ComponentTypeDecode))
+		var defaults ComponentDefaults = &podTemplateRuntimeDefaults{
+			ComponentDefaults: ComponentDefaultsFactory(string(v1beta1.ComponentTypeDecode)),
+		}
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
 			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, plan, lpuTemplate.Spec)
 			if err != nil {
@@ -343,8 +336,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 				ComponentDefaults: defaults, workload: workload, configMapName: input.CyborgConfigMap.Name,
 				replicas: *role.Replicas, lpxPodSpec: lpuTemplate.Spec,
 			}
-		} else {
-			defaults = &imageEntrypointComponentDefaults{ComponentDefaults: defaults}
 		}
 		gpu := p
 		gpu.component = role
@@ -386,18 +377,23 @@ func lpxRoleComponent(source *v1beta1.DynamoComponentDeploymentSharedSpec, templ
 	return role
 }
 
-// imageEntrypointComponentDefaults preserves all role-specific defaults while
-// leaving the executable to the workload image unless the user supplied one.
-type imageEntrypointComponentDefaults struct {
+// podTemplateRuntimeDefaults leaves startup and health checks to the authored role
+// while retaining shared infrastructure bindings.
+type podTemplateRuntimeDefaults struct {
 	ComponentDefaults
 }
 
-func (d *imageEntrypointComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
+func (d *podTemplateRuntimeDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	container, err := d.ComponentDefaults.GetBaseContainer(context)
 	if err != nil {
 		return corev1.Container{}, err
 	}
+
+	// Omitted template settings must not inherit another runtime's launch or health contract.
 	container.Command = nil
+	container.StartupProbe = nil
+	container.LivenessProbe = nil
+	container.ReadinessProbe = nil
 	return container, nil
 }
 
@@ -416,7 +412,6 @@ func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentCont
 	if err != nil {
 		return corev1.Container{}, err
 	}
-	container.Command = nil
 	if err := dynamolpx.ApplySelectedCyborgContainerDefaults(
 		&container,
 		d.workload,

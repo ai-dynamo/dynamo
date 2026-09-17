@@ -601,8 +601,11 @@ spec:
         podSpec:
           containers:
           - args:
-            - --agent-path
-            - /bin/agent
+            - --mpirun-path
+            - /bin/mpirun
+            - --mpi-ssh-cmd
+            - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+              -i /tmp/dynamo-lpu-ssh/private.key
             - --agent-wd
             - /tmp
             - --conductor-bind-host
@@ -617,21 +620,12 @@ spec:
             - /configs/model_config.toml
             - --json-logs
             - --disable-tracing
-            - --mpirun-path
-            - /bin/mpirun
-            - --mpi-ssh-cmd
-            - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-              -i /tmp/dynamo-lpu-ssh/private.key
             - --mpi-use-tcp
-            - --allocation
-            - agt0:agt1:agt2
             - --agent-disable-auto-restart
             - --agent-server-max-retries
             - "60"
             - --agent-server-retry-sleep-dur
             - 2s
-            - --controlplane-start-port
-            - "12345"
             - --graceful-shutdown-timeout
             - 0s
             - --response-timeout
@@ -640,10 +634,10 @@ spec:
             - dynamo
             - --endpoint-id
             - dyn://$(DYN_NAMESPACE).backend.generate
-            - --request-plane
-            - tcp
             - --store-backend
             - kubernetes
+            - --allocation
+            - $(LPX_ALLOCATION)
             command:
             - /bin/nova
             env:
@@ -659,6 +653,8 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
+            - name: LPX_ALLOCATION
+              value: agt0:agt1:agt2
             - name: NATS_SERVER
               value: nats-address
             - name: OMPI_ALLOW_RUN_AS_ROOT

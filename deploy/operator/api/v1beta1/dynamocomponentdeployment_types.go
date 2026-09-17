@@ -178,7 +178,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Admission defaults omitted replicas to 1 for
 	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
 	// preserves the implicit multinode role layout.
-	// LPX components require an agent role and may declare a conductor role.
+	// LPX components each require an agent role. All LPX components in a DGD
+	// must declare exactly one conductor role in total. Every LPX role requires
+	// its own podTemplate.
 	// +optional
 	// +listType=map
 	// +listMapKey=name

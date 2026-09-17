@@ -165,7 +165,17 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "lpx", ComponentType: v1beta1.ComponentTypeLPX,
 			LPX: &v1beta1.LPXConfig{BuildID: (&url.URL{Scheme: "file", Path: buildDir}).String()},
-			Roles: []v1beta1.ComponentRoleSpec{{Name: v1beta1.ComponentRoleLPXConductor}, {
+			Roles: []v1beta1.ComponentRoleSpec{{
+				Name: v1beta1.ComponentRoleLPXConductor,
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name: consts.MainContainerName, Image: "example/conductor:1.4.0",
+						Command: []string{"/custom-conductor"}, Args: []string{"--workers", "$(LPX_ALLOCATION)"},
+						VolumeMounts: []corev1.VolumeMount{{Name: consts.ModelStorageVolumeName, MountPath: "/models"}},
+					}},
+					Volumes: []corev1.Volume{{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+				}},
+			}, {
 				Name: v1beta1.ComponentRoleLPXAgent,
 				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{

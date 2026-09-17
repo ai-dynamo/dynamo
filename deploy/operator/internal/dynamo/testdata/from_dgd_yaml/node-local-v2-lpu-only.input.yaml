@@ -28,10 +28,87 @@ spec:
               - /opt/dynamo-lpu
               args:
               - serve
+              - --mpirun-path
+              - /bin/mpirun
+              - --mpi-ssh-cmd
+              - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /tmp/dynamo-lpu-ssh/private.key
+              - --agent-wd
+              - /tmp
+              - --conductor-bind-host
+              - 0.0.0.0
+              - --conductor-hostname
+              - $(POD_IP)
+              - --control-server-addr
+              - $(POD_IP):51045
+              - --datacenter-config-filepath
+              - /configs/datacenter.toml
+              - --model-config-filepath
+              - /configs/model_config.toml
+              - --json-logs
+              - --disable-tracing
+              - --mpi-use-tcp
+              - --agent-disable-auto-restart
+              - --agent-server-max-retries
+              - '60'
+              - --agent-server-retry-sleep-dur
+              - 2s
+              - --graceful-shutdown-timeout
+              - 0s
+              - --response-timeout
+              - 120s
+              - --frontend-type
+              - dynamo
+              - --endpoint-id
+              - dyn://$(DYN_NAMESPACE).backend.generate
+              - --store-backend
+              - kubernetes
+              - --allocation
+              - $(LPX_ALLOCATION)
+              env:
+              - name: OMPI_ALLOW_RUN_AS_ROOT
+                value: '1'
+              - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+                value: '1'
+              - name: OMPI_MCA_plm_rsh_args
+                value: -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentityFile=/tmp/dynamo-lpu-ssh/private.key
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: 51045
+                  scheme: HTTP
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                runAsNonRoot: false
               volumeMounts:
               - {name: model-storage, mountPath: /nfs}
               - {name: config, mountPath: /configs}
               - {name: single-v2-ssh-key, mountPath: /tmp/dynamo-lpu-ssh}
+            initContainers:
+            - args:
+              - -m
+              - '0600'
+              - /ssh-pk/private.key
+              - /tmp/dynamo-lpu-ssh/private.key
+              command:
+              - /bin/install
+              image: example.invalid/lpu-runtime:test
+              name: prepare-ssh-key
+              securityContext:
+                runAsGroup: 0
+                runAsNonRoot: false
+                runAsUser: 0
+              volumeMounts:
+              - mountPath: /tmp/dynamo-lpu-ssh
+                name: single-v2-ssh-key
+              - mountPath: /ssh-pk
+                name: ssh-secret
+                readOnly: true
             volumes:
             - {name: model-storage, persistentVolumeClaim: {claimName: model-storage}}
             - {name: ssh-secret, secret: {secretName: ssh-secret, defaultMode: 384}}
@@ -49,6 +126,17 @@ spec:
               resources:
                 limits:
                   lpu.nvidia.com/devices: '1'
+              readinessProbe:
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                successThreshold: 1
+                tcpSocket:
+                  port: 2222
+                timeoutSeconds: 1
+              env:
+              - name: LPU_RUN_SYSTEM_INIT
+                value: 'true'
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage

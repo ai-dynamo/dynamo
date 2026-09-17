@@ -680,7 +680,7 @@ func TestLPXMaterializationUsesOwnerSourceAndChildIdentity(t *testing.T) {
 func TestLPXReadableNamesSurviveServingComponentChanges(t *testing.T) {
 	t.Log("Publish a speculative engine with long deployment and component names")
 	_, source, registry := newLPXSpecDecodeTestDGD(t)
-	source.Name = "apaprotskyi-gpt-oss-20b-lp20-b300"
+	source.Name = "test-models-gpt-oss-20b-lp20-b300"
 	source.Spec.Components[0].ComponentName = "serving-component-with-name"
 	source.Spec.Components[1].ComponentName = "draft-component-with-name"
 	source.Spec.Components[1].Replicas = ptr.To(int32(1))
@@ -872,6 +872,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 	for _, scenario := range []struct {
 		name, componentName string
 		sharedDraft         bool
+		missingConductor    string
 		messages            []string
 	}{
 		{name: "invalid intent", messages: []string{
@@ -882,6 +883,10 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 			"spec.topologyConstraint: Forbidden:",
 			"spec.components[0].topologyConstraint: Forbidden:",
 		}},
+		{name: "missing conductor role", missingConductor: "role", messages: []string{"LPX components must declare exactly one conductor role"}},
+		{name: "missing conductor template", missingConductor: "podTemplate", messages: []string{"LPX conductor requires an explicit podTemplate"}},
+		{name: "shared draft missing conductor role", sharedDraft: true, missingConductor: "role", messages: []string{"LPX components must declare exactly one conductor role"}},
+		{name: "shared draft missing conductor template", sharedDraft: true, missingConductor: "podTemplate", messages: []string{"LPX conductor requires an explicit podTemplate"}},
 		{name: "disabled Grove", messages: []string{"Grove is disabled"}},
 		{name: componentProvider, messages: []string{"requires the Grove workload provider"}},
 		{name: "long serving name", componentName: strings.Repeat("serving-", 7) + "engine"},
@@ -903,6 +908,14 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 			component := lpx.ServingComponent(source)
 			if scenario.componentName != "" {
 				component.ComponentName = scenario.componentName
+			}
+			switch scenario.missingConductor {
+			case "role":
+				component.Roles = slices.DeleteFunc(component.Roles, func(role v1beta1.ComponentRoleSpec) bool {
+					return role.Name == v1beta1.ComponentRoleLPXConductor
+				})
+			case "podTemplate":
+				component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
 			}
 			switch scenario.name {
 			case "invalid intent":
@@ -940,6 +953,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 			}
 
 			t.Log("Reject unsupported intent before downloads and let valid names reach the download gate")
+			before := source.DeepCopy()
 			_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 			if scenario.name == componentProvider {
 				require.ErrorContains(t, err, "requires the Grove workload provider")
@@ -979,6 +993,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 			require.NoError(t, r.List(t.Context(), requests))
 			require.Empty(t, pcs.Items)
 			require.Empty(t, requests.Items)
+			require.Equal(t, before, source)
 		})
 	}
 }

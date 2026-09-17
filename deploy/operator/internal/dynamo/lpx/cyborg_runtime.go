@@ -30,7 +30,7 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
 	}
-	setContainerEnv(container, false, corev1.EnvVar{
+	setContainerEnv(container, corev1.EnvVar{
 		Name:  gbuildManifestPathEnv,
 		Value: filepath.Join(buildRoot, gbuildManifestV2CapnpFile),
 	})
@@ -39,7 +39,7 @@ func applyCyborgManifestPath(container *corev1.Container, projection *ModelProje
 
 // applyCyborgRuntimeIO projects the resolved split-I/O fanout into one Cyborg container.
 func applyCyborgRuntimeIO(container *corev1.Container, cyborgBatchSize int, ioFPGACount int32) {
-	setContainerEnv(container, false,
+	setContainerEnv(container,
 		corev1.EnvVar{Name: cyborgFpgaGpiIOFPGACountEnv, Value: strconv.FormatInt(int64(ioFPGACount), 10)},
 		corev1.EnvVar{
 			Name: cyborgFpgaGpiReplicaIndexEnv,
@@ -54,37 +54,13 @@ func applyCyborgRuntimeIO(container *corev1.Container, cyborgBatchSize int, ioFP
 // applyCyborgSWACacheIDs binds the replica index for an unbatched Cyborg container.
 func applyCyborgSWACacheIDs(container *corev1.Container, cyborgBatchSize int) {
 	if cyborgBatchSize == 1 {
-		setContainerEnv(container, false, corev1.EnvVar{
+		setContainerEnv(container, corev1.EnvVar{
 			Name: cyborgSwaCacheIDsEnv,
 			ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
 				FieldPath: grovePodCliquePodIndexPath,
 			}},
 		})
 	}
-}
-
-// wrapCyborgStartup prepares engine-local hosts and SWA IDs in one wrapper.
-func wrapCyborgStartup(container *corev1.Container, cyborgBatchSize int, configFile string) {
-	if cyborgBatchSize == 1 && configFile == "" {
-		return
-	}
-
-	args := make([]string, 0, 3+len(container.Command)+len(container.Args))
-	if configFile != "" {
-		args = append(args, "--expand-hosts")
-	}
-	if cyborgBatchSize > 1 {
-		args = append(args, "--swa-batch-ids")
-	}
-	args = append(args, "--")
-	if len(container.Command) == 0 {
-		args = append(args, "/usr/local/bin/cyborg")
-	} else {
-		args = append(args, container.Command...)
-	}
-	args = append(args, container.Args...)
-	container.Command = []string{"/usr/local/bin/cyborg-entrypoint"}
-	container.Args = args
 }
 
 // cyborgRuntimeIO requires a nonnil normalized build and validates its Cyborg replica domain.
@@ -125,15 +101,13 @@ func configuredCyborgBatchSize(container *corev1.Container, derived int) (int, e
 	return derived, nil
 }
 
-// setContainerEnv updates variables in order while optionally preserving the first existing value.
-func setContainerEnv(container *corev1.Container, preserveExisting bool, variables ...corev1.EnvVar) {
+// setContainerEnv updates the first matching variable or appends a new one.
+func setContainerEnv(container *corev1.Container, variables ...corev1.EnvVar) {
 variables:
 	for _, variable := range variables {
 		for index := range container.Env {
 			if container.Env[index].Name == variable.Name {
-				if !preserveExisting {
-					container.Env[index] = variable
-				}
+				container.Env[index] = variable
 				continue variables
 			}
 		}

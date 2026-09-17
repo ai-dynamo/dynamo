@@ -190,11 +190,11 @@ spec:
             - name: LPU_RUN_SYSTEM_INIT
               value: "true"
             - name: MPI_BTL_TCP_IF_INCLUDE
-              value: 7.241.144.0/24
+              value: 192.0.2.0/24
             - name: NATS_SERVER
               value: nats-address
             - name: OMPI_MCA_btl_tcp_if_include
-              value: 7.241.144.0/24
+              value: 192.0.2.0/24
             - name: POD_IP
               valueFrom:
                 fieldRef:
@@ -212,7 +212,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            image: nvcr.io/nvidia/ai-dynamo/lpu-runtime:v2
+            image: example.invalid/lpu-runtime:test
             name: agent
             readinessProbe:
               failureThreshold: 3
@@ -320,8 +320,11 @@ spec:
           - args:
             - --agent-env-vars
             - EXTRA_RUNTIME_KNOB
-            - --agent-path
-            - /bin/agent
+            - --mpirun-path
+            - /bin/mpirun
+            - --mpi-ssh-cmd
+            - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+              -i /tmp/dynamo-lpu-ssh/private.key
             - --agent-wd
             - /tmp
             - --conductor-bind-host
@@ -336,21 +339,12 @@ spec:
             - /configs/model_config.toml
             - --json-logs
             - --disable-tracing
-            - --mpirun-path
-            - /bin/mpirun
-            - --mpi-ssh-cmd
-            - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-              -i /tmp/dynamo-lpu-ssh/private.key
             - --mpi-use-tcp
-            - --allocation
-            - agt
             - --agent-disable-auto-restart
             - --agent-server-max-retries
             - "60"
             - --agent-server-retry-sleep-dur
             - 2s
-            - --controlplane-start-port
-            - "12345"
             - --graceful-shutdown-timeout
             - 0s
             - --response-timeout
@@ -359,10 +353,10 @@ spec:
             - dynamo
             - --endpoint-id
             - dyn://$(DYN_NAMESPACE).backend.generate
-            - --request-plane
-            - tcp
             - --store-backend
             - kubernetes
+            - --allocation
+            - $(LPX_ALLOCATION)
             command:
             - /bin/nova
             env:
@@ -378,8 +372,10 @@ spec:
               value: inference-engine
             - name: ETCD_ENDPOINTS
               value: etcd-address
+            - name: LPX_ALLOCATION
+              value: agt
             - name: MPI_BTL_TCP_IF_INCLUDE
-              value: 7.241.144.0/24
+              value: 192.0.2.0/24
             - name: NATS_SERVER
               value: nats-address
             - name: OMPI_ALLOW_RUN_AS_ROOT
@@ -387,7 +383,7 @@ spec:
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
               value: "1"
             - name: OMPI_MCA_btl_tcp_if_include
-              value: 7.241.144.0/24
+              value: 192.0.2.0/24
             - name: OMPI_MCA_plm_rsh_args
               value: -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
                 -o IdentityFile=/tmp/dynamo-lpu-ssh/private.key
@@ -408,7 +404,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-            image: nvcr.io/nvidia/ai-dynamo/lpu-runtime:v2
+            image: example.invalid/lpu-runtime:test
             name: conductor
             readinessProbe:
               failureThreshold: 3
@@ -442,7 +438,7 @@ spec:
             - /tmp/dynamo-lpu-ssh/private.key
             command:
             - /bin/install
-            image: nvcr.io/nvidia/ai-dynamo/lpu-runtime:v2
+            image: example.invalid/lpu-runtime:test
             name: prepare-ssh-key
             resources: {}
             securityContext:

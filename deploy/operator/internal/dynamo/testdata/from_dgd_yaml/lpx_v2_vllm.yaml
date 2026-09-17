@@ -233,30 +233,30 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                    - c1r1-lpu1
-                    - c1r1-lpu2
-                    - c1r1-lpu3
-                    - c1r1-lpu4
-                    - c1r1-lpu5
-                    - c1r1-lpu6
-                    - c1r1-lpu7
-                    - c1r1-lpu8
-                    - c1r2-lpu1
-                    - c1r2-lpu2
-                    - c1r2-lpu3
-                    - c1r2-lpu4
-                    - c1r2-lpu5
-                    - c1r2-lpu6
-                    - c1r2-lpu7
-                    - c1r2-lpu8
-                    - c1r7-lpu1
-                    - c1r7-lpu2
-                    - c1r7-lpu3
-                    - c1r7-lpu4
-                    - c1r7-lpu5
-                    - c1r7-lpu6
-                    - c1r7-lpu7
-                    - c1r7-lpu8
+                    - lpu-node-01
+                    - lpu-node-02
+                    - lpu-node-03
+                    - lpu-node-04
+                    - lpu-node-05
+                    - lpu-node-06
+                    - lpu-node-07
+                    - lpu-node-08
+                    - lpu-node-09
+                    - lpu-node-10
+                    - lpu-node-11
+                    - lpu-node-12
+                    - lpu-node-13
+                    - lpu-node-14
+                    - lpu-node-15
+                    - lpu-node-16
+                    - lpu-node-17
+                    - lpu-node-18
+                    - lpu-node-19
+                    - lpu-node-20
+                    - lpu-node-21
+                    - lpu-node-22
+                    - lpu-node-23
+                    - lpu-node-24
           containers:
           - args:
             - -c
@@ -333,7 +333,7 @@ spec:
                   name: dgd-lpx-v2-vllm-94cd-lpu-d73a69201a8e19d2
             - name: UCX_TLS
               value: tcp
-            image: us-docker.pkg.dev/nv-hwlpu-20260103060253/lpu-monorepo/agent-hybrid-v2:steved-1node.dfefd5a16f
+            image: example.invalid/lpu-runtime:test
             name: agent
             readinessProbe:
               failureThreshold: 6
@@ -456,12 +456,9 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                    - c1v2-b300n1-nic1
+                    - gpu-node-0
           containers:
           - args:
-            - --expand-hosts
-            - --
-            - /usr/local/bin/cyborg
             - --dynamo-model-name
             - meta-llama/Llama-3.2-1B-Instruct
             - --model-card
@@ -473,6 +470,9 @@ spec:
             - "16"
             command:
             - /usr/local/bin/cyborg-entrypoint
+            - --expand-hosts
+            - --
+            - /usr/local/bin/cyborg
             env:
             - name: CYBORG_BATCH_SIZE
               value: "1"
@@ -543,7 +543,7 @@ spec:
                   name: dgd-lpx-v2-vllm-94cd-decode-3aba9d08778da54a
             - name: TOTAL_REPLICAS
               value: "1"
-            image: us-docker.pkg.dev/nv-hwlpu-20260103060253/cyborg/cyborg:build-862
+            image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1
               httpGet:
@@ -773,7 +773,7 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: In
                     values:
-                    - c1v2-b300n1-nic1
+                    - gpu-node-0
           containers:
           - args:
             - --model

@@ -32,6 +32,27 @@ spec:
               - /opt/gpu-runtime
               args:
               - serve
+              startupProbe:
+                failureThreshold: 720
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 5
+              readinessProbe:
+                failureThreshold: 3
+                httpGet:
+                  path: /health
+                  port: system
+                periodSeconds: 10
+                timeoutSeconds: 4
+              livenessProbe:
+                failureThreshold: 1
+                httpGet:
+                  path: /live
+                  port: system
+                periodSeconds: 5
+                timeoutSeconds: 4
               volumeMounts:
               - {name: model-storage, mountPath: /nfs}
               resources:
@@ -46,11 +67,41 @@ spec:
             - name: main
               image: example.invalid/lpu-runtime:test
               args:
-              - --instance-model-name
-              - test/v3-hybrid
+              - start
               resources:
                 limits:
                   lpu.nvidia.com/devices: '1'
+              command:
+              - /bin/hydra-entrypoint
+              startupProbe:
+                exec:
+                  command:
+                  - /bin/hydra-entrypoint
+                  - ready
+                failureThreshold: 240
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              readinessProbe:
+                exec:
+                  command:
+                  - /bin/hydra-entrypoint
+                  - ready
+                failureThreshold: 6
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              env:
+              - name: GLUE_RDMA_PATH_MTU
+                value: '1024'
+              - name: NIC_NAME
+                value: mlx5_0
+              - name: UCX_TLS
+                value: tcp
+              - name: RDMA_PORT
+                value: '19877'
+              - name: READINESS_PORT
+                value: '19878'
               volumeMounts:
               - mountPath: /nfs
                 name: model-storage

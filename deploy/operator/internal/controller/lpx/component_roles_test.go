@@ -18,25 +18,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestLPXRoleDependenciesIncludeDraftAndConductorFallback(t *testing.T) {
-	t.Log("Give both components consumed Agent claims while the target conductor uses its Agent fallback")
+func TestLPXRoleDependenciesIncludeDraftAndConductor(t *testing.T) {
+	t.Log("Give both components consumed Agent claims and the conductor its own dependency")
 	source := newLPXSpecDecodeTestSource()
-	lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate = nil
 	for _, component := range lpx.Components(source) {
 		pod := &component.ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec
 		pod.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To(component.ComponentName + "-gpu")}}
 		pod.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
 	}
-	require.Nil(t, lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate)
-	before := source.DeepCopy()
-	require.ElementsMatch(t, []string{"draft-gpu", "lpx-gpu"}, lpxDRAClaimReferences(true)(source))
-	require.Equal(t, before, source)
-
-	t.Log("An independent conductor template contributes its own consumed dependency")
 	conductor := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor)
-	conductor.PodTemplate = lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.DeepCopy()
-	conductor.PodTemplate.Spec.ResourceClaims[0].ResourceClaimTemplateName = ptr.To("conductor-gpu")
+	conductor.PodTemplate.Spec.ResourceClaims = []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To("conductor-gpu")}}
+	conductor.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
+	before := source.DeepCopy()
+
+	t.Log("Index each authored role's consumed claim without modifying the source")
 	require.ElementsMatch(t, []string{"draft-gpu", "lpx-gpu", "conductor-gpu"}, lpxDRAClaimReferences(true)(source))
+	require.Equal(t, before, source)
 }
 
 func TestSpecDecodeStatusCountsCompleteDraftInstances(t *testing.T) {

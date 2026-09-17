@@ -61,7 +61,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="lpx" type="LPXConfig">
   DGD-only configuration for a `type: lpx` component; omitted from the standalone DCD schema. Set the required `buildId` and optional build `settings`. See [LPXConfig](full-api-reference.mdx#lpxconfig) for the full field set.
 
-  Supported modes are LPU, hybrid, and LPU draft with LPU target. Declare one complete component, or separate speculative draft and target components. The draft has only an `agent` role; the target has `conductor` and `agent` roles. Component names are arbitrary. All LPX components in a DGD share one LPX deployment and PodCliqueSet, separate from ordinary components.
+  Supported modes are LPU, hybrid, and LPU draft with LPU target. Every LPX graph requires exactly one explicit `conductor` role and template. A single LPX component declares both `conductor` and `agent` roles. In speculative decoding, the draft has only an `agent` role; the target declares both roles. Component names are arbitrary. All LPX components in a DGD share one LPX deployment and PodCliqueSet, separate from ordinary components.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -73,7 +73,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
   Pod template for the component's pods. The operator injects its defaults (image, command, env, ports, probes, resources, volume mounts) into the container named `main`, merging your overrides by name. If no `main` container is present, the operator generates one. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
-  For `type: lpx`, omit this field and use `roles[].podTemplate`. Each supplied LPX template requires an explicit `main` container image; see `roles` below for conductor-template fallback.
+  For `type: lpx`, omit this field and use `roles[].podTemplate`. Every LPX role requires its own template with an explicit `main` container image.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
@@ -91,7 +91,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="roles" type="[]ComponentRoleSpec">
   Named Pod-producing parts of a compound component, keyed by `name`. Multinode components must contain exactly one `leader` and one `worker`; omitted role counts default to `1` and `multinode.nodeCount - 1`, respectively. Omit the field to retain the implicit leader/worker layout.
 
-  LPX components use `agent` for Agent Pods and `conductor` for the conductor. With one LPX component, the conductor role is optional. In a speculative pair, the draft has only an agent role and the target declares both roles. Hybrid execution may also create Nova Pods from Agent configuration.
+  LPX components use `agent` for Agent Pods and `conductor` for the serving runtime. Exactly one LPX component in the graph must declare a conductor role with an explicit template. In a speculative pair, the draft has only an agent role and the target declares both roles. A hybrid engine's GPU runtime uses the conductor template.
 
   Standalone DCD roles cannot use LPX templates or DGD-only provider overrides. See [ComponentRoleSpec](full-api-reference.mdx#componentrolespec).
 </ParamField>
@@ -104,7 +104,9 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Logical cardinality of this role in one complete component instance; minimum `1`. For ordinary multinode components, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape. For LPX, omitted conductor replicas use `1`, subject to runtime-specific limits. Agent replicas are derived from the model build; an explicit count must match the build.
   </ParamField>
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-    Native Pod template for this role. LPX-only; required for the agent. Each supplied template requires a `main` container with an explicit image. An omitted conductor template reuses the same component's agent template; a single LPX component also uses this fallback when its conductor role is omitted. A speculative pair uses the target's conductor. An explicit conductor template merges with shared defaults independently, without inheriting the agent template.
+    Native Pod template for this role. LPX-only; required for every declared role. Each template requires a `main` container with an explicit image. Agent and conductor templates are independent.
+
+    For LP20 and LP30, the template owns runtime commands, static arguments and environment settings, init containers, health probes, and startup storage. It may use the image's entrypoint or supply `command`. The operator retains device-access security requirements and supplies generated configuration, model and hardware bindings, and `LPX_ALLOCATION` for the LPU conductor. A Nova template consumes that value through its authored `--allocation` argument. See [Deploy with DGD](../../kubernetes/model-deployment/deploy-with-dgd.md) for security-context overrides, role structure, and runtime examples.
 
     <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
   </ParamField>
