@@ -64,7 +64,7 @@ SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 1 "${DYN_SYSTEM_PORT:-8081}")
 SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 2 8082)
 NIXL_PORT_DECODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 5600)
 NIXL_PORT_PREFILL=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 20097)
-KV_PORT_PREFILL=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 20081)
+KV_PORT_PREFILL=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${DYN_VLLM_KV_EVENT_PORT:-20081}")
 
 # run decode worker with metrics on port 8081
 # --enforce-eager is added for quick deployment. for production use, need to remove this flag
