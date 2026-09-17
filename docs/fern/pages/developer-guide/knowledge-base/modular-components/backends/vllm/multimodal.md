@@ -63,16 +63,16 @@ The aggregated vLLM worker can load an author-provided vision tower in process, 
 
 ## Multimodal KV Routing
 
-vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the same image identity so requests can be placed on workers that already cache the image's KV blocks.
+vLLM supports two multimodal KV-routing paths. Both give the router and vLLM the same media identity so requests can be placed on workers that already cache the image or video's KV blocks.
 
 ### Choose a Routing Path
 
 | Consideration | Default Rust Frontend | Python Chat Processor |
 |---------------|-----------------------|-----------------------|
-| Frontend work | Hashes media and calculates the routing token layout | Runs vLLM's full Hugging Face multimodal processor |
+| Frontend work | Hashes media and calculates the routing token layout; exact video routing also samples and decodes the video | Runs vLLM's full Hugging Face multimodal processor |
 | Worker work | Processes the original multimodal input | Consumes processed `mm_kwargs` when transfer succeeds |
 | Model coverage | Models registered in Dynamo's `llm-multimodal` registry | Models supported by vLLM's multimodal processor |
-| Data sent to worker | Original media reference plus `mm_hashes` | Processed inputs over shared memory or NIXL, with media fallback when available |
+| Data sent to worker | Original image reference or frontend-decoded media, plus modality-grouped hashes | Processed inputs over shared memory or NIXL, with media fallback when available |
 | Best fit | Lowest frontend overhead for a registered model | Broader model coverage or centralized preprocessing |
 
 Start with the default path when the model is in Dynamo's Rust registry. It avoids running the full Hugging Face processor in the frontend and does not require a processed-input transfer channel.
@@ -83,13 +83,15 @@ Use the Python chat processor when the Rust registry does not recognize the mode
 
 The default path keeps multimodal processing on the worker:
 
-1. The frontend computes an `mm_hash` for each image.
-2. A model-specific processor specification resolves the image placeholder and calculates its expanded token count.
+1. The frontend computes an `mm_hash` for each supported media object.
+2. A model-specific processor specification resolves the media placeholder and calculates its expanded token layout.
 3. The frontend expands the placeholder in a routing-only token view and builds per-block multimodal metadata.
 4. The KV router credits that overlap in its combined prefill-and-decode cost and selects the lowest-cost eligible worker.
-5. The frontend forwards `mm_hashes`, which the worker passes to vLLM as `multi_modal_uuids`.
+5. The frontend forwards image hashes through `mm_hashes` and grouped image/video hashes through `mm_hashes_by_modality`. The worker passes them to vLLM as `multi_modal_uuids`.
 
 By default, the frontend hashes the exact full URI: the complete `data:` URI string or the HTTP URL including its query string. Set `--frontend-decoding` on the worker to register frontend media decoding and use decoded image content as the hash input. Content-addressed hashing lets different URLs for identical image bytes share a routing key.
+
+Exact video routing on this path requires `--frontend-decoding`. The frontend hashes sampled RGB frames and their model-visible metadata, then uses a model adapter to reproduce the worker's prompt expansion. Supported adapters cover Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. See [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md#video-identity-and-token-layout) for setup, verification, and fallback behavior.
 
 Launch the default path:
 
@@ -106,18 +108,18 @@ Key settings:
 | `NUM_WORKERS` | `2` | Number of backend workers |
 | `BLOCK_SIZE` | `16` | Shared frontend and worker KV block size |
 | `GPU_MEMORY_UTILIZATION` | `0.20` | Per-worker GPU memory fraction |
-| `VLLM_EXTRA_ARGS` | unset | Additional worker flags; set `--frontend-decoding` for content-addressed image hashes |
+| `VLLM_EXTRA_ARGS` | unset | Additional worker flags; set `--frontend-decoding` for content-addressed image hashes and exact video routing |
 
 ### Python Chat Processor
 
-Use the Python path when the model is supported by vLLM but not by the Rust model registry, or when the frontend should preprocess images:
+Use the Python path when the model is supported by vLLM but not by the Rust model registry, or when the frontend should preprocess media:
 
 ```bash
 cd $DYNAMO_HOME
 bash examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh
 ```
 
-This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging Face processor, extracts hashes and expanded multimodal inputs, builds routing metadata, and transfers processed `mm_kwargs` to the selected worker. This path supports any VLM handled by vLLM's multimodal processor.
+This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging Face processor, extracts hashes and expanded multimodal inputs for images and videos, builds routing metadata, and transfers processed `mm_kwargs` to the selected worker. This path supports models handled by vLLM's multimodal processor.
 
 `DYNAMO_MM_TRANSFER` selects the transfer mechanism:
 

@@ -40,6 +40,7 @@ from dynamo.sglang._compat import (
     resolved_server_args,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -112,6 +113,8 @@ def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
     """Return the worker role when the selected path does not create an FPM relay."""
     if is_snapshot_enabled():
         return "snapshot"
+    if dynamo_config.rerank_worker:
+        return "rerank"
     if dynamo_config.embedding_worker:
         return "embedding"
     if (
@@ -441,6 +444,16 @@ async def parse_args(args: list[str]) -> Config:
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
 
+    # Read off the parsed flags rather than ServerArgs: ServerArgs.from_cli_args
+    # downloads the model, and the diffusion and video paths build a stub that
+    # carries neither flag, so both would leave this unchecked. parsed_args
+    # comes from ServerArgs.add_cli_args, which declares both options across
+    # the supported SGLang releases.
+    check_elastic_ep_backend(
+        parsed_args.elastic_ep_backend,
+        parsed_args.enable_dp_attention,
+    )
+
     # Dynamo argument processing
     # If an endpoint is provided, validate and use it
     # otherwise fall back to default endpoints
@@ -450,9 +463,14 @@ async def parse_args(args: list[str]) -> Config:
     if dynamo_config.enable_multimodal:
         parsed_args.enable_multimodal = True
 
-    # If --embedding-worker is set, also set SGLang's --is-embedding flag
-    if dynamo_config.embedding_worker:
+    # Both dedicated pooling modes use SGLang's embedding engine.
+    if dynamo_config.embedding_worker or dynamo_config.rerank_worker:
         parsed_args.is_embedding = True
+    if dynamo_config.rerank_worker and (
+        parsed_args.disaggregation_mode != "null"
+        or getattr(parsed_args, "dllm_algorithm", None)
+    ):
+        raise ValueError("--rerank-worker requires aggregated cross-encoder serving")
 
     # Enable encoder_only mode for multimodal encode workers to load only vision encoder
     # This significantly reduces memory usage by avoiding loading the full LLM weights
@@ -461,7 +479,9 @@ async def parse_args(args: list[str]) -> Config:
 
     endpoint = dynamo_config.endpoint
     if endpoint is None:
-        if dynamo_config.embedding_worker:
+        if dynamo_config.rerank_worker:
+            endpoint = f"dyn://{namespace}.rerank.generate"
+        elif dynamo_config.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
         elif dynamo_config.image_diffusion_worker:
             endpoint = f"dyn://{namespace}.backend.generate"

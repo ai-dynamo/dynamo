@@ -10,10 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dynamo_kv_router::{
-    DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
-    protocols::RoutingConstraints,
-};
+use dynamo_kv_router::{config::KvRouterConfig, protocols::RoutingConstraints};
+
+use crate::kv_router::SelectionPolicySource;
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Client, Instance},
@@ -94,7 +93,7 @@ fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
 fn selector_state_remains_owned_by_the_scheduler_actor() {
     fn assert_send_sync<T: Send + Sync>() {}
 
-    assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
+    assert_send_sync::<RoutingHost>();
 }
 
 #[test]
@@ -126,8 +125,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
         .await
         .unwrap();
-    let host =
-        RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context.clone()).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context.clone()).unwrap();
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -139,7 +137,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -154,7 +152,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
     assert_eq!(host.inner.occupancy_for_test(1), 1);
-    let mut guard: RequestGuard<DefaultWorkerSelector> = RequestGuard::new_builtin(
+    let mut guard: RequestGuard = RequestGuard::new_builtin(
         Arc::clone(&host.request_metrics),
         selection.worker_id,
         Some(selection.reservation),
@@ -188,7 +186,7 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .unwrap();
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -228,14 +226,11 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
     let inner = PushRouter::from_client(client, RouterMode::Direct)
         .await
         .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let (host, _) = builtin_host_with_affinity(
         inner,
         load_context,
-        Some(affinity),
         crate::session_affinity::SessionAffinityMode::Hard,
-    )
-    .unwrap();
+    );
 
     let error = host
         .generate(affinity_request("direct-unbound", None))
@@ -275,14 +270,11 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     )
     .await
     .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let (host, _) = builtin_host_with_affinity(
         inner,
         load_context,
-        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Soft,
-    )
-    .unwrap();
+    );
     let session_id = SessionAffinityId::new("direct-soft-bound");
     bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
 
@@ -361,26 +353,14 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     )
     .await
     .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let (host, affinity) = builtin_host_with_affinity(
         inner,
         load_context,
-        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Hard,
-    )
-    .unwrap();
+    );
 
     let session_id = SessionAffinityId::new("local-inhibition");
-    let AffinityAcquire::Initialize(initializer) =
-        affinity.acquire(&session_id, None).await.unwrap()
-    else {
-        panic!("new affinity session must initialize");
-    };
-    drop(
-        initializer
-            .commit(AffinityTarget::worker(worker_id))
-            .unwrap(),
-    );
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(worker_id)).await;
 
     client.report_instance_down(worker_id);
     assert!(client.instance_ids().contains(&worker_id));
@@ -441,11 +421,10 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
+    let host = RoutingHost::new_builtin_with_capabilities(
         inner,
         load_context,
         None,
-        crate::session_affinity::SessionAffinityMode::Hard,
         Some((filter, Arc::clone(&estimator))),
     )
     .unwrap();
@@ -455,6 +434,7 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
 
     let mut adapter_request = request();
     adapter_request.routing_mut().lora_name = Some("adapter".to_string());
+    adapter_request.routing_mut().backend_instance_id = Some(stale_worker);
     let mut adapter_stream = host.generate(Context::new(adapter_request)).await.unwrap();
     assert_eq!(estimator.get_inflight_counts().get("adapter"), Some(&1));
     while adapter_stream.next().await.is_some() {}
@@ -518,14 +498,11 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         )
         .await
         .unwrap();
-        let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+        let (host, affinity) = builtin_host_with_affinity(
             inner,
             load_context,
-            Some(affinity.clone()),
             crate::session_affinity::SessionAffinityMode::Hard,
-        )
-        .unwrap();
+        );
         let session_id = format!("session-{index}");
         let affinity_id = SessionAffinityId::new(session_id.clone());
         let explicit_worker = (mode == RouterMode::Direct).then_some(worker_id);
@@ -577,7 +554,7 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let request = Context::new(request());
 
     let hard = host
@@ -600,7 +577,7 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
 
 #[tokio::test]
 #[serial_test::serial]
-async fn builtin_direct_fallback_stays_disabled_for_affinity() {
+async fn builtin_direct_distinguishes_unknown_requests_from_stale_affinity() {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -625,45 +602,44 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     )
     .await
     .unwrap();
-    let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let (host, affinity) = builtin_host_with_affinity(
         inner,
         load_context,
-        Some(affinity.clone()),
         crate::session_affinity::SessionAffinityMode::Hard,
-    )
-    .unwrap();
+    );
 
     let mut standalone = request();
     standalone.routing_mut().backend_instance_id = Some(stale_worker);
-    let mut stream = host.generate(Context::new(standalone)).await.unwrap();
+    let error = host.generate(Context::new(standalone)).await.unwrap_err();
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+
+    let session_id = SessionAffinityId::new("direct-affinity");
+    bind_affinity_target(&host, &session_id, AffinityTarget::worker(stale_worker)).await;
+    let error = host
+        .generate(affinity_request("direct-affinity", None))
+        .await
+        .unwrap_err();
+    assert!(!match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
+
+    let mut valid = request();
+    valid.routing_mut().backend_instance_id = Some(real_worker);
+    let mut stream = host.generate(Context::new(valid)).await.unwrap();
     while stream.next().await.is_some() {}
     assert_eq!(
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[real_worker]
     );
-
-    let session_id = SessionAffinityId::new("direct-affinity");
-    let AffinityAcquire::Initialize(initializer) =
-        affinity.acquire(&session_id, None).await.unwrap()
-    else {
-        panic!("new affinity session must initialize");
-    };
-    drop(
-        initializer
-            .commit(AffinityTarget::worker(stale_worker))
-            .unwrap(),
-    );
-    assert!(
-        host.generate(affinity_request("direct-affinity", Some(stale_worker)))
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        dispatch.worker_ids.lock().unwrap().as_slice(),
-        &[real_worker]
-    );
-    assert_eq!(affinity.query_target(&session_id, None).unwrap(), None);
 
     drop(host);
     runtime.shutdown();
@@ -694,7 +670,7 @@ async fn terminal_item_does_not_skip_transport_eof() {
         Arc::clone(&router.request_metrics),
         "terminal-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -763,7 +739,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         Arc::clone(&router.request_metrics),
         "shutdown-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -809,7 +785,7 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         Arc::clone(&router.request_metrics),
         "client-cancelled-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -847,7 +823,7 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         Arc::clone(&router.request_metrics),
         "shutdown-drain-deadline".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -902,7 +878,7 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
         Arc::clone(&router.request_metrics),
         "drain-window-armed".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -948,7 +924,7 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         Arc::clone(&router.request_metrics),
         "starvation-guard".to_string(),
         WorkerWithDpRank::from_worker_id(0),
-        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        None,
         &request(),
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -970,6 +946,27 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
 
     drop(router);
     runtime.shutdown();
+}
+
+/// The selection future is nested inside every request future (deeper still
+/// on the disaggregated path). A debug build once overflowed a worker stack
+/// when this grew and `await_with_cleanup_policy` held it by value; keep it
+/// small enough that nesting stays cheap.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_selection_future_stays_small() {
+    let (router, _runtime) = router_with_workers(None, &[1]).await;
+    let request = Context::with_id_and_metadata(
+        request(),
+        "selection-future-size".to_string(),
+        Default::default(),
+    );
+    let budget = CleanupBudget::default();
+    let future = router.select_with_affinity(&request, RequestPhase::Aggregated, false, &budget);
+    let size = std::mem::size_of_val(&future);
+    drop(future);
+    eprintln!("kv selection future size: {size} bytes");
+    assert!(size < 16 * 1024, "kv selection future is {size} bytes");
 }
 
 /// Transport EOF ends the drain and releases the booking.
@@ -1156,6 +1153,7 @@ async fn router_with_worker_configs(
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
+    // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
         .unwrap();
@@ -1180,7 +1178,7 @@ async fn router_with_worker_configs(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        SelectionPolicySource::Registry,
         Some(config),
         None,
         "decode",
@@ -1194,7 +1192,9 @@ async fn router_with_worker_configs(
     let inner = PushRouter::from_client(client, RouterMode::KV)
         .await
         .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    let mut router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    // Parallel tests must not share the process-global request counters.
+    router.request_metrics = router.request_metrics.with_isolated_counters_for_test();
     router
         .inner
         .client
@@ -1284,7 +1284,7 @@ async fn router_with_recorded_dispatch_and_affinity(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        crate::kv_router::SelectionPolicySource::Registry,
         Some(config),
         None,
         "decode",
@@ -1405,54 +1405,67 @@ async fn track_request(
     (request, selection, guard)
 }
 
+/// Scheduler-reported loads with no prompt, the way the reservation tests read them.
+async fn potential_loads(router: &RoutingHost) -> Vec<dynamo_kv_router::protocols::PotentialLoad> {
+    router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap()
+}
+
+fn active_requests_for(
+    loads: &[dynamo_kv_router::protocols::PotentialLoad],
+    worker_id: u64,
+    dp_rank: u32,
+) -> usize {
+    loads
+        .iter()
+        .find(|load| load.worker_id == worker_id && load.dp_rank == dp_rank)
+        .expect("selected worker must be reported")
+        .active_requests
+}
+
+/// Preview and admit one decode route, the two stages the plan tests exercise.
+async fn plan_decode_route(
+    router: &RoutingHost,
+    request: &Context<PreprocessedRequest>,
+) -> RoutePlan {
+    let preview = router
+        .preview_kv_route(request, RequestPhase::Decode)
+        .await
+        .expect("decode preview should select one request");
+    router
+        .plan_kv_route_from_preview(request, preview)
+        .await
+        .expect("decode plan should admit one request")
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
-    let preview = router
-        .preview_kv_route(&request, RequestPhase::Decode)
-        .await
-        .expect("decode preview should select one request");
-    let plan = router
-        .plan_kv_route_from_preview(&request, preview)
-        .await
-        .expect("decode plan should admit one request");
-    assert_eq!(plan.signals().worker.worker_id, 7);
+    let plan = plan_decode_route(&router, &request).await;
+    assert_eq!(plan.signals.worker.worker_id, 7);
     assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before,
+        router.request_metrics.requests_started_total.get(),
+        0,
         "a topology decision is not a started request"
     );
-    let admitted_loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        admitted_loads
-            .iter()
-            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
-            .expect("selected worker must be reported")
-            .active_requests,
-        1
-    );
+    let admitted_loads = potential_loads(&router).await;
+    assert_eq!(active_requests_for(&admitted_loads, 7, 0), 1);
 
     plan.abort().await;
-    let released_loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let released_loads = potential_loads(&router).await;
     assert!(
         released_loads.iter().all(|load| load.active_requests == 0),
         "abandoned plans must release their scheduler reservation: {released_loads:?}"
     );
     assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before,
+        router.request_metrics.requests_started_total.get(),
+        0,
         "an abandoned plan must not count as a started request"
     );
 
@@ -1465,23 +1478,15 @@ async fn route_plan_from_preview_holds_and_releases_the_decode_reservation() {
 async fn route_preview_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     let preview = router
         .preview_kv_route(&request, RequestPhase::Decode)
         .await
         .expect("decode preview should select one request");
-    assert_eq!(preview.signals().worker.worker_id, 7);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    assert_eq!(preview.signals.worker.worker_id, 7);
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
 
     drop(router);
     runtime.shutdown();
@@ -1496,27 +1501,16 @@ async fn route_plan_from_preview_admits_the_previewed_worker() {
         .preview_kv_route(&request, RequestPhase::Decode)
         .await
         .unwrap();
-    let previewed_worker = preview.signals().worker;
+    let previewed_worker = preview.signals.worker;
 
     let plan = router
         .plan_kv_route_from_preview(&request, preview)
         .await
         .unwrap();
-    assert_eq!(plan.signals().worker, previewed_worker);
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    assert_eq!(plan.signals.worker, previewed_worker);
+    let loads = potential_loads(&router).await;
     assert_eq!(
-        loads
-            .iter()
-            .find(|load| {
-                load.worker_id == previewed_worker.worker_id
-                    && load.dp_rank == previewed_worker.dp_rank
-            })
-            .expect("previewed worker must be reported")
-            .active_requests,
+        active_requests_for(&loads, previewed_worker.worker_id, previewed_worker.dp_rank),
         1
     );
     assert_eq!(
@@ -1549,7 +1543,7 @@ async fn route_preview_does_not_acquire_session_affinity() {
     .await
     .expect("preview must not leave affinity initialization pending")
     .unwrap();
-    assert!(matches!(acquisition, AffinityAcquire::Initialize(_)));
+    assert!(matches!(acquisition, Hold::Initialize(_)));
     drop(acquisition);
 
     drop(router);
@@ -1560,27 +1554,12 @@ async fn route_preview_does_not_acquire_session_affinity() {
 #[serial_test::serial]
 async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
     let (router, runtime) = router(None).await;
-    let requests_started_before = router.request_metrics.requests_started_total().get();
     let request = Context::new(request());
-    let preview = router
-        .preview_kv_route(&request, RequestPhase::Decode)
-        .await
-        .unwrap();
-    let plan = router
-        .plan_kv_route_from_preview(&request, preview)
-        .await
-        .unwrap();
+    let plan = plan_decode_route(&router, &request).await;
 
     assert!(router.dispatch_kv_plan(request, plan).await.is_err());
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before + 1
-    );
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    assert_eq!(router.request_metrics.requests_started_total.get(), 1);
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
 
     drop(router);
@@ -1592,19 +1571,11 @@ async fn planned_dispatch_transfers_the_reservation_to_request_cleanup() {
 async fn prefill_busy_probe_does_not_admit_a_request() {
     let (router, runtime) = router(None).await;
     let request = Context::new(request());
-    let requests_started_before = router.request_metrics.requests_started_total().get();
 
     assert!(!router.prefill_worker_busy(&request, 0.5).await.unwrap());
-    let loads = router
-        .kv_router()
-        .get_potential_loads(&[], None, None, None, None)
-        .await
-        .unwrap();
+    let loads = potential_loads(&router).await;
     assert!(loads.iter().all(|load| load.active_requests == 0));
-    assert_eq!(
-        router.request_metrics.requests_started_total().get(),
-        requests_started_before
-    );
+    assert_eq!(router.request_metrics.requests_started_total.get(), 0);
 
     drop(router);
     runtime.shutdown();
@@ -1636,7 +1607,7 @@ async fn aborted_route_plan_drops_pending_affinity_initialization() {
     .await
     .expect("abandoned plan must not leave affinity initialization pending")
     .unwrap();
-    assert!(matches!(acquisition, AffinityAcquire::Initialize(_)));
+    assert!(matches!(acquisition, Hold::Initialize(_)));
     drop(acquisition);
 
     drop(router);
@@ -1657,8 +1628,6 @@ async fn session_affinity_disabled_does_not_create_coordinator() {
 async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let (router, runtime) = router(None).await;
     let metrics = router.request_metrics.clone();
-    let started_before = metrics.requests_started_total().get();
-    let completed_before = metrics.requests_total.get();
 
     let controller = Controller::new("pre-admission-cancellation".to_string());
     controller.stop();
@@ -1674,23 +1643,39 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             .await
             .is_err()
     );
-    assert_eq!(metrics.requests_started_total().get(), started_before);
+    assert_eq!(metrics.requests_started_total.get(), 0);
 
     let (_, _, mut query_guard) = track_request(&router, true).await;
     query_guard.abort().await;
     drop(query_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before);
+    assert_eq!(metrics.requests_started_total.get(), 0);
 
-    let (_, _, mut cancelled_guard) = track_request(&router, false).await;
+    let (_, selection, mut cancelled_guard) = track_request(&router, false).await;
 
-    assert_eq!(metrics.requests_started_total().get(), started_before + 1);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 1);
+    assert_eq!(metrics.requests_total.get(), 0);
+    // The booking is held from admission until the guard finishes.
+    let loads = potential_loads(&router).await;
+    assert_eq!(
+        loads
+            .iter()
+            .find(|load| load.worker_id == selection.worker.worker_id)
+            .expect("tracked worker must be reported")
+            .active_requests,
+        1,
+        "a tracked request stays booked while its guard is live: {loads:?}"
+    );
 
     // Admission remains counted even when the request aborts before dispatch.
     cancelled_guard.abort().await;
     drop(cancelled_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 1);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 1);
+    assert_eq!(metrics.requests_total.get(), 0);
+    let loads = potential_loads(&router).await;
+    assert!(
+        loads.iter().all(|load| load.active_requests == 0),
+        "an aborted guard frees its booking: {loads:?}"
+    );
 
     let mut failed_input = request();
     failed_input.migration_state = Some(Default::default());
@@ -1728,28 +1713,34 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             .is_err()
     );
     assert_eq!(migration_state.excluded_worker_ids(), vec![failed_worker]);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 2);
-    assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(metrics.requests_started_total.get(), 2);
+    assert_eq!(metrics.requests_total.get(), 0);
 
     let (_, _, mut completed_guard) = track_request(&router, false).await;
     completed_guard.start_dispatch("aggregated");
     completed_guard.mark_dispatched();
     completed_guard.finish().await;
     drop(completed_guard);
-    assert_eq!(metrics.requests_started_total().get(), started_before + 3);
-    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(metrics.requests_started_total.get(), 3);
+    assert_eq!(metrics.requests_total.get(), 1);
 
-    let mut builtin_guard = RequestGuard::<DefaultWorkerSelector>::new_builtin(
-        Arc::clone(&metrics),
-        7,
-        None,
-        None,
-        &request(),
-    );
-    assert_eq!(metrics.requests_started_total().get(), started_before + 4);
+    let mut builtin_guard =
+        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
+    assert_eq!(metrics.requests_started_total.get(), 4);
     builtin_guard.abort().await;
     drop(builtin_guard);
-    assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(metrics.requests_total.get(), 1);
+
+    let (other_router, other_runtime) = router_with_workers(None, &[8]).await;
+    let (_, _, mut other_guard) = track_request(&other_router, false).await;
+    other_guard.start_dispatch("aggregated");
+    other_guard.mark_dispatched();
+    other_guard.finish().await;
+    drop(other_guard);
+    assert_eq!(metrics.requests_started_total.get(), 4);
+    assert_eq!(metrics.requests_total.get(), 1);
+    drop(other_router);
+    other_runtime.shutdown();
 
     drop(router);
     runtime.shutdown();
@@ -1764,12 +1755,14 @@ async fn session_affinity_post_selection_failures_preserve_binding() {
         worker_id: 7,
         dp_rank: Some(0),
     };
-    let AffinityAcquire::Initialize(initializer) =
-        affinity.acquire(&session_id, None).await.unwrap()
-    else {
+    let Hold::Initialize(initializer) = affinity.acquire(&session_id, None).await.unwrap() else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let operation = Some(affinity.acquire(&session_id, None).await.unwrap());
     drop(operation);
@@ -1797,7 +1790,7 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
         worker_id: 7,
         dp_rank: Some(0),
     };
-    let AffinityAcquire::Initialize(initializer) = router
+    let Hold::Initialize(initializer) = router
         .affinity
         .as_ref()
         .unwrap()
@@ -1807,7 +1800,11 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let controller = Controller::new("cancelled-selection-request".to_string());
     controller.stop();
@@ -1840,7 +1837,7 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
         Some(original_target)
     );
 
-    let AffinityAcquire::Bound { target, lease } = router
+    let Hold::Bound { target, lease } = router
         .affinity
         .as_ref()
         .unwrap()
@@ -1850,11 +1847,25 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
     else {
         panic!("cancellation must preserve the existing binding");
     };
-    assert_eq!(target, original_target);
+    assert_eq!(target, crate::session_affinity::to_table(original_target));
     drop(lease);
 
     drop(router);
     runtime.shutdown();
+}
+
+/// A builtin host over `inner` whose session-affinity coordinator has a 10s
+/// TTL and binds in `mode`.
+fn builtin_host_with_affinity(
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    load_context: Arc<RoutingLoadContext>,
+    mode: crate::session_affinity::SessionAffinityMode,
+) -> (RoutingHost, AffinityCoordinator) {
+    let affinity = AffinityCoordinator::new(Duration::from_secs(10), mode).unwrap();
+    let host =
+        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(affinity.clone()))
+            .unwrap();
+    (host, affinity)
 }
 
 async fn bind_affinity_target(
@@ -1862,7 +1873,7 @@ async fn bind_affinity_target(
     session_id: &SessionAffinityId,
     target: AffinityTarget,
 ) {
-    let AffinityAcquire::Initialize(initializer) = router
+    let Hold::Initialize(initializer) = router
         .affinity
         .as_ref()
         .unwrap()
@@ -1872,7 +1883,11 @@ async fn bind_affinity_target(
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(target))
+            .unwrap(),
+    );
 }
 
 #[tokio::test]
@@ -1963,7 +1978,7 @@ async fn stale_affinity_rank_recovers_within_request() {
         .await
         .unwrap();
     assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
-    assert!(matches!(operation, Some(AffinityAcquire::Initialize(_))));
+    assert!(matches!(operation, Some(Hold::Initialize(_))));
     router.kv_router().free(request.id()).await.unwrap();
 
     drop(operation);
@@ -2030,7 +2045,7 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
         worker_id: 7,
         dp_rank: Some(0),
     };
-    let AffinityAcquire::Initialize(initializer) = router
+    let Hold::Initialize(initializer) = router
         .affinity
         .as_ref()
         .unwrap()
@@ -2040,7 +2055,11 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let mut retry_input = request();
     retry_input.routing_mut().allowed_worker_ids = Some(HashSet::from([7, 8]));
@@ -2340,7 +2359,7 @@ async fn two_worker_migration_harness(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        SelectionPolicySource::Registry,
         Some(config),
         None,
         None,
@@ -2573,7 +2592,7 @@ async fn builtin_host_with_recorded_dispatch(
     )
     .await
     .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     (host, dispatch, worker_id, runtime)
 }
 
@@ -2785,8 +2804,7 @@ async fn kv_stopped_decode_request_survives_a_contended_session_affinity_wait() 
     // leg has to wait rather than take the slot immediately.
     let router = Arc::new(router);
     let coordinator = router.affinity.as_ref().unwrap().clone();
-    let AffinityAcquire::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap()
-    else {
+    let Hold::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap() else {
         panic!("the first acquisition must initialize the session");
     };
 
@@ -2852,5 +2870,203 @@ async fn kv_stopped_decode_request_without_staged_kv_never_reaches_a_worker() {
     );
 
     drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn unknown_explicit_workers_are_rejected_before_builtin_dispatch() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("unknown-explicit-workers")
+        .unwrap()
+        .component("workers")
+        .unwrap();
+    let endpoint = component.endpoint("generate");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    endpoint.register_endpoint_instance().await.unwrap();
+    let live_worker = client.wait_for_instances().await.unwrap()[0].id();
+    let dispatch = Arc::new(CompletedBuiltinDispatch::default());
+    let inner = PushRouter::from_client_with_dispatch(
+        client,
+        RouterMode::RoundRobin,
+        Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+    )
+    .await
+    .unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
+    let worker_id = live_worker.wrapping_add(1);
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing =
+            Some(serde_json::from_value(serde_json::json!({field: worker_id})).unwrap());
+        let error = host
+            .select_and_dispatch_builtin(Context::new(content), phase, |_, _| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}={worker_id} does not identify a known worker")
+        );
+    }
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    let mut valid = request();
+    valid.routing_mut().decode_worker_id = Some(live_worker);
+    let mut stream = host.generate(Context::new(valid)).await.unwrap();
+    while stream.next().await.is_some() {}
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[live_worker]
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn unknown_explicit_workers_are_rejected_before_kv_admission() {
+    let (host, dispatch, worker_id, runtime) =
+        router_with_recorded_dispatch("unknown-kv-worker").await;
+    let unknown = worker_id.wrapping_add(1);
+    assert!(!host.inner.client.is_instance_live(unknown));
+    for (field, phase) in [
+        ("backend_instance_id", RequestPhase::Aggregated),
+        ("decode_worker_id", RequestPhase::Decode),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing =
+            Some(serde_json::from_value(serde_json::json!({field: unknown})).unwrap());
+        let request = Context::new(content);
+        let error = host
+            .select_with_affinity(&request, phase, false, &CleanupBudget::default())
+            .await
+            .err()
+            .expect("unknown worker must fail before admission");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}={unknown} does not identify a known worker")
+        );
+        let error = host
+            .preview_kv_route(&request, phase)
+            .await
+            .err()
+            .expect("unknown preview target");
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+    }
+    assert!(dispatch.worker_ids.lock().unwrap().is_empty());
+    assert!(
+        potential_loads(&host)
+            .await
+            .iter()
+            .all(|load| load.active_requests == 0)
+    );
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn explicit_worker_validation_preserves_precedence_and_discovery_membership() {
+    let (host, runtime) = router_with_workers(None, &[u64::MAX]).await;
+    let cases = [
+        (serde_json::json!({}), RequestPhase::Aggregated),
+        (
+            serde_json::json!({"backend_instance_id": null, "decode_worker_id": null,
+            "prefill_worker_id": null, "dp_rank": null}),
+            RequestPhase::Aggregated,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": u64::MAX}),
+            RequestPhase::Prefill,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": u64::MAX, "decode_worker_id": null}),
+            RequestPhase::Decode,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": 42, "decode_worker_id": u64::MAX,
+            "prefill_worker_id": 42}),
+            RequestPhase::Aggregated,
+        ),
+        (
+            serde_json::json!({"backend_instance_id": 42, "decode_worker_id": 42,
+            "prefill_worker_id": u64::MAX}),
+            RequestPhase::Prefill,
+        ),
+    ];
+    host.inner.client.override_instance_avail(vec![]);
+    for (value, phase) in cases {
+        let _: crate::protocols::common::extensions::NvExt =
+            serde_json::from_value(value.clone()).unwrap();
+        let mut content = request();
+        content.routing = Some(serde_json::from_value(value).unwrap());
+        host.validate_explicit_worker(&content, phase).unwrap();
+    }
+    for (field, phase) in [
+        ("decode_worker_id", RequestPhase::Aggregated),
+        ("prefill_worker_id", RequestPhase::Prefill),
+    ] {
+        let mut content = request();
+        content.routing = Some(
+            serde_json::from_value(serde_json::json!({
+                "backend_instance_id": u64::MAX, field: 42
+            }))
+            .unwrap(),
+        );
+        let error = host.validate_explicit_worker(&content, phase).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().message(),
+            format!("nvext.{field}=42 does not identify a known worker")
+        );
+    }
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn explicit_worker_disappearing_after_preview_is_not_revalidated() {
+    let (host, runtime) = router(None).await;
+    let mut content = request();
+    content.routing_mut().decode_worker_id = Some(7);
+    let request = Context::new(content);
+    let preview = host
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+    host.inner.client.override_discovered_instances(vec![]);
+    // A failure after successful selection must keep its service-error classification.
+    let error = match host.plan_kv_route_from_preview(&request, preview).await {
+        Ok(plan) => host.dispatch_kv_plan(request, plan).await.unwrap_err(),
+        Err(error) => error,
+    };
+    assert!(!match_error_chain(
+        error.as_ref(),
+        &[ErrorType::InvalidArgument],
+        &[]
+    ));
+    drop(host);
     runtime.shutdown();
 }
