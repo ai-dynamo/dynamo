@@ -1,35 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# K-EXAONE 2.0 750B-A37B NVFP4 on vLLM via Dynamo, aggregated, B200 (TP=4, 4 GPUs),
-# chat workload (8K ISL / 1K OSL). The trace is DESIGNED for 70% prefix reuse; the
-# rate actually achieved on this topology is ~8.8%, because the working set is ~42x
-# oversubscribed against TP4 KV capacity and blocks are evicted before reuse.
+# K-EXAONE 2.0 750B-A37B NVFP4 on vLLM via Dynamo -- aggregated, B200, TP=4, 4 GPUs.
+# Documentation: https://docs.nvidia.com/dynamo/recipes/k-exaone-2
 #
-# Model: 764.5 B total params, ~37 B active per token. 78 layers, 256 experts top-8.
-# Hybrid attention: 20 full_attention + 58 sliding_attention layers. Native context 262,144.
-# Checkpoint: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4 (~530 GB on disk, NVFP4 W4A4).
-#
-# Key model-specific requirements:
-#   - --kernel-config moe_backend=FLASHINFER_CUTLASS is MANDATORY, not a tuning choice.
-#     vLLM's 'auto' selects FLASHINFER_TRTLLM, which silently corrupts long-form output on
-#     this checkpoint: it produces fluent, plausible, wrong text with no error. The pin costs
-#     some throughput and that cost is included in the published numbers.
-#   - --spec-method exaone_moe_mtp --spec-tokens 2: the checkpoint ships MTP heads.
-#     Draft length 1 is statistically indistinguishable; 4 is worse.
+# Correctness requirements, not tuning choices:
+#   - --kernel-config moe_backend=FLASHINFER_CUTLASS is MANDATORY. vLLM's 'auto' selects
+#     FLASHINFER_TRTLLM, which silently corrupts long-form output on this checkpoint --
+#     fluent, plausible, wrong, with no error.
 #   - --dyn-reasoning-parser / --dyn-tool-call-parser: the plain --reasoning-parser and
-#     --tool-call-parser flags configure the ENGINE only and never reach the Dynamo frontend.
-#   - --block-size 64: block-size 16 is measurably worse on this model.
-#   - --kv-events-config on the worker publishes the prefix-block index that the
-#     frontend's --router-kv-events consumes. Both halves are inert at replicas: 1
-#     (one destination), but without them raising replicas silently gives round-robin
-#     under a --router-mode kv label. Measured at parity with round-robin on this
-#     workload; shipped so that scaling out behaves as labelled, not for throughput.
-#   - TP=4 is the floor: ~530 GB of weights does not fit TP=2 on 180 GB B200s. TP=8 is slower
-#     per GPU -- the model is communication-bound, not KV-capacity-bound.
-#   - --enable-prompt-tokens-details is a 'vllm serve' flag; 'dynamo.vllm' rejects it. Read the
-#     achieved KV reuse from the worker log instead:
-#       kubectl logs <worker> | grep -o 'Prefix cache hit rate: [0-9.]*%'
+#     --tool-call-parser flags configure the ENGINE only and never reach the Dynamo
+#     frontend, so tool calling silently does nothing.
+#   - TP=4 is the floor: ~530 GB of weights does not fit TP=2 on 180 GB B200s.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -52,9 +34,7 @@ spec:
         spec:
           containers:
             - name: main
-              # Public released frontend. CPU-only -- it routes traffic and loads no weights,
-              # so it takes the released frontend image rather than the model-specific
-              # vLLM runtime. Multi-arch: linux/amd64 and linux/arm64.
+              # CPU-only: routes traffic, loads no weights. Multi-arch.
               image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
               imagePullPolicy: IfNotPresent
               command: [/bin/bash, -lc]
@@ -67,7 +47,7 @@ spec:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
     - name: Worker
-      # digest-pinned image has no semver tag for the operator to parse
+      # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
       runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
@@ -81,9 +61,8 @@ spec:
             - {key: nvidia.com/gpu, operator: Equal, value: "true", effect: NoSchedule}
           containers:
             - name: main
-              # Public released runtime for this model. Carries vLLM 0.28.0 plus the
-              # exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599); stock vLLM 0.28.0
-              # cannot load this NVFP4 checkpoint without it.
+              # vLLM 0.28.0 + the exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599);
+              # stock 0.28.0 cannot load this NVFP4 checkpoint.
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
               imagePullPolicy: IfNotPresent
               command: [/bin/bash, -lc]
@@ -109,10 +88,6 @@ spec:
               resources:
                 requests: {memory: 200Gi, nvidia.com/gpu: "4"}
                 limits: {nvidia.com/gpu: "4"}
-              # 530 GB of weights over a shared PVC, then torch.compile and cudagraph
-              # capture: first start is tens of minutes. 60 x 60 s of grace, matching the
-              # other 1T-class recipes. Without an explicit probe the operator default is
-              # far shorter and kills the worker mid-load.
               startupProbe:
                 failureThreshold: 60
                 httpGet:
