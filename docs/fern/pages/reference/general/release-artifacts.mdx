@@ -136,16 +136,6 @@ Current stable release: v1.5.0 (container tag `1.5.0`, wheel version `1.5.0`).
 | v0.8.1 | sglang-runtime:0.8.1-cuda13, vllm-runtime:0.8.1-cuda13 | Multimodality not expected to work on ARM64. Works on AMD64. | Known limitation |
 | v0.8.0 | sglang-runtime:0.8.0-cuda13 | CuDNN installation issue caused PyTorch v2.9.1 compatibility problems with nn.Conv3d — performance degradation and excessive memory usage in multimodal workloads. | Fixed in v0.8.1 (#5461) |
 
-**Recent nightly wheel builds**
-
-| Version | Date | Packages | Notes |
-| --- | --- | --- | --- |
-| 1.5.0.dev20260831 | Aug 31, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-| 1.5.0.dev20260830 | Aug 30, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-| 1.5.0.dev20260829 | Aug 29, 2026 | ai-dynamo, ai-dynamo-runtime, kvbm | - |
-
-ai-dynamo and ai-dynamo-runtime nightly builds from main publish wheels tagged `*.devYYYYMMDD` (since Apr 24, 2026); kvbm joined the nightly train on Aug 2, 2026. Install with pip or uv using `--pre` and the NVIDIA extra-index pattern shown above. Runtime containers publish to the `*-runtime-nightly` repositories on NGC, under a dated `YYYYMMDD-<shortsha>` tag plus a rolling `latest` tag.
-
 **Crates: first published version on crates.io**
 
 | Crate | First version | Date |
