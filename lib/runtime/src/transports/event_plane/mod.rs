@@ -1067,7 +1067,7 @@ mod tests {
             "127.0.0.1".parse::<IpAddr>().unwrap()
         );
 
-        for host in ["0.0.0.0", "::"] {
+        for host in ["0.0.0.0", "::", "::ffff:0.0.0.0", "[::ffff:0.0.0.0]"] {
             let error = temp_env::with_vars([(DYN_EVENT_PLANE_HOST, Some(host))], || {
                 event_plane_host_from_env_with_resolver(&resolver)
             })

@@ -1434,24 +1434,33 @@ mod tests {
 
     #[tokio::test]
     async fn wildcard_bind_advertises_concrete_ipv4_with_bound_port() {
-        let mut resolver = StubResolver::not_found();
-        resolver
-            .interfaces
-            .push(("eth0", "192.0.2.20".parse().unwrap()));
-        let options = ServerOptions::builder()
-            .port(0)
-            .interface(Some("0.0.0.0".to_string()))
-            .build()
-            .unwrap();
-        let server = TcpStreamServer::new_with_resolver(options, resolver)
+        for host in ["0.0.0.0", "::ffff:0.0.0.0", " [::ffff:0.0.0.0] "] {
+            let mut resolver = StubResolver::not_found();
+            resolver
+                .interfaces
+                .push(("eth0", "192.0.2.20".parse().unwrap()));
+            let options = ServerOptions::builder()
+                .port(0)
+                .interface(Some(host.to_string()))
+                .build()
+                .unwrap();
+            let server = TcpStreamServer::new_with_resolver(options, resolver)
+                .await
+                .unwrap();
+
+            let tcp_info = registered_tcp_info(&server).await;
+            let socket_addr: SocketAddr = tcp_info.address.parse().unwrap();
+            assert_eq!(socket_addr.ip(), "192.0.2.20".parse::<IpAddr>().unwrap());
+            assert_ne!(socket_addr.port(), 0);
+            assert!(!socket_addr.ip().is_unspecified());
+            // The advertised port must belong to the real wildcard listener.
+            let _connection = tokio::net::TcpStream::connect(SocketAddr::new(
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                socket_addr.port(),
+            ))
             .await
             .unwrap();
-
-        let tcp_info = registered_tcp_info(&server).await;
-        let socket_addr: SocketAddr = tcp_info.address.parse().unwrap();
-        assert_eq!(socket_addr.ip(), "192.0.2.20".parse::<IpAddr>().unwrap());
-        assert_ne!(socket_addr.port(), 0);
-        assert!(!socket_addr.ip().is_unspecified());
+        }
     }
 
     #[tokio::test]
@@ -1626,18 +1635,27 @@ mod tests {
         for (host, expected_ip) in [
             ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
             ("::1", "::1".parse::<IpAddr>().unwrap()),
+            (" 127.0.0.1 ", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            (" [::1]\t", "::1".parse::<IpAddr>().unwrap()),
+            ("::ffff:127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            (" lo ", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            (" lo:1 ", "127.0.0.1".parse::<IpAddr>().unwrap()),
         ] {
             if expected_ip.is_ipv6() && !ipv6_available {
                 eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
                 continue;
             }
 
+            let mut resolver = StubResolver::not_found();
+            resolver
+                .interfaces
+                .push(("lo:1", "127.0.0.1".parse().unwrap()));
             let server = TcpStreamServer::new_with_resolver(
                 ServerOptions {
                     port: 0,
                     interface: Some(host.to_string()),
                 },
-                StubResolver::not_found(),
+                resolver,
             )
             .await
             .unwrap();

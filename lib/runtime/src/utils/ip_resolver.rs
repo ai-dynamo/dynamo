@@ -43,6 +43,14 @@ pub trait IpResolver {
     fn list_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
         list_afinet_netifas()
     }
+
+    /// List addresses eligible for automatic selection.
+    ///
+    /// Custom resolvers can override this to exclude down interfaces. The
+    /// default trusts their existing interface inventory for compatibility.
+    fn list_up_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
+        self.list_afinet_netifas()
+    }
 }
 
 /// The system IP resolver.
@@ -56,6 +64,34 @@ impl IpResolver for DefaultIpResolver {
     fn local_ipv6(&self) -> Result<IpAddr, Error> {
         local_ipv6()
     }
+
+    #[cfg(unix)]
+    fn list_up_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
+        let interfaces = nix::ifaddrs::getifaddrs()
+            .map_err(|error| Error::StrategyError(format!("getifaddrs failed: {error}")))?;
+        Ok(up_ip_interfaces(interfaces))
+    }
+}
+
+#[cfg(unix)]
+fn up_ip_interfaces(
+    interfaces: impl IntoIterator<Item = nix::ifaddrs::InterfaceAddress>,
+) -> Vec<(String, IpAddr)> {
+    use nix::net::if_::InterfaceFlags;
+
+    interfaces
+        .into_iter()
+        .filter(|interface| interface.flags.contains(InterfaceFlags::IFF_UP))
+        .filter_map(|interface| {
+            let address = interface.address?;
+            let ip = if let Some(address) = address.as_sockaddr_in() {
+                IpAddr::V4(address.ip())
+            } else {
+                IpAddr::V6(address.as_sockaddr_in6()?.ip())
+            };
+            Some((interface.interface_name, ip))
+        })
+        .collect()
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,6 +159,7 @@ struct AddressCandidates {
 
 impl AddressCandidates {
     fn consider(&mut self, address: IpAddr) {
+        let address = address.to_canonical();
         if !is_usable(address) {
             return;
         }
@@ -179,7 +216,7 @@ impl AddressCandidates {
 
 fn local_candidates<R: IpResolver>(resolver: &R) -> Result<AddressCandidates, IpResolutionError> {
     let interfaces = resolver
-        .list_afinet_netifas()
+        .list_up_afinet_netifas()
         .map_err(IpResolutionError::InterfaceEnumeration)?;
     let mut candidates = AddressCandidates::default();
     for (_, address) in interfaces {
@@ -189,7 +226,7 @@ fn local_candidates<R: IpResolver>(resolver: &R) -> Result<AddressCandidates, Ip
 }
 
 /// Resolve the preferred local bind and advertisement address from one
-/// interface snapshot.
+/// interface snapshot. The system resolver excludes down interfaces on Unix.
 pub(crate) fn resolve_local_host<R: IpResolver>(
     resolver: &R,
 ) -> Result<ResolvedHost, IpResolutionError> {
@@ -207,10 +244,12 @@ pub(crate) fn resolve_local_host<R: IpResolver>(
 ///
 /// Named dual-stack interfaces prefer the first usable IPv4 address in OS
 /// enumeration order. IPv6 is used when no usable IPv4 address exists.
+/// Surrounding whitespace is trimmed, and IPv4-mapped addresses use IPv4 rules.
 pub(crate) fn resolve_host_or_interface<R: IpResolver>(
     host_or_interface: &str,
     resolver: &R,
 ) -> Result<ResolvedHost, IpResolutionError> {
+    let host_or_interface = host_or_interface.trim();
     if let Some(address) = parse_ip_literal(host_or_interface)? {
         if address.is_unspecified() {
             return resolve_wildcard(address, &local_candidates(resolver)?);
@@ -285,6 +324,7 @@ pub(crate) fn resolve_advertise_ip_for_bind<R: IpResolver>(
     bind_ip: IpAddr,
     resolver: &R,
 ) -> Result<IpAddr, IpResolutionError> {
+    let bind_ip = bind_ip.to_canonical();
     if !bind_ip.is_unspecified() {
         validate_configured_address(bind_ip)?;
         return Ok(bind_ip);
@@ -323,12 +363,12 @@ fn parse_ip_literal(value: &str) -> Result<Option<IpAddr>, IpResolutionError> {
         let inner = &value[1..value.len() - 1];
         return inner
             .parse::<Ipv6Addr>()
-            .map(|address| Some(IpAddr::V6(address)))
+            .map(|address| Some(IpAddr::V6(address).to_canonical()))
             .map_err(|_| IpResolutionError::InvalidLiteral(value.to_string()));
     }
 
     match value.parse::<IpAddr>() {
-        Ok(address) => Ok(Some(address)),
+        Ok(address) => Ok(Some(address.to_canonical())),
         Err(_) if looks_like_ip_literal(value) => {
             Err(IpResolutionError::InvalidLiteral(value.to_string()))
         }
@@ -449,6 +489,7 @@ pub(crate) mod test_support {
         pub(crate) ipv4: ProbeOutcome,
         pub(crate) ipv6: ProbeOutcome,
         pub(crate) interfaces: Vec<(&'static str, IpAddr)>,
+        pub(crate) down_interfaces: Vec<&'static str>,
         pub(crate) interface_error: Option<ProbeOutcome>,
         pub(crate) ipv4_calls: Cell<usize>,
         pub(crate) ipv6_calls: Cell<usize>,
@@ -464,6 +505,7 @@ pub(crate) mod test_support {
                     ("lo", IpAddr::V4(Ipv4Addr::LOCALHOST)),
                     ("lo", IpAddr::V6(Ipv6Addr::LOCALHOST)),
                 ],
+                down_interfaces: Vec::new(),
                 interface_error: None,
                 ipv4_calls: Cell::new(0),
                 ipv6_calls: Cell::new(0),
@@ -497,6 +539,14 @@ pub(crate) mod test_support {
                 .interfaces
                 .iter()
                 .map(|(name, address)| ((*name).to_string(), *address))
+                .collect())
+        }
+
+        fn list_up_afinet_netifas(&self) -> Result<Vec<(String, IpAddr)>, Error> {
+            Ok(self
+                .list_afinet_netifas()?
+                .into_iter()
+                .filter(|(name, _)| !self.down_interfaces.contains(&name.as_str()))
                 .collect())
         }
     }
@@ -536,22 +586,111 @@ mod tests {
         assert_eq!(resolver.interface_calls.get(), 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn system_inventory_keeps_only_up_ip_addresses() {
+        use nix::{
+            ifaddrs::InterfaceAddress, net::if_::InterfaceFlags, sys::socket::SockaddrStorage,
+        };
+        use std::{net::SocketAddr, os::fd::AsRawFd, os::unix::net::UnixDatagram};
+
+        let socket = UnixDatagram::unbound().unwrap();
+        let unsupported =
+            nix::sys::socket::getsockname::<SockaddrStorage>(socket.as_raw_fd()).unwrap();
+        let up = InterfaceFlags::IFF_UP;
+        let entries = [
+            (
+                "stale0",
+                InterfaceFlags::empty(),
+                Some(SocketAddr::new(ip("198.51.100.1"), 0).into()),
+            ),
+            ("eth0", up, Some(SocketAddr::new(ip("192.0.2.1"), 0).into())),
+            (
+                "eth0",
+                up,
+                Some(SocketAddr::new(ip("2001:db8::1"), 0).into()),
+            ),
+            (
+                "lo",
+                up | InterfaceFlags::IFF_LOOPBACK,
+                Some(SocketAddr::new(ip("127.0.0.1"), 0).into()),
+            ),
+            ("unsupported", up, Some(unsupported)),
+            ("no-address", up, None),
+        ];
+        let interfaces = entries
+            .into_iter()
+            .map(|(name, flags, address)| InterfaceAddress {
+                interface_name: name.to_string(),
+                flags,
+                address,
+                netmask: None,
+                broadcast: None,
+                destination: None,
+            });
+
+        assert_eq!(
+            up_ip_interfaces(interfaces),
+            vec![
+                ("eth0".to_string(), ip("192.0.2.1")),
+                ("eth0".to_string(), ip("2001:db8::1")),
+                ("lo".to_string(), ip("127.0.0.1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_selection_excludes_down_interfaces_but_explicit_lookup_keeps_them() {
+        for active in [Some("192.0.2.1"), Some("2001:db8::1"), None] {
+            let mut resolver = StubResolver::not_found();
+            resolver
+                .interfaces
+                .insert(0, ("stale0", ip("198.51.100.1")));
+            resolver.down_interfaces.push("stale0");
+            if let Some(address) = active {
+                resolver.interfaces.push(("eth0", ip(address)));
+            }
+            let expected = active.map(ip).unwrap_or(DEFAULT_LOOPBACK);
+            assert_eq!(
+                resolve_local_host(&resolver).unwrap().advertise_ip(),
+                expected
+            );
+            assert_eq!(
+                resolve_host_or_interface("0.0.0.0", &resolver)
+                    .unwrap()
+                    .advertise_ip(),
+                expected
+            );
+            assert_eq!(
+                resolve_advertise_ip_for_bind(unspecified_for(expected), &resolver).unwrap(),
+                expected
+            );
+            assert_eq!(
+                resolve_host_or_interface("stale0", &resolver)
+                    .unwrap()
+                    .advertise_ip(),
+                ip("198.51.100.1")
+            );
+        }
+    }
+
     #[test]
     fn configured_literals_are_parsed_and_validated() {
         let resolver = StubResolver::not_found();
 
-        for literal in [
-            "192.0.2.10",
-            "169.254.1.1",
-            "2001:db8::2",
-            "[2001:db8::2]",
-            "fd00::2",
+        for (literal, expected) in [
+            ("192.0.2.10", "192.0.2.10"),
+            ("169.254.1.1", "169.254.1.1"),
+            ("2001:db8::2", "2001:db8::2"),
+            ("[2001:db8::2]", "2001:db8::2"),
+            ("fd00::2", "fd00::2"),
+            (" 127.0.0.1 ", "127.0.0.1"),
+            ("\t[::1] ", "::1"),
+            ("::ffff:192.0.2.10", "192.0.2.10"),
+            ("[::ffff:127.0.0.1]", "127.0.0.1"),
         ] {
             let resolved = resolve_host_or_interface(literal, &resolver).unwrap();
-            assert_eq!(
-                resolved.bind_ip(),
-                literal.trim_matches(['[', ']']).parse::<IpAddr>().unwrap()
-            );
+            assert_eq!(resolved.bind_ip(), ip(expected));
             assert_eq!(resolved.advertise_ip(), resolved.bind_ip());
         }
 
@@ -562,7 +701,14 @@ mod tests {
             assert!(error.contains("invalid IP literal"), "{error}");
         }
 
-        for literal in ["224.0.0.1", "255.255.255.255", "fe80::1", "ff02::1"] {
+        for literal in [
+            "224.0.0.1",
+            "255.255.255.255",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:224.0.0.1",
+            "[::ffff:255.255.255.255]",
+        ] {
             let error = resolve_host_or_interface(literal, &resolver).unwrap_err();
             assert!(matches!(error, IpResolutionError::UnusableAddress(_)));
         }
@@ -576,6 +722,8 @@ mod tests {
             ("0.0.0.0", ip("0.0.0.0"), ip("192.0.2.20")),
             ("::", ip("0.0.0.0"), ip("192.0.2.20")),
             ("[::]", ip("0.0.0.0"), ip("192.0.2.20")),
+            ("::ffff:0.0.0.0", ip("0.0.0.0"), ip("192.0.2.20")),
+            (" [::ffff:0.0.0.0] ", ip("0.0.0.0"), ip("192.0.2.20")),
         ];
 
         for (literal, bind_ip, advertise_ip) in cases {
@@ -594,6 +742,7 @@ mod tests {
             ("0.0.0.0", ip("0.0.0.0"), ip("127.0.0.1")),
             ("::", ip("::"), ip("::1")),
             ("[::]", ip("::"), ip("::1")),
+            ("::ffff:0.0.0.0", ip("0.0.0.0"), ip("127.0.0.1")),
         ] {
             let resolved = resolve_host_or_interface(literal, &resolver).unwrap();
             assert_eq!(resolved.bind_ip(), expected_bind);
@@ -616,8 +765,10 @@ mod tests {
         let mut resolver = StubResolver::not_found();
         resolver.interfaces = interface("eth0:1", &["2001:db8::2", "169.254.10.5", "192.0.2.10"]);
 
-        let resolved = resolve_host_or_interface("eth0:1", &resolver).unwrap();
-        assert_eq!(resolved.advertise_ip(), ip("169.254.10.5"));
+        for name in ["eth0:1", " eth0:1\t"] {
+            let resolved = resolve_host_or_interface(name, &resolver).unwrap();
+            assert_eq!(resolved.advertise_ip(), ip("169.254.10.5"));
+        }
     }
 
     #[test]
@@ -627,6 +778,8 @@ mod tests {
 
         for (name, expected) in [
             ("missing", "interface not found: missing"),
+            ("", "interface not found: "),
+            (" \t", "interface not found: "),
             ("eth0", "interface has no usable IP address: eth0"),
         ] {
             let error = resolve_host_or_interface(name, &resolver)
@@ -675,6 +828,44 @@ mod tests {
         assert_eq!(
             resolve_advertise_ip_for_bind(ip("::"), &resolver).unwrap(),
             ip("2001:db8::20")
+        );
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::ffff:0.0.0.0"), &resolver).unwrap(),
+            ip("127.0.0.1")
+        );
+        assert_eq!(
+            resolve_advertise_ip_for_bind(ip("::ffff:127.0.0.1"), &resolver).unwrap(),
+            ip("127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn mapped_interface_addresses_use_ipv4_classification() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = interface(
+            "eth0",
+            &[
+                "::ffff:0.0.0.0",
+                "::ffff:224.0.0.1",
+                "::ffff:255.255.255.255",
+                "::ffff:127.0.0.1",
+                "2001:db8::20",
+            ],
+        );
+        assert_eq!(
+            resolve_local_host(&resolver).unwrap().advertise_ip(),
+            ip("2001:db8::20")
+        );
+        resolver.interfaces.push(("eth0", ip("::ffff:192.0.2.1")));
+        assert_eq!(
+            resolve_local_host(&resolver).unwrap().advertise_ip(),
+            ip("192.0.2.1")
+        );
+        assert_eq!(
+            resolve_host_or_interface("eth0", &resolver)
+                .unwrap()
+                .advertise_ip(),
+            ip("192.0.2.1")
         );
     }
 

@@ -147,18 +147,24 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Host for the TCP request-plane server. Accepts IPv4 and IPv6 literals, bracketed IPv6 literals,
   wildcards, and interface names, including aliases such as `eth0:1`. If unset or empty, Dynamo
   selects the first usable non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
-  loopback. Dynamo does not trim whitespace; a value containing only whitespace fails server startup.
+  loopback. On Unix, automatic selection excludes interfaces that are down. Dynamo trims surrounding
+  whitespace from configured hosts; a value containing only whitespace still fails server startup.
 
   For a named interface, Dynamo uses the same address selection order, restricted to that interface.
   It selects the first usable address in each category in operating-system enumeration order. An
-  interface with only loopback addresses uses IPv4 loopback, then IPv6 loopback.
+  interface with only loopback addresses uses IPv4 loopback, then IPv6 loopback. Explicit interface
+  lookup does not filter by interface state.
 
-  A wildcard selects a usable non-loopback address in its requested family for advertisement. If
-  only the other family has one, Dynamo switches the bind wildcard to that family. If neither family
-  has one, Dynamo prefers loopback in the requested family before trying the other family. If no
+  A wildcard uses the same automatic interface inventory to select a usable non-loopback address in
+  its requested family for advertisement. If only the other family has one, Dynamo switches the bind
+  wildcard to that family. If neither family has one, Dynamo prefers loopback in the requested family
+  before trying the other family. If no
   loopback address is found, it uses the requested family's standard loopback address. The bind
   wildcard uses the selected address family. Wildcards are never advertised. IPv4 link-local
   addresses are accepted. Multicast, broadcast, and IPv6 link-local addresses are rejected.
+
+  IPv4-mapped IPv6 addresses use IPv4 rules. For example, `::ffff:0.0.0.0` uses the `0.0.0.0`
+  wildcard rules and advertises a concrete address.
 
   The server resolves the address once at startup. A loopback fallback persists until restart, and
   an interface-enumeration error fails server startup.
@@ -200,9 +206,10 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
   For an interface name, Dynamo selects the first usable IPv4 address, then IPv6. Dynamo trims
   whitespace and treats an empty value as unset. Unspecified addresses such as `0.0.0.0` and `::` are
-  invalid. When unset, automatic advertisement stays in the IPv4 bind family. If the host has no
-  usable non-loopback IPv4 address, automatic selection advertises IPv4 loopback (`127.0.0.1` when
-  no IPv4 loopback address is found), and remote subscribers cannot reach the publisher.
+  invalid, including IPv4-mapped wildcards such as `::ffff:0.0.0.0`. When unset, automatic
+  advertisement stays in the IPv4 bind family and, on Unix, excludes down interfaces. If no eligible
+  interface has a usable non-loopback IPv4 address, automatic selection advertises IPv4 loopback
+  (`127.0.0.1` when no IPv4 loopback address is found), and remote subscribers cannot reach the publisher.
 
   This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
   an IPv4 wildcard. For remote subscribers, an explicit override must identify a reachable IPv4
