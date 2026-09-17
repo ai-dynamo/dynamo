@@ -28,7 +28,6 @@ from dynamo.sglang.request_handlers.llm.decode_handler import (
     _extract_sglang_stop_reason,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
-    _requests_input_logprobs,
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -252,9 +251,6 @@ def _new_decode_handler(
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
-    # Same default as a worker launched without --disaggregation-mode; the
-    # disaggregated-decode paths set this explicitly.
-    handler.serving_mode = DisaggregationMode.AGGREGATED
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(
             served_model_name="test-model",
@@ -382,62 +378,6 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     }
 
 
-def test_engine_generate_reads_return_logprob_as_sglang_does():
-    # The opaque payload is client JSON. "false" is a truthy Python string but
-    # the request model parses it as false, and that reading is the one that
-    # decides whether the engine computes logprobs at all.
-    native = build_native_generate_request(
-        {"return_logprob": "false"},
-        input_ids=[1],
-        fallback_rid="request",
-        priority=None,
-    )
-
-    assert native.return_logprob is False
-
-
-def test_prompt_logprobs_need_a_start_position_inside_the_prompt():
-    # logprob_start_len is the absolute position where scoring starts. Its
-    # default of -1 lands on the last prompt position, so return_logprob on
-    # its own scores output tokens only and asks nothing of the prompt.
-    def native(payload):
-        return build_native_generate_request(
-            payload,
-            input_ids=[1, 2, 3],
-            fallback_rid="request",
-            priority=None,
-        )
-
-    assert _requests_input_logprobs(native({"return_logprob": True})) is False
-    assert (
-        _requests_input_logprobs(
-            native({"return_logprob": True, "logprob_start_len": -1})
-        )
-        is False
-    )
-    assert (
-        _requests_input_logprobs(
-            native({"return_logprob": True, "logprob_start_len": 0})
-        )
-        is True
-    )
-    # Starting at or beyond the end scores no prompt token.
-    assert (
-        _requests_input_logprobs(
-            native({"return_logprob": True, "logprob_start_len": 3})
-        )
-        is False
-    )
-    assert (
-        _requests_input_logprobs(
-            native({"return_logprob": True, "logprob_start_len": 4})
-        )
-        is False
-    )
-    # A start position without the flag computes no logprobs at all.
-    assert _requests_input_logprobs(native({"logprob_start_len": 0})) is False
-
-
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():
     request = {"sampling_params": [1, 2]}
 
@@ -498,7 +438,6 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         handler._process_native_generate_stream(
             native_generate_stream(engine, "native-request"),
             _Context(),
-            input_logprobs_requested=False,
         )
     )
 
@@ -506,74 +445,6 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         {"token_ids": [], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
-
-
-@pytest.mark.asyncio
-async def test_native_generate_stream_marks_input_logprobs_unavailable_on_decode():
-    # A disaggregated decode worker never prefills the prompt, so its terminal
-    # meta_info lacks input_token_logprobs; the marker records that.
-    streaming_response = {
-        "output_ids": [101],
-        "meta_info": {"id": "request-1", "finish_reason": None},
-    }
-    terminal_response = {
-        "output_ids": [102],
-        "meta_info": {
-            "id": "request-1",
-            "finish_reason": {"type": "stop"},
-            "output_token_logprobs": [(-0.1, 102, "b")],
-        },
-    }
-
-    class TokenizerManager:
-        async def generate_request(self, request, request_context):
-            yield streaming_response
-            yield terminal_response
-
-    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
-    handler = _new_decode_handler()
-    handler.serving_mode = DisaggregationMode.DECODE
-    chunks = await _collect(
-        handler._process_native_generate_stream(
-            native_generate_stream(engine, "native-request"),
-            _Context(),
-            input_logprobs_requested=True,
-        )
-    )
-
-    responses = [chunk["engine_data"]["sglang_response"] for chunk in chunks]
-    assert responses == [streaming_response, terminal_response]
-    assert responses[1] is terminal_response
-    assert "input_logprobs_unavailable_reason" not in responses[0]["meta_info"]
-    assert (
-        responses[1]["meta_info"]["input_logprobs_unavailable_reason"]
-        == "disaggregated_decode"
-    )
-
-
-@pytest.mark.asyncio
-async def test_native_generate_stream_leaves_aggregated_response_untouched():
-    terminal_response = {
-        "output_ids": [102],
-        "meta_info": {"id": "request-1", "finish_reason": {"type": "stop"}},
-    }
-
-    class TokenizerManager:
-        async def generate_request(self, request, request_context):
-            yield terminal_response
-
-    engine = SimpleNamespace(tokenizer_manager=TokenizerManager())
-    handler = _new_decode_handler()
-    chunks = await _collect(
-        handler._process_native_generate_stream(
-            native_generate_stream(engine, "native-request"),
-            _Context(),
-            input_logprobs_requested=True,
-        )
-    )
-
-    response = chunks[0]["engine_data"]["sglang_response"]
-    assert "input_logprobs_unavailable_reason" not in response["meta_info"]
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):

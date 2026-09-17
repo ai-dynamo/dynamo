@@ -216,25 +216,6 @@ def _extract_sglang_stop_reason(
     return None
 
 
-def _requests_input_logprobs(native_request: Any) -> bool:
-    """Report whether a validated native request asks SGLang to score the prompt.
-
-    ``return_logprob`` alone is not enough: ``logprob_start_len`` is the absolute
-    sequence position where scoring starts, and its default of ``-1`` resolves to
-    the last prompt position, so only output tokens are scored. Prompt logprobs
-    need a start position inside the prompt.
-    """
-
-    if not native_request.return_logprob:
-        return False
-    start_len = native_request.logprob_start_len
-    return (
-        isinstance(start_len, int)
-        and isinstance(native_request.input_ids, list)
-        and 0 <= start_len < len(native_request.input_ids)
-    )
-
-
 class DecodeWorkerHandler(BaseWorkerHandler):
     """Handler for decode workers in both aggregated and disaggregated serving modes."""
 
@@ -449,13 +430,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param: Dict[str, Any],
         context: Context,
         priority: int | None,
-    ) -> tuple[AsyncIterator[Dict[str, Any]], bool]:
-        """Build and dispatch one native SGLang request.
-
-        Returns the response stream alongside whether the validated request asks
-        the engine to score the prompt. The opaque payload is client JSON, so
-        only the validated request gives a reliable answer.
-        """
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Build and dispatch one native SGLang request."""
         raise_if_unextracted_multimodal(request)
         input_ids = input_param.get("input_ids")
         if not isinstance(input_ids, list):
@@ -484,10 +460,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
         )
-        return (
-            native_generate_stream(self.engine, native_request),
-            _requests_input_logprobs(native_request),
-        )
+        return native_generate_stream(self.engine, native_request)
 
     async def generate(
         self, request: Dict[str, Any], context: Context
@@ -516,18 +489,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
         if native_payload is not None:
-            stream, input_logprobs_requested = self._native_generate_stream(
+            stream = self._native_generate_stream(
                 request,
                 native_payload,
                 input_param,
                 context,
                 priority,
             )
-            async for output in self._process_native_generate_stream(
-                stream,
-                context,
-                input_logprobs_requested=input_logprobs_requested,
-            ):
+            async for output in self._process_native_generate_stream(stream, context):
                 yield output
             return
 
@@ -699,26 +668,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
-        *,
-        input_logprobs_requested: bool,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Forward opaque SGLang chunks while retaining engine cancellation.
-
-        ``input_logprobs_requested`` says whether the request asked SGLang to
-        score the prompt; the native payload it comes from is not in scope here.
-        It is keyword-only and required because it cannot be derived inside this
-        method, and a default would silently disable the terminal-chunk
-        annotation for any future caller that forgot it.
-        """
+        """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
-        is_disaggregated_decode = self.serving_mode == DisaggregationMode.DECODE
         async with self._cancellation_monitor(request_id_future, context):
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
-                meta_info = native_response.get("meta_info", {})
                 if not request_id_future.done():
-                    sglang_request_id = meta_info.get("id")
+                    sglang_request_id = native_response.get("meta_info", {}).get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
@@ -727,13 +685,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 ):
                     first_output_seen = True
                     context.notify_first_token()
-                # Mutates meta_info in place, so the chunk keeps forwarding the
-                # engine's own response object rather than a re-wrapped copy.
-                _shared_logprobs.annotate_input_logprobs_unavailable(
-                    meta_info,
-                    requested=input_logprobs_requested,
-                    is_disaggregated_decode=is_disaggregated_decode,
-                )
                 if not context.is_stopped():
                     yield chunk
 

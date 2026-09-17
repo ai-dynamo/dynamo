@@ -234,43 +234,6 @@ def extract_prompt_logprobs_from_sglang_meta(
     return payload
 
 
-INPUT_LOGPROBS_UNAVAILABLE_KEY = "input_logprobs_unavailable_reason"
-INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE = "disaggregated_decode"
-
-
-def annotate_input_logprobs_unavailable(
-    meta_info: dict[str, Any],
-    *,
-    requested: bool,
-    is_disaggregated_decode: bool,
-) -> bool:
-    """Mark prompt logprobs a decode worker structurally cannot produce.
-
-    A decode worker under disaggregation never prefills, so its ``meta_info``
-    simply lacks ``input_token_logprobs`` — and in JSON an absent array is
-    indistinguishable from an empty one, leaving a caller unable to tell that
-    from a prompt that produced none. Writing the key in place makes the
-    difference machine-readable.
-
-    ``requested`` means the request asked SGLang to score the prompt, not
-    merely to return logprobs. Never mark a response that already carries
-    input logprobs: that is what stops the marker contradicting data
-    forwarded from prefill, and what makes it disappear on its own once that
-    forwarding lands.
-
-    Returns whether the key was written.
-    """
-    if not (requested and is_disaggregated_decode):
-        return False
-    finish_reason = meta_info.get("finish_reason")
-    if finish_reason is None:
-        return False
-    if meta_info.get("input_token_logprobs"):
-        return False
-    meta_info[INPUT_LOGPROBS_UNAVAILABLE_KEY] = INPUT_LOGPROBS_UNAVAILABLE_DISAGG_DECODE
-    return True
-
-
 _SGLANG_TOP_LOGPROBS_UNSUPPORTED_MSG = (
     "Dynamo's SGLang backend does not currently support logprobs >= 1 due to "
     "an O(N) per-position detokenization in the upstream sglang tokenizer "
