@@ -8,10 +8,8 @@ use anyhow::{Context as _, Result};
 use tokio::sync::{oneshot, watch};
 
 use dynamo_kv_router::{
-    DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
-    conditional_disagg::make_conditional_disagg_policy,
+    PrefillLoadEstimator, conditional_disagg::make_conditional_disagg_policy,
     config::KvRouterConfig,
-    selector::{DefaultWorkerSelector, WorkerSelector},
 };
 use dynamo_runtime::{
     component::Endpoint,
@@ -24,8 +22,7 @@ use dynamo_runtime::{
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget},
-    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource},
     model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -102,14 +99,14 @@ fn resolve_advertisement_from_cards(
     Ok(advertisement)
 }
 
-impl PrefillRouter<DefaultWorkerSelector> {
+impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
     pub fn disabled(
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
-        Self::disabled_with_selector(
+        Self::disabled_with_session_affinity_mode(
             model_manager,
             decode_router_mode,
             session_affinity_ttl_secs,
@@ -135,18 +132,13 @@ impl PrefillRouter<DefaultWorkerSelector> {
         load_thresholds: LoadThresholdHandle,
         parent_token: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
-        Self::new_with_selector_factory(
+        Self::new_with_selection_policy(
             Some(activation_rx),
             model_manager,
             decode_router_mode,
             kv_cache_block_size,
             kv_router_config,
-            Arc::new(|config, worker_type, _partition| {
-                DefaultWorkerSelector::new(
-                    Some(config.clone()),
-                    worker_type.default_selector_label(),
-                )
-            }),
+            SelectionPolicySource::Registry,
             prefill_load_estimator,
             session_affinity_ttl_secs,
             session_affinity_mode,
@@ -159,11 +151,8 @@ impl PrefillRouter<DefaultWorkerSelector> {
     }
 }
 
-impl<Sel> PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    pub(crate) fn disabled_with_selector(
+impl PrefillRouter {
+    pub(crate) fn disabled_with_session_affinity_mode(
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
@@ -174,7 +163,7 @@ where
             target: parking_lot::Mutex::new(None),
             target_tx: None,
             decode_routing_host: std::sync::OnceLock::new(),
-            worker_selector_factory: None,
+            selection_policy: None,
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
@@ -194,13 +183,13 @@ where
     }
 
     #[expect(clippy::too_many_arguments)]
-    pub(crate) fn new_with_selector_factory(
+    pub(crate) fn new_with_selection_policy(
         activation_rx: Option<oneshot::Receiver<Endpoint>>,
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        worker_selector_factory: WorkerSelectorFactory<Sel>,
+        selection_policy: SelectionPolicySource,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
         session_affinity_mode: SessionAffinityMode,
@@ -226,7 +215,7 @@ where
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
             decode_routing_host: std::sync::OnceLock::new(),
-            worker_selector_factory: Some(worker_selector_factory),
+            selection_policy: Some(selection_policy),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,
@@ -291,11 +280,11 @@ where
     }
 
     async fn build_binding(
-        context: &PrefillBuildContext<Sel>,
+        context: &PrefillBuildContext,
         target: WorkerSetTarget,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-    ) -> Result<PrefillBinding<Sel>> {
+    ) -> Result<PrefillBinding> {
         let target_id = target.id();
         let endpoint = target.endpoint();
         let endpoint_id = endpoint.id();
@@ -369,18 +358,12 @@ where
 
         let router = if prefill_router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint (this is a prefill router)
-            let effective_kv_router_config = prefill_kv_config.clone().unwrap_or_default();
-            let selector = (context.worker_selector_factory)(
-                &effective_kv_router_config,
-                crate::worker_type::WorkerType::Prefill,
-                RoutingPartitionRef::new(&context.model_name, DEFAULT_ROUTING_GROUP),
-            );
             let kv_chooser = context
                 .model_manager
-                .kv_chooser_for_with_selector_and_client(
+                .kv_chooser_for_with_policy_and_client(
                     client.clone(),
                     prefill_block_size,
-                    selector,
+                    context.selection_policy.clone(),
                     prefill_kv_config,
                     context.prefill_load_estimator.clone(),
                     Some(crate::worker_type::WorkerType::Prefill),
@@ -392,8 +375,12 @@ where
                 )
                 .await?;
 
-            let affinity =
-                create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
+            let affinity = create_affinity_coordinator(
+                prefill_session_affinity_ttl,
+                context.session_affinity_mode,
+                client.clone(),
+            )
+            .await?;
 
             // Build the PushRouter for prefill with KV mode using the shared client
             let push_router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_monitor(
@@ -408,11 +395,14 @@ where
                 kv_chooser,
                 load_context.clone(),
                 affinity,
-                context.session_affinity_mode,
             ))
         } else {
-            let affinity =
-                create_affinity_coordinator(prefill_session_affinity_ttl, client.clone()).await?;
+            let affinity = create_affinity_coordinator(
+                prefill_session_affinity_ttl,
+                context.session_affinity_mode,
+                client.clone(),
+            )
+            .await?;
 
             // Create the transport and discovery layer for the builtin policy.
             // Note: Per-worker metrics (active_prefill_tokens, active_decode_blocks) are only
@@ -424,11 +414,10 @@ where
             )
             .await?;
 
-            Arc::new(RoutingHost::<Sel>::new_builtin_with_coordinator(
+            Arc::new(RoutingHost::new_builtin_with_coordinator(
                 push_router,
                 load_context.clone(),
                 affinity,
-                context.session_affinity_mode,
             )?)
         };
 
@@ -449,7 +438,7 @@ where
     /// wrong strategy because of one transient discovery miss — a downgrade that
     /// would persist until the binding was rebuilt.
     async fn resolve_prefill_advertisement(
-        context: &PrefillBuildContext<Sel>,
+        context: &PrefillBuildContext,
         endpoint: &Endpoint,
     ) -> Result<PrefillAdvertisement> {
         let endpoint_id = endpoint.id();
@@ -531,10 +520,10 @@ where
             let build_context = PrefillBuildContext {
                 model_manager: router_ref.model_manager.clone(),
                 decode_router_mode: router_ref.decode_router_mode,
-                worker_selector_factory: router_ref
-                    .worker_selector_factory
+                selection_policy: router_ref
+                    .selection_policy
                     .clone()
-                    .expect("enabled prefill router has a worker selector factory"),
+                    .expect("enabled prefill router has a selection policy"),
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
                 session_affinity_mode: router_ref.session_affinity_mode,
@@ -637,11 +626,6 @@ where
         if let Some(target_tx) = &self.target_tx {
             target_tx.send_replace(target);
         }
-    }
-
-    /// Whether the inner router has initialized.
-    pub fn is_activated(&self) -> bool {
-        self.binding.load().is_some()
     }
 
     pub(super) fn lifecycle_state(&self) -> PrefillLifecycleState {
@@ -896,13 +880,13 @@ mod tests {
                 admitted_ids,
             })
         };
-        let router = PrefillRouter::new_with_selector_factory(
+        let router = PrefillRouter::new_with_selection_policy(
             None,
             Arc::new(ModelManager::new()),
             RouterMode::RoundRobin,
             16,
             None,
-            Arc::new(|config, _, _| DefaultWorkerSelector::new(Some(config.clone()), "prefill")),
+            SelectionPolicySource::Registry,
             None,
             None,
             SessionAffinityMode::Hard,
@@ -958,8 +942,9 @@ mod tests {
         admissions.send_replace(vec![ids[1]]);
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let outcome = router
-                    .query_prefill_worker(
+                let reservation = router
+                    .reserve_prefill_worker(
+                        "admitted-probe",
                         &[1; 128],
                         None,
                         None,
@@ -967,16 +952,13 @@ mod tests {
                         0.0,
                         0,
                         None,
+                        None,
                         RoutingConstraints::default(),
                     )
                     .await
-                    .unwrap();
-                let crate::kv_router::prefill_router::PrefillQueryOutcome::Routed {
-                    worker_id, ..
-                } = outcome
-                else {
-                    panic!("prefill query must remain routable");
-                };
+                    .expect("prefill reservation must remain routable");
+                let worker_id = reservation.worker_id();
+                reservation.release().await.unwrap();
                 assert!(
                     ids[..2].contains(&worker_id),
                     "rejected prefill worker became selectable"

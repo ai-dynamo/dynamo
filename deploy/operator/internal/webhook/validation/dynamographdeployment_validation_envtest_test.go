@@ -1058,6 +1058,40 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "v1beta1 role PodTemplates require component-specific support",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "v1alpha1 role PodTemplates require component-specific support",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
 			name: "roles require a component role schema",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
@@ -1142,6 +1176,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
 			}),
+		},
+		{
+			name: "non-worker checkpoint is rejected at admission",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].experimental.checkpoint: Forbidden: checkpoint functionality is supported only for worker, prefill, and decode components",
+			},
 		},
 		{
 			name:          "checkpoint configuration requires operator feature gate",

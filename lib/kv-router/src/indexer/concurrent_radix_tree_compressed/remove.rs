@@ -98,7 +98,7 @@ impl ConcurrentRadixTreeCompressed {
                     // entry (and the per-worker tracked-block count) leaks
                     // permanently. Mirrors the scrubs in apply_removed_hash's
                     // miss branches.
-                    Self::remove_lookup_hashes(lookup, worker, [block_hash]);
+                    self.remove_lookup_hashes(lookup, worker, [block_hash]);
                 }
             }
         }
@@ -125,7 +125,7 @@ impl ConcurrentRadixTreeCompressed {
 
         match cur_node.remove_worker_for_hashes(worker, block_hashes) {
             Some(outcome) => {
-                Self::remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
+                self.remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
                 for block_hash in outcome.unmatched_hashes {
                     self.apply_removed_hash(lookup, worker, block_hash, id);
                 }
@@ -158,7 +158,7 @@ impl ConcurrentRadixTreeCompressed {
                 block_hash = ?block_hash,
                 "Block not found during batched remove fallback; skipping"
             );
-            Self::remove_lookup_hashes(lookup, worker, [block_hash]);
+            self.remove_lookup_hashes(lookup, worker, [block_hash]);
             return;
         };
 
@@ -172,7 +172,7 @@ impl ConcurrentRadixTreeCompressed {
             match cur_node.remove_worker_for_hashes(worker, std::slice::from_ref(&block_hash)) {
                 Some(outcome) => {
                     debug_assert!(outcome.unmatched_hashes.is_empty());
-                    Self::remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
+                    self.remove_lookup_hashes(lookup, worker, outcome.stale_hashes);
                     return;
                 }
                 None => {
@@ -201,7 +201,7 @@ impl ConcurrentRadixTreeCompressed {
                                 block_hash = ?block_hash,
                                 "Block not found in subtree during batched remove; skipping"
                             );
-                            Self::remove_lookup_hashes(lookup, worker, [block_hash]);
+                            self.remove_lookup_hashes(lookup, worker, [block_hash]);
                             return;
                         }
                     }
@@ -211,6 +211,7 @@ impl ConcurrentRadixTreeCompressed {
     }
 
     fn remove_lookup_hashes(
+        &self,
         lookup: &mut FxHashMap<WorkerWithDpRank, WorkerLookup>,
         worker: WorkerWithDpRank,
         hashes: impl IntoIterator<Item = ExternalSequenceBlockHash>,
@@ -218,6 +219,7 @@ impl ConcurrentRadixTreeCompressed {
         if let Some(wl) = lookup.get_mut(&worker) {
             for hash in hashes {
                 wl.remove(&hash);
+                self.release_hash(worker, hash);
             }
         }
     }
@@ -228,7 +230,18 @@ impl ConcurrentRadixTreeCompressed {
         target: WorkerRemovalTarget,
         sweep_tree: bool,
     ) {
-        lookup.retain(|worker, _| !target.matches(*worker));
+        lookup.retain(|worker, blocks| {
+            if target.matches(*worker) {
+                if self.lifecycle.is_enabled() {
+                    for &hash in blocks.keys() {
+                        self.release_hash(*worker, hash);
+                    }
+                }
+                false
+            } else {
+                true
+            }
+        });
         if !sweep_tree {
             return;
         }

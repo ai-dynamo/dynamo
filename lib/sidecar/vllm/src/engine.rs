@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_v14 as tonic;
+
 use std::collections::HashSet;
 
 use async_trait::async_trait;
@@ -17,7 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
-use crate::convert::{ResponseState, build_generate_request, data_parallel_rank};
+use crate::convert::{
+    ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
+};
 use crate::model::DiscoveredModel;
 
 pub struct VllmSidecarEngine {
@@ -85,6 +89,7 @@ impl VllmSidecarEngine {
 
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
         let vllm_http_url = args
             .vllm_http_endpoint
             .map(|endpoint| {
@@ -110,7 +115,7 @@ impl VllmSidecarEngine {
             )));
         }
         let rl_metadata = enable_rl
-            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .then(|| model.rl_worker_metadata(vllm_http_url, vllm_rl_world_size))
             .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
@@ -214,6 +219,7 @@ impl LLMEngine for VllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
+        let request = normalize_response_options(request)?;
         let mut state = ResponseState::new(&request, self.mode);
         let data_parallel_rank = data_parallel_rank(&request, self.mode);
         let mut proto_request = build_generate_request(request, request_id, self.mode)?;

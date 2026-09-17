@@ -413,21 +413,29 @@ type componentRoleSpecValidationOptions struct {
 	workloadProvider           string
 	scope                      provideroverride.Scope
 	component                  *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	podTemplateAllowed         bool
 }
 
 // validateComponentRoleSpec validates role. role and fldPath must not be nil;
-// the optional provider override may be nil.
+// the optional provider override and PodTemplate may be nil.
 func (v *sharedValidation) validateComponentRoleSpec(
 	role *nvidiacomv1beta1.ComponentRoleSpec,
 	fldPath *field.Path,
 	options componentRoleSpecValidationOptions,
 ) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if role.PodTemplate != nil && !options.podTemplateAllowed {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("podTemplate"),
+			"is not supported for this component role",
+		))
+	}
 	if role.ProviderOverride == nil {
-		return nil
+		return allErrs
 	}
 
 	// Validate the provider fragment against this exact multinode role.
-	return v.validateProviderOverride(
+	return append(allErrs, v.validateProviderOverride(
 		role.ProviderOverride,
 		fldPath.Child("providerOverride"),
 		providerOverrideValidationOptions{
@@ -436,7 +444,7 @@ func (v *sharedValidation) validateComponentRoleSpec(
 			scope:            options.scope,
 			component:        options.component,
 		},
-	)
+	)...)
 }
 
 // validateEPPConfig validates deprecated Go-EPP config. config and fldPath must not be nil.
@@ -529,6 +537,7 @@ func (v *sharedValidation) validateExperimentalSpec(
 			experimental.Checkpoint,
 			fldPath.Child("checkpoint"),
 			experimental.GPUMemoryService,
+			options.componentType,
 		)...)
 	}
 
@@ -672,10 +681,22 @@ func (v *sharedValidation) validateComponentCheckpointConfig(
 	checkpointConfig *nvidiacomv1beta1.ComponentCheckpointConfig,
 	fldPath *field.Path,
 	gms *nvidiacomv1beta1.GPUMemoryServiceSpec,
+	componentType nvidiacomv1beta1.ComponentType,
 ) field.ErrorList {
 	var allErrs field.ErrorList
 	if checkpointConfig.Enabled && !features.MustGateFrom(v.ctx).Enabled(features.Checkpoint) {
 		allErrs = append(allErrs, field.Forbidden(fldPath, "checkpoint functionality is disabled in the operator configuration"))
+	}
+	if checkpointConfig.Enabled && componentType == "" {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"checkpoint functionality requires component type to be explicitly set to worker, prefill, or decode",
+		))
+	} else if checkpointConfig.Enabled && !dynamo.IsWorkerComponent(string(componentType)) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath,
+			"checkpoint functionality is supported only for worker, prefill, and decode components",
+		))
 	}
 	if checkpointConfig.Job == nil {
 		return allErrs

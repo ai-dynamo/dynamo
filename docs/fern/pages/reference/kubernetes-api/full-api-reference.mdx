@@ -159,6 +159,12 @@ ProviderOverride configures the provider workload unit generated for this role. 
 See [ProviderOverride](#provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+PodTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. No component type supports it in this release.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="configmapkeyselector" title="ConfigMapKeySelector">
@@ -2421,6 +2427,12 @@ replicas is the logical cardinality of this role in one complete component insta
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the provider workload unit generated for this role. It is supported only for components embedded in a DGD.
 See [ProviderOverride](#v1beta1-provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="podTemplate" type="PodTemplateSpec">
+podTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. No component type supports it in this release.
+See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

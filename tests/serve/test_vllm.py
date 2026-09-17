@@ -10,6 +10,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
+# tests.serve.multimodal_profiles.vllm reaches dynamo.common.multimodal, whose
+# package __init__ eagerly imports torch.
+# Skip the whole module in images that do not ship torch (e.g. Triton).
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError as e:
+    pytest.skip(f"torch not available in this image: {e}", allow_module_level=True)
+
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -835,7 +843,7 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [3], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
@@ -848,9 +856,7 @@ def test_serve_deployment(
     """
     Test dynamo serve deployments with different graph configurations.
     """
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 3
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

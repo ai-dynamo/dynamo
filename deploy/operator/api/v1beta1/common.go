@@ -133,6 +133,12 @@ type ComponentRoleSpec struct {
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// podTemplate defines the Pod configuration for this role. Admission permits
+	// it only when the enclosing component type explicitly supports role-specific
+	// Pod templates. No component type supports it in this release.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // MultinodeSpec configures a multinode component.

@@ -174,8 +174,8 @@ COMMON_ENV=(
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) — otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + i - 1))
+    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + i - 1)))
 
     if [[ "${SINGLE_GPU}" == "true" ]]; then
         GPU_ID=0
@@ -201,7 +201,7 @@ done
 
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    WORKER_PORT=$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))
+    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
     wait_ready "http://127.0.0.1:${WORKER_PORT}/health" "vLLM backend $i" 900
 done
 
@@ -271,7 +271,8 @@ for f in $(seq 1 "${NUM_FRONTENDS}"); do
     echo "Frontend ${f}: http://127.0.0.1:$((HTTP_PORT + f - 1))"
 done
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    echo "Worker $i: http://127.0.0.1:$((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2))/health"
+    WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + (i - 1) * 2)))
+    echo "Worker $i: http://127.0.0.1:${WORKER_PORT}/health"
 done
 echo
 echo "Architecture: ${NUM_FRONTENDS}x Frontend (vLLM processor + KvRouter) -> ${NUM_WORKERS}x vLLM backend"
