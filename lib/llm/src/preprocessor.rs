@@ -2353,10 +2353,12 @@ impl OpenAIPreprocessor {
         };
         let model_info = model_info.get_model_info()?;
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
-        crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
-            tool_call_parser.as_deref(),
-            mdc.runtime_config.reasoning_parser.as_deref(),
-        )?;
+        if mdc.model_type.supports_chat() {
+            crate::protocols::openai::chat_completions::tool_parser_v2::validate_parser_version(
+                tool_call_parser.as_deref(),
+                mdc.runtime_config.reasoning_parser.as_deref(),
+            )?;
+        }
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
             || mdc.runtime_config.tool_call_parser.as_deref() == Some("glm47");
@@ -4816,6 +4818,15 @@ impl OpenAIPreprocessor {
 
         if !should_jail {
             return Ok(ToolProcessingRoute::PassThrough);
+        }
+
+        if selected_version == dynamo_runtime::config::ParserVersion::V2
+            && effective_tool_call_parser.is_none()
+        {
+            anyhow::bail!(
+                "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
+                env_llm::DYN_PARSER_VERSION
+            );
         }
 
         if let Some(parser_name) = effective_tool_call_parser.as_deref()
@@ -7706,6 +7717,20 @@ mod tests {
                 "parser={parser}, structural_tag={structural_tag}: {error:#}"
             );
         }
+
+        let card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        let preprocessor = OpenAIPreprocessor::new(card).unwrap();
+        let request = parser_route_test_request(ChatCompletionToolChoiceOption::Required);
+        let constraint =
+            crate::preprocessor::tool_choice::guided_tool_constraint(&request, None, None, false)
+                .unwrap();
+        assert!(
+            preprocessor
+                .tool_processing_route(&request, &constraint)
+                .expect_err("explicit v2 must not construct an unconfigured immediate jail")
+                .to_string()
+                .contains("requires the v1 tool-call jail")
+        );
     }
 
     #[test]
