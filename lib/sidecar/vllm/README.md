@@ -82,7 +82,7 @@ provided through the environment.
 
 ### RL workflows
 
-Start vLLM with the capabilities required by the workflow, then opt the sidecar into RL discovery:
+Start vLLM with the capabilities required by the workflow, then opt the sidecar into RL discovery. This example targets vLLM 0.28:
 
 ```bash
 vllm-rs serve Qwen/Qwen3-0.6B \
@@ -95,14 +95,20 @@ vllm-rs serve Qwen/Qwen3-0.6B \
 DYN_SYSTEM_PORT=8081 dynamo-vllm-sidecar \
   --grpc-endpoint 127.0.0.1:50051 \
   --vllm-http-endpoint http://rollout-0.rl.svc.cluster.local:8000 \
+  --vllm-rl-world-size 1 \
+  --vllm-rl-prefill-context-parallel-size 1 \
   --enable-rl
 ```
+
+For newer vLLM releases, use the same command without the two `--vllm-rl-*` compatibility options; the nonzero world size reported over gRPC is authoritative.
 
 Replace `rollout-0.rl.svc.cluster.local` with a private address that the RL controller can route to. Binding vLLM to `0.0.0.0` exposes both its HTTP and gRPC listeners, so restrict both ports with host firewall rules, Kubernetes NetworkPolicy, or an equivalent trusted-network control. A colocated sidecar can continue to use loopback for `--grpc-endpoint`; the advertised HTTP URL must be routable from the controller, not merely from the worker.
 
 `--enable-rl` (or `DYN_ENABLE_RL=true`) requires the Dynamo system server (`DYN_SYSTEM_PORT=0` or a positive port) and registers `dyn://<namespace>.<component>.rl`, which lets the Dynamo frontend discover this worker and its `/engine/control/*` and `/engine/update/*` routes through `/v1/rl/workers`. The sidecar advertises pause/resume, sleep-status, and weight-version controls when the vLLM server reports the RL gRPC API; mutating sleep/wake routes require `--enable-sleep-mode`, weight-transfer routes require `--weight-transfer-config`, and draft updates require speculative decoding support. The sidecar publishes `--vllm-http-endpoint` (or `VLLM_HTTP_ENDPOINT`) only as part of this RL worker metadata.
 
 Native vLLM lifecycle and weight-update operations use the typed gRPC Control service and do not require `--vllm-http-endpoint`. Configure the HTTP base URL only when an RL framework needs a compatibility operation that is not represented by the typed service, such as a custom `worker_extension_cls` method invoked through `/collective_rpc`.
+
+vLLM 0.28 does not report its engine world size over production gRPC or HTTP routes. When RL is enabled against that release, pass `--vllm-rl-world-size` (or `DYN_VLLM_RL_WORLD_SIZE`) with the total process count and `--vllm-rl-prefill-context-parallel-size` (or `DYN_VLLM_RL_PREFILL_CONTEXT_PARALLEL_SIZE`) with PCP. The sidecar validates the total against tensor, pipeline, prefill-context, and data parallelism (`TP * PP * PCP * DP`); the example uses the default one-rank topology. Do not substitute decode-context parallelism for PCP because those settings do not have a one-to-one relationship. Newer vLLM releases report the per-data-parallel engine value over gRPC, so omit both compatibility options for them.
 
 The HTTP value must be a controller-routable `http://` or `https://` base URL. Path prefixes are preserved, so a reverse proxy can advertise a value such as `https://rollout.example.internal/vllm-admin`; downstream clients append the compatibility route beneath that prefix. User information, query strings, and fragments are rejected. Do not place credentials or tokens in the URL.
 

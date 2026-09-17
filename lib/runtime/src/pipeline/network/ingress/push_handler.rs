@@ -4,10 +4,12 @@
 use super::*;
 
 use crate::engine::AsyncEngineContext;
+use crate::error::DynamoError;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
     WORK_HANDLER_NETWORK_TRANSIT_SECONDS, WORK_HANDLER_TIME_TO_FIRST_RESPONSE_SECONDS,
 };
+use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::{ManyIn, RequestStream};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
@@ -678,7 +680,12 @@ where
                     tracing::error!("Failed to generate response stream: {error_string}");
                 }
 
-                let _result = publisher.send_prologue(Some(error_string)).await;
+                // Send the worker's error type with the display text, so a
+                // frontend can tell a request the backend cannot serve from
+                // a transport failure.
+                let prologue_error =
+                    StreamPrologueError::new(error_string, typed_error_from_pipeline_error(&e));
+                let _result = publisher.send_prologue_typed(Some(prologue_error)).await;
                 Err(e)?
             }
         };
@@ -758,6 +765,21 @@ where
     }
 }
 
+/// Recover the worker's typed error from a pipeline failure, for the prologue.
+///
+/// `GenerateError` must unwrap its `anyhow::Error` payload first. `anyhow::Error`
+/// does not implement `std::error::Error`, so that variant exposes no `source()`
+/// and converting the enclosing `PipelineError` yields a bare
+/// `ErrorType::Unknown`, losing the worker error type. Any other variant carries
+/// no worker error and converts to `ErrorType::Unknown`.
+pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError {
+    let source: &(dyn std::error::Error + 'static) = match e {
+        PipelineError::GenerateError(inner) => inner.as_ref(),
+        other => other,
+    };
+    DynamoError::from(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,9 +789,43 @@ mod tests {
     use futures::stream;
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
 
+    use crate::error::{BackendError, ErrorType};
+
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
     type TestIngress = Ingress<SingleIn<TestRequest>, ManyOut<TestResponse>>;
+
+    /// The positive half of the recovery hop: a worker's typed refusal, boxed
+    /// into the `anyhow::Error` payload of `PipelineError::GenerateError`,
+    /// comes back out with its type intact.
+    #[test]
+    fn generate_error_payload_keeps_the_workers_error_type() {
+        let e = PipelineError::GenerateError(anyhow::Error::new(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                .message("multimodal input is not supported by this backend")
+                .build(),
+        ));
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument),
+            "the worker's type must survive the anyhow payload"
+        );
+    }
+
+    /// The negative half: a failure that is not a worker's `generate()` error
+    /// has no type to recover, and must not acquire one.
+    #[test]
+    fn non_generate_pipeline_error_stays_untyped() {
+        let e = PipelineError::DeserializationError("bad request payload".to_string());
+
+        assert_eq!(
+            typed_error_from_pipeline_error(&e).error_type(),
+            ErrorType::Unknown,
+            "a transport-side failure must not be reported as a worker error"
+        );
+    }
 
     /// Standalone metrics, not bound to an `Endpoint`, so the test needs no DRT.
     fn test_metrics() -> WorkHandlerMetrics {

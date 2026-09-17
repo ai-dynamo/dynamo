@@ -23,6 +23,7 @@ use super::worker_monitor::LoadThresholdConfig;
 use super::{
     GenerateEngineSelection, KvSourceMembershipWatch, Model, RuntimeConfigWatch, WorkerSet,
     kv_source_watch::KvSourceMembershipCoordinator, runtime_config_watch,
+    runtime_configs::filter_runtime_configs,
 };
 
 use dynamo_runtime::{
@@ -438,6 +439,19 @@ impl ModelManager {
         self.models
             .get(model_name)
             .map(|entry| entry.value().clone())
+    }
+
+    /// Reject a local model registration that would claim an alias-reserved name.
+    ///
+    /// Callers hold `reservation_lock` so this check is atomic with alias
+    /// registration.
+    fn ensure_name_not_alias(&self, model_name: &str) -> Result<(), ModelManagerError> {
+        if self.alias_to_primary.contains_key(model_name) {
+            return Err(ModelManagerError::ModelAlreadyExists(
+                model_name.to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Remove a Model if it has no remaining WorkerSets.
@@ -1045,16 +1059,27 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
-    /// Snapshot the serving readiness of every registered model.
+    /// Snapshot the serving readiness of every registered primary model name.
     ///
     /// Each value is derived from [`Model::is_ready_to_serve`], the same
     /// selection gate used by request routing and KServe model readiness.
     /// Results are sorted by model name so scrape output is deterministic.
+    ///
+    /// An alias is registered in `models` under its own name so that routing can
+    /// resolve it, which would otherwise emit a second, duplicate reading for the
+    /// deployment it points at. Alias names are therefore filtered out here, so a
+    /// caller sees one entry per primary name — matching the request path, which
+    /// canonicalizes an alias through [`Self::resolve_canonical_name`] before it
+    /// labels a metric. Both maps are read from the single loaded catalog guard,
+    /// so they always come from the same published snapshot. A LoRA adapter is a
+    /// distinct servable model rather than a second name for one, is never
+    /// recorded in `aliases`, and so keeps its own entry.
     pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
         let catalog = self.catalog.load();
         let mut readiness = catalog
             .models
             .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
             .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
             .collect::<Vec<_>>();
         readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -1238,19 +1263,18 @@ impl ModelManager {
     /// must stay aligned with endpoint retraction: a unit answered wrongly here either
     /// disables an endpoint that still has models or leaves one enabled with none.
     pub fn has_models_of_type(&self, model_type: ModelType) -> bool {
-        (model_type.contains(ModelType::Chat) && !self.list_chat_completions_models().is_empty())
-            || (model_type.contains(ModelType::Completions)
-                && !self.list_completions_models().is_empty())
-            || (model_type.contains(ModelType::Embedding)
-                && !self.list_embeddings_models().is_empty())
-            || (model_type.contains(ModelType::Images) && !self.list_images_models().is_empty())
-            || (model_type.contains(ModelType::Audios) && !self.list_audios_models().is_empty())
-            || (model_type.contains(ModelType::Videos) && !self.list_videos_models().is_empty())
-            || (model_type.contains(ModelType::TensorBased)
-                && !self.list_tensor_models().is_empty())
-            || (model_type.contains(ModelType::Realtime) && !self.list_realtime_models().is_empty())
-            || (model_type.contains(ModelType::Classify) && !self.list_classify_models().is_empty())
-            || (model_type.contains(ModelType::Pooling) && !self.list_pooling_models().is_empty())
+        self.catalog.load().models.values().any(|model| {
+            (model_type.contains(ModelType::Chat) && model.has_chat_engine())
+                || (model_type.contains(ModelType::Completions) && model.has_completions_engine())
+                || (model_type.contains(ModelType::Embedding) && model.has_embeddings_engine())
+                || (model_type.contains(ModelType::Images) && model.has_images_engine())
+                || (model_type.contains(ModelType::Audios) && model.has_audios_engine())
+                || (model_type.contains(ModelType::Videos) && model.has_videos_engine())
+                || (model_type.contains(ModelType::TensorBased) && model.has_tensor_engine())
+                || (model_type.contains(ModelType::Realtime) && model.has_realtime_engine())
+                || (model_type.contains(ModelType::Classify) && model.has_classify_engine())
+                || (model_type.contains(ModelType::Pooling) && model.has_pooling_engine())
+        })
     }
 
     pub fn get_embeddings_engine(
@@ -1494,6 +1518,7 @@ impl ModelManager {
         engine: OpenAIChatCompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_chat_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1517,6 +1542,7 @@ impl ModelManager {
         engine: OpenAICompletionsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_completions_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1540,6 +1566,7 @@ impl ModelManager {
         engine: OpenAIEmbeddingsStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_embeddings_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1563,6 +1590,7 @@ impl ModelManager {
         engine: OpenAIClassifyStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_classify_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1586,6 +1614,7 @@ impl ModelManager {
         engine: OpenAIPoolingStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_pooling_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1609,6 +1638,7 @@ impl ModelManager {
         engine: TensorStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_tensor_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1632,6 +1662,7 @@ impl ModelManager {
         engine: OpenAIImagesStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_images_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1655,6 +1686,7 @@ impl ModelManager {
         engine: OpenAIVideosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_videos_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1678,6 +1710,7 @@ impl ModelManager {
         engine: OpenAIAudiosStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_audios_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1701,6 +1734,7 @@ impl ModelManager {
         engine: RealtimeBidirectionalEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_realtime_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1724,6 +1758,7 @@ impl ModelManager {
         engine: GenerateStreamingEngine,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_generate_engine() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -1747,6 +1782,7 @@ impl ModelManager {
         card_checksum: &str,
     ) -> Result<(), ModelManagerError> {
         let _reservation = self.reservation_lock.lock();
+        self.ensure_name_not_alias(model)?;
         let model_entry = self.get_or_create_model(model);
         if model_entry.has_prefill() {
             return Err(ModelManagerError::ModelAlreadyExists(model.to_string()));
@@ -2186,6 +2222,13 @@ impl ModelManager {
             None
         };
 
+        // Shared endpoint state includes rejected cohorts; router capacity and metadata
+        // must use the same membership as this client's worker selection.
+        let workers_with_configs = filter_runtime_configs(
+            workers_with_configs,
+            client.instance_avail_watcher(),
+            cancellation_token.clone(),
+        );
         let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
@@ -2378,7 +2421,7 @@ impl ModelManager {
         let prefill_providers = worker_sets
             .iter()
             .filter(|worker_set| worker_set.card().worker_type == Some(WorkerType::Prefill))
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let decode_consumers = worker_sets
             .iter()
@@ -2388,7 +2431,11 @@ impl ModelManager {
             .then(|| prefill_providers[0].clone());
         for worker_set in &decode_consumers {
             if let Some(router) = &worker_set.prefill_router {
-                router.set_target(prefill_target.clone());
+                router.set_target(
+                    prefill_target
+                        .clone()
+                        .map(super::WorkerSetTarget::Committed),
+                );
             }
         }
 
@@ -2398,7 +2445,7 @@ impl ModelManager {
                 worker_set.card().worker_type == Some(WorkerType::Encode)
                     && worker_set.card().model_type.is_empty()
             })
-            .filter_map(|worker_set| worker_set.topology_endpoint().cloned())
+            .filter_map(|worker_set| worker_set.topology_target().cloned())
             .collect::<Vec<_>>();
         let unique_encode = (encode_providers.len() == 1).then(|| encode_providers[0].clone());
         let capable_prefill = (prefill_providers.len() == 1)
@@ -2418,7 +2465,12 @@ impl ModelManager {
                     Self::supports_encoder_result_handoff(worker_set.card())
                 }
             };
-            router.set_target(routing_enabled.then(|| unique_encode.clone()).flatten());
+            router.set_target(
+                routing_enabled
+                    .then(|| unique_encode.clone())
+                    .flatten()
+                    .map(super::WorkerSetTarget::Committed),
+            );
         }
     }
 
@@ -3614,9 +3666,18 @@ mod tests {
         Option<Arc<crate::kv_router::EncoderRouter>>,
     ) {
         let card = topology_card(role);
-        let mut worker_set =
-            WorkerSet::new(endpoint.id().namespace, card.mdcsum().to_string(), card);
-        worker_set.set_topology_endpoint(endpoint);
+        let mut worker_set = WorkerSet::new(
+            endpoint.id().namespace,
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        worker_set.set_topology_target(crate::discovery::CommittedWorkerSetTarget {
+            group: endpoint.id().to_string(),
+            endpoint,
+            generation: 1,
+            card: Arc::new(card),
+            admitted_ids: tokio::sync::watch::channel(Vec::new()).1,
+        });
         if role != WorkerType::Decode {
             return (worker_set, None, None);
         }
@@ -3942,7 +4003,6 @@ mod tests {
         );
     }
 
-    /// Stand-in engine for registration-only tests; never invoked.
     struct UncalledEngine;
 
     #[async_trait::async_trait]

@@ -20,6 +20,42 @@ use dynamo_kv_router::protocols::WorkerId;
 /// Type alias for the runtime config watch receiver.
 pub type RuntimeConfigWatch = watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>;
 
+/// Scope shared endpoint configs to the workers available to one routing client.
+pub(super) fn filter_runtime_configs(
+    mut configs: RuntimeConfigWatch,
+    mut instance_ids: watch::Receiver<Vec<WorkerId>>,
+    lifecycle: CancellationToken,
+) -> RuntimeConfigWatch {
+    let snapshot = |configs: &mut RuntimeConfigWatch,
+                    instance_ids: &mut watch::Receiver<Vec<WorkerId>>| {
+        let configs = configs.borrow_and_update();
+        instance_ids
+            .borrow_and_update()
+            .iter()
+            .filter_map(|id| configs.get(id).map(|config| (*id, config.clone())))
+            .collect::<HashMap<_, _>>()
+    };
+    let (tx, rx) = watch::channel(snapshot(&mut configs, &mut instance_ids));
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = lifecycle.cancelled() => break,
+                _ = tx.closed() => break,
+                result = configs.changed() => { if result.is_err() { break; } }
+                result = instance_ids.changed() => { if result.is_err() { break; } }
+            }
+
+            let next = snapshot(&mut configs, &mut instance_ids);
+            if *tx.borrow() != next && tx.send(next).is_err() {
+                break;
+            }
+        }
+    });
+
+    rx
+}
+
 // `lifecycle` bounds this task directly rather than leaving it to notice its
 // receiver is gone. That receiver-drop signal only reaches this task via a
 // failed `tx.send`, and `tx.send` is only attempted when a discovery event
@@ -186,6 +222,64 @@ pub async fn runtime_config_watch(
 mod tests {
     use super::*;
     use dynamo_runtime::discovery::{DiscoveryInstance, ModelCardInstanceId, ModelTaintsUpdate};
+
+    #[tokio::test]
+    async fn router_runtime_configs_follow_admitted_membership_and_config_updates() {
+        let initial = HashMap::from([
+            (1, ModelRuntimeConfig::default()),
+            (2, ModelRuntimeConfig::default()),
+        ]);
+        let (configs_tx, configs_rx) = watch::channel(initial.clone());
+        let (ids_tx, ids_rx) = watch::channel(vec![1]);
+        let lifecycle = CancellationToken::new();
+        let mut filtered = filter_runtime_configs(configs_rx.clone(), ids_rx, lifecycle.clone());
+
+        // Rejected worker 2 must not contribute to the scheduler's initial capacity.
+        assert_eq!(
+            *filtered.borrow(),
+            HashMap::from([(1, initial[&1].clone())])
+        );
+        assert_eq!(*configs_rx.borrow(), initial);
+
+        let updated = ModelRuntimeConfig {
+            max_num_batched_tokens: Some(128),
+            ..Default::default()
+        };
+        configs_tx.send_modify(|configs| {
+            configs.insert(1, updated.clone());
+            configs.insert(3, ModelRuntimeConfig::default());
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), filtered.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(*filtered.borrow(), HashMap::from([(1, updated.clone())]));
+
+        // Compatible membership changes update capacity without a new router.
+        ids_tx.send(vec![1, 3]).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), filtered.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            *filtered.borrow(),
+            HashMap::from([(1, updated), (3, ModelRuntimeConfig::default())])
+        );
+
+        ids_tx.send(Vec::new()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), filtered.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(filtered.borrow().is_empty());
+        assert_eq!(configs_rx.borrow().len(), 3);
+
+        lifecycle.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), filtered.changed())
+            .await
+            .unwrap()
+            .expect_err("retired router must release its config watch on a quiet endpoint");
+    }
 
     fn model_instance(
         instance_id: u64,

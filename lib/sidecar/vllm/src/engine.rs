@@ -95,6 +95,10 @@ impl VllmSidecarEngine {
 
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
+        let vllm_rl_prefill_context_parallel_size = args
+            .vllm_rl_prefill_context_parallel_size
+            .map(|size| size.get());
         let vllm_http_url = args
             .vllm_http_endpoint
             .map(|endpoint| {
@@ -114,7 +118,13 @@ impl VllmSidecarEngine {
         let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
         let rl_metadata = enable_rl
-            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .then(|| {
+                model.rl_worker_metadata(
+                    vllm_http_url,
+                    vllm_rl_world_size,
+                    vllm_rl_prefill_context_parallel_size,
+                )
+            })
             .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {

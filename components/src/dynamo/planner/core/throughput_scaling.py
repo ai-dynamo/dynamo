@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional
+from typing import Literal, Optional
 
 from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import ScalingDecision
@@ -39,7 +39,7 @@ class ThroughputScalingMixin:
         demand_rps: float,
         isl: float,
         osl: float,
-        component: str,
+        component: Literal["prefill", "decode"],
         kv_hit_rate: Optional[float] = None,
     ) -> Optional[ScalingDecision]:
         desired = (
@@ -158,7 +158,7 @@ class ThroughputScalingMixin:
         )
         engine_rps = capacity.rps if capacity is not None else 0.0
         model_not_ready = capacity is None or engine_rps <= 0
-        if model_not_ready:
+        if capacity is None or engine_rps <= 0:
             logger.warning(
                 "Agg perf model not ready, holding at the current replica count "
                 "and enforcing the endpoint floor"

@@ -48,6 +48,17 @@ use std::{
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
+#[test]
+fn model_endpoint_availability_is_public() {
+    let service = HttpService::builder().build().unwrap();
+
+    assert!(!service.model_endpoint_enabled(EndpointType::Chat));
+    service
+        .enable_model_endpoint(EndpointType::Chat, true)
+        .unwrap();
+    assert!(service.model_endpoint_enabled(EndpointType::Chat));
+}
+
 #[path = "common/ports.rs"]
 mod ports;
 use ports::bind_random_port;
@@ -1925,6 +1936,69 @@ async fn test_audio_speech_buffers_complete_response_with_content_length() {
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     }
+}
+
+#[tokio::test]
+async fn test_audio_speech_alias_meters_under_primary_model() {
+    const PRIMARY: &str = "audio-model";
+    const ALIAS: &str = "audio-model-alias";
+
+    let engine = Arc::new(CompleteAudioEngine::default());
+    // `Notify` keeps one permit from a `notify_one` that arrives before the
+    // wait, so arming it here lets the engine run straight through without a
+    // second task to release it.
+    engine.release.notify_one();
+
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let state = service.state_clone();
+    let card = ModelDeploymentCard::with_name_only(PRIMARY);
+    state
+        .manager()
+        .add_audios_model(PRIMARY, card.mdcsum(), engine.clone())
+        .unwrap();
+    // Audio requests resolve an alias through its primary model registration.
+    assert!(state.manager().register_alias(ALIAS, PRIMARY));
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(5),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": ALIAS,
+                "input": "hello",
+                "response_format": "mp3"
+            }))
+            .send(),
+    )
+    .await
+    .expect("audio speech request should complete")
+    .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+
+    let metrics = state.metrics_clone();
+    let counter = |model: &str| {
+        metrics.get_request_counter(
+            model,
+            &Endpoint::Audios,
+            &RequestType::Unary,
+            &Status::Success,
+            &ErrorType::None,
+        )
+    };
+    assert_eq!(counter(PRIMARY), 1);
+    assert_eq!(counter(ALIAS), 0);
+
+    token.cancel();
+    task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

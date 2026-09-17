@@ -150,6 +150,25 @@ def test_agg_throughput_applies_floor_when_perf_model_not_ready():
     assert scaling._diag_throughput_reason == "model_not_ready"
 
 
+def test_agg_throughput_scales_when_capacity_is_available():
+    scaling = _ModelNotReadyHarness()
+    scaling._config.decode_min_endpoint = 1
+    scaling._agg_regression = SimpleNamespace(
+        find_engine_capacity_rps=lambda **_kwargs: SimpleNamespace(
+            rps=2.0,
+            ttft_ms=100.0,
+            itl_ms=5.0,
+            eligible=True,
+        )
+    )
+
+    decision = scaling._throughput_agg(3.1, 1.0, 1.0)
+
+    assert decision is not None
+    assert decision.num_decode == 2
+    assert scaling._diag_throughput_reason == "scale"
+
+
 @pytest.mark.parametrize("gpu_cost_per_replica", [4, 5])
 def test_engine_rps_recommendation_is_independent_of_sidecar_cost(
     gpu_cost_per_replica: int,
