@@ -191,7 +191,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	}
 	var classification lpxClassification
 	selected, classification, err = r.reconcileLPXSafetyPreflight(ctx, deployment, source, pcs, nil)
-	if err != nil {
+	// An uncached successor must reach the download gate before snapshot resolution can succeed.
+	if err != nil && !errors.Is(err, lpx.ErrBuildSnapshotAcquisition) {
 		return ctrl.Result{}, err
 	}
 	if classification != nil {

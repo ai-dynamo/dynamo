@@ -88,8 +88,9 @@ func (r *downloadOrderedLPXRegistry) BuildURL(string) (*url.URL, error) {
 }
 
 func (r *downloadOrderedLPXRegistry) EnsureDownloaded(context.Context, url.URL) (bool, error) {
+	firstDownload := !slices.Contains(r.calls, "download")
 	r.calls = append(r.calls, "download")
-	if len(r.calls) == 1 {
+	if firstDownload {
 		return false, nil
 	}
 	r.downloaded = true
@@ -213,6 +214,51 @@ func TestSelectedLPXColdCacheDownloadsBeforeSnapshot(t *testing.T) {
 	require.NoError(t, reconciler.Get(t.Context(), request.NamespacedName, child))
 	require.NotNil(t, child.Status.ModelDownload)
 	require.Equal(t, []string{registry.buildURL.String()}, child.Status.ModelDownload.Builds)
+}
+
+func TestSelectedLPXSuccessorBuildDownloadsBeforePublication(t *testing.T) {
+	t.Log("Publish the previous build before switching to an uncached successor")
+	ctx := t.Context()
+	child, source, baseRegistry := newLPXTestDGD(t, lpx.PipelineSingle)
+	r, selected := newPreparedLPXTestReconciler(t, baseRegistry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	previous := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
+	const nextBuild = "next-build"
+	registry := &downloadOrderedLPXRegistry{
+		ModelRegistry: newLPXTestRegistryWithPartitionsAndMode(t, nextBuild, []int{7, 8}, manifestcapnpv2.CompilationMode_lpuOnly),
+		buildURL:      url.URL{Scheme: lpx.BuildSchemeGCS, Host: "test-bucket", Path: "/" + nextBuild},
+	}
+	r.modelRegistry = registry
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(source), source))
+	lpx.ServingComponent(source).LPX.BuildID = nextBuild
+	source.Generation++
+	require.NoError(t, r.Update(ctx, source))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	child.Generation++
+	var err error
+	child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
+	require.NoError(t, err)
+	require.NoError(t, r.Update(ctx, child))
+
+	t.Log("Start downloading despite snapshot unavailability, preserving the existing request")
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	result, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, modelDownloadRequeueAfter, result.RequeueAfter)
+	require.Equal(t, []string{"snapshot", "download"}, registry.calls)
+	require.Equal(t, previous, getLPXRequest(t, ctx, r.Client, previous.Namespace, previous.Name))
+	require.NoError(t, r.Get(ctx, request.NamespacedName, child))
+	require.Equal(t, child.Generation, child.Status.ObservedGeneration)
+
+	t.Log("Resolve the successor after download completes on the next reconciliation")
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Equal(t, []string{"snapshot", "download", "snapshot", "download", "snapshot"}, registry.calls)
+	require.NoError(t, r.Get(ctx, request.NamespacedName, child))
+	require.Equal(t, []string{registry.buildURL.String()}, child.Status.ModelDownload.Builds)
+	require.NotNil(t, child.Status.ModelDownload.LastCheckedAt)
 }
 
 func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(t *testing.T) {
