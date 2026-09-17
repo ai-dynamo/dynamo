@@ -436,12 +436,7 @@ async def _put_presigned(data: bytes, target: PresignedHttpPutTarget) -> None:
         raise ArtifactStorageError("presigned artifact PUT failed") from None
 
 
-async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
-    enabled = os.environ.get(
-        "DYN_GENERATION_ARTIFACT_ENABLE_MANAGED_FSSPEC", ""
-    ).lower()
-    if enabled not in {"1", "true", "yes"}:
-        raise ArtifactStorageError("managed fsspec artifact delivery is not enabled")
+def _managed_max_bytes() -> int:
     try:
         max_bytes = int(
             os.environ.get("DYN_GENERATION_ARTIFACT_MAX_BYTES", str(_DEFAULT_MAX_BYTES))
@@ -452,8 +447,18 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
         raise ArtifactStorageError(
             "generation artifact byte limit is outside the supported single-PUT range"
         )
-    if len(data) > max_bytes:
-        raise ArtifactStorageError("artifact exceeds managed storage byte limit")
+    return max_bytes
+
+
+def _validated_managed_target(
+    target: ManagedFsspecTarget,
+) -> tuple[int, dict[str, Any]]:
+    enabled = os.environ.get(
+        "DYN_GENERATION_ARTIFACT_ENABLE_MANAGED_FSSPEC", ""
+    ).lower()
+    if enabled not in {"1", "true", "yes"}:
+        raise ArtifactStorageError("managed fsspec artifact delivery is not enabled")
+    max_bytes = _managed_max_bytes()
     profile = _profiles().get(target.profile)
     if profile is None:
         raise ArtifactStorageError("generation artifact storage profile is unknown")
@@ -464,6 +469,26 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
         raise ArtifactStorageError(
             "managed target object_key is outside the profile prefix"
         )
+    if urlsplit(profile["url"]).scheme not in {"s3", "s3a"}:
+        raise ArtifactStorageError(
+            "managed artifact profile must use an s3-compatible provider"
+        )
+    return max_bytes, profile
+
+
+def validate_artifact_target(target: ArtifactTarget) -> int:
+    """Validate a target without performing storage I/O and return its byte limit."""
+    if isinstance(target, PresignedHttpPutTarget):
+        return target.max_bytes
+    max_bytes, _ = _validated_managed_target(target)
+    return max_bytes
+
+
+async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
+    max_bytes = _managed_max_bytes()
+    if len(data) > max_bytes:
+        raise ArtifactStorageError("artifact exceeds managed storage byte limit")
+    _, profile = _validated_managed_target(target)
     try:
         timeout = int(
             os.environ.get(
@@ -476,10 +501,6 @@ async def _put_managed(data: bytes, target: ManagedFsspecTarget) -> None:
     if timeout <= 0:
         raise ArtifactStorageError("managed artifact timeout is invalid")
     try:
-        if urlsplit(profile["url"]).scheme not in {"s3", "s3a"}:
-            raise ArtifactStorageError(
-                "managed artifact profile must use an s3-compatible provider"
-            )
         storage_options = dict(profile["storage_options"])
         config_kwargs = dict(storage_options.get("config_kwargs") or {})
         config_kwargs.setdefault("connect_timeout", min(timeout, 10))
