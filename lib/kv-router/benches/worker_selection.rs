@@ -181,6 +181,7 @@ fn fixture_with_preferred_taints(
         isl_tokens: 2_048,
         lora_name: None,
         expected_output_tokens: Some(256),
+        affinity_target: None,
         pinned_worker: None,
         allowed_worker_ids: None,
         routing_constraints: RoutingConstraints {
@@ -202,8 +203,8 @@ fn fixture_with_preferred_taints(
             effective_overlap_blocks,
             effective_cached_tokens,
         },
-        router_hint_candidates: None,
-        retain_router_hint_chain: false,
+        kv_transfer_candidates: None,
+        retain_kv_transfer_chain: false,
         shared_cache_hits: None,
         worker_loads,
         resp_tx: None,

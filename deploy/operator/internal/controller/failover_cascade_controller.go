@@ -9,12 +9,9 @@ import (
 	"context"
 	"fmt"
 
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -65,13 +62,6 @@ func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		return ctrl.Result{}, err
 	}
 
-	// Snapshot+GMS restore targets currently use IntraPod recovery. InterPod
-	// Snapshot+failover is follow-on work, so fail closed rather than cascade-
-	// deleting a cohort when the unsupported labels overlap.
-	if pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue {
-		return ctrl.Result{}, nil
-	}
-
 	if !isTerminalPhase(pod.Status.Phase) {
 		return ctrl.Result{}, nil
 	}
@@ -111,15 +101,6 @@ func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		groveLabelPCSGReplicaIndex: pcsgReplica,
 		groveLabelPodIndex:         podIndex,
 	}
-	restoreTargetRequirement, err := labels.NewRequirement(
-		snapshotprotocol.RestoreTargetLabel,
-		selection.NotEquals,
-		[]string{commonconsts.KubeLabelValueTrue},
-	)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to build restore-target selector: %w", err)
-	}
-	groupSelector := labels.SelectorFromSet(labels.Set(groupLabels)).Add(*restoreTargetRequirement)
 
 	// Force delete (grace=0) intentionally: the distributed inference group is
 	// already broken when we get here, so giving the surviving engines a SIGTERM
@@ -128,7 +109,7 @@ func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// hostPath. We deliberately skip preStop hooks and the graceful shutdown
 	// window; do NOT soften this to a positive grace period.
 	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace),
-		client.MatchingLabelsSelector{Selector: groupSelector}, client.GracePeriodSeconds(0)); err != nil {
+		groupLabels, client.GracePeriodSeconds(0)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
 
@@ -168,8 +149,7 @@ func isTerminalPhase(phase corev1.PodPhase) bool {
 //   - DeleteFunc and GenericFunc suppress events that cannot initiate failover.
 func failoverCascadePredicate() predicate.Predicate {
 	isEligible := func(labels map[string]string) bool {
-		return labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] == commonconsts.KubeLabelValueTrue &&
-			labels[snapshotprotocol.RestoreTargetLabel] != commonconsts.KubeLabelValueTrue
+		return labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] == commonconsts.KubeLabelValueTrue
 	}
 
 	return predicate.Funcs{

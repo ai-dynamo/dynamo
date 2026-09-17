@@ -31,7 +31,7 @@ import (
 )
 
 // dgdDiscoveryReconciler owns the service account, role, and role binding used
-// by Kubernetes discovery and checkpoint jobs.
+// by Kubernetes discovery and SnapshotJob capture Pods.
 type dgdDiscoveryReconciler struct {
 	dgdResourceSyncer
 	config *configv1alpha1.OperatorConfiguration

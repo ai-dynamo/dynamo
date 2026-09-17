@@ -170,6 +170,8 @@ class MultiModalRequest(BaseModel):
 class MultiModalInput(BaseModel):
     image_url: Optional[str] = None
     video_url: Optional[str] = None
+    # Frontend-decoded RGB descriptor, mutually exclusive with image_url.
+    image_decoded: Optional[dict[str, Any]] = None
 
 
 class MultiModalGroup(BaseModel):

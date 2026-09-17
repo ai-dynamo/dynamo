@@ -20,6 +20,7 @@ import math
 import re
 import struct
 import time
+import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -29,6 +30,8 @@ import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
 from tests.utils.constants import DefaultPort
+from tests.utils.http_checks import check_health_generate as check_health_generate
+from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
 
@@ -42,6 +45,7 @@ class BasePayload:
     body: Dict[str, Any]
     expected_response: List[Any]  # Can be List[str] or List[List[str]] for alternatives
     expected_log: List[str]
+    expected_status_code: int = field(default=200, kw_only=True)
     # Number of times to send this exact request in sequence. Each call must
     # pass validation independently. Use >1 for cache/repeatability tests
     # (e.g., CachedTokensChatPayload asserts a cache hit on the 2nd+ call).
@@ -127,6 +131,16 @@ class BasePayload:
         content = self.response_handler(response)
         self.validate(response, content)
         return content
+
+
+@dataclass
+class HttpErrorPayload(BasePayload):
+    """Payload that validates an expected HTTP error response."""
+
+    expected_status_code: int = field(default=400, kw_only=True)
+
+    def response_handler(self, response: Any) -> str:
+        return response.text
 
 
 @dataclass
@@ -2159,6 +2173,76 @@ class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
 
 
 @dataclass
+class SGLangDisaggRouterMetricsPayload(MetricsPayload):
+    """Validate request accounting across disaggregated prefill workers."""
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        request_counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        return [
+            check
+            for check in super()._get_common_metric_checks()
+            if check.name != request_counter_name
+        ]
+
+    def validate(self, response: Any, content: str) -> None:
+        # Preserve the existing common metrics checks on the primary prefill
+        # worker, but account for routed requests across every configured
+        # prefill worker.
+        super().validate(response, content)
+
+        if not self.system_ports:
+            raise AssertionError("No prefill worker metrics ports were configured")
+
+        counter_name = (
+            f"{prometheus_names.name_prefix.COMPONENT}_"
+            f"{prometheus_names.work_handler.REQUESTS_TOTAL}"
+        )
+        labels = {
+            prometheus_names.labels.COMPONENT: "prefill",
+            prometheus_names.labels.ENDPOINT: "generate",
+        }
+        counts: dict[int, float] = {}
+
+        for port in self.system_ports:
+            worker_content = content
+            if port != self.port:
+                worker_response = requests.get(
+                    f"http://{self.host}:{port}/metrics",
+                    timeout=self.timeout,
+                )
+                worker_response.raise_for_status()
+                worker_content = worker_response.text
+
+            samples = find_metric_samples(worker_content, counter_name, labels)
+            if not samples:
+                raise AssertionError(
+                    f"Metric {counter_name} with labels {labels} was not found "
+                    f"on prefill worker metrics port {port}"
+                )
+            counts[port] = sum(samples)
+
+        total_requests = sum(counts.values())
+        per_worker = ", ".join(
+            f"port {port}={count:g}" for port, count in counts.items()
+        )
+        if total_requests < self.min_num_requests:
+            raise AssertionError(
+                f"{counter_name} has aggregate count {total_requests:g}, less than "
+                f"required {self.min_num_requests} across prefill workers "
+                f"({per_worker})"
+            )
+        logger.info(
+            "SUCCESS: Found %s with aggregate count %g across prefill workers (%s)",
+            counter_name,
+            total_requests,
+            per_worker,
+        )
+
+
+@dataclass
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
@@ -2218,56 +2302,6 @@ class TRTLLMMetricsPayload(MetricsPayload):
             )
 
         return checks
-
-
-def check_models_api(response):
-    """Check if models API is working and returns models"""
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-        time.sleep(
-            1
-        )  # temporary to avoid /completions race condition where we get 404 error
-        return data.get("data") and len(data["data"]) > 0
-    except Exception:
-        return False
-
-
-# Additional health check helpers
-def check_health_generate(response):
-    """Validate /health reports a 'generate' endpoint.
-
-    Returns True if either of the following is found:
-      - "endpoints" contains a string mentioning 'generate'
-      - "instances" contains an object with endpoint == 'generate'
-    """
-    try:
-        if response.status_code != 200:
-            return False
-        data = response.json()
-
-        # Check endpoints list for any entry containing 'generate'
-        endpoints = data.get("endpoints", []) or []
-        for ep in endpoints:
-            if isinstance(ep, str) and "generate" in ep:
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        # Check instances for an entry with endpoint == 'generate'
-        instances = data.get("instances", []) or []
-        for inst in instances:
-            if isinstance(inst, dict) and inst.get("endpoint") == "generate":
-                time.sleep(
-                    1
-                )  # temporary to avoid /completions race condition where we get 404 error
-                return True
-
-        return False
-    except Exception:
-        return False
 
 
 # backwards compatiability
@@ -2351,10 +2385,24 @@ class I2VPayload(VideoGenerationPayload):
 
 @dataclass
 class AudioSpeechPayload(BasePayload):
-    """Payload for /v1/audio/speech endpoint."""
+    """Payload for /v1/audio/speech endpoint.
+
+    The byte-count check alone passes on a WAV that carries a header and a
+    fraction of a second of silence, which is what a broken decoder or a
+    mis-assembled chunk stream produces. Set the waveform expectations below to
+    assert the audio is actually as long and as loud as the request implies;
+    they apply to WAV responses (binary or base64) and are skipped for URL
+    responses.
+    """
 
     endpoint: str = "/v1/audio/speech"
     timeout: int = 300
+    # Minimum decoded duration in seconds; 0 disables the check.
+    min_duration_s: float = 0.0
+    # Minimum RMS amplitude, normalized to [0, 1]; 0 disables the check.
+    min_rms: float = 0.0
+    # Expected sample rate in Hz; None disables the check.
+    expected_sample_rate: Optional[int] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2365,6 +2413,7 @@ class AudioSpeechPayload(BasePayload):
                 f"Audio response too small ({len(audio_bytes)} bytes), "
                 f"likely not valid audio"
             )
+            self._validate_waveform(audio_bytes)
             return f"binary_audio_{len(audio_bytes)}_bytes"
         result = response.json()
         assert (
@@ -2378,4 +2427,50 @@ class AudioSpeechPayload(BasePayload):
         if "url" in entry and entry["url"]:
             return entry["url"]
         assert entry.get("b64_json"), "Audio response b64_json is empty"
+        self._validate_waveform(base64.b64decode(entry["b64_json"]))
         return "b64_audio_returned"
+
+    def _validate_waveform(self, audio_bytes: bytes) -> None:
+        """Assert the decoded WAV meets the configured expectations."""
+        if (
+            self.min_duration_s <= 0
+            and self.min_rms <= 0
+            and self.expected_sample_rate is None
+        ):
+            return
+
+        with wave.open(BytesIO(audio_bytes), "rb") as wav:
+            sample_rate = wav.getframerate()
+            frame_count = wav.getnframes()
+            sample_width = wav.getsampwidth()
+            channels = wav.getnchannels()
+            frames = wav.readframes(frame_count)
+
+        if self.expected_sample_rate is not None:
+            assert sample_rate == self.expected_sample_rate, (
+                f"Expected {self.expected_sample_rate} Hz audio, "
+                f"got {sample_rate} Hz"
+            )
+
+        duration_s = frame_count / sample_rate if sample_rate else 0.0
+        assert duration_s >= self.min_duration_s, (
+            f"Audio is {duration_s:.3f}s, shorter than the expected minimum "
+            f"{self.min_duration_s:.3f}s ({frame_count} frames at {sample_rate} Hz)"
+        )
+
+        if self.min_rms <= 0:
+            return
+
+        assert sample_width == 2, (
+            f"RMS check supports 16-bit PCM only, got {sample_width * 8}-bit "
+            f"audio; drop min_rms for this payload"
+        )
+        sample_count = len(frames) // 2
+        assert sample_count > 0, "Decoded WAV carries no samples"
+        samples = struct.unpack(f"<{sample_count}h", frames[: sample_count * 2])
+        rms = math.sqrt(sum(s * s for s in samples) / sample_count) / 32768.0
+        assert rms >= self.min_rms, (
+            f"Audio RMS {rms:.5f} is below the expected minimum {self.min_rms:.5f}; "
+            f"the waveform is silent or near-silent "
+            f"({duration_s:.3f}s, {channels}ch at {sample_rate} Hz)"
+        )

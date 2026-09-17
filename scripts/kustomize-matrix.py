@@ -76,6 +76,10 @@ class MatrixValue:
     components: tuple[Path, ...]
     templates: tuple[TemplateSelection, ...]
     values: dict[str, Any]
+    sort_options: str | None = None
+
+
+DEFAULT_SORT_OPTIONS = "sortOptions:\n  order: fifo"
 
 
 @dataclass(frozen=True)
@@ -84,6 +88,11 @@ class MatrixVariant:
     components: tuple[Path, ...]
     templates: tuple[TemplateSelection, ...]
     values: dict[str, Any]
+    # Rendered `sortOptions:` block for this variant's generated overlay.
+    # Kustomize reads sortOptions from the kustomization it builds, so a base
+    # cannot set them -- only the generated overlay can. Per variant, not per
+    # matrix: only the variant that needs an order pays for one.
+    sort_options: str = DEFAULT_SORT_OPTIONS
 
 
 @dataclass(frozen=True)
@@ -277,6 +286,7 @@ def load_matrix(path: str) -> MatrixConfig:
                 "components",
                 "templates",
                 "values",
+                "sortOptions",
             }
             if unknown_value_keys:
                 raise ValueError(
@@ -307,6 +317,11 @@ def load_matrix(path: str) -> MatrixConfig:
                     ),
                     values=load_variant_values(
                         raw_value.get("values"), f"{context}.values"
+                    ),
+                    sort_options=(
+                        parse_sort_options(raw_value["sortOptions"])
+                        if "sortOptions" in raw_value
+                        else None
                     ),
                 )
             )
@@ -385,12 +400,25 @@ def expand_matrix(config: MatrixConfig) -> list[MatrixVariant]:
                         f"variant {name!r} defines value {key!r} more than once"
                     )
                 variant_values[key] = template_value
+        selected_sort_options = [
+            value.sort_options for value in values if value.sort_options is not None
+        ]
+        if len(set(selected_sort_options)) > 1:
+            raise ValueError(
+                f"variant {name!r} selects conflicting sortOptions from more than "
+                f"one dimension"
+            )
         variants.append(
             MatrixVariant(
                 name=name,
                 components=components,
                 templates=templates,
                 values=variant_values,
+                sort_options=(
+                    selected_sort_options[0]
+                    if selected_sort_options
+                    else DEFAULT_SORT_OPTIONS
+                ),
             )
         )
 
@@ -735,6 +763,59 @@ def generated_template_content(
     )
 
 
+def parse_sort_options(raw: Any) -> str:
+    """Render an optional matrix `sortOptions` mapping into a kustomization block.
+
+    Omitted (the normal case) keeps the repository-wide `order: fifo`, so matrices
+    that do not declare it render byte-identically.
+    """
+    if raw is None:
+        return DEFAULT_SORT_OPTIONS
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("sortOptions must be a non-empty mapping")
+    unknown = set(raw) - {"order", "legacySortOptions"}
+    if unknown:
+        raise ValueError(f"unsupported sortOptions key: {min(unknown)}")
+    order = require_string(raw.get("order"), "sortOptions.order")
+    if order not in {"fifo", "legacy"}:
+        raise ValueError(f"sortOptions.order must be fifo or legacy, got {order!r}")
+
+    lines = ["sortOptions:", f"  order: {order}"]
+    legacy = raw.get("legacySortOptions")
+    if legacy is not None:
+        if order != "legacy":
+            raise ValueError("sortOptions.legacySortOptions requires order: legacy")
+        if not isinstance(legacy, dict):
+            raise ValueError("sortOptions.legacySortOptions must be a mapping")
+        unknown_legacy = set(legacy) - {"orderFirst", "orderLast"}
+        if unknown_legacy:
+            raise ValueError(
+                f"unsupported legacySortOptions key: {min(unknown_legacy)}"
+            )
+        legacy_lines: list[str] = []
+        for key in ("orderFirst", "orderLast"):
+            kinds = legacy.get(key)
+            if kinds is None:
+                continue
+            if not isinstance(kinds, list) or not all(
+                isinstance(kind, str) for kind in kinds
+            ):
+                raise ValueError(f"legacySortOptions.{key} must be a list of kinds")
+            legacy_lines.append(f"    {key}: {json.dumps(kinds)}")
+        # Emitting the key with no children renders `legacySortOptions:`, which
+        # parses back as null rather than an empty mapping, and Kustomize then
+        # applies its own hardcoded legacy ordering. Reject instead: omitting the
+        # key entirely is the way to ask for the default ordering.
+        if not legacy_lines:
+            raise ValueError(
+                "sortOptions.legacySortOptions must set orderFirst or orderLast; "
+                "omit the key to keep Kustomize's default legacy ordering"
+            )
+        lines.append("  legacySortOptions:")
+        lines.extend(legacy_lines)
+    return "\n".join(lines)
+
+
 def unfolded_kustomization(
     config: MatrixConfig, variant: MatrixVariant, template_components: tuple[Path, ...]
 ) -> str:
@@ -748,8 +829,7 @@ def unfolded_kustomization(
         "",
         "apiVersion: kustomize.config.k8s.io/v1beta1",
         "kind: Kustomization",
-        "sortOptions:",
-        "  order: fifo",
+        *variant.sort_options.split("\n"),
         "resources:",
         f"  - {json.dumps(relative_path(config.source, overlay_dir))}",
     ]

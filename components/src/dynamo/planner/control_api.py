@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Local runtime API for planner minimum endpoint configuration."""
+"""Local runtime API for planner endpoint and GPU budget configuration."""
 
 from __future__ import annotations
 
@@ -37,6 +37,8 @@ class _MinimumEndpointsPatch(BaseModel):
     min_endpoint: int | None = Field(default=None, ge=0)
     prefill_min_endpoint: int | None = Field(default=None, ge=1)
     decode_min_endpoint: int | None = Field(default=None, ge=1)
+    min_gpu_budget: int | None = Field(default=None, ge=-1)
+    max_gpu_budget: int | None = Field(default=None, ge=-1)
 
 
 def _error(message: str, status: int) -> web.Response:
@@ -74,9 +76,12 @@ def _build_app(controller: _MinimumEndpointController) -> web.Application:
 
         fields = patch.model_fields_set
         if not fields:
-            return _error("request body must include at least one endpoint field", 400)
+            return _error(
+                "request body must include at least one runtime configuration field",
+                400,
+            )
         if any(getattr(patch, field) is None for field in fields):
-            return _error("minimum endpoint fields cannot be null", 422)
+            return _error("runtime configuration fields cannot be null", 422)
 
         updates = {field: int(getattr(patch, field)) for field in fields}
         try:

@@ -149,7 +149,7 @@ The request plane can be exposed in two ways:
 - **Dynamo-native Frontend routing** -- the Dynamo Frontend is the request entry point and the integrated Dynamo Router selects workers using KV-aware scoring.
 - **Gateway API routing with GAIE** -- a Kubernetes [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension) gateway calls the Dynamo Endpoint Picker Plugin (EPP), then forwards to the selected worker's Frontend sidecar in `--router-mode direct`.
 
-Both topologies share the same control plane, event plane, and backend integrations; only the request entry point and routing boundary differ. See [Gateway API Routing Architecture](kubernetes/kubernetes-operator/gateway-api-routing.md) for the component and request-flow details.
+Both topologies share the same control plane, event plane, and backend integrations; only the request entry point and routing boundary differ. See [Using GAIE with Dynamo](../../kubernetes/kv-aware-routing/gateway-api.mdx) for the component and request-flow details.
 
 ## Fault Tolerance Architecture
 
@@ -192,7 +192,7 @@ NIXL reduces KV handoff cost in distributed serving by optimizing cross-worker t
 - [Planner Design](modular-components/planner/planner-design.md)
 - [Simulation](concepts/simulation/dynosim-architecture.md)
 - [Fault Tolerance](../../kubernetes/fault-tolerance/introduction.md)
-- [Grove](kubernetes/multinode/grove.md)
+- [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md)
 
 ## Acknowledgements
 
