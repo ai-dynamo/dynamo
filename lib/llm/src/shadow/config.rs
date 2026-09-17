@@ -69,8 +69,9 @@ pub struct ResponseOptions {
     /// Record output token ids.
     #[serde(default = "default_true")]
     pub tokens: bool,
-    /// Record the arrival offset of every response chunk, not only the first
-    /// and the last.
+    /// Record the arrival offset of every response chunk that carried tokens,
+    /// not only the first and the last. `end_offset_ns` gives the end of the
+    /// stream, which covers a final chunk that carries only a finish reason.
     #[serde(default)]
     pub chunk_timing: bool,
 }
