@@ -6,7 +6,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
-use tokio::sync::{mpsc, oneshot, watch};
+#[cfg(feature = "standalone-selection")]
+use tokio::sync::mpsc;
+use tokio::sync::{oneshot, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -62,7 +64,9 @@ where
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
+    #[cfg(feature = "standalone-selection")]
     config_barriers: mpsc::Sender<WorkerConfigBarrier>,
+    #[cfg(feature = "standalone-selection")]
     config_monitor_cancel: CancellationToken,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
@@ -190,8 +194,10 @@ where
         ));
 
         let (queue_updates, _) = watch::channel(());
+        #[cfg(feature = "standalone-selection")]
         let config_monitor_cancel = cancellation_token.clone();
 
+        #[cfg(feature = "standalone-selection")]
         let (config_barriers, mut barrier_rx) = mpsc::channel::<WorkerConfigBarrier>(1);
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
@@ -209,6 +215,16 @@ where
                 );
 
                 loop {
+                    let next_barrier = async {
+                        #[cfg(feature = "standalone-selection")]
+                        {
+                            barrier_rx.recv().await
+                        }
+                        #[cfg(not(feature = "standalone-selection"))]
+                        {
+                            std::future::pending::<Option<WorkerConfigBarrier>>().await
+                        }
+                    };
                     let barrier = tokio::select! {
                         _ = monitor_cancel_token.cancelled() => {
                             tracing::trace!("LocalScheduler workers monitoring task shutting down");
@@ -221,7 +237,7 @@ where
                             }
                             None
                         }
-                        barrier = barrier_rx.recv() => {
+                        barrier = next_barrier => {
                             let Some(barrier) = barrier else { break; };
                             Some(barrier)
                         }
@@ -304,7 +320,9 @@ where
             queue,
             queue_updates,
             request_classifier: OnceLock::new(),
+            #[cfg(feature = "standalone-selection")]
             config_barriers,
+            #[cfg(feature = "standalone-selection")]
             config_monitor_cancel,
             track_prefill_tokens_default,
             worker_type,
@@ -314,10 +332,12 @@ where
     /// Wait for a freshly processed snapshot while the caller holds the
     /// catalog mutation lock. This is a completion barrier, not a cached
     /// membership check that could accept an older absent-worker snapshot.
+    #[cfg(feature = "standalone-selection")]
     pub(crate) async fn wait_for_worker_config(&self) -> Result<(), KvSchedulerError> {
         self.worker_config_barrier(None).await
     }
 
+    #[cfg(feature = "standalone-selection")]
     pub(crate) async fn wait_for_worker_removal(
         &self,
         worker: WorkerId,
@@ -325,6 +345,7 @@ where
         self.worker_config_barrier(Some(worker)).await
     }
 
+    #[cfg(feature = "standalone-selection")]
     async fn worker_config_barrier(
         &self,
         removed_worker: Option<WorkerId>,
