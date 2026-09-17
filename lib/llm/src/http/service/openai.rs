@@ -3824,6 +3824,7 @@ async fn responses(
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
+        let producer_ctx = ctx.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -3860,7 +3861,23 @@ async fn responses(
                     continue;
                 };
 
-                converter.append_chunk_events(&stream_resp, &mut events);
+                let terminal_failure = converter.append_chunk_events(&stream_resp, &mut events);
+                if terminal_failure {
+                    producer_error_signal.set(ErrorType::Internal);
+                    producer_ctx.kill();
+
+                    let terminal_event = events
+                        .pop()
+                        .expect("terminal failure is missing response.failed");
+                    for event in events.drain(..) {
+                        yield event.map_err(axum::Error::new);
+                    }
+                    if terminal_event.is_ok() {
+                        producer_error_signal.mark_terminal_event_emitted();
+                    }
+                    yield terminal_event.map_err(axum::Error::new);
+                    return;
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
