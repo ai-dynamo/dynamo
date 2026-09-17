@@ -137,7 +137,7 @@ TRT-LLM and vLLM ship NIXL `0.10.1`, missing two Libfabric/EFA fixes in NIXL `1.
 
 Under `optimization_target=sla` with default scaling settings, the 180 s throughput-tick decouples scaling decisions from the latency signal. Prefill never scales above 1 replica because `demand_rps` is capped under HTTP backpressure; decode never fires its ITL-violation check because `find_best_engine_decode_rps` clamps the returned ITL to ≤ target by construction. In QA, decode hit a 16% client `ReadTimeout` rate at the 50 ms ITL target while the planner's reported `est_itl` stayed flat. Prefill-side fix shipped in RC10 (#8861, cherry-pick #8956); decode-side fix is deferred.
 
-> **Workaround:** Enable `enable_load_scaling=True` (the README's "advanced" example) so the reactive 5 s load-tick triggers prefill scale-up based on `queued_prefill_tokens`. For decode, pre-provision sufficient `VllmDecodeWorker.replicas` for peak load until the fix lands.
+> **Workaround:** Enable `enable_load_scaling=True` (the README's "advanced" example) so the reactive 5 s load-tick triggers prefill scale-up based on `queued_prefill_tokens`. For decode, pre-provision sufficient `decode.replicas` for peak load until the fix lands.
 
 #### Latency-Mode Prefill Scale-Up Triggers Grove Gang Roll
 

@@ -1404,7 +1404,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											TimeoutSeconds:   4,
 											PeriodSeconds:    5,
 											SuccessThreshold: 0,
-											FailureThreshold: 1,
+											FailureThreshold: 3,
 										},
 										ReadinessProbe: &corev1.Probe{
 											ProbeHandler: corev1.ProbeHandler{
@@ -1846,6 +1846,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				},
 			},
 		})
+		if dcd.Spec.PodTemplate.Annotations == nil {
+			dcd.Spec.PodTemplate.Annotations = map[string]string{}
+		}
+		dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation] = "compatibility-v1"
 		return dcd
 	}
 
@@ -1872,9 +1876,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		require.NoError(t, checkpoint.ApplyRestoreCandidateMetadata(
 			dcd.Spec.PodTemplate.Annotations,
 			&checkpoint.CheckpointInfo{
-				Enabled:          true,
-				AutomaticCapture: true,
-				StartupPolicy:    v1alpha1.CheckpointStartupPolicyImmediate,
+				Enabled:                   true,
+				AutomaticCapture:          true,
+				StartupPolicy:             v1alpha1.CheckpointStartupPolicyImmediate,
+				SnapshotCompatibilityHash: "compatibility-v1",
 				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
 					Name: "checkpoint-job",
 					UID:  types.UID("snapshot-job-uid"),
@@ -1899,7 +1904,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			corev1.Container{Name: "engine-0", Image: "test-image:latest"},
 		)
 		stampAutomaticCandidate(t, readyDCD)
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Spec.Source.PodRef.Containers = []string{"engine-0"}
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -1925,7 +1930,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	t.Run("DGD-managed checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
 		t.Log("Given a DGD-managed DCD reference and a Ready compatible PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
@@ -1948,7 +1953,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	t.Run("pending explicit snapshot keeps Immediate workload cold-start shaped", func(t *testing.T) {
 		t.Log("Given an Immediate DCD referencing a compatible PodSnapshot that is not Ready")
 		dcd := makeDCD("worker-snapshot")
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", false)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", false)
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
@@ -1969,7 +1974,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Log("Given a WaitForCheckpoint DCD and a Ready compatible PodSnapshot with no legacy checkpoint")
 		dcd := makeDCD("worker-snapshot")
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered after the startup gate opens")
@@ -1994,19 +1999,20 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		require.NoError(t, (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(
 			dcd,
 			&checkpoint.CheckpointInfo{
-				Enabled:          true,
-				Exists:           true,
-				Ready:            true,
-				AutomaticCapture: true,
-				CheckpointName:   "worker-snapshot",
-				StartupPolicy:    v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				Enabled:                   true,
+				Exists:                    true,
+				Ready:                     true,
+				AutomaticCapture:          true,
+				CheckpointName:            "worker-snapshot",
+				StartupPolicy:             v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				SnapshotCompatibilityHash: "compatibility-v1",
 				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
 					Name: "checkpoint-job",
 					UID:  types.UID("snapshot-job-uid"),
 				},
 			},
 		))
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -2031,7 +2037,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Log("Given a generated DCD referencing another DGD's retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
 		stampAutomaticCandidate(t, dcd)
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "different-dgd-uid"
@@ -2052,7 +2058,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	t.Run("DGD explicit checkpointRef cannot adopt a retained automatic checkpoint", func(t *testing.T) {
 		t.Log("Given a generated DCD with an explicit reference to a retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
@@ -2074,7 +2080,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		t.Log("Given a standalone DCD referencing a retained automatic PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
 		dcd.OwnerReferences = nil
-		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "compatibility-v1", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
 		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID

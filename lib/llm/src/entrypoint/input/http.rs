@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
@@ -13,8 +13,9 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::WorkerSelectorFactory,
-    local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
+    kv_router::SelectionPolicySource,
+    local_model::runtime_config::TokenizerBackend,
+    model_type::ModelType,
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -22,20 +23,20 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    WorkerType,
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
-/// The default frontend uses [`DefaultWorkerSelector`]. A statically linked external crate can
-/// replace only worker selection with [`Self::worker_selection_policy_factory`].
+/// The default frontend resolves worker selection from its configuration. A statically linked
+/// external crate can replace only worker selection with [`Self::worker_selection_policy_factory`].
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 impl HttpFrontend {
@@ -48,7 +49,7 @@ impl HttpFrontend {
         self
     }
 
-    /// Replace the default worker selector with a statically linked native policy.
+    /// Replace the registry-resolved worker-selection policy with a statically linked native one.
     ///
     /// The factory is called when each decode or prefill worker set is constructed, not per
     /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
@@ -81,35 +82,32 @@ impl HttpFrontend {
             anyhow::bail!("custom worker-selection policies require a dynamic engine");
         }
 
+        // Callers that reach the frontend without going through `run_input`
+        // still have to drain the trace sinks before the process exits. The
+        // registration is reference counted, so arriving through `run_input`
+        // simply nests inside its guard and drains once, at the outer one. It
+        // is taken before initialization because `spawn_workers` reads the
+        // registration count to decide whether the process-wide sinks follow
+        // this runtime's token.
+        let active_input = crate::request_trace::ActiveInput::register();
+
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        match self.worker_selection_policy_factory {
-            Some(factory) => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    true,
-                    factory,
-                )
-                .await
-            }
-            None => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    false,
-                    Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(
-                            Some(config.clone()),
-                            worker_type.default_selector_label(),
-                        )
-                    }),
-                )
-                .await
-            }
-        }
+        let selection_policy = match self.worker_selection_policy_factory {
+            Some(factory) => SelectionPolicySource::Factory(factory),
+            None => SelectionPolicySource::Registry,
+        };
+        let result = run_with_selection_policy(
+            distributed_runtime,
+            engine_config,
+            self.frontend_route_extensions,
+            selection_policy,
+        )
+        .await;
+
+        active_input.release_and_drain().await;
+
+        result
     }
 }
 
@@ -135,33 +133,45 @@ pub async fn run_with_frontend_route_extensions(
         .await
 }
 
-async fn run_with_worker_selector_factory<Sel>(
+async fn run_with_selection_policy(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-) -> anyhow::Result<()>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    selection_policy: SelectionPolicySource,
+) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
-    let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
-        (Some(tls_cert_path), Some(tls_key_path)) => {
+    let mut http_service_builder = match (
+        local_model.tls_cert_path(),
+        local_model.tls_key_path(),
+        local_model.tls_client_ca_cert_path(),
+    ) {
+        (Some(tls_cert_path), Some(tls_key_path), tls_client_ca_cert_path) => {
             if !tls_cert_path.exists() {
                 anyhow::bail!("TLS certificate not found: {}", tls_cert_path.display());
             }
             if !tls_key_path.exists() {
                 anyhow::bail!("TLS key not found: {}", tls_key_path.display());
             }
+            if let Some(client_ca_cert_path) = tls_client_ca_cert_path
+                && !client_ca_cert_path.exists()
+            {
+                anyhow::bail!(
+                    "TLS client CA certificate not found: {}",
+                    client_ca_cert_path.display()
+                );
+            }
             service_v2::HttpService::builder()
                 .enable_tls(true)
                 .tls_cert_path(Some(tls_cert_path.to_path_buf()))
                 .tls_key_path(Some(tls_key_path.to_path_buf()))
+                .tls_client_ca_cert_path(tls_client_ca_cert_path.map(Path::to_path_buf))
                 .port(local_model.http_port())
         }
-        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
-        (_, _) => {
+        (None, None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (None, None, Some(_)) => {
+            anyhow::bail!("--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path");
+        }
+        (_, _, _) => {
             // CLI should prevent us ever getting here
             anyhow::bail!(
                 "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"
@@ -231,8 +241,7 @@ where
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
-                require_typed_worker_role,
-                worker_selector_factory.clone(),
+                selection_policy.clone(),
             )
             .await?;
             http_service
@@ -284,11 +293,13 @@ where
             .collect::<Vec<String>>()
     );
 
-    http_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+    let run_result = http_service.run(distributed_runtime.primary_token()).await;
 
-    distributed_runtime.shutdown(); // Cancel primary token
+    // Initiate runtime shutdown whenever the server exits, including bind
+    // failures, for both discovery-backed and in-process engines.
+    distributed_runtime.shutdown();
+
+    run_result?;
     Ok(())
 }
 
@@ -304,7 +315,7 @@ fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Resu
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
-async fn run_watcher<Sel>(
+async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
@@ -319,12 +330,8 @@ async fn run_watcher<Sel>(
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
-    require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-) -> anyhow::Result<()>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    selection_policy: SelectionPolicySource,
+) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
     // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
@@ -333,7 +340,7 @@ where
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }
 
-    let mut watch_obj = ModelWatcher::new_with_worker_selector_factory(
+    let mut watch_obj = ModelWatcher::new_with_selection_policy(
         runtime.clone(),
         model_manager,
         router_config,
@@ -342,8 +349,7 @@ where
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
-        require_typed_worker_role,
-        worker_selector_factory,
+        selection_policy,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
@@ -398,10 +404,17 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
             }
         }
         ModelUpdate::Removed(card) => {
-            // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card
+            // Endpoint flags are process-wide and a LoRA adapter card carries its base
+            // model's `model_type`, so only retract units the live catalog has vacated.
+            let manager = service.model_manager();
+            let vacated = card
                 .model_type
-                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+                .units()
+                .into_iter()
+                .filter(|unit| !manager.has_models_of_type(*unit))
+                .fold(ModelType::empty(), |vacated, unit| vacated | unit);
+            for endpoint_type in
+                vacated.as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
                 service.enable_model_endpoint(endpoint_type, false)?;
             }
@@ -427,5 +440,131 @@ fn update_model_metrics(
             // Note: Metrics are typically not removed to preserve historical data
             // This matches the behavior in the polling task
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engines::make_echo_engine;
+    use crate::model_card::{LoraInfo, ModelDeploymentCard};
+    use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+
+    // `run` takes a `request_trace::ActiveInput` registration, which is
+    // process-wide, so this shares a serialization group with the request-trace
+    // lifecycle test rather than racing it for the last release.
+    #[tokio::test]
+    #[serial_test::serial(request_trace_lifecycle)]
+    async fn http_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
+        use crate::local_model::LocalModelBuilder;
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+        use std::time::Duration;
+
+        for dynamic in [true, false] {
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let model = Box::new(
+                LocalModelBuilder::default()
+                    .model_name(Some("bind-failure".to_string()))
+                    .http_host(Some("127.0.0.1".to_string()))
+                    .http_port(occupied.local_addr().unwrap().port())
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let engine_config = if dynamic {
+                EngineConfig::Dynamic {
+                    model,
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                }
+            } else {
+                EngineConfig::InProcessText {
+                    engine: make_echo_engine(),
+                    model,
+                }
+            };
+            let drt = DistributedRuntime::new(
+                Runtime::from_current().unwrap(),
+                DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            let shutdown = drt.primary_token();
+
+            let error = tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config))
+                .await
+                .expect("HTTP run must return after an occupied-port bind failure")
+                .expect_err("the occupied HTTP port must prevent server startup");
+            assert!(
+                error.to_string().contains("already in use"),
+                "expected an HTTP bind error (dynamic={dynamic}), got {error:#}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+                .await
+                .expect("HTTP bind failure must initiate runtime shutdown");
+        }
+    }
+
+    fn chat_engine() -> OpenAIChatCompletionsStreamingEngine {
+        Arc::new(StreamingEngineAdapter::new(make_echo_engine()))
+    }
+
+    fn chat_card(name: &str) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only(name);
+        card.model_type = ModelType::Chat;
+        card
+    }
+
+    /// A LoRA adapter card is a clone of its base model's card, so it carries
+    /// `ModelType::Chat` for a chat model. Because endpoint flags are process-wide,
+    /// treating that removal as "disable chat" answers `404` on
+    /// `/v1/chat/completions` for the base model and every sibling adapter that is
+    /// still registered. The retraction must instead follow the live catalog.
+    #[test]
+    fn unloading_one_adapter_keeps_chat_enabled_for_the_base_model() {
+        let service = Arc::new(HttpService::builder().build().unwrap());
+        let manager = service.model_manager();
+        manager
+            .add_chat_completions_model("base-model", "ck-base", chat_engine())
+            .unwrap();
+        manager
+            .add_chat_completions_model("base-model-adapter", "ck-adapter", chat_engine())
+            .unwrap();
+
+        let base_card = chat_card("base-model");
+        let mut adapter_card = chat_card("base-model-adapter");
+        adapter_card.lora = Some(LoraInfo {
+            name: "base-model-adapter".to_string(),
+            max_gpu_lora_count: None,
+        });
+
+        update_http_endpoints(service.clone(), ModelUpdate::Added(base_card.clone())).unwrap();
+        update_http_endpoints(service.clone(), ModelUpdate::Added(adapter_card.clone())).unwrap();
+        assert!(service.model_endpoint_enabled(EndpointType::Chat));
+        assert!(service.model_endpoint_enabled(EndpointType::Responses));
+
+        // The watcher drops the model from the manager before it emits the removal,
+        // so the frontend observes the post-removal catalog.
+        manager.remove_model("base-model-adapter");
+        update_http_endpoints(service.clone(), ModelUpdate::Removed(adapter_card)).unwrap();
+        assert!(
+            service.model_endpoint_enabled(EndpointType::Chat),
+            "unloading one adapter must leave /v1/chat/completions serving the base model"
+        );
+        assert!(
+            service.model_endpoint_enabled(EndpointType::Responses),
+            "unloading one adapter must leave /v1/responses serving the base model"
+        );
+
+        manager.remove_model("base-model");
+        update_http_endpoints(service.clone(), ModelUpdate::Removed(base_card)).unwrap();
+        assert!(
+            !service.model_endpoint_enabled(EndpointType::Chat),
+            "removing the last chat model must disable /v1/chat/completions"
+        );
+        assert!(
+            !service.model_endpoint_enabled(EndpointType::Responses),
+            "removing the last chat model must disable /v1/responses"
+        );
     }
 }

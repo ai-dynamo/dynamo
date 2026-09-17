@@ -26,7 +26,9 @@ from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
+    _resolve_streaming_kv_events_config,
     _strip_postprocess_workers,
+    _validate_streaming_kv_events_backend,
     init_llm_worker,
 )
 
@@ -473,6 +475,41 @@ class EngineArgsCaptured(Exception):
 def _mock_get_llm_engine(engine_args, *args, **kwargs):
     """Mock for get_llm_engine that captures engine_args and short-circuits."""
     raise EngineArgsCaptured(engine_args)
+
+
+def test_resolve_streaming_kv_events_config_uses_nested_kv_cache_config():
+    resolved = _resolve_streaming_kv_events_config(
+        {
+            "kv_cache_config": {
+                "kv_events_config": {
+                    "enable_kv_cache_events": True,
+                    "publisher": "zmq",
+                    "endpoint": "tcp://*:6000",
+                    "topic": "kv-events",
+                }
+            }
+        }
+    )
+
+    assert resolved == {
+        "enable_kv_cache_events": True,
+        "publisher": "zmq",
+        "endpoint": "tcp://*:6000",
+        "topic": "kv-events",
+    }
+
+
+def test_streaming_kv_events_require_python_v2_cache_manager(monkeypatch):
+    monkeypatch.delenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", raising=False)
+
+    with pytest.raises(ValueError, match="TLLM_KV_CACHE_MANAGER_V2_BACKEND=python"):
+        _validate_streaming_kv_events_backend()
+
+
+def test_streaming_kv_events_accept_python_v2_cache_manager(monkeypatch):
+    monkeypatch.setenv("TLLM_KV_CACHE_MANAGER_V2_BACKEND", "python")
+
+    _validate_streaming_kv_events_backend()
 
 
 @pytest.mark.parametrize(

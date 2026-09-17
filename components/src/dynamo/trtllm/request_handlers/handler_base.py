@@ -35,12 +35,13 @@ from tensorrt_llm.scheduling_params import SchedulingParams
 
 from dynamo._core import Client, Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.backend.engine import is_generation_stage
 from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMode
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -50,7 +51,6 @@ from dynamo.trtllm.conversation_affinity import (
     CONVERSATION_PARAMS_AVAILABLE,
     conversation_params_for,
     engine_conversation_affinity_enabled,
-    session_id_from_request,
 )
 from dynamo.trtllm.engine import TensorRTLLMEngine
 from dynamo.trtllm.logits_processing.adapter import create_trtllm_adapters
@@ -208,7 +208,7 @@ class _DeferredAbort:
         """Abort immediately if first token received, otherwise defer."""
         if self._first_token_received:
             self._generation_result.abort()
-            logging.debug("Deferred abort: first token already received, aborting now")
+            logging.debug("Deferred abort: immediate path, engine abort fired")
         else:
             logging.debug(
                 "Deferred abort: first token not received, spawning background task"
@@ -223,7 +223,7 @@ class _DeferredAbort:
         except Exception:
             pass
         self._generation_result.abort()
-        logging.debug("Deferred abort: background task completed, abort fired")
+        logging.debug("Deferred abort: deferred path, engine abort fired")
 
 
 @dataclass
@@ -867,7 +867,15 @@ class HandlerBase(BaseGenerativeHandler):
             return processed_input
 
         if self.multimodal_processor is None and self._request_has_multimodal(request):
-            raise RuntimeError(
+            # InvalidArgument, not RuntimeError: no worker in the pool can
+            # serve this request. RuntimeError maps to Backend(Unknown) and so
+            # to a sanitized 500 that reads as a server fault; this maps to
+            # Backend(InvalidArgument), which the frontend answers 4xx.
+            #
+            # That 4xx reaches a non-streaming client. A streaming client still
+            # sees 200 then an SSE error frame unless the operator sets
+            # DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, which is unset by default.
+            raise InvalidArgument(
                 "Multimodal input received but worker started without --modality multimodal. "
                 "Restart the worker with --modality multimodal or remove image_url content."
             )
@@ -906,12 +914,15 @@ class HandlerBase(BaseGenerativeHandler):
                         return True
         return False
 
-    def _normalize_request_format(self, request: dict) -> None:
+    @staticmethod
+    def _normalize_request_format(request: dict) -> None:
         """
         Convert OpenAI request format to TRT-LLM internal format.
 
         Moves fields from OpenAI locations to where TRT-LLM expects them:
         - max_tokens: top-level → stop_conditions.max_tokens
+        - min_tokens: top-level → stop_conditions.min_tokens
+        - ignore_eos: top-level → stop_conditions.ignore_eos
         - temperature: top-level → sampling_options.temperature
 
         Note: The Rust frontend's PrefillRouter handles the *value* of max_tokens
@@ -924,17 +935,17 @@ class HandlerBase(BaseGenerativeHandler):
         # Ensure stop_conditions exists
         if "stop_conditions" not in request:
             request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+        for field in ("max_tokens", "min_tokens", "ignore_eos"):
+            if field in request:
+                value = request.pop(field)
+                request["stop_conditions"].setdefault(field, value)
 
         # Ensure sampling_options exists
         if "sampling_options" not in request:
             request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
+        if "temperature" in request:
+            temperature = request.pop("temperature")
+            request["sampling_options"].setdefault("temperature", temperature)
 
     async def _initiate_shutdown(self, error: Exception):
         """Initiate graceful shutdown after fatal error"""
