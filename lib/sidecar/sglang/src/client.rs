@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig, format_error_chain,
+};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::{Channel, Endpoint};
@@ -108,7 +110,7 @@ async fn try_connect_once(
     let channel = timeout_at(deadline, endpoint.connect())
         .await
         .map_err(|_| "startup deadline elapsed while connecting".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_error_chain(&e))?;
     Ok(client_from_channel(channel))
 }
 

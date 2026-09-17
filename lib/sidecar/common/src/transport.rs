@@ -231,7 +231,10 @@ fn startup_timeout(
     ))
 }
 
-fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+/// Flattens an error's `source()` chain into one string ("outer: middle:
+/// inner"). `Display` alone on a `tonic::transport::Error` gives only the
+/// constant "transport error" -- this is what callers should log instead.
+pub fn format_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
