@@ -86,7 +86,8 @@
 ^https://docs\.nvidia\.com/dynamo/dev/recipes/deepseek-v4-1-flash$
 
 # The TokenSpeed example is introduced with its docs link in the same PR.
-# Its canonical main-branch URL returns 404 until merge; remove after merge.
+# Its canonical main-branch URL returns 404 until merge. Cleanup tracked in:
+# https://github.com/ai-dynamo/dynamo/issues/15025
 ^https://github\.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed$
 
 # Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main

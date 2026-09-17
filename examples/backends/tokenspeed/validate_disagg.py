@@ -17,6 +17,31 @@ from dynamo.llm import KvRouter, KvRouterConfig
 from dynamo.runtime import DistributedRuntime
 
 
+async def wait_for_frontend(http, url, model, timeout=120):
+    """Wait for model registration, including while the frontend port is closed."""
+    deadline = time.monotonic() + timeout
+    last_observation = "no response"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"Frontend did not expose {model!r}; inspect its model registration "
+                f"logs. Last /v1/models result: {last_observation}"
+            )
+        try:
+            response = await http.get(
+                url.rstrip("/") + "/v1/models", timeout=min(5.0, remaining)
+            )
+            last_observation = f"{response.status_code}: {response.text[:1000]}"
+            if response.status_code == 200 and any(
+                row.get("id") == model for row in response.json().get("data", [])
+            ):
+                return
+        except httpx.TransportError as error:
+            last_observation = f"{type(error).__name__}: {error}"
+        await asyncio.sleep(min(0.5, max(0, deadline - time.monotonic())))
+
+
 async def run(args):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
     runtime = DistributedRuntime(
@@ -73,21 +98,7 @@ async def run(args):
                 await asyncio.sleep(0.25)
 
         async with httpx.AsyncClient(timeout=300) as http:
-            deadline = time.monotonic() + 120
-            while True:
-                response = await http.get(args.url.rstrip("/") + "/v1/models")
-                if response.status_code == 200 and any(
-                    row.get("id") == args.model
-                    for row in response.json().get("data", [])
-                ):
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"Frontend did not expose {args.model!r}; inspect its model "
-                        f"registration logs. Last /v1/models response: "
-                        f"{response.status_code}: {response.text[:1000]}"
-                    )
-                await asyncio.sleep(0.5)
+            await wait_for_frontend(http, args.url, args.model)
 
             async def request(label, tokens, expected_word, forced_prefill=None):
                 headers = {"x-request-id": f"longcat-{label}-{uuid.uuid4().hex}"}
@@ -139,11 +150,17 @@ async def run(args):
                     "prompt_tokens": len(tokens),
                 }
                 observations.append(record)
-                assert finished and expected_word in text.upper(), record
-                assert workers.get("prefill_worker_id") in prefill_ids, record
-                assert isinstance(workers.get("decode_worker_id"), int), record
-                if forced_prefill is not None:
-                    assert workers["prefill_worker_id"] == forced_prefill, record
+                if not finished or expected_word not in text.upper():
+                    raise RuntimeError(f"Incomplete or incorrect generation: {record}")
+                if workers.get("prefill_worker_id") not in prefill_ids:
+                    raise RuntimeError(f"Unexpected prefill worker: {record}")
+                if not isinstance(workers.get("decode_worker_id"), int):
+                    raise RuntimeError(f"Missing decode worker: {record}")
+                if (
+                    forced_prefill is not None
+                    and workers["prefill_worker_id"] != forced_prefill
+                ):
+                    raise RuntimeError(f"Forced prefill worker was not selected: {record}")
                 print(
                     json.dumps({k: v for k, v in record.items() if k != "chunks"}),
                     flush=True,
@@ -159,15 +176,17 @@ async def run(args):
                 )
                 report[f"warm_{i}_overlap"] = await wait_for_cache(prompts[i], owner)
             report["cold_overlap"] = await scores(prompts[2])
-            assert all(
-                row["device_blocks"] == 0 for row in report["cold_overlap"]["workers"]
-            ), report["cold_overlap"]
+            if any(
+                row["device_blocks"] != 0 for row in report["cold_overlap"]["workers"]
+            ):
+                raise RuntimeError(f"Cold prefix was already cached: {report['cold_overlap']}")
             for repeat in range(2):
                 for i, owner in enumerate(prefill_ids):
                     record = await request(
                         f"reuse-{i}-{repeat}", prompts[i], ("ORANGE", "PURPLE")[i]
                     )
-                    assert record["worker_ids"]["prefill_worker_id"] == owner, record
+                    if record["worker_ids"]["prefill_worker_id"] != owner:
+                        raise RuntimeError(f"Cached-prefix owner was not selected: {record}")
             await request("cold-control", prompts[2], "SILVER")
         report["passed"] = True
     except Exception as error:

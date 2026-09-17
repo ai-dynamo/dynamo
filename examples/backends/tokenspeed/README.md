@@ -53,8 +53,6 @@ docker build \
   --target runtime \
   --build-arg BASE_IMAGE=lightseekorg/tokenspeed-runner@sha256:8187a564ba7fd3cb8b13dfa7fe697c61b894b518b5ee57fde7ca845ffb17c3ef \
   --build-arg TOKENSPEED_GIT_REF=1b859c107b1d8450b750403f9c2e00251ecc59f3 \
-  --build-arg CUDA_ARCH_LIST=9.0a \
-  --build-arg MAX_JOBS=8 \
   -t dynamo-tokenspeed:longcat-flash .
 ```
 
@@ -64,7 +62,7 @@ Make the resulting image available on all three hosts.
 
 ### GB300
 
-Build on an ARM64 host with the matching runner and CUDA architecture:
+Build on an ARM64 host with the matching runner:
 
 ```bash
 docker build \
@@ -72,8 +70,6 @@ docker build \
   --target runtime \
   --build-arg BASE_IMAGE=lightseekorg/tokenspeed-runner@sha256:2d9477bc2417572be8740676e8e038b564938c9ab466421f23daca441c97b153 \
   --build-arg TOKENSPEED_GIT_REF=1b859c107b1d8450b750403f9c2e00251ecc59f3 \
-  --build-arg CUDA_ARCH_LIST=10.3a \
-  --build-arg MAX_JOBS=16 \
   --build-arg CARGO_BUILD_JOBS=32 \
   -t dynamo-tokenspeed:longcat-flash-gb300-base .
 ```
