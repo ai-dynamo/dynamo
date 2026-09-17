@@ -24,16 +24,16 @@ use super::registry::WorkerRegistry;
 /// Timeout for one peer `/dump` fetch (HTTP request + body transfer). A full
 /// KV-index snapshot can be tens of MB on a busy deployment; 10s only fits
 /// small indexes once serialization and parsing are counted. Configurable via
-/// `DYN_EPP_RECOVERY_HTTP_TIMEOUT_MS` for larger clusters.
+/// `DYN_KV_RECOVERY_HTTP_TIMEOUT_MS` for larger clusters.
 const DEFAULT_RECOVERY_HTTP_TIMEOUT_MS: u64 = 30_000;
-const RECOVERY_HTTP_TIMEOUT_ENV: &str = "DYN_EPP_RECOVERY_HTTP_TIMEOUT_MS";
+const RECOVERY_HTTP_TIMEOUT_ENV: &str = "DYN_KV_RECOVERY_HTTP_TIMEOUT_MS";
 /// Safety ceiling on the accepted `/dump` response body. The whole snapshot is
 /// materialized in memory on both sides today (streaming is a follow-up), so
 /// an unbounded body either OOMs or trips the timeout and then the retry loop.
 /// Fail fast with a clear error instead. Configurable via
-/// `DYN_EPP_RECOVERY_MAX_DUMP_BYTES`.
+/// `DYN_KV_RECOVERY_MAX_DUMP_BYTES`.
 const DEFAULT_MAX_DUMP_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_DUMP_BYTES_ENV: &str = "DYN_EPP_RECOVERY_MAX_DUMP_BYTES";
+const MAX_DUMP_BYTES_ENV: &str = "DYN_KV_RECOVERY_MAX_DUMP_BYTES";
 
 #[derive(Deserialize)]
 struct DumpEntry {
@@ -61,8 +61,6 @@ pub async fn recover_from_peers(peers: &[String], registry: &WorkerRegistry) -> 
         .timeout(timeout)
         .build()
         .context("failed to build HTTP client")?;
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
 
     for peer_url in peers {
         // Freeze the exact connected listener attempts covered by this dump
@@ -92,9 +90,9 @@ async fn try_recover_from_peer(
     registry: &WorkerRegistry,
 ) -> Result<()> {
     // Pass the accepted budget to the peer so it can reject an over-budget
-    // snapshot with 413 *before* serializing/transmitting it. `0` means no
-    // budget (unbounded). The Content-Length check below remains as receiver
-    // defense in depth.
+    // snapshot with 413 before transmitting it. `0` means no budget
+    // (unbounded). The Content-Length check below remains as receiver defense
+    // in depth for older peers that ignore the query parameter.
     let max_dump_bytes = env_u64(MAX_DUMP_BYTES_ENV, DEFAULT_MAX_DUMP_BYTES);
     let dump_url = if max_dump_bytes > 0 {
         format!("{peer_url}/dump?max_bytes={max_dump_bytes}")
@@ -115,9 +113,9 @@ async fn try_recover_from_peer(
 
     // Fail fast on an oversized snapshot before reading the body: the dump is
     // materialized fully in memory on both sides, so a large body either OOMs
-    // or trips the request timeout and the retry loop. The peer already rejects
-    // over-budget bodies with 413, so this only fires for a peer without the
-    // budget-aware endpoint.
+    // or trips the request timeout and the retry loop. A budget-aware peer
+    // rejects over-budget bodies with 413, so this mainly protects against
+    // older peers that ignore `max_bytes`.
     if let Some(len) = resp.content_length()
         && max_dump_bytes > 0
         && len > max_dump_bytes

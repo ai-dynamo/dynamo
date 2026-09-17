@@ -263,7 +263,7 @@ impl SelectionServiceBuilder {
             }
         }
         if !self.defer_indexer_for_bootstrap {
-            core.signal_indexer_ready();
+            core.start_indexer_listeners();
         }
 
         let peer_manager = if replica_runtime.is_some() {
@@ -477,7 +477,7 @@ impl SelectionService {
         );
         self.core.wait_for_indexer_listeners_buffering().await?;
         recover().await?;
-        self.core.signal_indexer_ready();
+        self.core.start_indexer_listeners();
         self.core.wait_for_indexer_listeners_active().await
     }
 
@@ -674,15 +674,12 @@ mod tests {
 
     #[tokio::test]
     async fn builder_starts_indexer_listeners_by_default() {
-        let service = SelectionServiceBuilder::new(
-            test_config(),
-            WorkerType::Aggregated,
-            test_registry(),
-        )
-        .indexer_threads(1)
-        .build()
-        .await
-        .unwrap();
+        let service =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .build()
+                .await
+                .unwrap();
         assert!(service.core.indexer_listeners_started());
         let error = service
             .bootstrap_indexer(|| async { Ok(()) })
@@ -694,16 +691,13 @@ mod tests {
 
     #[tokio::test]
     async fn deferred_builder_bootstraps_indexer_in_order() {
-        let service = SelectionServiceBuilder::new(
-            test_config(),
-            WorkerType::Aggregated,
-            test_registry(),
-        )
-        .indexer_threads(1)
-        .defer_indexer_for_bootstrap()
-        .build()
-        .await
-        .unwrap();
+        let service =
+            SelectionServiceBuilder::new(test_config(), WorkerType::Aggregated, test_registry())
+                .indexer_threads(1)
+                .defer_indexer_for_bootstrap()
+                .build()
+                .await
+                .unwrap();
         assert!(!service.core.indexer_listeners_started());
         let error = service
             .bootstrap_indexer(|| async { Err(anyhow::anyhow!("recovery failed")) })
