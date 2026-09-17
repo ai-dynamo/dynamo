@@ -421,6 +421,19 @@ def test_prompt_logprobs_need_a_start_position_inside_the_prompt():
         )
         is True
     )
+    # Starting at or beyond the end scores no prompt token.
+    assert (
+        _requests_input_logprobs(
+            native({"return_logprob": True, "logprob_start_len": 3})
+        )
+        is False
+    )
+    assert (
+        _requests_input_logprobs(
+            native({"return_logprob": True, "logprob_start_len": 4})
+        )
+        is False
+    )
     # A start position without the flag computes no logprobs at all.
     assert _requests_input_logprobs(native({"logprob_start_len": 0})) is False
 

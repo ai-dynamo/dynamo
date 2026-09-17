@@ -132,8 +132,9 @@ pub(crate) fn request(
     } else {
         None
     };
+    let logprob_start_len = parse_logprob_start_len(body.get("logprob_start_len"));
     let input_logprobs_requested = parse_return_logprob(body.get("return_logprob"))
-        && parse_logprob_start_len(body.get("logprob_start_len")) >= 0;
+        && usize::try_from(logprob_start_len).is_ok_and(|start| start < request.token_ids.len());
     Ok(Some(NativeRequest {
         body: Value::Object(body),
         is_prefill: mode.is_prefill(),
@@ -148,16 +149,13 @@ pub(crate) fn request(
 /// SGLang parses the field with Pydantic, which in lax mode accepts `0`/`1`
 /// and the usual false and true spellings as strings. Plain truthiness would
 /// disagree on `"false"` and `"0"` and claim logprobs were requested when the
-/// engine saw the opposite. Anything SGLang would reject never reaches
-/// generation, so it is "not requested" here.
+/// engine saw the opposite. Use Dynamo's canonical string parser so this path
+/// cannot grow a separate boolean vocabulary.
 fn parse_return_logprob(value: Option<&Value>) -> bool {
     match value {
         Some(Value::Bool(flag)) => *flag,
         Some(Value::Number(number)) => number.as_f64() == Some(1.0),
-        Some(Value::String(text)) => matches!(
-            text.to_ascii_lowercase().as_str(),
-            "1" | "on" | "t" | "true" | "y" | "yes"
-        ),
+        Some(Value::String(text)) => dynamo_runtime::config::parse_bool(text).unwrap_or(false),
         _ => false,
     }
 }
@@ -536,9 +534,8 @@ mod tests {
 
     use dynamo_backend_common::engine::RoutingHints;
     use dynamo_backend_common::{
-        BackendError, BootstrapInfo, DisaggregationMode, ErrorType, FinishReason,
-        GenerateContext, LLMEngineOutput, OutputOptions, PreprocessedRequest, SamplingOptions,
-        StopConditions,
+        BackendError, BootstrapInfo, DisaggregationMode, ErrorType, FinishReason, GenerateContext,
+        LLMEngineOutput, OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions,
     };
     use dynamo_sidecar_common::{GrpcEndpoint, HttpEndpoint};
     use futures::StreamExt;
@@ -706,6 +703,27 @@ mod tests {
         assert!(native.is_decode);
         assert!(!native.input_logprobs_requested);
 
+        // A start position at or beyond the prompt length scores no prompt
+        // token and therefore must not trigger an unavailable marker.
+        for start in [3, 4] {
+            canonical.extra_args = Some(json!({
+                "sglang_tito": {
+                    "return_logprob": true,
+                    "logprob_start_len": start
+                }
+            }));
+            let native = request(
+                &canonical,
+                "request-id",
+                DisaggregationMode::Decode,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(!native.input_logprobs_requested, "start={start}");
+        }
+
         canonical.extra_args = Some(json!({"sglang_tito": {}}));
         let native = request(
             &canonical,
@@ -721,9 +739,9 @@ mod tests {
     }
 
     #[test]
-    fn return_logprob_follows_sglang_boolean_parsing() {
-        // The spellings SGLang's request model accepts as false are the ones
-        // plain truthiness gets wrong: every string below is non-empty.
+    fn return_logprob_uses_canonical_boolean_spellings() {
+        // These false spellings are accepted by SGLang but are exactly the
+        // cases plain JSON truthiness gets wrong: every string is non-empty.
         for value in [json!("false"), json!("False"), json!("0"), json!("no")] {
             assert!(
                 !parse_return_logprob(Some(&value)),
@@ -869,6 +887,8 @@ mod tests {
             NativeRequest {
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: true,
+                is_decode: false,
+                input_logprobs_requested: false,
                 prefill_handoff: Some(json!({
                     "bootstrap_host": "prefill",
                     "bootstrap_port": 5000,
@@ -901,6 +921,8 @@ mod tests {
                 NativeRequest {
                     body: json!({"input_ids": [1], "stream": true}),
                     is_prefill: true,
+                    is_decode: false,
+                    input_logprobs_requested: false,
                     prefill_handoff: Some(json!({
                         "bootstrap_host": "prefill", "bootstrap_port": 1, "bootstrap_room": 7,
                     })),
@@ -948,6 +970,8 @@ mod tests {
             NativeRequest {
                 body: json!({"input_ids": [1], "stream": true}),
                 is_prefill: true,
+                is_decode: false,
+                input_logprobs_requested: false,
                 prefill_handoff: Some(json!({
                     "bootstrap_host": "prefill",
                     "bootstrap_port": 5000,
