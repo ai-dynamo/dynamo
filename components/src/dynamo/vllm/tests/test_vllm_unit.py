@@ -856,6 +856,53 @@ class TestVllmOmniOptionalDependency:
 class TestBenchmarkConfig:
     """Tests for BenchmarkConfig dataclass and grid generation."""
 
+    @pytest.mark.parametrize(
+        ("trace", "worker_cls"),
+        [(False, "auto"), (True, "auto"), (False, "example.ServingWorker")],
+    )
+    def test_disabled_benchmark_preserves_serving_worker(
+        self, monkeypatch, mock_vllm_cli, trace, worker_cls
+    ):
+        for name in (
+            "DYN_BENCHMARK_MODE",
+            "DYN_BENCHMARK_RANDOMIZE_KDA_STATE",
+            "DYN_FORWARDPASS_METRIC_PORT",
+            "DYN_FPM_TRACE",
+            "DYN_GMS_USE_V1",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+        flags = [
+            "--model",
+            "Qwen/Qwen3-0.6B",
+            "--worker-cls",
+            worker_cls,
+            "--worker-extension-cls",
+            "example.ServingExtension",
+            "--additional-config",
+            '{"application_setting": "preserved"}',
+        ]
+        if trace:
+            flags.append("--fpm-trace")
+        mock_vllm_cli(*flags)
+
+        config = parse_args()
+
+        assert config.benchmark_mode is None
+        assert config.benchmark_randomize_kda_state is False
+        assert getattr(config, "_benchmark_additional_config", None) is None
+        assert config.engine_args.additional_config == {
+            "application_setting": "preserved"
+        }
+        assert config.engine_args.worker_cls == worker_cls
+        assert config.engine_args.worker_extension_cls == "example.ServingExtension"
+        expected_scheduler = (
+            "dynamo.vllm.instrumented_scheduler.InstrumentedScheduler"
+            if trace
+            else None
+        )
+        assert config.engine_args.scheduler_cls == expected_scheduler
+
     def test_benchmark_config_defaults(self):
         from dynamo.vllm.instrumented_scheduler import BenchmarkConfig
 
