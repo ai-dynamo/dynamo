@@ -54,12 +54,18 @@ struct Registry {
 }
 
 impl Registry {
+    /// Every lookup drops the taps of stopped runtimes. The shutdown task in
+    /// [`taps`] does the same, but a runtime can be dropped before its tasks
+    /// run again.
     fn live(&self, runtime_id: u64) -> Option<ShadowTaps> {
-        let runtimes = self.runtimes.lock().expect("shadow tap registry poisoned");
-        runtimes
-            .get(&runtime_id)
-            .filter(|(_, shutdown)| !shutdown.is_cancelled())
-            .map(|(taps, _)| Arc::clone(taps))
+        let mut runtimes = self.runtimes.lock().expect("shadow tap registry poisoned");
+        runtimes.retain(|_, (_, shutdown)| !shutdown.is_cancelled());
+        runtimes.get(&runtime_id).map(|(taps, _)| Arc::clone(taps))
+    }
+
+    fn forget(&self, runtime_id: u64) {
+        let mut runtimes = self.runtimes.lock().expect("shadow tap registry poisoned");
+        runtimes.remove(&runtime_id);
     }
 
     async fn get_or_init<F, Fut>(
@@ -83,7 +89,6 @@ impl Registry {
 
     fn insert(&self, runtime_id: u64, taps: ShadowTaps, shutdown: CancellationToken) {
         let mut runtimes = self.runtimes.lock().expect("shadow tap registry poisoned");
-        runtimes.retain(|_, (_, shutdown)| !shutdown.is_cancelled());
         runtimes.insert(runtime_id, (taps, shutdown));
     }
 }
@@ -126,12 +131,26 @@ pub(crate) async fn taps(drt: &DistributedRuntime) -> Result<Option<ShadowTaps>>
     if config.taps.is_empty() {
         return Ok(None);
     }
+    let runtime_id = drt.connection_id();
+    let shutdown = drt.child_token();
     REGISTRY
-        .get_or_init(drt.connection_id(), drt.child_token(), || {
-            start_taps(drt, config)
+        .get_or_init(runtime_id, shutdown.clone(), || async {
+            let taps = start_taps(drt, config).await?;
+            // A process can create and stop many runtimes and never look up
+            // taps again, so the entry must not wait for the next lookup.
+            drt.runtime().secondary().spawn(async move {
+                shutdown.cancelled().await;
+                REGISTRY.forget(runtime_id);
+            });
+            Ok(taps)
         })
         .await
         .map(Some)
+}
+
+/// Whether `DYN_SHADOW_TAP_CONFIG` names a config, without starting anything.
+pub(crate) fn is_configured() -> bool {
+    config_path().is_some()
 }
 
 /// Every step that can fail for a transient reason runs before anything that
@@ -244,11 +263,40 @@ mod tests {
         let second = queue_set();
         registry.insert(2, Arc::clone(&second), CancellationToken::new());
         assert!(Arc::ptr_eq(&registry.live(2).unwrap(), &second));
-        assert_eq!(
-            registry.runtimes.lock().unwrap().len(),
-            1,
-            "stopped runtimes are pruned"
-        );
+        assert_eq!(registry.runtimes.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_lookup_drops_the_taps_of_stopped_runtimes() {
+        let registry = Registry::default();
+        let stopped = CancellationToken::new();
+        registry.insert(1, queue_set(), stopped.clone());
+        stopped.cancel();
+
+        assert!(registry.live(2).is_none());
+        assert!(registry.runtimes.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_shutdown_drops_its_taps_without_a_later_lookup() {
+        let config = config_file("schema_version: 1\ntaps:\n  - {name: t, capture: request}\n");
+        TEST_CONFIG_PATH
+            .scope(Some(config.path().to_path_buf()), async {
+                let drt = process_local_runtime().await;
+                let runtime_id = drt.connection_id();
+                taps(&drt).await.unwrap().unwrap();
+                drt.shutdown();
+
+                let dropped = async {
+                    while REGISTRY.runtimes.lock().unwrap().contains_key(&runtime_id) {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(5), dropped)
+                    .await
+                    .expect("shutdown must remove the runtime's taps from the registry");
+            })
+            .await;
     }
 
     #[tokio::test]

@@ -153,12 +153,31 @@ pub async fn run_input_with_frontend_route_extensions(
     result
 }
 
+/// A text engine takes the public request and has no `PreprocessedRequest`,
+/// so there is nothing for a shadow tap to mirror. A config that is set and
+/// does nothing would look like a working tap, so it is an error.
+pub(crate) fn reject_shadow_taps_for_text_engine(
+    engine_config: &super::EngineConfig,
+) -> anyhow::Result<()> {
+    if matches!(engine_config, super::EngineConfig::InProcessText { .. })
+        && crate::shadow::is_configured()
+    {
+        anyhow::bail!(
+            "shadow taps mirror tokenized requests and do not support an in-process text engine; \
+             unset {}",
+            dynamo_runtime::config::environment_names::llm::shadow::DYN_SHADOW_TAP_CONFIG
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn initialize_input(
     drt: &dynamo_runtime::DistributedRuntime,
     engine_config: &super::EngineConfig,
 ) -> anyhow::Result<()> {
     // Unlike the trace sinks below, a bad shadow tap config stops the
     // frontend: a mistyped filter must not mirror more than was intended.
+    reject_shadow_taps_for_text_engine(engine_config)?;
     crate::shadow::taps(drt).await?;
 
     if let Err(e) = crate::request_trace::init_from_env_with_shutdown(drt.child_token()).await {

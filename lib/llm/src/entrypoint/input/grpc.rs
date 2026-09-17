@@ -26,6 +26,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     // A dynamic engine builds its pipelines in the background watcher, where a
     // bad tap config would leave models unregistered behind a running server.
+    super::reject_shadow_taps_for_text_engine(&engine_config)?;
     crate::shadow::taps(&distributed_runtime).await?;
 
     let mut grpc_service_builder = kserve::KserveService::builder()
@@ -286,5 +287,46 @@ mod tests {
             .expect("a bad tap config must stop startup, not leave the server running")
             .expect_err("an unknown filter name is a config error");
         assert!(format!("{error:#}").contains("nope"), "got {error:#}");
+    }
+
+    #[tokio::test]
+    async fn shadow_tap_config_is_an_error_for_a_text_engine() {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            "schema_version: 1\ntaps:\n  - {name: t, capture: request}\n",
+        )
+        .unwrap();
+        let model = Box::new(
+            LocalModelBuilder::default()
+                .model_name(Some("text-engine".to_string()))
+                .http_port(0)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let engine_config = EngineConfig::InProcessText {
+            engine: make_echo_engine(),
+            model,
+        };
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+
+        let started = crate::shadow::TEST_CONFIG_PATH.scope(
+            Some(config.path().to_path_buf()),
+            tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config)),
+        );
+        let error = started
+            .await
+            .expect("a tap config that cannot take effect must stop startup")
+            .expect_err("a text engine has no tokenized request to mirror");
+        assert!(
+            format!("{error:#}").contains("text engine"),
+            "got {error:#}"
+        );
     }
 }
