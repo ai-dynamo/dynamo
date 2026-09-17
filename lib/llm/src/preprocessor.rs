@@ -6609,23 +6609,14 @@ impl OpenAIPreprocessor {
                     })
                 };
 
-                // Retain a spare envelope only when an EOF flush may follow, so
-                // the common reasoning path avoids a full per-token clone. Skip
-                // chunks with no choices (the trailing usage-only chunk): they
-                // carry no delta slot, so using one as the flush envelope would
-                // drop the very bytes the flush exists to preserve.
-                //
-                // Captured ONCE rather than on every chunk. The envelope only
-                // ever supplies response-level constants — `id`, `model`,
-                // `created`, `object`, `service_tier`, `system_fingerprint` —
-                // because `scrub_synthetic_chunk_metadata` clears every
-                // per-chunk field and the synthetic choice below overrides every
-                // field of the template it clones. The last content-bearing
-                // chunk is therefore worth no more than the first, and taking
-                // the first retires a full per-token clone that previously ran
-                // for the whole deferral path. That matters now: the flush is no
-                // longer restricted to `force_nonempty_content`, so a per-chunk
-                // clone here would land on every reasoning request.
+                // Any content-bearing chunk is an equally valid envelope, so
+                // capture the first and keep it: `scrub_synthetic_chunk_metadata`
+                // clears every per-chunk field and the synthetic choice below
+                // overrides every field of the template it clones, leaving only
+                // response-level constants in play. Chunks with no choices (the
+                // trailing usage-only chunk) are skipped: they carry no delta
+                // slot, so using one would drop the very bytes the flush exists
+                // to preserve.
                 if state.last_response.is_none()
                     && processed_response
                         .data
@@ -6650,15 +6641,8 @@ impl OpenAIPreprocessor {
                 // unavoidable when there was no terminal chunk to attach them
                 // to. Taking the envelope below rather than cloning it makes
                 // this branch one-shot: once it is gone the next poll ends the
-                // stream.
-                //
-                // Every reasoning parser reaches this branch. It used to be
-                // reserved for the force_nonempty_content path, which meant any
-                // other parser holding state at EOF simply lost it — for gpt-oss
-                // behind a malformed harmony header that was the entire answer,
-                // reported as `content: null`. A parser with nothing buffered
-                // flushes nothing and `flushed` stays empty, so no synthetic
-                // chunk is produced and the stream ends exactly as before.
+                // stream. A parser with nothing buffered leaves `flushed`
+                // empty, so no synthetic chunk is produced.
                 //
                 // Sorted so the emitted choice order is deterministic rather
                 // than following HashMap iteration order.
@@ -7838,17 +7822,6 @@ mod tests {
         );
     }
 
-    // ---- EOF finalization for every reasoning parser (gpt-oss null-content) ----
-    //
-    // A reasoning parser may hold text when the upstream stream ends: a partial
-    // delimiter it kept in case the next chunk completed a marker, or — for
-    // harmony behind a malformed `<|channel|>final` header — an entire final
-    // message. That text used to be dropped, because the end-of-stream flush ran
-    // only for `force_nonempty_content` requests. The response then carried
-    // `content: null` with `finish_reason: "stop"` and HTTP 200, which nothing
-    // downstream can tell apart from a legitimately empty answer.
-
-    /// One choice-0 content chunk, optionally terminal.
     fn reasoning_flush_chunk(
         text: Option<&str>,
         finish: bool,
@@ -7860,7 +7833,6 @@ mod tests {
         chunk
     }
 
-    /// Concatenate choice-0 `(content, reasoning_content)` across the output.
     fn collect_reasoning_flush(
         output: &[Annotated<NvCreateChatCompletionStreamResponse>],
     ) -> (String, String) {
@@ -8058,8 +8030,6 @@ mod tests {
 
     #[tokio::test]
     async fn reasoning_eof_flush_leaves_a_well_formed_stream_untouched() {
-        // The widened flush must be invisible when a parser is holding nothing:
-        // same chunk count, same text, no synthetic trailer.
         let chunks = vec![
             reasoning_flush_chunk(Some("<think>thought</think>"), false),
             reasoning_flush_chunk(Some("Answer"), false),
