@@ -13,7 +13,9 @@ use dynamo_llm::discovery::{RuntimeConfigWatch, runtime_config_watch};
 use dynamo_llm::kv_router::publisher::{KvEventPublisher, KvEventSourceConfig};
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::config::HealthStatus;
 use dynamo_runtime::distributed::{DistributedConfig, DistributedRuntime};
+use dynamo_runtime::prelude::DistributedRuntimeProvider;
 use dynamo_runtime::{Runtime, logging};
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use serde::Deserialize;
@@ -285,7 +287,7 @@ fn start_publishers(
     config: &ModelRuntimeConfig,
     leader: &LeaderKvConfig,
 ) -> Result<Vec<KvEventPublisher>> {
-    context
+    let publishers = context
         .kv_event_sources
         .iter()
         .map(|source| {
@@ -306,7 +308,15 @@ fn start_publishers(
                 None,
             )
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    // There is no serving worker to mark this process ready. Publish readiness
+    // only after all local publishers have been created.
+    endpoint
+        .drt()
+        .system_health()
+        .lock()
+        .set_health_status(HealthStatus::Ready);
+    Ok(publishers)
 }
 
 #[cfg(test)]
@@ -604,7 +614,9 @@ mod tests {
             .await
             .unwrap()
             .typed::<Vec<RouterEvent>>();
+        assert!(!drt.system_health().lock().get_health_status().0);
         let publishers = start_publishers(&endpoint, &context, 42, &config, &metadata).unwrap();
+        assert!(drt.system_health().lock().get_health_status().0);
 
         // Repeat until the real ZMQ subscriptions are connected; no fixed sleep.
         let received = tokio::time::timeout(Duration::from_secs(5), async {

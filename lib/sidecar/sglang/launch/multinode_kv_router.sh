@@ -97,6 +97,7 @@ print_launch_banner --no-curl "SGLang multinode KV sidecar ($ROLE, node $NODE_RA
 trap dynamo_exit_trap EXIT
 
 # Sidecars retry gRPC startup; no sleep or inference health check is needed on followers.
+# SGLang needs a wildcard bind to advertise a node-local KV-event source.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 "$SGLANG_PYTHON" -m sglang.launch_server \
     --model-path "$MODEL" \
@@ -104,7 +105,7 @@ trap dynamo_exit_trap EXIT
     --incremental-streaming-output \
     --nnodes "$NNODES" --node-rank "$NODE_RANK" --dist-init-addr "$DIST_INIT_ADDR" \
     --tp-size "$TP_SIZE" --dp-size "$DP_SIZE" --enable-dp-attention \
-    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://127.0.0.1:${SGLANG_KV_EVENT_PORT}\",\"topic\":\"\"}" \
+    --kv-events-config "{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG_KV_EVENT_PORT}\",\"topic\":\"\"}" \
     --page-size "$SGLANG_PAGE_SIZE" --context-length "$MAX_MODEL_LEN" \
     --max-running-requests "$MAX_CONCURRENT_SEQS" \
     "${ENGINE_ROLE_ARGS[@]}" $GPU_MEM_ARGS "$@" &
