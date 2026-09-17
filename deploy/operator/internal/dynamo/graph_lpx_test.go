@@ -97,7 +97,7 @@ func TestRenderSelectedLPXRoleSecurityContext(t *testing.T) {
 			t.Log("Render the role before runtime-specific lowering")
 			template, err := renderSelectedLPXRole(component, source, nil,
 				&configv1alpha1.OperatorConfiguration{}, &mockSecretsRetriever{}, DiscoveryContext{},
-				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}, nil)
+				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()})
 			require.NoError(t, err)
 
 			t.Log("Retain authored security context and default only an absent one")
@@ -235,6 +235,9 @@ func TestLPXInputRevision(t *testing.T) {
 		{"component/compilation-cache", true, func(d *v1beta1.DynamoGraphDeployment) {
 			lpx.ServingComponent(d).CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "cache"}
 		}},
+		{"component/topology", true, func(d *v1beta1.DynamoGraphDeployment) {
+			lpx.ServingComponent(d).TopologyConstraint = &v1beta1.TopologyConstraint{PackDomain: "rack"}
+		}},
 		{"component/build", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).LPX.BuildID = "next-build" }},
 		{"component/settings", true, func(d *v1beta1.DynamoGraphDeployment) {
 			lpx.ServingComponent(d).LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{"prop_sync":false}`)}
@@ -271,9 +274,6 @@ func TestLPXInputRevision(t *testing.T) {
 		{"shared/environment", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Env = []corev1.EnvVar{{Name: "SHARED", Value: "new"}} }},
 		{"shared/priority", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.PriorityClassName = "inference" }},
 		{"shared/backend", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
-		{"shared/kv-transfer", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.Spec.Experimental = &v1beta1.DynamoGraphDeploymentExperimentalSpec{KvTransferPolicy: &v1beta1.KvTransferPolicy{LabelKey: "topology.kubernetes.io/zone", Domain: "zone"}}
-		}},
 		{"shared/topology", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "cluster", PackDomain: "rack"}
 		}},

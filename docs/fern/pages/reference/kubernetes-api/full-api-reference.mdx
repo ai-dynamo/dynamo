@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 175 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">71 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">75 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">73 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -1506,55 +1506,6 @@ PreferredWeight is required and used only when enforcement is "preferred". Highe
 </ParamField>
 </Accordion>
 
-<Accordion id="lpxattemptrequeststatus" title="LPXAttemptRequestStatus">
-LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
-
-
-**Kind:** `type`
-**Appears in:** [LPXAttemptStatus](#lpxattemptstatus)
-
-<ParamField path="name" type="string">
-</ParamField>
-
-<ParamField path="attemptDigest" type="string">
-</ParamField>
-
-<ParamField path="uid" type="UID">
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-</ParamField>
-</Accordion>
-
-<Accordion id="lpxattemptstatus" title="LPXAttemptStatus">
-LPXAttemptStatus mirrors the v1beta1 durable LPX attempt authority record.
-
-
-**Kind:** `type`
-**Appears in:** [PlacementStatus](#placementstatus)
-
-<ParamField path="observedGeneration" type="integer">
-</ParamField>
-
-<ParamField path="podCliqueSetUID" type="UID">
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-</ParamField>
-
-<ParamField path="deadlineAt" type="Time">
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-</ParamField>
-
-<ParamField path="exceededAt" type="Time">
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-</ParamField>
-
-<ParamField path="disarmedAt" type="Time">
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-</ParamField>
-
-<ParamField path="requests" type="LPXAttemptRequestStatus array">
-See [LPXAttemptRequestStatus](#lpxattemptrequeststatus).
-</ParamField>
-</Accordion>
-
 <Accordion id="modelreference" title="ModelReference">
 ModelReference identifies a model served by this component
 
@@ -1663,12 +1614,6 @@ Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0] where
 State indicates placement score reporting state.
 See [PlacementScoreState](#placementscorestate).
 **Validation:** Enum: [Reported Partial Unsupported Unknown]  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="lpxAttempt" type="LPXAttemptStatus">
-LPXAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
-See [LPXAttemptStatus](#lpxattemptstatus).
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -3721,55 +3666,6 @@ preferredWeight is required and used only when enforcement is "preferred". Highe
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-lpxattemptrequeststatus" title="LPXAttemptRequestStatus">
-LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
-
-
-**Kind:** `type`
-**Appears in:** [LPXAttemptStatus](#v1beta1-lpxattemptstatus)
-
-<ParamField path="name" type="string">
-</ParamField>
-
-<ParamField path="attemptDigest" type="string">
-</ParamField>
-
-<ParamField path="uid" type="UID">
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-</ParamField>
-</Accordion>
-
-<Accordion id="v1beta1-lpxattemptstatus" title="LPXAttemptStatus">
-LPXAttemptStatus is Dynamo's durable authority record for one aggregate LPX attempt.
-
-
-**Kind:** `type`
-**Appears in:** [PlacementStatus](#v1beta1-placementstatus)
-
-<ParamField path="observedGeneration" type="integer">
-</ParamField>
-
-<ParamField path="podCliqueSetUID" type="UID">
-See [UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg).
-</ParamField>
-
-<ParamField path="deadlineAt" type="Time">
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-</ParamField>
-
-<ParamField path="exceededAt" type="Time">
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-</ParamField>
-
-<ParamField path="disarmedAt" type="Time">
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-</ParamField>
-
-<ParamField path="requests" type="LPXAttemptRequestStatus array">
-See [LPXAttemptRequestStatus](#v1beta1-lpxattemptrequeststatus).
-</ParamField>
-</Accordion>
-
 <Accordion id="lpxconfig" title="LPXConfig">
 LPXConfig identifies the component's compiled model and runtime settings.
 
@@ -3981,12 +3877,6 @@ score is the DGD-level scheduler placement score aggregated from relevant schedu
 state indicates placement score reporting state. See PlacementScoreState for the semantics of each value.
 See [PlacementScoreState](#v1beta1-placementscorestate).
 **Validation:** Enum: [Reported Partial Unsupported Unknown]  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="lpxAttempt" type="LPXAttemptStatus">
-lpxAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
-See [LPXAttemptStatus](#v1beta1-lpxattemptstatus).
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4253,7 +4143,7 @@ SchedulingSpec configures LPX scheduling attempts.
 **Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 <ParamField path="attemptDeadlineSeconds" type="integer">
-attemptDeadlineSeconds limits one aggregate LPX scheduling attempt. Omission means unlimited; the value is not a solver budget.
+attemptDeadlineSeconds limits how long each LPR may remain pending. Omission means unlimited; the value is not a solver budget.
 **Validation:** Maximum: 9.223372036e+09  Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -4626,7 +4516,7 @@ LPXConfiguration holds LPX scheduler integration and model-registry settings.
 **Appears in:** [OperatorConfiguration](#operatorconfiguration)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled opts the operator into LPX request production. When true, startup requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and scheduler.grove.io/v1alpha1 PodGang APIs to be installed separately.
+Enabled opts the operator into LPX request production. When true, startup requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to be installed separately.
 </ParamField>
 
 <ParamField path="modelRegistryURL" type="string">

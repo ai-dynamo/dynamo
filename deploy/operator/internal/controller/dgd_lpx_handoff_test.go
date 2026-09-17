@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -221,10 +220,8 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 		GPUsPerEngine: ptr.To(int64(8)), GPUsPerReplica: ptr.To(int64(8)),
 	}}
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"build"}}
-	child.Status.Placement = &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{
-		ObservedGeneration: child.Generation,
-		Requests:           []v1beta1.LPXAttemptRequestStatus{{Name: "request", UID: "request-uid"}},
-	}}
+	placementScore := 0.75
+	child.Status.Placement = &v1beta1.PlacementStatus{Score: &placementScore, State: v1beta1.PlacementScoreStateReported}
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
 	result := ReconcileResult{State: v1beta1.DGDStateSuccessful, ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{"prefill": {Replicas: 4, AvailableReplicas: ptr.To(int32(4)), Ready: true}}}
 	status := v1beta1.DynamoGraphDeploymentStatus{}
@@ -234,9 +231,9 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	require.Equal(t, child.Status.Components["lpx"], result.ComponentStatus["lpx"])
 	require.Equal(t, status.LPX.Placement, status.Placement)
 	status.LPX.ModelDownload.Builds[0] = "parent-copy"
-	status.LPX.Placement.LPXAttempt.Requests[0].UID = "parent-copy"
+	*status.LPX.Placement.Score = 0.25
 	require.Equal(t, "build", child.Status.ModelDownload.Builds[0])
-	require.Equal(t, "request-uid", string(child.Status.Placement.LPXAttempt.Requests[0].UID))
+	require.Equal(t, placementScore, *child.Status.Placement.Score)
 
 	t.Log("Reject missing or stale children and stale Ready conditions")
 	for _, failure := range []string{"missing-child", "generation", "condition"} {
@@ -316,7 +313,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			child, source, _ := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 			child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Replicas: 1}}
 			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"stale-build"}}
-			child.Status.Placement = &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{ObservedGeneration: child.Generation}}
+			child.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
 			child.Status.Conditions = []metav1.Condition{{Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "PublicationDenied", Message: "Check the namespace quota"}}
 			result := ReconcileResult{State: v1beta1.DGDStateSuccessful}
 			status := v1beta1.DynamoGraphDeploymentStatus{LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
@@ -433,8 +430,8 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 	}
 }
 
-func TestLPXHandoffOrdinaryScalingPreservesTheEntireAttempt(t *testing.T) {
-	t.Log("Seed the shared child's current readiness, published request identity and deadline")
+func TestLPXHandoffOrdinaryScalingPreservesPlacement(t *testing.T) {
+	t.Log("Seed the shared child's current readiness and placement")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1)),
@@ -442,11 +439,7 @@ func TestLPXHandoffOrdinaryScalingPreservesTheEntireAttempt(t *testing.T) {
 		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:0"}}}},
 	})
-	deadline := metav1.NewTime(time.Now().UTC().Truncate(time.Second).Add(time.Minute))
-	child.Status.Placement = &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{
-		ObservedGeneration: child.Generation, DeadlineAt: &deadline,
-		Requests: []v1beta1.LPXAttemptRequestStatus{{Name: "published-request", UID: "request-uid"}},
-	}}
+	child.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
 		"lpx":   {Replicas: 1, AvailableReplicas: ptr.To(int32(1)), Ready: true},
@@ -473,16 +466,14 @@ func TestLPXHandoffOrdinaryScalingPreservesTheEntireAttempt(t *testing.T) {
 		require.Equal(t, v1beta1.DGDStateSuccessful, projected.Status.State)
 		require.True(t, meta.IsStatusConditionTrue(projected.Status.Conditions, "Ready"))
 		require.Equal(t, source.Generation, projected.Status.ObservedGeneration)
-		require.Equal(t, source.Generation, projected.Status.LPX.Placement.LPXAttempt.ObservedGeneration)
 		require.Equal(t, beforeChild.Status.Placement, current.Status.Placement)
-		require.True(t, deadline.Equal(projected.Status.LPX.Placement.LPXAttempt.DeadlineAt))
+		require.Equal(t, beforeChild.Status.Placement, projected.Status.LPX.Placement)
 		require.Equal(t, beforeSource, source)
 		source.Status = projected.Status
 	}
 	require.Equal(t, int64(8), source.Generation)
-	require.Equal(t, int64(3), beforeChild.Status.Placement.LPXAttempt.ObservedGeneration)
 
-	t.Log("Scale prefill without changing the child or its durable attempt")
+	t.Log("Scale prefill without changing the child or its placement")
 	source.GetComponentByName("prefill").Replicas = ptr.To(int32(4))
 	source.Generation++
 	current, err := handoff.Reconcile(t.Context(), source)
@@ -882,7 +873,7 @@ func TestOrdinaryDGDClearsLPXStatusWithoutRefresh(t *testing.T) {
 			Placement: &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported},
 			LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
 				ModelDownload: &v1beta1.ModelDownloadStatus{Builds: []string{"model/build"}, LastCheckedAt: &checkedAt},
-				Placement:     &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{ObservedGeneration: 1}},
+				Placement:     &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported},
 			},
 		},
 	}
@@ -911,7 +902,6 @@ func TestOrdinaryDGDClearsMirroredLPXPlacement(t *testing.T) {
 	t.Log("Seed an ordinary DGD with the same compatibility projection at both placement paths")
 	placement := &v1beta1.PlacementStatus{
 		Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported,
-		LPXAttempt: &v1beta1.LPXAttemptStatus{ObservedGeneration: 1},
 	}
 	source := &v1beta1.DynamoGraphDeployment{
 		Status: v1beta1.DynamoGraphDeploymentStatus{

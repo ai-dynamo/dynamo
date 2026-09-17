@@ -961,45 +961,6 @@ _Appears in:_
 | `preferredWeight` _float_ | PreferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
-#### LPXAttemptRequestStatus
-
-
-
-LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
-
-
-
-_Appears in:_
-- [LPXAttemptStatus](#lpxattemptstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `attemptDigest` _string_ |  |  |  |
-| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ |  |  |  |
-
-
-#### LPXAttemptStatus
-
-
-
-LPXAttemptStatus mirrors the v1beta1 durable LPX attempt authority record.
-
-
-
-_Appears in:_
-- [PlacementStatus](#placementstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `observedGeneration` _integer_ |  |  |  |
-| `podCliqueSetUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ |  |  |  |
-| `deadlineAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `exceededAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `disarmedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  |  |
-
-
 
 
 #### ModelReference
@@ -1112,7 +1073,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `score` _float_ | Score is the DGD-level scheduler placement score. Normalized to [0.0, 1.0]<br />where higher is better and 1.0 is the best possible placement. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `state` _[PlacementScoreState](#placementscorestate)_ | State indicates placement score reporting state. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
-| `lpxAttempt` _[LPXAttemptStatus](#lpxattemptstatus)_ | LPXAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record. |  | Optional: \{\} <br /> |
 
 
 #### ProfilingConfigSpec
@@ -2545,45 +2505,6 @@ _Appears in:_
 | `preferredWeight` _float_ | preferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
-#### LPXAttemptRequestStatus
-
-
-
-LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
-
-
-
-_Appears in:_
-- [LPXAttemptStatus](#lpxattemptstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `name` _string_ |  |  |  |
-| `attemptDigest` _string_ |  |  |  |
-| `uid` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ |  |  |  |
-
-
-#### LPXAttemptStatus
-
-
-
-LPXAttemptStatus is Dynamo's durable authority record for one aggregate LPX attempt.
-
-
-
-_Appears in:_
-- [PlacementStatus](#placementstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `observedGeneration` _integer_ |  |  |  |
-| `podCliqueSetUID` _[UID](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#uid-types-pkg)_ |  |  |  |
-| `deadlineAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `exceededAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `disarmedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ |  |  |  |
-| `requests` _[LPXAttemptRequestStatus](#lpxattemptrequeststatus) array_ |  |  |  |
-
-
 #### LPXConfig
 
 
@@ -2795,7 +2716,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `score` _float_ | score is the DGD-level scheduler placement score aggregated from<br />relevant scheduler placement units. Normalized to [0.0, 1.0] where higher<br />is better and 1.0 represents the best possible placement. Aggregation<br />uses the minimum across placement units so the value is a worst-placement<br />signal for the graph. Scores are only comparable across DGDs that share<br />the same scheduler scoring contract and version. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 | `state` _[PlacementScoreState](#placementscorestate)_ | state indicates placement score reporting state. See PlacementScoreState<br />for the semantics of each value. |  | Enum: [Reported Partial Unsupported Unknown] <br />Optional: \{\} <br /> |
-| `lpxAttempt` _[LPXAttemptStatus](#lpxattemptstatus)_ | lpxAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record. |  | Optional: \{\} <br /> |
 
 
 #### ProfilingPhase
@@ -3048,7 +2968,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `attemptDeadlineSeconds` _integer_ | attemptDeadlineSeconds limits one aggregate LPX scheduling attempt.<br />Omission means unlimited; the value is not a solver budget. |  | Maximum: 9.223372036e+09 <br />Minimum: 1 <br />Optional: \{\} <br /> |
+| `attemptDeadlineSeconds` _integer_ | attemptDeadlineSeconds limits how long each LPR may remain pending.<br />Omission means unlimited; the value is not a solver budget. |  | Maximum: 9.223372036e+09 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### SearchStrategy
@@ -3400,7 +3320,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and<br />scheduler.grove.io/v1alpha1 PodGang APIs to be installed separately. | false |  |
+| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to<br />be installed separately. | false |  |
 | `modelRegistryURL` _string_ | ModelRegistryURL configures the location of the LPU model registry used by LPX.<br />Supported values are an absolute local path (or file:// URL) and gs:// URLs. |  |  |
 
 

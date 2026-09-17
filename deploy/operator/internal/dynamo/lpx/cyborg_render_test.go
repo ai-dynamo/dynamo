@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	projection.configuredBuild.IOFanoutFactor = 1
 	workload := &SelectedWorkload{
 		modelProjections:     []*ModelProjection{projection},
-		scalingGroupReplicas: int32(schedulingAttemptRequestBytesBudget / maximumSchedulingAttemptRequestBytes),
+		scalingGroupReplicas: math.MaxInt32,
 	}
 	pcsName := strings.Repeat("a", MaxPodCliqueSetNameLength)
 	plan, err := workload.PlanNodeLocalMaterialization(pcsName)
@@ -44,8 +45,8 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 		wantError bool
 	}{
 		{name: "one GPU per engine", replicas: 1},
-		{name: "hostname at DNS limit", replicas: 100_000_000},
-		{name: "hostname over DNS limit", replicas: 100_000_001, wantError: true},
+		{name: "hostname at DNS limit", replicas: 100},
+		{name: "hostname over DNS limit", replicas: 101, wantError: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Render the GPU width beneath the same readable PCS name")

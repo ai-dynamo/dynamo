@@ -6,7 +6,6 @@ package v1beta1
 import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 // LPXConfig identifies the component's compiled model and runtime settings.
@@ -23,31 +22,12 @@ type LPXConfig struct {
 
 // SchedulingSpec configures LPX scheduling attempts.
 type SchedulingSpec struct {
-	// attemptDeadlineSeconds limits one aggregate LPX scheduling attempt.
+	// attemptDeadlineSeconds limits how long each LPR may remain pending.
 	// Omission means unlimited; the value is not a solver budget.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=9223372036
 	AttemptDeadlineSeconds *int64 `json:"attemptDeadlineSeconds,omitempty"`
-}
-
-// LPXAttemptStatus is Dynamo's durable authority record for one aggregate LPX attempt.
-type LPXAttemptStatus struct {
-	ObservedGeneration int64        `json:"observedGeneration"`
-	PodCliqueSetUID    types.UID    `json:"podCliqueSetUID,omitempty"`
-	DeadlineAt         *metav1.Time `json:"deadlineAt,omitempty"`
-	ExceededAt         *metav1.Time `json:"exceededAt,omitempty"`
-	DisarmedAt         *metav1.Time `json:"disarmedAt,omitempty"`
-	// +listType=map
-	// +listMapKey=name
-	Requests []LPXAttemptRequestStatus `json:"requests"`
-}
-
-// LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
-type LPXAttemptRequestStatus struct {
-	Name          string    `json:"name"`
-	AttemptDigest string    `json:"attemptDigest"`
-	UID           types.UID `json:"uid,omitempty"`
 }
 
 // DynamoGraphDeploymentLPXStatus contains the public status of a graph's LPX workload.

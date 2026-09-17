@@ -74,8 +74,8 @@ spec:
 
 <Indent>
   <ParamField path="attemptDeadlineSeconds" type="int64">
-    Wall-clock lifetime of the aggregate LPX attempt, from the first request's API-server creation time through `Bound`, `NoFit`, or `Unsupported`. Valid values are `1` through `9,223,372,036`; omission means unlimited.
-    Dynamo durably records the absolute deadline. Resumed scheduling keeps it; late terminal status loses to expiry. Expiry reports `LPXSchedulingDeadlineExceeded` and retires the exact attempt through LPX cleanup. It is neither a solver budget nor retry authorization.
+    Wall-clock limit for each pending LPU pipeline request, measured from the scheduler-published start of its current scheduling cycle until it reports `Bound`, `NoFit`, or `Unsupported`. The deadline is not armed until the scheduler publishes `status.schedulingStartedAt`, and a later scheduling cycle resets that timestamp. Valid values are `1` through `9,223,372,036`; omission means unlimited.
+    Expiry reports `LPXSchedulingDeadlineExceeded` and deletes the expired request. When `replicas` is explicit, it also lowers the Grove replica count to the surviving prefix; externally managed capacity is left unchanged. A later LPX input revision authorizes another publication. This field is not a solver budget.
   </ParamField>
 </Indent>
 

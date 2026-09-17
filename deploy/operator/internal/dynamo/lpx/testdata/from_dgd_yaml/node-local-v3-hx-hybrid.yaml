@@ -78,7 +78,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
       labels:
-        lpx.nvidia.com/execution-role: lpu
         lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
@@ -250,7 +249,6 @@ spec:
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
-        lpx.nvidia.com/execution-role: gpu
         lpx.nvidia.com/serving: "true"
         lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
@@ -367,7 +365,7 @@ spec:
           - name: gpu
             resourceClaimTemplateName: decode-gpu
           restartPolicy: Always
-          schedulerName: lpx-scheduler
+          schedulerName: default-scheduler
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch

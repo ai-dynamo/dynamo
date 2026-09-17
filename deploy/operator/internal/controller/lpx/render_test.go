@@ -32,7 +32,6 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -64,9 +63,8 @@ func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 	plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
 	require.NoError(t, err)
 	config := &configv1alpha1.OperatorConfiguration{}
-	kube := newTestLPXClient(t)
 	runtimeConfig := &controller_common.RuntimeConfig{}
-	pcs, _, err := renderPodCliqueSet(t.Context(), source, config, runtimeConfig, kube, nil,
+	pcs, _, err := renderPodCliqueSet(t.Context(), source, config, runtimeConfig, nil,
 		selected, plan, newLPXRenderDeployment(t, source))
 	require.NoError(t, err)
 	serialized, err := json.Marshal(pcs)
@@ -74,7 +72,7 @@ func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 
 	t.Log("Accept exactly one MiB including final identity, discovery and scheduler metadata")
 	source.Annotations["kai.scheduler/padding"] = strings.Repeat("x", lpx.MaxRenderedPodCliqueSetBytes-len(serialized))
-	pcs, _, err = renderPodCliqueSet(t.Context(), source, config, runtimeConfig, kube, nil,
+	pcs, _, err = renderPodCliqueSet(t.Context(), source, config, runtimeConfig, nil,
 		selected, plan, newLPXRenderDeployment(t, source))
 	require.NoError(t, err)
 	serialized, err = json.Marshal(pcs)
@@ -86,76 +84,11 @@ func TestLPXRenderingChecksFinalPodCliqueSetSize(t *testing.T) {
 
 	t.Log("Reject one additional final-metadata byte as a selected-render failure before publication")
 	source.Annotations["kai.scheduler/padding"] += "x"
-	pcs, resources, err := renderPodCliqueSet(t.Context(), source, config, runtimeConfig, kube, nil,
+	pcs, resources, err := renderPodCliqueSet(t.Context(), source, config, runtimeConfig, nil,
 		selected, plan, newLPXRenderDeployment(t, source))
 	require.ErrorContains(t, err, "rendered LPX PodCliqueSet is 1048577 bytes; maximum is 1048576")
 	require.Nil(t, pcs)
 	require.Nil(t, resources)
-}
-
-func TestLPXHybridPreservesKVTransferTopology(t *testing.T) {
-	t.Log("Create immutable native builds for this story's hybrid cases")
-	registry := newTestDataModelRegistry(t, t.TempDir())
-
-	for _, fixture := range []string{"node-local-v2-hybrid", "node-local-v3-hx-hybrid"} {
-		t.Run(fixture, func(t *testing.T) {
-			t.Log("Resolve a hybrid engine using a real ClusterTopologyBinding for KV transfer")
-			payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/" + fixture + ".input.yaml")
-			require.NoError(t, err)
-			source := &v1beta1.DynamoGraphDeployment{}
-			require.NoError(t, yaml.Unmarshal(payload, source))
-			source.Spec.Experimental = &v1beta1.DynamoGraphDeploymentExperimentalSpec{
-				KvTransferPolicy: &v1beta1.KvTransferPolicy{ClusterTopologyName: "fabric", Domain: "rack"},
-			}
-			binding := &grovev1alpha1.ClusterTopologyBinding{ObjectMeta: metav1.ObjectMeta{Name: "fabric"},
-				Spec: grovev1alpha1.ClusterTopologyBindingSpec{Levels: []grovev1alpha1.TopologyLevel{
-					{Domain: "zone", Key: "topology.kubernetes.io/zone"}, {Domain: "rack", Key: "nvidia.com/rack"},
-				}},
-			}
-			scheme := runtime.NewScheme()
-			require.NoError(t, corev1.AddToScheme(scheme))
-			require.NoError(t, grovev1alpha1.AddToScheme(scheme))
-			kube := fake.NewClientBuilder().WithScheme(scheme).WithObjects(binding).Build()
-			child := newLPXRenderDeployment(t, source)
-			selected, err := lpx.ResolveSelectedWorkload(t.Context(), source, registry)
-			require.NoError(t, err)
-			plan, err := selected.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(newLPXRenderDeployment(t, source)))
-			require.NoError(t, err)
-			config := &configv1alpha1.OperatorConfiguration{}
-			pcs, _, err := renderPodCliqueSet(t.Context(), source, config, &controller_common.RuntimeConfig{}, kube, nil, selected, plan, child)
-			require.NoError(t, err)
-
-			t.Log("The Cyborg role receives every topology domain, not an empty mounted directory")
-			items := map[string]string{}
-			for _, clique := range pcs.Spec.Template.Cliques {
-				if clique.Name != plan.CyborgTemplate {
-					continue
-				}
-				require.Equal(t, binding.Name, clique.Annotations[commonconsts.KubeAnnotationTopologyClusterTopologyName])
-				for _, volume := range clique.Spec.PodSpec.Volumes {
-					if volume.Name == "topology-labels" {
-						require.NotNil(t, volume.DownwardAPI)
-						for _, item := range volume.DownwardAPI.Items {
-							items[item.Path] = item.FieldRef.FieldPath
-						}
-					}
-				}
-			}
-			require.Equal(t, map[string]string{
-				"zone": "metadata.labels['" + commonconsts.DynamoTopologyLabelKey("zone") + "']",
-				"rack": "metadata.labels['" + commonconsts.DynamoTopologyLabelKey("rack") + "']",
-			}, items)
-
-			t.Log("Binding changes and deletion must invalidate the render instead of silently losing routing metadata")
-			binding.Spec.Levels = binding.Spec.Levels[:1]
-			require.NoError(t, kube.Update(t.Context(), binding))
-			_, _, err = renderPodCliqueSet(t.Context(), source, config, &controller_common.RuntimeConfig{}, kube, nil, selected, plan, child)
-			require.ErrorContains(t, err, `domain "rack" does not exist`)
-			require.NoError(t, kube.Delete(t.Context(), binding))
-			_, _, err = renderPodCliqueSet(t.Context(), source, config, &controller_common.RuntimeConfig{}, kube, nil, selected, plan, child)
-			require.ErrorContains(t, err, "was not found")
-		})
-	}
 }
 
 func TestLPXRenderingPreservesInputs(t *testing.T) {
@@ -274,10 +207,10 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 
 			t.Log("Render twice and require identical resources with no input or shared-metadata mutation")
 			first, firstResources, err := renderPodCliqueSet(t.Context(), source, config,
-				&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected, plan, child)
+				&controller_common.RuntimeConfig{}, nil, selected, plan, child)
 			require.NoError(t, err)
 			second, secondResources, err := renderPodCliqueSet(t.Context(), source, config,
-				&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected, plan, child)
+				&controller_common.RuntimeConfig{}, nil, selected, plan, child)
 			require.NoError(t, err)
 			require.Equal(t, first, second)
 			require.Equal(t, firstResources, secondResources)
@@ -330,7 +263,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			require.Equal(t, selected.Digest(), equivalentSelected.Digest())
 			require.Equal(t, plan, equivalentPlan)
 			equivalentPCS, equivalentResources, err := renderPodCliqueSet(t.Context(), equivalent, config,
-				&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, equivalentSelected, equivalentPlan, child)
+				&controller_common.RuntimeConfig{}, nil, equivalentSelected, equivalentPlan, child)
 			require.NoError(t, err)
 			require.Equal(t, first, equivalentPCS)
 			require.Equal(t, firstResources, equivalentResources)
@@ -354,7 +287,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 				scaledPlan, err := workload.PlanNodeLocalMaterialization(plan.PodCliqueSetName)
 				require.NoError(t, err)
 				pcs, resources, err := renderPodCliqueSet(t.Context(), scaled, config,
-					&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, workload, scaledPlan, scaledChild)
+					&controller_common.RuntimeConfig{}, nil, workload, scaledPlan, scaledChild)
 				require.NoError(t, err)
 				require.Equal(t, firstResources, resources)
 				require.Equal(t, first.Spec.Template.Cliques, pcs.Spec.Template.Cliques)
@@ -480,7 +413,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	t.Log("Render one shared conductor without changing either component's Agent template")
 	pcs, _, err := renderPodCliqueSet(t.Context(), source,
 		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected, plan, newLPXRenderDeployment(t, source))
+		&controller_common.RuntimeConfig{}, nil, selected, plan, newLPXRenderDeployment(t, source))
 	require.NoError(t, err)
 
 	t.Log("Keep Nova separate from Quasar and preserve each role's metadata and storage")
@@ -829,7 +762,7 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 			&deployment,
 			controllerConfig,
 			&controller_common.RuntimeConfig{},
-			nil, nil,
+			nil,
 			selected,
 			mustPlanSelectedLPX(t, &deployment, selected),
 			child,
@@ -974,7 +907,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 
 	registryRoot := t.TempDir()
 	testdataModelRegistry := newTestDataModelRegistry(t, registryRoot)
-	kubeClient := newTestLPXClient(t)
+	kubeClient := fake.NewClientBuilder().Build()
 	runtimeConfig := &controller_common.RuntimeConfig{}
 
 	tests := []string{
@@ -1009,7 +942,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			t.Log("Render all LPX roles with the separate LPX PCS identity")
 			got, extraResources, err := renderPodCliqueSet(
 				t.Context(), &dynamoDeployment, controllerConfig, runtimeConfig,
-				kubeClient, nil, selected,
+				nil, selected,
 				plan,
 				newLPXRenderDeployment(t, &dynamoDeployment),
 			)
@@ -1170,7 +1103,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	}
 	pcs, extraResources, err := renderPodCliqueSet(
 		t.Context(), dgd, controllerConfig, &controller_common.RuntimeConfig{},
-		newTestLPXClient(t), nil, selected, plan, newLPXRenderDeployment(t, dgd),
+		nil, selected, plan, newLPXRenderDeployment(t, dgd),
 	)
 	require.NoError(t, err)
 
@@ -1335,7 +1268,6 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.T) {
 	t.Log("Share the immutable build registry across entrypoint cases")
 	registry := newTestDataModelRegistry(t, t.TempDir())
-	kubeClient := newTestLPXClient(t)
 	modes := []struct {
 		name            string
 		file            string
@@ -1465,7 +1397,6 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 						dgd,
 						&configv1alpha1.OperatorConfiguration{},
 						&controller_common.RuntimeConfig{},
-						kubeClient,
 						nil,
 						selected,
 						mustPlanSelectedLPX(t, dgd, selected),
@@ -1520,11 +1451,6 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 	}
 }
 
-func newTestLPXClient(t *testing.T) client.Client {
-	t.Helper()
-	return fake.NewClientBuilder().Build()
-}
-
 func envValueSource(envs []corev1.EnvVar, name string) *corev1.EnvVarSource {
 	for index := range envs {
 		if envs[index].Name == name {
@@ -1571,7 +1497,7 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	plan := mustPlanSelectedLPX(t, source, selected)
 	pcs, _, err := renderPodCliqueSet(t.Context(), source,
 		&configv1alpha1.OperatorConfiguration{},
-		&controller_common.RuntimeConfig{}, newTestLPXClient(t), nil, selected,
+		&controller_common.RuntimeConfig{}, nil, selected,
 		plan, newLPXRenderDeployment(t, source))
 	require.NoError(t, err)
 	cliqueIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {

@@ -327,9 +327,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
 	components := componentsByName(spec.Components)
+	hasLPXComponent := false
 	for i := range spec.Components {
 		component := &spec.Components[i]
 		componentPath := componentsPath.Index(i)
+		hasLPXComponent = hasLPXComponent || component.IsLPX()
 
 		// Externally managed components validate their generated names in their own controller.
 		if opts.grovePathway && !component.ManagedByExternalController() {
@@ -484,6 +486,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			opts.grovePathway,
 			opts.grovePathwayRequirement,
 		)...)
+		// A deployment-wide KV policy cannot be applied consistently once LPX owns a serving component.
+		if hasLPXComponent && spec.Experimental.KvTransferPolicy != nil {
+			allErrs = append(allErrs, field.Forbidden(
+				fldPath.Child("experimental", "kvTransferPolicy"),
+				"is not supported when an LPX component is selected",
+			))
+		}
 	}
 
 	return allErrs

@@ -731,10 +731,6 @@ type PlacementStatus struct {
 	// for the semantics of each value.
 	// +optional
 	State PlacementScoreState `json:"state,omitempty"`
-
-	// lpxAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
-	// +optional
-	LPXAttempt *LPXAttemptStatus `json:"lpxAttempt,omitempty"`
 }
 
 // RestartPhase enumerates phases of a graph-level restart.

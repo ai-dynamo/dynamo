@@ -43,9 +43,6 @@ func mergeLPXChildStatus(
 			ModelDownload: child.Status.ModelDownload.DeepCopy(),
 			Placement:     child.Status.Placement.DeepCopy(),
 		}
-		if status.Placement != nil && status.Placement.LPXAttempt != nil {
-			status.Placement.LPXAttempt.ObservedGeneration = source.Generation
-		}
 		for _, component := range components {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
 				ordinary.ComponentStatus[component.ComponentName] = *observedStatus.DeepCopy()

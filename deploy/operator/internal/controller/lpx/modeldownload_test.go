@@ -283,14 +283,10 @@ func TestLPXDisabledRevisionPreservesObservationFence(t *testing.T) {
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
 		Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: ptr.To(metav1.Now()),
 	}
-	child.Status.Placement = &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{
-		ObservedGeneration: child.Generation,
-		DeadlineAt:         ptr.To(metav1.NewTime(time.Now().Add(-time.Minute))),
-		Requests:           []v1beta1.LPXAttemptRequestStatus{{Name: "previous-request", UID: "previous-uid"}},
-	}}
+	child.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
 	child.Generation++
 	previousGeneration := child.Status.ObservedGeneration
-	require.Nil(t, lpxAttemptDeadlineSeconds(source))
+	require.Nil(t, lpxRequestDeadlineSeconds(source))
 	registry := newModelDownloadRegistry(t, map[string]bool{modelDownloadTestSecondBuildID: true}, nil)
 	r := newLPXTestReconciler(t, registry, child, source)
 	r.runtimeConfig.Gate = features.Gates{LPX: true}

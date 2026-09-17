@@ -9,13 +9,10 @@ import (
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,41 +20,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-// ResolveLPXGPUShape counts one complete engine replica from a non-nil rendered
-// LPX PCS. GPU-role main containers define engine width; all role Pods define
-// replica cost. Outer scaling-group replicas never multiply either value.
-func ResolveLPXGPUShape(ctx context.Context, reader client.Reader, pcs *grovev1alpha1.PodCliqueSet) (GPUShape, error) {
-	enginePods := make([]dra.PodSpecMultiplicity, 0, len(pcs.Spec.Template.Cliques))
-	replicaPods := make([]dra.PodSpecMultiplicity, 0, len(pcs.Spec.Template.Cliques))
-	for _, clique := range pcs.Spec.Template.Cliques {
-		pod := &clique.Spec.PodSpec
-		replicaPods = append(replicaPods, dra.PodSpecMultiplicity{PodSpec: pod, Count: clique.Spec.Replicas})
-		if clique.Labels[lpx.ExecutionRoleLabel] != lpxGPUExecutionRole {
-			continue
-		}
-		engine := &corev1.PodSpec{ResourceClaims: pod.ResourceClaims}
-		for i := range pod.Containers {
-			if pod.Containers[i].Name == consts.MainContainerName {
-				engine.Containers = pod.Containers[i : i+1]
-				break
-			}
-		}
-		if len(engine.Containers) == 0 {
-			return GPUShape{}, fmt.Errorf("LPX GPU role %q has no main container", clique.Name)
-		}
-		enginePods = append(enginePods, dra.PodSpecMultiplicity{PodSpec: engine, Count: clique.Spec.Replicas})
-	}
-	engineGPUs, err := dra.ResolvePodSetGPUCount(ctx, reader, pcs.Namespace, enginePods)
-	if err != nil {
-		return GPUShape{}, fmt.Errorf("resolve LPX engine GPUs: %w", err)
-	}
-	replicaGPUs, err := dra.ResolvePodSetGPUCount(ctx, reader, pcs.Namespace, replicaPods)
-	if err != nil {
-		return GPUShape{}, fmt.Errorf("resolve LPX replica GPUs: %w", err)
-	}
-	return GPUShape{GPUsPerEngine: int64(engineGPUs), GPUsPerReplica: int64(replicaGPUs)}, nil
-}
 
 // EvaluateLPXGroveReadiness observes one complete engine, including every role
 // in every replica. Ordinary DGD components are deliberately not evaluated here.

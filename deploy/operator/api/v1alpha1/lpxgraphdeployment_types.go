@@ -36,8 +36,7 @@ type LPXGraphDeploymentStatus struct {
 	// modelDownload retains the existing remote-build download progress.
 	// +optional
 	ModelDownload *v1beta1.ModelDownloadStatus `json:"modelDownload,omitempty"`
-	// placement retains the scheduling attempt fence, progress, and deadline.
-	// Its observed generation belongs to this child, not the source DGD.
+	// placement retains scheduler placement progress.
 	// +optional
 	Placement *v1beta1.PlacementStatus `json:"placement,omitempty"`
 }

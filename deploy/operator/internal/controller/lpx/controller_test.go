@@ -24,9 +24,9 @@ import (
 	"github.com/stretchr/testify/require"
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
@@ -69,13 +69,15 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 			group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
 			group.Spec.Replicas = 9
 			createLPXTestObjects(t, t.Context(), r.Client, objects...)
+			pcs = observedLPXTestPodCliqueSet(t, t.Context(), r, child, selected)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 			beforePCS := pcs.DeepCopy()
 
 			t.Log("Rebuild scheduler intent from explicit replicas or the current native scale")
-			selected, rejected := requirePreparedLPX(t, r, t.Context(), child, source)
-			require.Nil(t, rejected)
+			selected, classification, err := r.prepareLPXMaterializing(t.Context(), child, source, pcs)
+			require.NoError(t, err)
+			require.Nil(t, classification)
 			require.Equal(t, ptr.Deref(tc.replicas, int32(9)), selected.plan.Replicas)
 			require.Len(t, selected.requests, int(selected.plan.Replicas))
 			updates := 0
@@ -96,7 +98,7 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 			})
 
 			t.Log("Only explicit changes write scale, preserving the observed resource-version precondition")
-			_, _, err = r.reconcileWorkload(t.Context(), child, source, selected)
+			_, _, err = r.reconcileWorkload(t.Context(), child, source, selected, pcs)
 			require.ErrorIs(t, err, tc.err)
 			require.Equal(t, tc.wantUpdates, updates)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
@@ -111,6 +113,72 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 			require.Equal(t, beforePCS, pcs)
 		})
 	}
+}
+
+func TestLPXTerminatingGroveResourcesRemainRetiring(t *testing.T) {
+	t.Log("Publish a workload whose PCS and scaling group are both terminating")
+	ctx := t.Context()
+	child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	pcs := observedLPXTestPodCliqueSet(t, ctx, r, child, selected)
+	group := &grovev1alpha1.PodCliqueScalingGroup{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
+	for _, object := range []client.Object{pcs, group} {
+		object.SetFinalizers([]string{"example.com/cleanup"})
+		require.NoError(t, r.Update(ctx, object))
+		require.NoError(t, r.Delete(ctx, object))
+	}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.False(t, pcs.DeletionTimestamp.IsZero())
+
+	t.Log("Let the publication fence report retirement before attempting scale")
+	state, result, err := r.reconcileWorkload(ctx, child, source, selected, pcs)
+	require.NoError(t, err)
+	require.Equal(t, lpxRetiringReason, state.Reason)
+	require.Equal(t, lpxRetirementRequeueAfter, result.RequeueAfter)
+}
+
+func TestLPXScaleDownDoesNotRepeatWriteFromStaleCache(t *testing.T) {
+	t.Log("Observe an externally inflated group through a cache that stays stale after scale")
+	ctx := t.Context()
+	child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	lpx.ServingComponent(source).Replicas = ptr.To(int32(2))
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
+	group.Spec.Replicas = 9
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	pcs := observedLPXTestPodCliqueSet(t, ctx, r, child, selected)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	stale := group.DeepCopy()
+	scaled, updates := false, 0
+	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+			if scaled && key == client.ObjectKeyFromObject(stale) {
+				if observed, ok := object.(*grovev1alpha1.PodCliqueScalingGroup); ok {
+					stale.DeepCopyInto(observed)
+					return nil
+				}
+			}
+			return delegated.Get(ctx, key, object, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+			updates++
+			if err := delegated.SubResource(subresource).Update(ctx, object, opts...); err != nil {
+				return err
+			}
+			scaled = true
+			return nil
+		},
+	})
+
+	t.Log("Continue reconciliation without issuing a second stale-resource-version write")
+	_, _, err := r.reconcileWorkload(ctx, child, source, selected, pcs)
+	require.NoError(t, err)
+	require.Equal(t, 1, updates)
 }
 
 func TestLPXScaleDownUpdatesGroveBeforeDeletingStaleRequest(t *testing.T) {
@@ -146,12 +214,7 @@ func TestLPXScaleDownUpdatesGroveBeforeDeletingStaleRequest(t *testing.T) {
 	group := &grovev1alpha1.PodCliqueScalingGroup{}
 	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
 	require.Equal(t, int32(1), group.Spec.Replicas)
-	stale = getLPXRequest(t, ctx, r.Client, stale.Namespace, stale.Name)
-	require.True(t, stale.DeletionTimestamp.IsZero())
-
-	t.Log("Delete the stale request while its scheduler finalizer remains pending")
-	_, err = r.Reconcile(ctx, request)
-	require.NoError(t, err)
+	t.Log("Let request finalization proceed asynchronously after the lower scale is persisted")
 	stale = getLPXRequest(t, ctx, r.Client, stale.Namespace, stale.Name)
 	require.False(t, stale.DeletionTimestamp.IsZero())
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
@@ -191,83 +254,349 @@ func TestLPXScaleDownUpdatesGroveBeforeDeletingStaleRequest(t *testing.T) {
 	require.True(t, replacement.DeletionTimestamp.IsZero())
 }
 
+func TestLPXNativeScaleToZeroPreservesPodCliqueSetTemplate(t *testing.T) {
+	t.Log("Publish one engine whose capacity is owned by the native Grove scaling group")
+	ctx := t.Context()
+	child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	lpx.ServingComponent(source).Replicas = nil
+	r, initial := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, initial)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, initial)
+	pcs := observedLPXTestPodCliqueSet(t, ctx, r, child, initial)
+	pcsUID := pcs.UID
+	templateReplicas := ptr.Deref(pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas, 0)
+	require.Positive(t, templateReplicas)
+	request := getLPXRequest(t, ctx, r.Client, child.Namespace, initial.requests[0].requestName)
+	requestUID := request.UID
+
+	t.Log("Scale the native Grove group to zero and derive empty scheduler intent")
+	group := &grovev1alpha1.PodCliqueScalingGroup{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: initial.plan.LPXScalingGroup}, group))
+	group.Spec.Replicas = 0
+	require.NoError(t, r.Update(ctx, group))
+	zero, classification, err := r.prepareLPXMaterializing(ctx, child, source, pcs)
+	require.NoError(t, err)
+	require.Nil(t, classification)
+	require.Zero(t, zero.plan.Replicas)
+	require.Empty(t, zero.requests)
+
+	t.Log("Delete the stale LPR before reconciling the stable PCS template")
+	_, _, err = r.reconcileWorkload(ctx, child, source, zero, pcs)
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(request), &lpxv1alpha1.LPUPipelineRequest{})))
+	_, _, err = r.reconcileWorkload(ctx, child, source, zero, pcs)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	require.Zero(t, group.Spec.Replicas)
+	storedPCS := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), storedPCS))
+	require.Equal(t, pcsUID, storedPCS.UID)
+	require.Equal(t, templateReplicas, ptr.Deref(storedPCS.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas, 0))
+
+	t.Log("Scale the native group back up and publish a fresh request through the same PCS")
+	group.Spec.Replicas = 1
+	require.NoError(t, r.Update(ctx, group))
+	scaledUp, classification, err := r.prepareLPXMaterializing(ctx, child, source, storedPCS)
+	require.NoError(t, err)
+	require.Nil(t, classification)
+	require.Equal(t, int32(1), scaledUp.plan.Replicas)
+	require.Len(t, scaledUp.requests, 1)
+	_, _, err = r.reconcileWorkload(ctx, child, source, scaledUp, storedPCS)
+	require.NoError(t, err)
+	replacement := getLPXRequest(t, ctx, r.Client, child.Namespace, scaledUp.requests[0].requestName)
+	require.NotEqual(t, requestUID, replacement.UID)
+	require.Equal(t, pcsUID, metav1.GetControllerOf(replacement).UID)
+}
+
+func TestLPXModelScaleDownRecreatesPodCliqueSet(t *testing.T) {
+	ctx := t.Context()
+	child, source, registry := newLPXSpecDecodeTestDGD(t)
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+
+	scaledSource := source.DeepCopy()
+	require.Len(t, scaledSource.Spec.Components, 2)
+	scaledSource.Spec.Components[1].Replicas = ptr.To(int32(1))
+	scaled, rejected := requirePreparedLPX(t, r, ctx, child, scaledSource)
+	require.Nil(t, rejected)
+	require.Len(t, scaled.requests, 2)
+
+	desiredNames := make(map[string]struct{}, len(scaled.requests))
+	for _, request := range scaled.requests {
+		desiredNames[request.requestName] = struct{}{}
+	}
+	var stale *lpxv1alpha1.LPUPipelineRequest
+	for _, request := range selected.requests {
+		if _, retained := desiredNames[request.requestName]; retained {
+			continue
+		}
+		stale = getLPXRequest(t, ctx, r.Client, child.Namespace, request.requestName)
+		break
+	}
+	require.NotNil(t, stale)
+	stale.Finalizers = []string{"scheduling.lpu.nvidia.com/plan-protection"}
+	require.NoError(t, r.Update(ctx, stale))
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(findLPXTestPodCliqueSet(t, objects)), pcs))
+	pcs.Finalizers = []string{"test.example/observe-retirement"}
+	require.NoError(t, r.Update(ctx, pcs))
+	retiredTemplate := selected.plan.Agents[1].TemplateName
+	originalCliqueCount := len(pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames)
+	group := &grovev1alpha1.PodCliqueScalingGroup{}
+	require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, group))
+	require.Contains(t, group.Spec.CliqueNames, retiredTemplate)
+
+	t.Log("Retire the immutable PCS without mutating Grove membership or directly deleting its LPRs")
+	pcsDeleteObserved := false
+	requestDeleteObserved := false
+	wrapped := interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, delegated client.WithWatch, object client.Object, opts ...client.DeleteOption) error {
+			switch object.(type) {
+			case *grovev1alpha1.PodCliqueSet:
+				pcsDeleteObserved = true
+			case *lpxv1alpha1.LPUPipelineRequest:
+				requestDeleteObserved = true
+			}
+			return delegated.Delete(ctx, object, opts...)
+		},
+	})
+	r.Client, r.apiReader = wrapped, wrapped
+	_, classification, err := r.reconcileLPXPublicationFence(ctx, child, scaled, pcs)
+	require.NoError(t, err)
+	require.IsType(t, &lpxRetiring{}, classification)
+	require.True(t, pcsDeleteObserved)
+	require.False(t, requestDeleteObserved)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.False(t, pcs.DeletionTimestamp.IsZero())
+	require.Contains(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames, retiredTemplate)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	require.Contains(t, group.Spec.CliqueNames, retiredTemplate)
+	stale = getLPXRequest(t, ctx, r.Client, stale.Namespace, stale.Name)
+	require.True(t, stale.DeletionTimestamp.IsZero())
+
+	t.Log("Fence replacement until owner garbage collection removes every old LPR")
+	pcs.Finalizers = nil
+	require.NoError(t, r.Update(ctx, pcs))
+	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{})))
+	_, classification, err = r.reconcileLPXPublicationFence(ctx, child, scaled, nil)
+	require.NoError(t, err)
+	require.IsType(t, &lpxRetiring{}, classification)
+
+	requests, err := r.listLPXRequestCandidates(ctx, child)
+	require.NoError(t, err)
+	for index := range requests.Items {
+		request := &requests.Items[index]
+		request.Finalizers = nil
+		require.NoError(t, r.Update(ctx, request))
+		require.NoError(t, r.Delete(ctx, request))
+	}
+	_, classification, err = r.reconcileLPXPublicationFence(ctx, child, scaled, nil)
+	require.NoError(t, err)
+	require.Nil(t, classification)
+
+	t.Log("Create the replacement PCS with the scaled-in immutable shape")
+	replacement := renderLPXTestPodCliqueSet(t, ctx, r, child, scaledSource, scaled)
+	changed, synced, err := commoncontroller.SyncObservedResource(
+		ctx, r, child, nil, replacement, commoncontroller.WithPreservedListOrder(),
+	)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Equal(t, replacement.Spec, synced.Spec)
+	require.Equal(t, scaled.workloadDigest, synced.Annotations[lpx.WorkloadDigestAnnotation])
+	require.Less(t, len(synced.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames), originalCliqueCount)
+}
+
 func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		missing bool
-	}{{name: "deadline"}, {name: "missing request", missing: true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Observe a completed engine and a newer scheduling batch in their shared PCS")
-			ctx := t.Context()
-			child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-			lpx.ServingComponent(source).Replicas = ptr.To(int32(2))
-			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
-			objects := lpxMaterializedObjects(t, r, child, source, selected)
-			createLPXTestObjects(t, ctx, r.Client, objects...)
-			publishSelectedLPXForTest(t, ctx, r, child, selected)
-			pcs := findLPXTestPodCliqueSet(t, objects)
-			serving := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
-			serving.Status = deadlineTestRequest(child, pcs, serving.Name, time.Now(), lpxv1alpha1.RequestPhaseBound).Status
-			require.NoError(t, r.Update(ctx, serving))
-			pending := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].requestName)
-			pending.Finalizers = []string{"scheduling.lpu.nvidia.com/plan-protection"}
-			require.NoError(t, r.Update(ctx, pending))
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
-			attempt := deadlineTestAttempt(child, pending, time.Now().Add(-time.Second))
-			if tc.missing {
-				attempt.DeadlineAt = nil
-				pending.Finalizers = nil
-				require.NoError(t, r.Update(ctx, pending))
-				require.NoError(t, r.Delete(ctx, pending))
-			} else {
-				attempt.ExceededAt = ptr.To(metav1.Now())
-			}
-			child.Status.Placement.LPXAttempt = attempt
-			require.NoError(t, r.Status().Update(ctx, child))
+	t.Run("deadline", func(t *testing.T) {
+		t.Log("Observe a completed engine and a newer pending request in their shared PCS")
+		ctx := t.Context()
+		child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+		source.Spec.Scheduling = deadlineTestScheduling()
+		lpx.ServingComponent(source).Replicas = ptr.To(int32(2))
+		r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+		objects := lpxMaterializedObjects(t, r, child, source, selected)
+		createLPXTestObjects(t, ctx, r.Client, objects...)
+		publishSelectedLPXForTest(t, ctx, r, child, selected)
+		pcs := findLPXTestPodCliqueSet(t, objects)
+		serving := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
+		serving.Status = deadlineTestRequest(child, pcs, serving.Name, time.Now(), lpxv1alpha1.RequestPhaseBound).Status
+		require.NoError(t, r.Update(ctx, serving))
+		pending := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].requestName)
+		pending.Status = deadlineTestRequest(child, pcs, pending.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
+		pending.Finalizers = []string{"scheduling.lpu.nvidia.com/plan-protection"}
+		require.NoError(t, r.Update(ctx, pending))
 
-			t.Log("Retire only the failed scale-out and keep Grove below the authored scale while cleanup is pending")
-			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
-			group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
-			for range 3 {
-				_, err := r.Reconcile(ctx, request)
-				require.NoError(t, err)
-				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{}))
-				require.Equal(t, serving, getLPXRequest(t, ctx, r.Client, serving.Namespace, serving.Name))
-				require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
-				require.Equal(t, int32(1), group.Spec.Replicas)
-			}
-			if tc.missing {
-				requireLPXRequestNotFound(t, ctx, r.Client, pending.Namespace, pending.Name)
-				return
-			}
+		t.Log("Persist failure before changing Grove or deleting scheduler intent")
+		request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+		group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
+		_, err := r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+		require.Equal(t, int32(2), group.Spec.Replicas)
+		pending = getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
+		require.True(t, pending.DeletionTimestamp.IsZero())
 
-			t.Log("A later edit still waits for the failed request's scheduler finalizer")
-			pending = getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
-			require.False(t, pending.DeletionTimestamp.IsZero())
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
-			child.Generation++
-			require.NoError(t, r.Update(ctx, child))
-			_, err := r.Reconcile(ctx, request)
+		t.Log("Retire only the failed scale-out and keep Grove below the authored scale while cleanup is pending")
+		for range 3 {
+			_, err = r.Reconcile(ctx, request)
 			require.NoError(t, err)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{}))
+			require.True(t, apiequality.Semantic.DeepEqual(serving, getLPXRequest(t, ctx, r.Client, serving.Namespace, serving.Name)), "serving request changed")
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
 			require.Equal(t, int32(1), group.Spec.Replicas)
+		}
+		t.Log("A later edit still waits for the failed request's scheduler finalizer")
+		pending = getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
+		require.False(t, pending.DeletionTimestamp.IsZero())
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+		child.Generation++
+		require.NoError(t, r.Update(ctx, child))
+		_, err = r.Reconcile(ctx, request)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+		require.Equal(t, int32(1), group.Spec.Replicas)
 
-			t.Log("After cleanup the later edit can retry without replacing the serving engine")
-			retiredUID := pending.UID
-			pending.Finalizers = nil
-			require.NoError(t, r.Update(ctx, pending))
-			for range 5 {
-				_, err = r.Reconcile(ctx, request)
-				require.NoError(t, err)
-			}
-			replacement := getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
-			require.NotEqual(t, retiredUID, replacement.UID)
-			require.True(t, replacement.DeletionTimestamp.IsZero())
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
-			require.Equal(t, int32(2), group.Spec.Replicas)
-			require.Equal(t, serving, getLPXRequest(t, ctx, r.Client, serving.Namespace, serving.Name))
-		})
+		t.Log("After cleanup the later edit can retry without replacing the serving engine")
+		retiredUID := pending.UID
+		pending.Finalizers = nil
+		require.NoError(t, r.Update(ctx, pending))
+		for range 5 {
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+		}
+		replacement := getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
+		require.NotEqual(t, retiredUID, replacement.UID)
+		require.True(t, replacement.DeletionTimestamp.IsZero())
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+		require.Equal(t, int32(2), group.Spec.Replicas)
+		require.True(t, apiequality.Semantic.DeepEqual(serving, getLPXRequest(t, ctx, r.Client, serving.Namespace, serving.Name)), "serving request changed")
+	})
+}
+
+func TestLPXDeadlineContinuesDuringRequestRetirement(t *testing.T) {
+	t.Log("Publish two pending replicas and expire the tail first")
+	ctx := t.Context()
+	child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	source.Spec.Scheduling = deadlineTestScheduling()
+	lpx.ServingComponent(source).Replicas = ptr.To(int32(2))
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	prefix := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
+	prefix.Status = deadlineTestRequest(child, pcs, prefix.Name, time.Now(), lpxv1alpha1.RequestPhasePending).Status
+	require.NoError(t, r.Update(ctx, prefix))
+	tail := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].requestName)
+	tail.Status = deadlineTestRequest(child, pcs, tail.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
+	tail.Finalizers = []string{"scheduling.lpu.nvidia.com/plan-protection"}
+	require.NoError(t, r.Update(ctx, tail))
+
+	t.Log("Retire the expired tail while its scheduler finalizer holds deletion")
+	reconcileRequest := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	for range 2 {
+		_, err := r.Reconcile(ctx, reconcileRequest)
+		require.NoError(t, err)
 	}
+	tail = getLPXRequest(t, ctx, r.Client, child.Namespace, tail.Name)
+	require.False(t, tail.DeletionTimestamp.IsZero())
+
+	t.Log("Continue enforcing the surviving request's independent deadline")
+	prefix = getLPXRequest(t, ctx, r.Client, child.Namespace, prefix.Name)
+	prefix.Status = deadlineTestRequest(child, pcs, prefix.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
+	require.NoError(t, r.Update(ctx, prefix))
+	_, err := r.Reconcile(ctx, reconcileRequest)
+	require.NoError(t, err)
+	requireLPXRequestNotFound(t, ctx, r.Client, child.Namespace, prefix.Name)
+}
+
+func TestLPXEditBeforeDeadlineFailureDoesNotAuthorizeRetry(t *testing.T) {
+	t.Log("Publish a request, then advance the deployment before that request expires")
+	ctx := t.Context()
+	child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	source.Spec.Scheduling = deadlineTestScheduling()
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	pending := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	pending.Status = deadlineTestRequest(child, pcs, pending.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
+	require.NoError(t, r.Update(ctx, pending))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	child.Generation++
+	require.NoError(t, r.Update(ctx, child))
+	failureGeneration := child.Generation
+
+	t.Log("Expire and remove the request at the already-edited generation")
+	reconcileRequest := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+	_, err := r.Reconcile(ctx, reconcileRequest)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pending), &lpxv1alpha1.LPUPipelineRequest{}))
+
+	t.Log("After the failure fence is durable, scale down and remove the expired request")
+	_, err = r.Reconcile(ctx, reconcileRequest)
+	require.NoError(t, err)
+	requireLPXRequestNotFound(t, ctx, r.Client, pending.Namespace, pending.Name)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	failed := meta.FindStatusCondition(child.Status.Conditions, "Failed")
+	require.NotNil(t, failed)
+	require.Equal(t, metav1.ConditionTrue, failed.Status)
+	require.Equal(t, lpxSchedulingDeadlineExceededReason, failed.Reason)
+	require.Equal(t, failureGeneration, failed.ObservedGeneration)
+	schedulingFailed := meta.FindStatusCondition(child.Status.Conditions, lpxSchedulingFailedCondition)
+	require.NotNil(t, schedulingFailed)
+	require.Equal(t, metav1.ConditionTrue, schedulingFailed.Status)
+	require.Equal(t, failureGeneration, schedulingFailed.ObservedGeneration)
+
+	t.Log("Reconciliation at the failure generation does not recreate scheduler intent")
+	for range 3 {
+		_, err = r.Reconcile(ctx, reconcileRequest)
+		require.NoError(t, err)
+		requireLPXRequestNotFound(t, ctx, r.Client, pending.Namespace, pending.Name)
+	}
+
+	t.Log("An edit after the failure permits a fresh request")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	child.Generation++
+	require.NoError(t, r.Update(ctx, child))
+	for range 3 {
+		_, err = r.Reconcile(ctx, reconcileRequest)
+		require.NoError(t, err)
+	}
+	replacement := getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
+	require.NotEqual(t, pending.UID, replacement.UID)
+}
+
+func TestLPXMissingRequestGetsANewIndependentDeadline(t *testing.T) {
+	t.Log("Publish two requests and remove one without a terminal deadline decision")
+	ctx := t.Context()
+	child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	source.Spec.Scheduling = deadlineTestScheduling()
+	lpx.ServingComponent(source).Replicas = ptr.To(int32(2))
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	createLPXTestObjects(t, ctx, r.Client, lpxMaterializedObjects(t, r, child, source, selected)...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+
+	t.Log("Advance the deployment and remove one request before it fails")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	child.Generation++
+	require.NoError(t, r.Update(ctx, child))
+
+	missing := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].requestName)
+	previousUID := missing.UID
+	require.NoError(t, r.Delete(ctx, missing))
+
+	t.Log("Reconciliation recreates deterministic scheduler intent without inheriting a scheduling clock")
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.NoError(t, err)
+	replacement := getLPXRequest(t, ctx, r.Client, missing.Namespace, missing.Name)
+	require.NotEqual(t, previousUID, replacement.UID)
+	require.Nil(t, replacement.Status)
 }
 
 func TestLPXEngineOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
@@ -308,7 +637,7 @@ func TestLPXEngineOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
 	afterPCS := renderLPXTestPodCliqueSet(t, t.Context(), r, child, source, afterSelected)
 	require.Equal(t, beforePCS, afterPCS)
 	require.NotContains(t, afterPCS.Annotations, lpx.DGDGenerationAnnotation)
-	_, err := reconcileSelectedLPXForTest(t.Context(), r, child, afterSelected)
+	_, err := reconcileSelectedLPXForTest(t, t.Context(), r, child, afterSelected)
 	require.NoError(t, err)
 	afterRequests := &lpxv1alpha1.LPUPipelineRequestList{}
 	require.NoError(t, r.List(t.Context(), afterRequests))
@@ -318,19 +647,13 @@ func TestLPXEngineOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
 	require.Equal(t, beforeSource, source)
 }
 
-func TestLPXCurrentAttemptSurvivesUnobservedReconciliation(t *testing.T) {
-	t.Log("A failed reconciliation may have a current durable attempt and an older result generation")
+func TestLPXRequestListFailureUsesControllerBackoff(t *testing.T) {
+	t.Log("A request-list failure prevents deriving any active deadline")
 	source := newLPXTestSource(lpx.PipelineSingle, "build-v2")
 	child := newLPXTestDeployment(t, source)
 	source.Spec.Scheduling = deadlineTestScheduling()
-	child.Status.Placement = &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{
-		ObservedGeneration: child.Generation,
-		DeadlineAt:         ptr.To(metav1.NewTime(time.Now().UTC().Truncate(time.Second).Add(time.Minute))),
-		Requests:           []v1beta1.LPXAttemptRequestStatus{{Name: "current-request", UID: "current-uid"}},
-	}}
 	r := newLPXTestReconciler(t, nil, child, source)
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
-	before := child.Status.Placement.DeepCopy()
 	readError := errors.New("temporary request observation failure")
 	r.apiReader = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
 		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -341,46 +664,11 @@ func TestLPXCurrentAttemptSurvivesUnobservedReconciliation(t *testing.T) {
 		},
 	})
 	result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-	require.NoError(t, err, "active deadlines bound transient errors with a scheduled retry")
-	require.Positive(t, result.RequeueAfter)
+	require.ErrorIs(t, err, readError)
+	require.Zero(t, result)
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 	require.NotEqual(t, child.Generation, child.Status.ObservedGeneration)
-	require.Equal(t, before, child.Status.Placement)
 	require.Contains(t, meta.FindStatusCondition(child.Status.Conditions, "Failed").Message, readError.Error())
-}
-
-func TestLPXGPUCapacityReportsTheCompleteEngine(t *testing.T) {
-	for _, mode := range []string{"lpu-only", "hybrid", "speculative"} {
-		t.Run(mode, func(t *testing.T) {
-			t.Log("Reconcile the actual LPX workload and publish its per-engine GPU shape")
-			var child *v1alpha1.LPXGraphDeployment
-			var source *v1beta1.DynamoGraphDeployment
-			var registry lpx.ModelRegistry
-			var want int64
-			switch mode {
-			case "lpu-only":
-				child, source, registry = newLPXTestDGD(t, lpx.PipelineSingle)
-			case "hybrid":
-				child, source, registry = newLPXTestDGD(t, lpx.PipelineLPX)
-				source.Spec.Components[0].Replicas = ptr.To(int32(3))
-				source.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
-				pod := &lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
-				pod.ResourceClaims = nil
-				pod.Containers[0].Resources.Limits = corev1.ResourceList{consts.KubeResourceGPUNvidia: resource.MustParse("4")}
-				want = 8
-			case "speculative":
-				child, source, registry = newLPXSpecDecodeTestDGD(t)
-			}
-			r := newLPXTestReconciler(t, registry, child, source)
-			_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-			require.NoError(t, err)
-			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
-			require.Contains(t, child.Status.Components, "lpx")
-			require.Equal(t, ptr.To(want), child.Status.Components["lpx"].GPUsPerEngine)
-			require.Equal(t, ptr.To(want), child.Status.Components["lpx"].GPUsPerReplica)
-
-		})
-	}
 }
 
 func TestLPXInvalidEditsPreserveExistingWorkload(t *testing.T) {
@@ -546,7 +834,7 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 				},
 			})
 			r.Client, r.apiReader = wrapped, wrapped
-			retiring, err := r.retireInvalidLPXWorkload(t.Context(), child, "invalid runtime")
+			retiring, err := r.retireInvalidLPXWorkload(t.Context(), child, pcs, "invalid runtime")
 			switch scenario {
 			case "new child generation":
 				require.ErrorContains(t, err, "authority changed")
@@ -567,13 +855,13 @@ func TestLPXTerminalCleanupPreservesForeignObjectsAndNewerAuthority(t *testing.T
 				if scenario == "pending finalizer" {
 					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 					require.False(t, pcs.DeletionTimestamp.IsZero())
-					retiring, err = r.retireInvalidLPXWorkload(t.Context(), child, "invalid runtime")
+					retiring, err = r.retireInvalidLPXWorkload(t.Context(), child, pcs, "invalid runtime")
 					require.NoError(t, err)
 					require.NotNil(t, retiring)
 					pcs.Finalizers = nil
 					require.NoError(t, r.Update(t.Context(), pcs))
 				}
-				retiring, err = r.retireInvalidLPXWorkload(t.Context(), child, "invalid runtime")
+				retiring, err = r.retireInvalidLPXWorkload(t.Context(), child, nil, "invalid runtime")
 				require.NoError(t, err)
 				require.Nil(t, retiring)
 				require.Equal(t, 3, deletes, "cleanup must not repeat deletes after they are accepted")
@@ -664,7 +952,7 @@ func TestLPXEndpointLifecycle(t *testing.T) {
 	t.Log("Retire the recreated discovery endpoint when the workload becomes invalid")
 	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
 	require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))
-	_, err := r.retireInvalidLPXWorkload(t.Context(), child, "invalid source")
+	_, err := r.retireInvalidLPXWorkload(t.Context(), child, nil, "invalid source")
 	require.NoError(t, err)
 	require.True(t, apierrors.IsNotFound(r.Get(t.Context(), key, service)))
 	require.NoError(t, r.Get(t.Context(), modelKey, modelService))
@@ -705,7 +993,7 @@ func TestLPXMaterializationUsesOwnerSourceAndChildIdentity(t *testing.T) {
 	}
 
 	t.Log("Keep scheduler-request provenance rooted in the source DGD, not the independently named child")
-	requests, err := r.listOwnedLPXRequests(t.Context(), child)
+	requests, err := r.listOwnedLPXRequests(t.Context(), child, pcs)
 	require.NoError(t, err)
 	require.NotEmpty(t, requests)
 	for _, request := range requests {
@@ -763,12 +1051,39 @@ func TestLPXReadableNamesSurviveServingComponentChanges(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, r.Update(t.Context(), child))
 
-		t.Log("Keep one PCS and endpoint while updating their serving component metadata")
+		t.Log("Preserve the PCS on rename and retire it when target and draft assignments change")
 		_, err = r.Reconcile(t.Context(), request)
 		require.NoError(t, err)
+		if change == "move conductor" {
+			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), pcsKey, &grovev1alpha1.PodCliqueSet{})))
+			require.NoError(t, r.Get(t.Context(), request.NamespacedName, child))
+			require.Equal(t, lpxRetiringReason, meta.FindStatusCondition(child.Status.Conditions, "Ready").Reason)
+			require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
+			require.Equal(t, "stable-endpoint", string(endpoint.UID))
+
+			t.Log("Fence replacement until the retired PCS's requests are garbage collected")
+			_, err = r.Reconcile(t.Context(), request)
+			require.NoError(t, err)
+			require.True(t, apierrors.IsNotFound(r.Get(t.Context(), pcsKey, &grovev1alpha1.PodCliqueSet{})))
+			requests, err := r.listLPXRequestCandidates(t.Context(), child)
+			require.NoError(t, err)
+			require.NotEmpty(t, requests.Items)
+			for index := range requests.Items {
+				require.Equal(t, "stable-pcs", string(metav1.GetControllerOf(&requests.Items[index]).UID))
+				require.NoError(t, r.Delete(t.Context(), &requests.Items[index]))
+			}
+
+			t.Log("Recreate the workload under the same readable names after retirement")
+			_, err = r.Reconcile(t.Context(), request)
+			require.NoError(t, err)
+		}
 		require.NoError(t, r.Get(t.Context(), pcsKey, pcs))
 		require.NoError(t, r.Get(t.Context(), endpointKey, endpoint))
-		require.Equal(t, "stable-pcs", string(pcs.UID))
+		if change == "rename serving component" {
+			require.Equal(t, "stable-pcs", string(pcs.UID))
+		} else {
+			require.NotEqual(t, "stable-pcs", string(pcs.UID))
+		}
 		require.Equal(t, "stable-endpoint", string(endpoint.UID))
 		require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 1)
 		require.Equal(t, beforeGroup.Name, pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Name)
@@ -1048,7 +1363,7 @@ func TestLPXPublicationFencesLiveSourceAndChildMetadata(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(source), liveSource))
 	liveSource.Annotations[consts.KubeAnnotationEnableMetrics] = "false"
 	require.NoError(t, r.Update(t.Context(), liveSource))
-	_, _, err := r.reconcileWorkload(t.Context(), child, source, selected)
+	_, _, err := r.reconcileWorkload(t.Context(), child, source, selected, nil)
 	require.ErrorContains(t, err, "input revision")
 	allPCS := &grovev1alpha1.PodCliqueSetList{}
 	require.NoError(t, r.List(t.Context(), allPCS))

@@ -124,6 +124,18 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{`spec.components: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
+			name: "LPX rejects the deployment-wide KV transfer policy",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{
+						LabelKey: "topology.kubernetes.io/zone",
+						Domain:   "zone",
+					},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy: Forbidden: is not supported when an LPX component is selected`},
+		},
+		{
 			name: "LPX topology and checkpoint support is deferred to the child controller",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{

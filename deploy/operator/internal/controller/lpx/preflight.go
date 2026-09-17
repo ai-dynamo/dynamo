@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -30,13 +31,15 @@ import (
 
 // reconcileLPXSafetyPreflight classifies and fences scheduler-owned state
 // after the LPX controller validates source identity and the Grove provider.
+// pcs is nil when its stable name was not found.
 func (r *graphReconciler) reconcileLPXSafetyPreflight(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	source *nvidiacomv1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
 	requests []lpxv1alpha1.LPUPipelineRequest,
 ) (*lpxMaterializing, lpxClassification, error) {
-	classification, requests, err := r.reconcileLPXKnownIntentFence(ctx, deployment, source, requests)
+	classification, requests, err := r.reconcileLPXKnownIntentFence(ctx, deployment, source, pcs, requests)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fence prior LPX intent: %w", err)
 	}
@@ -51,23 +54,25 @@ func (r *graphReconciler) reconcileLPXSafetyPreflight(
 		return nil, nil, nil
 	}
 
-	return r.reconcileSelectedLPXSafetyPreflight(ctx, deployment, source)
+	return r.reconcileSelectedLPXSafetyPreflight(ctx, deployment, source, pcs)
 }
 
 // reconcileSelectedLPXSafetyPreflight resolves and validates one selected LPX
-// workload after its caller establishes the required download order.
+// workload after its caller establishes the required download order. pcs is
+// nil when its stable name was not found.
 func (r *graphReconciler) reconcileSelectedLPXSafetyPreflight(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
 	source *nvidiacomv1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
 ) (*lpxMaterializing, lpxClassification, error) {
 	// Resolve one immutable workload projection for selection and rendering.
-	selectedLPX, rejected, prepareErr := r.prepareLPXMaterializing(ctx, deployment, source)
+	selectedLPX, classification, prepareErr := r.prepareLPXMaterializing(ctx, deployment, source, pcs)
 	if prepareErr != nil {
 		return nil, nil, fmt.Errorf("failed to resolve the LPX workload: %w", prepareErr)
 	}
-	if rejected != nil {
-		return nil, rejected, nil
+	if classification != nil {
+		return nil, classification, nil
 	}
 
 	// Grove accepts the desired spec before individual engine requests are reconciled.

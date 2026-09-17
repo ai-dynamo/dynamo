@@ -24,12 +24,8 @@ import (
 // admission metadata and transport overhead.
 const MaxRenderedPodCliqueSetBytes = 1 << 20
 
-const (
-	// StageLabel records the authored LPX component association.
-	StageLabel = "lpx.nvidia.com/stage"
-	// ExecutionRoleLabel distinguishes internal LPU and GPU Pod templates.
-	ExecutionRoleLabel = "lpx.nvidia.com/execution-role"
-)
+// StageLabel records the authored LPX component association.
+const StageLabel = "lpx.nvidia.com/stage"
 
 // RenderInput contains the fresh stage templates and runtime settings consumed by rendering.
 type RenderInput struct {
@@ -239,11 +235,6 @@ func RenderSelectedNodeLocal(
 		Replicas:     ptr.To(plan.Replicas),
 		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
 	}}
-
-	// Select Grove's LPX backend for the complete engine, including its KAI fallback.
-	for _, clique := range pcs.Spec.Template.Cliques {
-		clique.Spec.PodSpec.SchedulerName = SchedulerName
-	}
 
 	explicit := grovev1alpha1.CliqueStartupTypeExplicit
 	pcs.Spec.Template.StartupType = &explicit

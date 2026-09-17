@@ -679,6 +679,7 @@ type LPUPipelineRequestStatus struct {
 	LastPlanRevision           int64                      `json:"lastPlanRevision"`
 	ObservedGeneration         *int64                     `json:"observedGeneration,omitempty"`
 	Phase                      RequestPhase               `json:"phase"`
+	SchedulingStartedAt        *metav1.Time               `json:"schedulingStartedAt,omitempty"`
 }
 
 func (in *LPUPipelineRequestStatus) DeepCopyInto(out *LPUPipelineRequestStatus) {
@@ -708,6 +709,9 @@ func (in *LPUPipelineRequestStatus) DeepCopyInto(out *LPUPipelineRequestStatus) 
 	if in.ObservedGeneration != nil {
 		value := *in.ObservedGeneration
 		out.ObservedGeneration = &value
+	}
+	if in.SchedulingStartedAt != nil {
+		out.SchedulingStartedAt = in.SchedulingStartedAt.DeepCopy()
 	}
 }
 

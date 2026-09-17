@@ -189,6 +189,14 @@ func TestLPXSourceWatchIgnoresOrdinaryChurn(t *testing.T) {
 	changed.Spec.Components[0].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "new-runtime"
 	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: source, ObjectNew: changed}))
 	changed = source.DeepCopy()
+	changed.Generation++
+	changed.Spec.Components[0].TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: source, ObjectNew: changed}))
+	changed = source.DeepCopy()
+	changed.Generation++
+	changed.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "fabric"}
+	require.True(t, predicate.Update(event.UpdateEvent{ObjectOld: source, ObjectNew: changed}))
+	changed = source.DeepCopy()
 	changed.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart"}
 	require.False(t, predicate.Update(event.UpdateEvent{ObjectOld: source, ObjectNew: changed}))
 	changed.Status.Restart = &nvidiacomv1beta1.RestartStatus{ObservedID: "restart", Phase: nvidiacomv1beta1.RestartPhaseRestarting, InProgress: []string{"lpx"}}

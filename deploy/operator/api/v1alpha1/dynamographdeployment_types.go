@@ -22,7 +22,6 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -82,28 +81,6 @@ type PlacementStatus struct {
 	// State indicates placement score reporting state.
 	// +optional
 	State PlacementScoreState `json:"state,omitempty"`
-	// LPXAttempt is Dynamo's durable aggregate LPX scheduling-attempt authority record.
-	// +optional
-	LPXAttempt *LPXAttemptStatus `json:"lpxAttempt,omitempty"`
-}
-
-// LPXAttemptStatus mirrors the v1beta1 durable LPX attempt authority record.
-type LPXAttemptStatus struct {
-	ObservedGeneration int64        `json:"observedGeneration"`
-	PodCliqueSetUID    types.UID    `json:"podCliqueSetUID,omitempty"`
-	DeadlineAt         *metav1.Time `json:"deadlineAt,omitempty"`
-	ExceededAt         *metav1.Time `json:"exceededAt,omitempty"`
-	DisarmedAt         *metav1.Time `json:"disarmedAt,omitempty"`
-	// +listType=map
-	// +listMapKey=name
-	Requests []LPXAttemptRequestStatus `json:"requests"`
-}
-
-// LPXAttemptRequestStatus identifies one exact request in the aggregate attempt.
-type LPXAttemptRequestStatus struct {
-	Name          string    `json:"name"`
-	AttemptDigest string    `json:"attemptDigest"`
-	UID           types.UID `json:"uid,omitempty"`
 }
 
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.

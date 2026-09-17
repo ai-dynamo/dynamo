@@ -96,7 +96,7 @@ func TestDynamoGraphDeploymentRoleShapesRoundTrip(t *testing.T) {
 
 func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	checkedAt := metav1.NewTime(time.Unix(1_800_000_000, 0))
-	deadlineAt := metav1.NewTime(time.Unix(1_800_000_900, 0))
+	placementScore := 0.75
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "lpx", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -119,14 +119,10 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 					Builds:        []string{"gs://models/draft", "gs://models/target"},
 					LastCheckedAt: &checkedAt,
 				},
-				Placement: &v1beta1.PlacementStatus{LPXAttempt: &v1beta1.LPXAttemptStatus{
-					ObservedGeneration: 2,
-					PodCliqueSetUID:    "pcs-uid",
-					DeadlineAt:         &deadlineAt,
-					Requests: []v1beta1.LPXAttemptRequestStatus{{
-						Name: "request", AttemptDigest: "sha256:attempt", UID: "request-uid",
-					}},
-				}},
+				Placement: &v1beta1.PlacementStatus{
+					Score: &placementScore,
+					State: v1beta1.PlacementScoreStateReported,
+				},
 			},
 		},
 	}

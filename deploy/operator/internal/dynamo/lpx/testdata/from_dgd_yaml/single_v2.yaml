@@ -161,7 +161,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
       labels:
-        lpx.nvidia.com/execution-role: lpu
         lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
@@ -307,7 +306,6 @@ spec:
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f41776b5eeefee5dab35cb81c9d4c052c88b10ac1025b0f408d690dec65d0ea1
         scheduling.lpu.nvidia.com/role: conductor
       labels:
-        lpx.nvidia.com/execution-role: lpu
         lpx.nvidia.com/serving: "true"
         lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
@@ -456,7 +454,7 @@ spec:
               name: ssh-secret
               readOnly: true
           restartPolicy: Always
-          schedulerName: lpx-scheduler
+          schedulerName: default-scheduler
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch

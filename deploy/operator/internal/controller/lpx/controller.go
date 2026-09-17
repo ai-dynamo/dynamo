@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -146,46 +145,19 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		deployment.Status.ModelDownload = nil
 	}
 	state := reconcileOutcome{State: v1beta1.DGDStatePending, Reason: "LPXPending", Message: "Waiting for the current LPX engine"}
-	var deadlineAt time.Time
 	var source *v1beta1.DynamoGraphDeployment
+	var pcs *grovev1alpha1.PodCliqueSet
+	var selected *lpxMaterializing
 	defer func() {
-		// Reconcile intended removals before deadline cleanup, including on failed renders.
-		if unavailableReason == "" {
-			classification, wake, _, deadlineErr := r.reconcileLPXAttemptDeadline(ctx, deployment, source)
-			deadlineAt, err = wake, errors.Join(err, deadlineErr)
-			if classification != nil {
-				state, result = lpxResult(classification), projectLPXLifecycleStatus(deployment, classification)
-			}
-		}
-		if err != nil {
-			state.State, state.Reason, state.Message = v1beta1.DGDStateFailed, "LPXReconciliationFailed", truncateLPXMessage(err.Error())
-		} else if unavailableReason == "" {
-			deployment.Status.ObservedGeneration = deployment.Generation
-		}
-		ready, failed := metav1.ConditionFalse, metav1.ConditionFalse
-		if state.State == v1beta1.DGDStateSuccessful {
-			ready = metav1.ConditionTrue
-		}
-		if state.State == v1beta1.DGDStateFailed {
-			failed = metav1.ConditionTrue
-		}
-		// Every authored component observes the complete shared runtime gate.
-		for name, component := range deployment.Status.Components {
-			component.Ready = ready == metav1.ConditionTrue
-			deployment.Status.Components[name] = component
-		}
-		for condition, value := range map[string]metav1.ConditionStatus{"Ready": ready, "Failed": failed} {
-			meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{Type: condition, Status: value, ObservedGeneration: deployment.Generation, Reason: state.Reason, Message: state.Message})
-		}
-		if !apiequality.Semantic.DeepEqual(previous, &deployment.Status) {
-			if statusErr := r.Status().Update(ctx, deployment); statusErr != nil {
-				err = errors.Join(err, fmt.Errorf("persist LPX lifecycle status: %w", statusErr))
-			}
-		}
-		if ready == metav1.ConditionTrue && deployment.Status.ModelDownload != nil && deployment.Status.ModelDownload.LastCheckedAt != nil && result.RequeueAfter == 0 {
-			result.RequeueAfter = max(modelDownloadRequeueAfter, time.Until(deployment.Status.ModelDownload.LastCheckedAt.Add(modelDownloadRefreshInterval)))
-		}
-		result, err = completeLPXDeadline(ctx, deadlineAt, result, err)
+		result, err = r.completeReconcile(ctx, deployment, previous, lpxReconcileCompletion{
+			unavailableReason: unavailableReason,
+			state:             state,
+			source:            source,
+			pcs:               pcs,
+			selected:          selected,
+			result:            result,
+			reconcileErr:      err,
+		})
 	}()
 
 	// Like Grove, disabling integration reports unavailability without touching workloads.
@@ -200,17 +172,31 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	if sourceErr != nil {
 		return ctrl.Result{}, sourceErr
 	}
-	if rejected != nil {
-		state = lpxResult(rejected)
-		return r.retireInvalidWorkload(ctx, deployment, rejected.reason)
+	pcs, err = r.observeCurrentLPXPodCliqueSet(ctx, deployment)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
-	selected, classification, err := r.reconcileLPXSafetyPreflight(ctx, deployment, source, nil)
+	// Invalid source authority retires existing LPX state before reporting rejection.
+	if rejected != nil {
+		retiring, retireErr := r.retireInvalidLPXWorkload(ctx, deployment, pcs, rejected.reason)
+		if retireErr != nil {
+			return ctrl.Result{}, retireErr
+		}
+		if retiring != nil {
+			state = lpxResult(retiring)
+			return projectLPXLifecycleStatus(retiring), nil
+		}
+		state = lpxResult(rejected)
+		return ctrl.Result{}, nil
+	}
+	var classification lpxClassification
+	selected, classification, err = r.reconcileLPXSafetyPreflight(ctx, deployment, source, pcs, nil)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if classification != nil {
 		state = lpxResult(classification)
-		return projectLPXLifecycleStatus(deployment, classification), nil
+		return projectLPXLifecycleStatus(classification), nil
 	}
 	ready, err := r.reconcileModelDownloads(ctx, deployment, source, selected == nil)
 	if err != nil {
@@ -221,69 +207,136 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{RequeueAfter: modelDownloadRequeueAfter}, nil
 	}
 	if selected == nil {
-		selected, classification, err = r.reconcileSelectedLPXSafetyPreflight(ctx, deployment, source)
+		selected, classification, err = r.reconcileSelectedLPXSafetyPreflight(ctx, deployment, source, pcs)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		if classification != nil {
 			state = lpxResult(classification)
-			return projectLPXLifecycleStatus(deployment, classification), nil
+			return projectLPXLifecycleStatus(classification), nil
 		}
 	}
-	state, result, err = r.reconcileWorkload(ctx, deployment, source, selected)
+	state, result, err = r.reconcileWorkload(ctx, deployment, source, selected, pcs)
 	return result, err
+}
+
+type lpxReconcileCompletion struct {
+	unavailableReason string
+	state             reconcileOutcome
+	source            *v1beta1.DynamoGraphDeployment
+	pcs               *grovev1alpha1.PodCliqueSet
+	selected          *lpxMaterializing
+	result            ctrl.Result
+	reconcileErr      error
+}
+
+// completeReconcile projects deadlines and the final lifecycle outcome after
+// every reconcile path has finished mutating its in-memory status.
+func (r *graphReconciler) completeReconcile(
+	ctx context.Context,
+	deployment *v1alpha1.LPXGraphDeployment,
+	previous *v1alpha1.LPXGraphDeploymentStatus,
+	completion lpxReconcileCompletion,
+) (ctrl.Result, error) {
+	state, result, err := completion.state, completion.result, completion.reconcileErr
+	deadlineAt := time.Time{}
+
+	// Keep active-request deadlines running while unrelated request cleanup converges.
+	deadlineExceeded := false
+	recordDeadlineFailure := false
+	requestScopedRetirement := state.Reason == lpxRetiringReason && state.retirementScope == lpxRequestRetirement
+	if completion.unavailableReason == "" && completion.selected != nil &&
+		(state.Reason != lpxRetiringReason || requestScopedRetirement) {
+		classification, wake, deadlineErr := r.reconcileLPXRequestDeadlines(
+			ctx, deployment, completion.source, completion.pcs, completion.selected.requests,
+		)
+		deadlineAt, err = wake, errors.Join(err, deadlineErr)
+		if classification != nil {
+			state, result = lpxResult(classification), projectLPXLifecycleStatus(classification)
+			deadlineExceeded, recordDeadlineFailure = lpxDeadlineFlags(classification)
+		}
+	}
+	if err != nil {
+		if !deadlineExceeded {
+			state.State, state.Reason, state.Message = v1beta1.DGDStateFailed, "LPXReconciliationFailed", truncateLPXMessage(err.Error())
+		}
+	} else if completion.unavailableReason == "" {
+		deployment.Status.ObservedGeneration = deployment.Generation
+	}
+	ready, failed := metav1.ConditionFalse, metav1.ConditionFalse
+	if state.State == v1beta1.DGDStateSuccessful {
+		ready = metav1.ConditionTrue
+	}
+	if state.State == v1beta1.DGDStateFailed {
+		failed = metav1.ConditionTrue
+	}
+	// Every authored component observes the complete shared runtime gate.
+	for name, component := range deployment.Status.Components {
+		component.Ready = ready == metav1.ConditionTrue
+		deployment.Status.Components[name] = component
+	}
+	for condition, value := range map[string]metav1.ConditionStatus{"Ready": ready, "Failed": failed} {
+		meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{Type: condition, Status: value, ObservedGeneration: deployment.Generation, Reason: state.Reason, Message: state.Message})
+	}
+	projectLPXSchedulingFailureCondition(deployment, previous, state, recordDeadlineFailure)
+	if !apiequality.Semantic.DeepEqual(previous, &deployment.Status) {
+		if statusErr := r.Status().Update(ctx, deployment); statusErr != nil {
+			err = errors.Join(err, fmt.Errorf("persist LPX lifecycle status: %w", statusErr))
+		}
+	}
+	if ready == metav1.ConditionTrue && deployment.Status.ModelDownload != nil && deployment.Status.ModelDownload.LastCheckedAt != nil && result.RequeueAfter == 0 {
+		result.RequeueAfter = max(modelDownloadRequeueAfter, time.Until(deployment.Status.ModelDownload.LastCheckedAt.Add(modelDownloadRefreshInterval)))
+	}
+	return completeLPXDeadline(ctx, deadlineAt, result, err)
 }
 
 // reconcileWorkload publishes and observes the selected engine after source,
 // deadline, placement, and model-download gates have passed. deployment, source
-// and selected are non-nil and supplied by that preflight.
-func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, source *v1beta1.DynamoGraphDeployment, selected *lpxMaterializing) (reconcileOutcome, ctrl.Result, error) {
+// and selected are non-nil and supplied by that preflight. pcs is nil when its
+// stable name was not found before preflight.
+func (r *graphReconciler) reconcileWorkload(
+	ctx context.Context,
+	deployment *v1alpha1.LPXGraphDeployment,
+	source *v1beta1.DynamoGraphDeployment,
+	selected *lpxMaterializing,
+	pcs *grovev1alpha1.PodCliqueSet,
+) (reconcileOutcome, ctrl.Result, error) {
 	state := reconcileOutcome{State: v1beta1.DGDStatePending, Reason: "LPXPending", Message: "Waiting for the current LPX engine"}
-
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: selected.plan.PodCliqueSetName}, pcs); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return state, ctrl.Result{}, err
-		}
-		pcs = nil
-	}
-	desired, resources, err := renderPodCliqueSet(ctx, source, r.Config, r.runtimeConfig, r.Client, r.DockerSecretRetriever, selected.workload, selected.plan, deployment)
+	desired, resources, err := renderPodCliqueSet(ctx, source, r.Config, r.runtimeConfig, r.DockerSecretRetriever, selected.workload, selected.plan, deployment)
 	if err != nil {
 		return state, ctrl.Result{}, err
 	}
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
 		return state, ctrl.Result{}, err
 	}
-	// Scale the live Grove group before stale request retirement. LPX scheduler
-	// finalizers may wait for Grove to remove the corresponding pods, so the
-	// publication fence must not block this write.
-	if err := r.reconcileLPXScalingGroupScale(ctx, source, pcs, selected.plan.LPXScalingGroup, true); err != nil {
-		return state, ctrl.Result{}, err
+	// Replica scale-down keeps the immutable PCS shape, so lower the live Grove
+	// group before deleting stale requests. A workload-shape change replaces the
+	// PCS instead and must not try to mutate its old group.
+	scaled := false
+	if pcs != nil && pcs.DeletionTimestamp.IsZero() && pcs.Annotations[lpx.WorkloadDigestAnnotation] == selected.workloadDigest {
+		scaled, err = r.reconcileLPXScalingGroupScale(ctx, source, pcs, selected.plan.LPXScalingGroup, true)
+		if err != nil {
+			return state, ctrl.Result{}, err
+		}
 	}
-	currents, classification, err := r.reconcileLPXPublicationFence(ctx, deployment, selected, pcs == nil)
+	currents, classification, err := r.reconcileLPXPublicationFence(ctx, deployment, selected, pcs)
 	if err != nil {
 		return state, ctrl.Result{}, err
 	}
 	if classification != nil {
 		state = lpxResult(classification)
-		return state, projectLPXLifecycleStatus(deployment, classification), nil
+		return state, projectLPXLifecycleStatus(classification), nil
+	}
+	// The existing PCS template only seeds its PCSG; preserve that seed while
+	// the live group scales independently, including to zero.
+	if err := preserveLPXScalingGroupReplicaSeed(desired, pcs); err != nil {
+		return state, ctrl.Result{}, err
 	}
 	for _, resource := range resources {
 		if err := r.syncLPXResource(ctx, deployment, resource); err != nil {
 			return state, ctrl.Result{}, err
 		}
 	}
-	// Grove seeds native scale only at creation; preserve that seed when replicas are omitted.
-	if pcs != nil && lpx.ServingComponent(source).Replicas == nil {
-		group := &desired.Spec.Template.PodCliqueScalingGroupConfigs[0]
-		for _, existing := range pcs.Spec.Template.PodCliqueScalingGroupConfigs {
-			if existing.Name == group.Name {
-				group.Replicas = existing.Replicas
-				break
-			}
-		}
-	}
-
 	changed, synced, err := commoncontroller.SyncObservedResource(
 		ctx,
 		r,
@@ -298,23 +351,17 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 	if err := r.reconcileEndpoint(ctx, deployment, source); err != nil {
 		return state, ctrl.Result{}, err
 	}
-	if err := r.reconcileLPXScalingGroupScale(ctx, source, synced, selected.plan.LPXScalingGroup, false); err != nil {
-		return state, ctrl.Result{}, err
+	// Apply scale-out, or scale-down not already persisted before request cleanup.
+	if !scaled {
+		if _, err := r.reconcileLPXScalingGroupScale(ctx, source, synced, selected.plan.LPXScalingGroup, false); err != nil {
+			return state, ctrl.Result{}, err
+		}
 	}
 	readiness, err := dynamo.EvaluateLPXGroveReadiness(ctx, r.Client, source, deployment, synced)
 	if err != nil {
 		return state, ctrl.Result{}, err
 	}
 	deployment.Status.Components = readiness.ComponentStatuses
-	shape, err := dynamo.ResolveLPXGPUShape(ctx, r.Client, synced)
-	if err != nil {
-		return state, ctrl.Result{}, err
-	}
-	// The serving component owns shared GPU costs exactly once.
-	name := selected.workload.LPXComponentName()
-	component := deployment.Status.Components[name]
-	component.GPUsPerEngine, component.GPUsPerReplica = ptr.To(shape.GPUsPerEngine), ptr.To(shape.GPUsPerReplica)
-	deployment.Status.Components[name] = component
 	state.Reason, state.Message = readiness.Classification, readiness.Message
 	if readiness.Ready && !changed {
 		if err := r.deleteStaleLPXConfigMaps(ctx, deployment, resources); err != nil {
@@ -327,51 +374,85 @@ func (r *graphReconciler) reconcileWorkload(ctx context.Context, deployment *v1a
 		return state, ctrl.Result{}, err
 	}
 	state = overlayLPXResult(state, classification)
-	return state, projectLPXLifecycleStatus(deployment, classification), nil
+	return state, projectLPXLifecycleStatus(classification), nil
+}
+
+// preserveLPXScalingGroupReplicaSeed mutates nonnil desired to retain the
+// observed PCS template's scale-owned replica seed. observed is nil only when
+// the first PCS has not been created yet.
+func preserveLPXScalingGroupReplicaSeed(
+	desired *grovev1alpha1.PodCliqueSet,
+	observed *grovev1alpha1.PodCliqueSet,
+) error {
+	if observed == nil {
+		return nil
+	}
+
+	// LPX renders and owns exactly one complete-engine scaling group.
+	desiredConfigs := desired.Spec.Template.PodCliqueScalingGroupConfigs
+	observedConfigs := observed.Spec.Template.PodCliqueScalingGroupConfigs
+	if len(desiredConfigs) != 1 || len(observedConfigs) != 1 {
+		return fmt.Errorf("LPX PodCliqueSet %q requires exactly one scaling-group template", desired.Name)
+	}
+	if desiredConfigs[0].Name != observedConfigs[0].Name {
+		return fmt.Errorf("LPX PodCliqueSet %q scaling-group template changed from %q to %q",
+			desired.Name, observedConfigs[0].Name, desiredConfigs[0].Name)
+	}
+
+	// Copy the pointer value so desired never aliases the observed object.
+	desiredConfigs[0].Replicas = nil
+	if observedConfigs[0].Replicas != nil {
+		replicas := *observedConfigs[0].Replicas
+		desiredConfigs[0].Replicas = &replicas
+	}
+	return nil
 }
 
 // reconcileLPXScalingGroupScale applies explicit component replicas to the
 // Grove group. Grove seeds this group once, so later replica changes use its
-// scale subresource without rewriting the PCS template.
+// scale subresource without rewriting the PCS template. pcs is nil when the
+// desired PodCliqueSet was not found, in which case there is no group to scale.
 func (r *graphReconciler) reconcileLPXScalingGroupScale(
 	ctx context.Context,
 	source *v1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	groupName string,
 	scaleDownOnly bool,
-) error {
+) (bool, error) {
 	replicas := lpx.ServingComponent(source).Replicas
 	if replicas == nil || pcs == nil {
-		return nil
+		return false, nil
 	}
 	group := &grovev1alpha1.PodCliqueScalingGroup{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: pcs.Namespace, Name: groupName}, group); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil
+			return false, nil
 		}
-		return err
+		return false, err
 	}
-	if !metav1.IsControlledBy(group, pcs) || !group.DeletionTimestamp.IsZero() {
-		return fmt.Errorf("LPX scaling group lacks the current PCS owner")
+	if !metav1.IsControlledBy(group, pcs) {
+		return false, fmt.Errorf("LPX scaling group lacks the current PCS owner")
+	}
+	if !group.DeletionTimestamp.IsZero() {
+		return false, nil
 	}
 	if group.Spec.Replicas == *replicas || scaleDownOnly && group.Spec.Replicas < *replicas {
-		return nil
+		return false, nil
 	}
 	scale := &autoscalingv1.Scale{
 		ObjectMeta: metav1.ObjectMeta{ResourceVersion: group.ResourceVersion},
 		Spec:       autoscalingv1.ScaleSpec{Replicas: *replicas},
 	}
-	return r.SubResource("scale").Update(ctx, group, client.WithSubResourceBody(scale))
+	if err := r.SubResource("scale").Update(ctx, group, client.WithSubResourceBody(scale)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // projectLPXLifecycleStatus transfers reconcile-owned results to the same child before returning.
-func projectLPXLifecycleStatus(deployment *v1alpha1.LPXGraphDeployment, classification lpxClassification) ctrl.Result {
-	if transition, ok := classification.(*lpxDeadlineTransition); ok {
-		if deployment.Status.Placement == nil {
-			deployment.Status.Placement = &v1beta1.PlacementStatus{}
-		}
-		deployment.Status.Placement.LPXAttempt = transition.attempt
-		return ctrl.Result{RequeueAfter: transition.requeueAfter}
+func projectLPXLifecycleStatus(classification lpxClassification) ctrl.Result {
+	if deadline, ok := classification.(*lpxDeadlineExceeded); ok {
+		return ctrl.Result{RequeueAfter: deadline.requeueAfter}
 	}
 	if _, retiring := classification.(*lpxRetiring); retiring {
 		return ctrl.Result{RequeueAfter: lpxRetirementRequeueAfter}
@@ -379,15 +460,12 @@ func projectLPXLifecycleStatus(deployment *v1alpha1.LPXGraphDeployment, classifi
 	return ctrl.Result{}
 }
 
-func (r *graphReconciler) retireInvalidWorkload(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, reason string) (ctrl.Result, error) {
-	retiring, err := r.retireInvalidLPXWorkload(ctx, deployment, reason)
-	if err != nil {
-		return ctrl.Result{}, err
+func lpxDeadlineFlags(classification lpxClassification) (bool, bool) {
+	deadline, ok := classification.(*lpxDeadlineExceeded)
+	if !ok {
+		return false, false
 	}
-	if retiring != nil {
-		return ctrl.Result{RequeueAfter: lpxRetirementRequeueAfter}, nil
-	}
-	return ctrl.Result{}, nil
+	return true, deadline.recordFailure
 }
 
 // Publication is an identity-sensitive write boundary: an uncached read fences

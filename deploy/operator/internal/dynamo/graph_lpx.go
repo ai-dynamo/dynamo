@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // RenderLPXBasePodCliqueSet applies shared Dynamo defaults to the Grove envelope
@@ -35,7 +34,6 @@ func RenderLPXBasePodCliqueSet(
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	kubeClient client.Reader,
 	secretsRetriever SecretsRetriever,
 	selectedWorkload *dynamolpx.SelectedWorkload,
 	plan *dynamolpx.MaterializationPlan,
@@ -59,26 +57,16 @@ func RenderLPXBasePodCliqueSet(
 		pcs.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queue
 	}
 
-	// Cyborg uses ordinary worker KV-transfer defaults, including the binding's domains.
-	var topologyDomains []v1beta1.TopologyDomain
-	if dynamoDeployment.Spec.Experimental != nil {
-		topologyDomains, err = resolveGroveClusterTopologyDomains(ctx, kubeClient, dynamoDeployment.Spec.Experimental.KvTransferPolicy)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-
 	// Preserve the complete source graph as the independent role-default context.
 	component := dynamolpx.ServingComponent(dynamoDeployment)
 
 	input, gpuCliques, err := renderLPXComponents(cliqueParams{
 		component: component, componentName: component.ComponentName,
 		dynamoDeployment: dynamoDeployment, operatorConfig: operatorConfig, runtimeConfig: runtimeConfig,
-		secretsRetriever:            secretsRetriever,
-		discoveryBackend:            controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
-		discoveryContext:            NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
-		validatedQueueName:          queue,
-		groveClusterTopologyDomains: topologyDomains,
+		secretsRetriever:   secretsRetriever,
+		discoveryBackend:   controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
+		discoveryContext:   NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
+		validatedQueueName: queue,
 	}, selectedWorkload, plan)
 	if err != nil {
 		return nil, nil, err
@@ -98,7 +86,6 @@ const (
 	LPXDeploymentUIDAnnotation = dynamolpx.DeploymentUIDAnnotation
 	LPXRestartAnnotation       = "lpx.nvidia.com/restart-id"
 	LPXServingLabel            = "lpx.nvidia.com/serving"
-	lpxGPUExecutionRole        = "gpu"
 )
 
 // LPXRestartToken advances only from the DGD's persisted restart selection.
@@ -157,9 +144,8 @@ type lpxInputRevisionPayload struct {
 	Environment           []corev1.EnvVar `json:"Env"`
 	PriorityClass         string
 	BackendFramework      string
-	RestartToken          string `json:"Restart"`
-	KVTransferPolicy      *v1beta1.KvTransferPolicy
 	TopologyConstraint    *v1beta1.SpecTopologyConstraint
+	RestartToken          string `json:"Restart"`
 	ProviderOverride      *v1beta1.ProviderOverride
 	SchedulingLabels      map[string]string            `json:",omitempty"`
 	EPPEnabled            bool                         `json:",omitempty"`
@@ -171,8 +157,9 @@ type lpxInputRevisionPayload struct {
 // LPXInputRevision hashes all LPX components and their shared render inputs.
 // Source identity is checked separately by ValidateLPXSource. Ordinary component payloads,
 // DGD bookkeeping and raw restart requests are excluded: restart is the effective
-// token selected by persisted DGD restart state. Operator configuration and external
-// dependencies are not source revisions; the LPX controller observes them separately.
+// token selected by persisted DGD restart state. Operator configuration is not a
+// source revision; rejected topology inputs remain included because they change
+// preflight results.
 func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (string, error) {
 	components := dynamolpx.Components(dgd)
 	if len(components) == 0 {
@@ -199,10 +186,6 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 			annotations[key] = value
 		}
 	}
-	var policy *v1beta1.KvTransferPolicy
-	if dgd.Spec.Experimental != nil {
-		policy = dgd.Spec.Experimental.KvTransferPolicy
-	}
 	input := lpxInputRevisionPayload{
 		Components:            canonical,
 		Scheduling:            dgd.Spec.Scheduling,
@@ -212,9 +195,8 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 		Environment:           dgd.Spec.Env,
 		PriorityClass:         dgd.Spec.PriorityClassName,
 		BackendFramework:      dgd.Spec.BackendFramework,
-		RestartToken:          restart,
-		KVTransferPolicy:      policy,
 		TopologyConstraint:    dgd.Spec.TopologyConstraint,
+		RestartToken:          restart,
 		ProviderOverride:      dgd.Spec.ProviderOverride,
 		SchedulingLabels:      lpxSchedulingMetadata(dgd.Labels),
 		EPPEnabled:            dgd.HasEPPComponent(),
@@ -301,12 +283,11 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 		lpuDefaults := &podTemplateRuntimeDefaults{ComponentDefaults: &BaseComponentDefaults{}}
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, lpuDefaults, nil)
+			p.discoveryContext, lpuDefaults)
 		if err != nil {
 			return nil, nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
 		lpuTemplate.Labels[dynamolpx.StageLabel] = component.ComponentName
-		lpuTemplate.Labels[dynamolpx.ExecutionRoleLabel] = "lpu"
 		input.Stages[component.ComponentName] = *lpuTemplate
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 		if component != p.component {
@@ -317,12 +298,11 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		if workload.Pipeline() != dynamolpx.PipelineLPX {
 			role := lpxRoleComponent(component, conductor.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
 			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-				p.discoveryContext, lpuDefaults, nil)
+				p.discoveryContext, lpuDefaults)
 			if err != nil {
 				return nil, nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
 			input.Conductor.Labels[dynamolpx.StageLabel] = component.ComponentName
-			input.Conductor.Labels[dynamolpx.ExecutionRoleLabel] = "lpu"
 			continue
 		}
 
@@ -350,7 +330,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		gpu.componentName = component.ComponentName
 		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: *role.Replicas}
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
-			p.discoveryContext, defaults, p.groveClusterTopologyDomains)
+			p.discoveryContext, defaults)
 		if err != nil {
 			return nil, nil, fmt.Errorf("rendering %s.conductor: failed to generate podSpec for role %s: %w", component.ComponentName, gpu.r.Name, err)
 		}
@@ -362,7 +342,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		clique.Spec.MinAvailable = ptr.To(clique.Spec.Replicas)
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
 		clique.Labels[dynamolpx.StageLabel] = component.ComponentName
-		clique.Labels[dynamolpx.ExecutionRoleLabel] = lpxGPUExecutionRole
 		gpuCliques = append(gpuCliques, clique)
 	}
 	return input, gpuCliques, nil
@@ -433,7 +412,7 @@ func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentCont
 }
 
 // renderSelectedLPXRole consumes a private component copy; other inputs are read-only.
-// alphaComponent may be nil; topologyDomains may be nil when no topology is consumed.
+// alphaComponent may be nil.
 func renderSelectedLPXRole(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 	dgd *v1beta1.DynamoGraphDeployment,
@@ -442,12 +421,11 @@ func renderSelectedLPXRole(
 	secretsRetriever SecretsRetriever,
 	discoveryContext DiscoveryContext,
 	defaults ComponentDefaults,
-	topologyDomains []v1beta1.TopologyDomain,
 ) (*corev1.PodTemplateSpec, error) {
 	componentName := component.ComponentName
 	// Capture authored precedence before PodSpec defaults fill the role's metadata.
 	metadata := generatePodMetadata(component, dgd, alphaComponent, componentName, discoveryContext)
-	applyDGDTemplateDefaults(component, dgd, topologyDomains)
+	applyDGDTemplateDefaults(component, dgd, nil)
 	basePodSpec, err := generateBasePodSpecWithDefaults(
 		component,
 		BackendFrameworkNoop,

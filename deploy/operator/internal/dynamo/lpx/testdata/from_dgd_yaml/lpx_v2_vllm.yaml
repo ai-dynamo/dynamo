@@ -219,7 +219,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
       labels:
-        lpx.nvidia.com/execution-role: lpu
         lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
@@ -441,7 +440,6 @@ spec:
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
-        lpx.nvidia.com/execution-role: gpu
         lpx.nvidia.com/serving: "true"
         lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
@@ -596,7 +594,7 @@ spec:
             - mountPath: /dev/shm
               name: shared-memory
           restartPolicy: Always
-          schedulerName: lpx-scheduler
+          schedulerName: default-scheduler
           securityContext:
             fsGroup: 1000
             fsGroupChangePolicy: OnRootMismatch
