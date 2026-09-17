@@ -62,7 +62,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 # Resolve the sibling AISim core carrying the compact-buffer lease lifecycle
 # The lease ABI must be consumed from the published AISimulate revision, not a
 # sibling checkout, so Dynamo can build independently of AIPerf's worktree.
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "bc33d2e940628a6be960e2433fb1f7fd1a4867fd" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "33c53136ff05940a1766eedbef0e22c6da5d80fa" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
