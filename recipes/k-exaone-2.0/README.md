@@ -12,6 +12,10 @@ with vLLM via Dynamo.
 20 `full_attention` and 58 `sliding_attention`. 256 experts, top-8 routing. Native context
 262,144 tokens. The NVFP4 (W4A4) checkpoint is ~530 GB on disk.
 
+> Rendered documentation: **[docs.nvidia.com/dynamo/recipes/k-exaone-2](https://docs.nvidia.com/dynamo/recipes/k-exaone-2)**
+> — the same content with a target picker for the aggregated and disaggregated variants.
+> Browse every model at [docs.nvidia.com/dynamo/recipes](https://docs.nvidia.com/dynamo/recipes/).
+
 ## Configurations
 
 Dynamo + vLLM deployment profiles for the B200 chat workload:

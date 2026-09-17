@@ -56,6 +56,7 @@ spec:
               # so it takes the released frontend image rather than the model-specific
               # vLLM runtime. Multi-arch: linux/amd64 and linux/arm64.
               image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+              imagePullPolicy: IfNotPresent
               command: [/bin/bash, -lc]
               args:
                 - exec python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000
@@ -84,6 +85,7 @@ spec:
               # exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599); stock vLLM 0.28.0
               # cannot load this NVFP4 checkpoint without it.
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+              imagePullPolicy: IfNotPresent
               command: [/bin/bash, -lc]
               args:
                 - |
@@ -102,10 +104,11 @@ spec:
                     --spec-tokens 2
               securityContext:
                 runAsUser: 0
-                capabilities: {add: [IPC_LOCK, SYS_RESOURCE]}
+                runAsGroup: 0
+                capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
               resources:
                 requests: {memory: 200Gi, nvidia.com/gpu: "4"}
-                limits: {memory: 480Gi, nvidia.com/gpu: "4"}
+                limits: {nvidia.com/gpu: "4"}
               # 530 GB of weights over a shared PVC, then torch.compile and cudagraph
               # capture: first start is tens of minutes. 60 x 60 s of grace, matching the
               # other 1T-class recipes. Without an explicit probe the operator default is
@@ -119,9 +122,6 @@ spec:
                 timeoutSeconds: 20
               volumeMounts:
                 - {mountPath: /model-cache, name: model-cache, readOnly: true}
-                - {mountPath: /dev/shm, name: dshm}
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
-            - name: dshm
-              emptyDir: {medium: Memory}
