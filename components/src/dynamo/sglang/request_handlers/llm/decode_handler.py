@@ -222,13 +222,17 @@ def _requests_input_logprobs(native_request: Any) -> bool:
     ``return_logprob`` alone is not enough: ``logprob_start_len`` is the absolute
     sequence position where scoring starts, and its default of ``-1`` resolves to
     the last prompt position, so only output tokens are scored. Prompt logprobs
-    need a start position of ``0`` or above.
+    need a start position inside the prompt.
     """
 
     if not native_request.return_logprob:
         return False
     start_len = native_request.logprob_start_len
-    return isinstance(start_len, int) and start_len >= 0
+    return (
+        isinstance(start_len, int)
+        and isinstance(native_request.input_ids, list)
+        and 0 <= start_len < len(native_request.input_ids)
+    )
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
