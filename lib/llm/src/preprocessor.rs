@@ -5044,11 +5044,9 @@ impl OpenAIPreprocessor {
                 Box::pin(stream)
             };
 
-        // Only a force_nonempty_content request needs the deferral and the EOF
-        // flush of a truncated `<think>` prefix; gating on the request keeps the
-        // per-token clone and the finish_reasoning_stream() flush off every
-        // other request's path. Same predicate the aggregator uses, so the
-        // streaming and non-streaming paths cannot disagree.
+        // `force_nonempty_content` selects the deferral; the EOF flush itself
+        // runs for every reasoning parser. Same predicate the aggregator uses,
+        // so the streaming and non-streaming paths cannot disagree.
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(Self::parse_reasoning_content_from_stream_inner(
                 stream,
@@ -5064,12 +5062,20 @@ impl OpenAIPreprocessor {
         } else {
             Box::pin(stream)
         };
-        let stream: Pin<Box<dyn Stream<Item = _> + Send>> =
-            if defer_reasoning_for_nonempty_content || should_strip_disabled_reasoning_start {
-                Box::pin(Self::hold_usage_until_stream_end(stream))
-            } else {
-                stream
-            };
+        // Any stage above that can emit a chunk at EOF must have the usage
+        // trailer held behind it. Clients treat the usage-only chunk as the end
+        // of the stream, so a recovery chunk emitted after it is never read.
+        // This covers every reasoning parser, not just a deferring one: the EOF
+        // flush fires for all of them, and a choice whose terminal delta carries
+        // Parts deliberately leaves recovery to that flush.
+        let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning
+            || defer_reasoning_for_nonempty_content
+            || should_strip_disabled_reasoning_start
+        {
+            Box::pin(Self::hold_usage_until_stream_end(stream))
+        } else {
+            stream
+        };
         let stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_parse_reasoning {
             Box::pin(annotate_reasoning_usage(stream))
         } else {
@@ -7873,35 +7879,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reasoning_eof_flush_fires_without_force_nonempty_content() {
-        // `<thi` is a partial `<think>` opener: the parser holds it rather than
-        // emitting it, because the next chunk could complete the marker. No next
-        // chunk comes. Before this change the finalizer was never called for a
-        // plain reasoning request, so those bytes died with the parser state.
-        let output = run_reasoning_flush(
-            vec![
-                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
-                reasoning_flush_chunk(Some("<thi"), false),
-                reasoning_flush_chunk(None, true),
-            ],
-            "deepseek_r1",
-            false,
-        )
-        .await;
-
-        let (content, reasoning) = collect_reasoning_flush(&output);
-        assert!(
-            content.contains("Answer"),
-            "the real answer must still stream: {content:?}"
-        );
-        assert!(
-            content.contains("<thi") || reasoning.contains("<thi"),
-            "the held partial delimiter must be flushed, not dropped: \
-             content={content:?} reasoning={reasoning:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn reasoning_eof_flush_rides_the_terminal_chunk() {
         // The recovered bytes must land on the chunk that carries
         // `finish_reason`, not after it: a client that stops reading at the
@@ -7944,6 +7921,11 @@ mod tests {
             terminal_index,
             output.len() - 1,
             "no chunk may follow the terminal one when it absorbed the flush"
+        );
+        let (content, _) = collect_reasoning_flush(&output);
+        assert!(
+            content.contains("Answer"),
+            "recovery must not cost the answer that already streamed: {content:?}"
         );
     }
 
@@ -8045,6 +8027,122 @@ mod tests {
             output.len(),
             expected_len,
             "a parser holding nothing must not add a chunk"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_eof_flush_precedes_a_trailing_usage_chunk() {
+        // Clients treat the usage-only chunk as the end of the stream, so a
+        // recovery chunk emitted after it is never read. `hold_usage_until_stream_end`
+        // is what keeps the order right, and it has to wrap every reasoning
+        // parser now that the EOF flush is no longer limited to the deferral
+        // path.
+        let mut usage_chunk = reasoning_flush_chunk(None, false);
+        {
+            let data = usage_chunk.data.as_mut().unwrap();
+            data.inner.choices.clear();
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+
+        // No `finish_reason` anywhere, so recovery happens on the EOF fallback
+        // rather than riding a terminal chunk — the case where ordering matters.
+        let inner = OpenAIPreprocessor::parse_reasoning_content_from_stream_inner(
+            stream::iter(vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                usage_chunk,
+            ]),
+            "deepseek_r1".to_string(),
+            false,
+            false,
+            false,
+        );
+        let output = OpenAIPreprocessor::hold_usage_until_stream_end(inner)
+            .collect::<Vec<_>>()
+            .await;
+
+        let usage_index = output
+            .iter()
+            .position(|response| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+            })
+            .expect("the usage trailer must survive");
+        let recovery_index = output
+            .iter()
+            .position(|response| {
+                response.data.as_ref().is_some_and(|data| {
+                    data.inner.choices.iter().any(|choice| {
+                        matches!(
+                            choice.delta.content.as_ref(),
+                            Some(ChatCompletionMessageContent::Text(text)) if text.contains("<thi")
+                        ) || choice
+                            .delta
+                            .reasoning_content
+                            .as_ref()
+                            .is_some_and(|text| text.contains("<thi"))
+                    })
+                })
+            })
+            .expect("the held bytes must be recovered");
+
+        assert!(
+            recovery_index < usage_index,
+            "recovered text must precede the usage trailer, got recovery at \
+             {recovery_index} and usage at {usage_index}"
+        );
+
+        // Negative control: without the wrapper the EOF recovery chunk lands
+        // after the usage trailer. This is what makes applying
+        // `hold_usage_until_stream_end` to every reasoning parser load-bearing
+        // rather than decorative.
+        let mut bare_usage = reasoning_flush_chunk(None, false);
+        {
+            let data = bare_usage.data.as_mut().unwrap();
+            data.inner.choices.clear();
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+        let unheld = OpenAIPreprocessor::parse_reasoning_content_from_stream_inner(
+            stream::iter(vec![
+                reasoning_flush_chunk(Some("<think>thought</think>Answer"), false),
+                reasoning_flush_chunk(Some("<thi"), false),
+                bare_usage,
+            ]),
+            "deepseek_r1".to_string(),
+            false,
+            false,
+            false,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        let unheld_usage = unheld
+            .iter()
+            .position(|response| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+            })
+            .expect("usage trailer");
+        assert_eq!(
+            unheld_usage,
+            unheld.len() - 2,
+            "without the wrapper the recovery chunk trails the usage chunk, \
+             which is the ordering this test exists to prevent"
         );
     }
 

@@ -1,24 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cost of the end-of-stream flush envelope on the ordinary reasoning path.
+//! Cost of the once-per-stream end-of-stream flush envelope clone, measured
+//! both in isolation and as a fraction of a whole reasoning stream.
 //!
-//! `parse_reasoning_content_from_stream` retains one content-bearing response per
-//! stream so that a parser still holding buffered text at EOF has an envelope to
-//! flush it on. The retention is a clone, and it now happens for every reasoning
-//! request rather than only `force_nonempty_content` ones, so its cost has to be
-//! measured rather than asserted.
-//!
-//! Two measurements, so the overhead can be stated as a fraction rather than an
-//! absolute:
-//!
-//! * `envelope_clone` — the isolated clone of a representative first
-//!   content-bearing chunk, i.e. exactly what retention adds per stream.
-//! * `reasoning_stream/<n>` — a whole non-deferred reasoning stream of `n`
-//!   chunks through the public entry point, which is the thing the clone is a
-//!   fraction of.
-//!
-//! Run with:
 //! `cargo bench -p dynamo-llm --features reasoning-flush-bench --bench reasoning_flush_envelope`
 
 use std::hint::black_box;
