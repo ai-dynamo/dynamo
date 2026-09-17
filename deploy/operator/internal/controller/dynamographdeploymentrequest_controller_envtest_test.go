@@ -67,6 +67,23 @@ func (c *writeFaultClient) Apply(ctx context.Context, obj runtime.ApplyConfigura
 	return c.Client.Apply(ctx, obj, opts...)
 }
 
+// dgdCacheMissClient hides one DGD observation while writes reach the API server.
+type dgdCacheMissClient struct {
+	client.Client
+	unobservedDGD client.ObjectKey
+}
+
+func (c *dgdCacheMissClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	// Model an informer that has not observed the DGD yet, then allow subsequent reads.
+	if _, isDGD := obj.(*nvidiacomv1beta1.DynamoGraphDeployment); isDGD && key == c.unobservedDGD {
+		c.unobservedDGD = client.ObjectKey{}
+		return apierrors.NewNotFound(schema.GroupResource{
+			Group: nvidiacomv1beta1.GroupVersion.Group, Resource: "dynamographdeployments",
+		}, key.Name)
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
 var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 	const (
 		timeout  = time.Second * 10
@@ -1397,7 +1414,7 @@ spec:
 		})
 
 		DescribeTable("Should refuse to adopt an existing DGD that is not this request's own deployment",
-			func(nameSuffix string, trackedByThisRequest bool, liveWorkerImage string) {
+			func(nameSuffix string, trackedByThisRequest bool, liveWorkerImage string, cacheMiss bool) {
 				ctx := context.Background()
 				t := GinkgoT()
 				namespace := envtestNamespace
@@ -1491,6 +1508,27 @@ spec:
 				Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
 				defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
 
+				if cacheMiss {
+					t.Log("When the cache misses the existing DGD, creation reaches the API server and returns AlreadyExists")
+
+					reconciler.Client = &dgdCacheMissClient{
+						Client: k8sClient, unobservedDGD: client.ObjectKeyFromObject(existingDGD),
+					}
+					result, err := reconciler.handleDeployingPhase(ctx, dgdr)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(result.RequeueAfter).Should(BeNumerically(">", 0))
+					t.Logf("The collision schedules another observation after %s", result.RequeueAfter)
+
+					t.Log("Then the request retains its generated intent without confirming or adopting the unseen DGD")
+
+					Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), dgdr)).Should(Succeed())
+					Expect(dgdr.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseDeploying))
+					Expect(dgdr.Annotations[AnnotationGeneratedDGDSpec]).ShouldNot(BeEmpty())
+					Expect(dgdr.Annotations[AnnotationConfirmedDGDUID]).Should(BeEmpty())
+					Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(additionalCM), additionalCM)).Should(Succeed())
+					Expect(additionalCM.OwnerReferences).Should(BeEmpty())
+				}
+
 				t.Log("When the deploying phase observes the same-name DGD")
 
 				_, err := reconciler.handleDeployingPhase(ctx, dgdr)
@@ -1521,8 +1559,135 @@ spec:
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: namespace}, existingDGD)).Should(Succeed())
 				Expect(existingDGD.Spec.Components[0].PodTemplate.Spec.Containers[0].Image).Should(Equal(liveWorkerImage))
 			},
-			Entry("when it does not carry this request's tracking labels", "foreign", false, "registry.example/runtime:1.1.0"),
-			Entry("when its spec differs from the spec this request generated", "spec-drift", true, "registry.example/other:9.9.9"),
+			Entry("when it does not carry this request's tracking labels", "foreign", false, "registry.example/runtime:1.1.0", false),
+			Entry("when its spec differs from the spec this request generated", "spec-drift", true, "registry.example/other:9.9.9", false),
+			Entry("after AlreadyExists retries an initially stale cache", "cache-miss", false, "registry.example/runtime:1.1.0", true),
+		)
+
+		DescribeTable("Should reject a same-name DGD replacement after confirmation",
+			func(phase nvidiacomv1beta1.DGDRPhase) {
+				ctx := context.Background()
+				t := GinkgoT()
+				dgdrName := "confirmed-replacement-" + strings.ToLower(string(phase))
+				dgdName := dgdrName + "-dgd"
+
+				t.Log("Given a request that creates its DGD through the controller")
+
+				dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: dgdrName, Namespace: envtestNamespace,
+						Annotations: map[string]string{
+							AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ` + dgdName + `
+spec:
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.1.0`,
+						},
+					},
+					Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+						Model: "test-model", Backend: "vllm", Image: "test-profiler:1.1.0",
+					},
+				}
+				Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+				defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+				dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+				dgdr.Status.DGDName = dgdName
+				Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+				_, err := reconciler.createDGD(ctx, dgdr)
+				Expect(err).NotTo(HaveOccurred())
+
+				t.Log("When the controller observes the original DGD, its UID is persisted on the DGDR")
+
+				originalDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+				dgdKey := client.ObjectKey{Name: dgdName, Namespace: envtestNamespace}
+				Expect(k8sClient.Get(ctx, dgdKey, originalDGD)).Should(Succeed())
+				originalDGD.Status.State = nvidiacomv1beta1.DGDStatePending
+				availableReplicas := int32(0)
+				if phase == nvidiacomv1beta1.DGDRPhaseDeployed {
+					originalDGD.Status.State = nvidiacomv1beta1.DGDStateSuccessful
+					availableReplicas = 1
+				}
+				originalDGD.Status.Components = map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+					"worker": {ComponentKind: nvidiacomv1beta1.ComponentKindDeployment, Replicas: 1, AvailableReplicas: ptr.To(availableReplicas)},
+				}
+				Expect(k8sClient.Status().Update(ctx, originalDGD)).Should(Succeed())
+				_, err = reconciler.handleDeployingPhase(ctx, dgdr)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), dgdr)).Should(Succeed())
+				Expect(dgdr.Status.Phase).Should(Equal(phase))
+				Expect(dgdr.Annotations[AnnotationConfirmedDGDUID]).Should(Equal(string(originalDGD.UID)))
+				Expect(dgdr.Annotations[AnnotationGeneratedDGDSpec]).Should(BeEmpty())
+				confirmedInfo := dgdr.Status.DeploymentInfo.DeepCopy()
+
+				t.Log("And an additional ConfigMap arrives after confirmation, still without an owner")
+
+				additionalCM := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: dgdrName + "-config", Namespace: envtestNamespace,
+						Labels: originalDGD.DeepCopy().Labels,
+					},
+					Data: map[string]string{"planner_config.json": "{}"},
+				}
+				Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
+				defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+
+				t.Log("When a same-name replacement copies the original spec and tracking metadata but has a new UID")
+
+				Expect(k8sClient.Delete(ctx, originalDGD)).Should(Succeed())
+				Eventually(func() bool {
+					return apierrors.IsNotFound(k8sClient.Get(ctx, dgdKey, &nvidiacomv1beta1.DynamoGraphDeployment{}))
+				}, timeout, interval).Should(BeTrue())
+				replacement := originalDGD.DeepCopy()
+				replacement.ObjectMeta = metav1.ObjectMeta{
+					Name: dgdName, Namespace: envtestNamespace,
+					Labels: replacement.Labels, Annotations: replacement.Annotations,
+				}
+				Expect(k8sClient.Create(ctx, replacement)).Should(Succeed())
+				defer func() { _ = k8sClient.Delete(ctx, replacement) }()
+				Expect(replacement.UID).ShouldNot(Equal(originalDGD.UID))
+				replacement.Status.State = nvidiacomv1beta1.DGDStateSuccessful
+				if phase == nvidiacomv1beta1.DGDRPhaseDeployed {
+					replacement.Status.State = nvidiacomv1beta1.DGDStateFailed
+				}
+				replacement.Status.Components = map[string]nvidiacomv1beta1.ComponentReplicaStatus{
+					"worker": {ComponentKind: nvidiacomv1beta1.ComponentKindDeployment, Replicas: 1, AvailableReplicas: ptr.To(1 - availableReplicas)},
+				}
+				Expect(k8sClient.Status().Update(ctx, replacement)).Should(Succeed())
+
+				t.Log("Then observation rejects the replacement before adopting resources or consuming its status")
+
+				if phase == nvidiacomv1beta1.DGDRPhaseDeploying {
+					_, err = reconciler.handleDeployingPhase(ctx, dgdr)
+				} else {
+					_, err = reconciler.handleDeployedPhase(ctx, dgdr)
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(dgdr), dgdr)).Should(Succeed())
+				Expect(dgdr.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+				condition := meta.FindStatusCondition(dgdr.Status.Conditions, nvidiacomv1beta1.ConditionTypeDeploymentReady)
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).Should(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).Should(Equal(ReasonDeploymentNameCollision))
+				Expect(dgdr.Annotations[AnnotationConfirmedDGDUID]).Should(Equal(string(originalDGD.UID)))
+				Expect(dgdr.Annotations[AnnotationGeneratedDGDSpec]).Should(BeEmpty())
+				Expect(dgdr.Status.DeploymentInfo).Should(Equal(confirmedInfo))
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(additionalCM), additionalCM)).Should(Succeed())
+				Expect(additionalCM.OwnerReferences).Should(BeEmpty())
+				Expect(k8sClient.Get(ctx, dgdKey, replacement)).Should(Succeed())
+				Expect(replacement.OwnerReferences).Should(BeEmpty())
+			},
+			Entry("while Deploying", nvidiacomv1beta1.DGDRPhaseDeploying),
+			Entry("while Deployed", nvidiacomv1beta1.DGDRPhaseDeployed),
 		)
 
 		It("Should refuse a recreated DGDR from adopting its prior DGD", func() {
