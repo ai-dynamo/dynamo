@@ -303,8 +303,11 @@ impl Listener for RebindingTcpListener {
     type Addr = std::net::SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let mut next_rebind = tokio::time::Instant::now();
         loop {
             let Some(listener) = self.listener.as_ref() else {
+                tokio::time::sleep_until(next_rebind).await;
+                next_rebind = tokio::time::Instant::now() + self.rebind_backoff;
                 tracing::info!("System status server rebinding to {}", self.address);
                 match bind_system_status_listener(self.address.to_string()).await {
                     Ok((listener, actual_address)) => {
@@ -317,7 +320,6 @@ impl Listener for RebindingTcpListener {
                             self.address,
                             self.rebind_backoff
                         );
-                        tokio::time::sleep(self.rebind_backoff).await;
                     }
                 }
                 continue;
@@ -340,13 +342,11 @@ impl Listener for RebindingTcpListener {
                 }
                 Err(error) => {
                     tracing::error!(
-                        "System status listener stopped accepting on {}; rebinding after {:?}: {error}",
-                        self.address,
-                        self.rebind_backoff
+                        "System status listener stopped accepting on {}; rebinding: {error}",
+                        self.address
                     );
                     // Drop before rebinding or the address remains in use.
                     self.listener = None;
-                    tokio::time::sleep(self.rebind_backoff).await;
                 }
             }
         }
