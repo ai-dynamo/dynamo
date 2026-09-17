@@ -13,7 +13,6 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 )
 
 // configureHybridCyborg consumes a fresh hybrid clique from an admitted source
@@ -33,7 +32,7 @@ func configureHybridCyborg(
 	if err != nil {
 		return err
 	}
-	if !apiequality.Semantic.DeepEqual(cyborgStorage.volume, modelStorage.volume) || !apiequality.Semantic.DeepEqual(cyborgStorage.mount, modelStorage.mount) {
+	if cyborgStorage.mount.MountPath != modelStorage.mount.MountPath {
 		return fmt.Errorf("selected Cyborg podTemplate conflicts with model storage mount %q", modelStorage.mount.MountPath)
 	}
 	cyborgBatchSize, ioFPGACount, err := cyborgRuntimeIO(&projection.configuredBuild, cyborg.Spec.Replicas)

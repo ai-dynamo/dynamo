@@ -112,6 +112,12 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 		corev1.EnvVar{Name: "RDMA_PORT", Value: "12345"},
 		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
 	)
+
+	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
+	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
+	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ReadOnly = true
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].SubPath = "cyborg"
+	decode.Spec.PodSpec.Containers[0].VolumeMounts[1].ReadOnly = true
 	input := RenderInput{
 		Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 	}
@@ -138,8 +144,10 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
 		Name: "RDMA_PORT", Value: "12345",
 	})
-	require.Contains(t, cyborg.Spec.PodSpec.Volumes, renderTestPodSpec().Volumes[0])
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, renderTestPodSpec().Containers[0].VolumeMounts[0])
+	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
+	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
+	})
 	require.Equal(t, []string{"/custom-cyborg", "--wrapper-option"}, cyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"argument with spaces", "literal $HOME", ""}, cyborg.Spec.PodSpec.Containers[0].Args)
 
@@ -161,23 +169,27 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
 
-	t.Log("Reject incomplete endpoint and fanout coverage of the same split-I/O runtime")
+	t.Log("Reject invalid Cyborg runtime bindings")
 
 	for _, test := range []struct {
 		name      string
 		replicas  int32
+		mountPath string
 		wantError string
 	}{
-		{"incomplete endpoints", 1, "Cyborg replicas 1 must be divisible by ioFpgaCount 2"},
-		{"incomplete fanout", 2, "Cyborg replicas 2 must provide fanoutFactor 2 clients"},
+		{"incomplete endpoints", 1, "/models", "Cyborg replicas 1 must be divisible by ioFpgaCount 2"},
+		{"incomplete fanout", 2, "/models", "Cyborg replicas 2 must provide fanoutFactor 2 clients"},
+		{"different storage path", 4, "/other-models", "conflicts with model storage mount"},
+		{"empty storage path", 4, "", "has no mount path"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Reject incomplete Cyborg coverage during runtime rendering")
+			t.Log("Reject incompatible runtime bindings during rendering")
 			pcs := renderTestPCS(true)
 			cyborg := namedClique(t, pcs, "cond")
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
 			cyborg.Spec.PodSpec.Containers[0].Command = []string{"/usr/local/bin/dynamo_main"}
+			cyborg.Spec.PodSpec.Containers[0].VolumeMounts[1].MountPath = test.mountPath
 			_, err := renderSelectedForTest(pcs, []*ModelProjection{projection}, RenderInput{
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
