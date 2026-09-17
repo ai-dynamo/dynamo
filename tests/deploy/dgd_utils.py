@@ -1610,7 +1610,6 @@ class ManagedDeployment:
 
     def _get_checkpoint_pods(self, name: str, uid: str) -> list[Pod]:
         # Match the SnapshotJob incarnation, not just its reusable name.
-        # Include source pods even when they lack the usual DGD labels.
         return retry_vcluster_api(
             f"listing pods for checkpoint job {name}",
             lambda: list(
