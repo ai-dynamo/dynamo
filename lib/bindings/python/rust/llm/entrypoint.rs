@@ -42,6 +42,9 @@ use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
+#[cfg(target_os = "linux")]
+use dynamo_kv_hint_policy_example::{FixedRetention, SessionKvHintPolicy};
+
 use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
 use crate::RouterMode;
@@ -1030,6 +1033,10 @@ pub fn run_input<'p>(
             .kv_router_config,
     )
     .map_err(to_pyerr)?;
+    #[cfg(target_os = "linux")]
+    let kv_hint_policy = experimental_session_kv_hint_policy()?;
+    #[cfg(not(target_os = "linux"))]
+    let kv_hint_policy: Option<()> = None;
     if worker_selection_policy_factory.is_some()
         && !engine_config
             .inner
@@ -1042,18 +1049,27 @@ pub fn run_input<'p>(
             "linked worker-selection policies require --router-mode kv",
         ));
     }
-    if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {
+    if (worker_selection_policy_factory.is_some() || kv_hint_policy.is_some())
+        && !matches!(&input_enum, Input::Http)
+    {
         return Err(PyValueError::new_err(
-            "linked worker-selection policies require HTTP frontend input",
+            "linked router policies require HTTP frontend input",
         ));
     }
     crate::future_into_py(py, async move {
-        if let Some(factory) = worker_selection_policy_factory {
-            HttpFrontend::default()
-                .frontend_route_extensions(frontend_route_extensions)
-                .worker_selection_policy_factory(move |config, worker_type, partition| {
-                    factory(config, worker_type, partition)
-                })
+        if worker_selection_policy_factory.is_some() || kv_hint_policy.is_some() {
+            let mut frontend =
+                HttpFrontend::default().frontend_route_extensions(frontend_route_extensions);
+            if let Some(factory) = worker_selection_policy_factory {
+                frontend = frontend.worker_selection_policy_factory(
+                    move |config, worker_type, partition| factory(config, worker_type, partition),
+                );
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(policy) = kv_hint_policy {
+                frontend = frontend.kv_hint_policy(policy);
+            }
+            frontend
                 .run(distributed_runtime.inner.clone(), engine_config.inner)
                 .await
                 .map_err(to_pyerr)?;
@@ -1069,6 +1085,42 @@ pub fn run_input<'p>(
         .map_err(to_pyerr)?;
         Ok(())
     })
+}
+
+#[cfg(target_os = "linux")]
+fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>> {
+    const ENABLED: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY";
+    const TTL: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_TTL_SECONDS";
+    const PRIORITY: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_PRIORITY";
+
+    if std::env::var_os(ENABLED).is_none() {
+        return Ok(None);
+    }
+
+    let ttl_seconds = std::env::var(TTL)
+        .ok()
+        .map(|value| {
+            value.parse::<f64>().map_err(|error| {
+                PyValueError::new_err(format!("invalid {TTL} value {value:?}: {error}"))
+            })
+        })
+        .transpose()?;
+    let fixed_retention = if let Some(ttl_seconds) = ttl_seconds {
+        let priority = std::env::var(PRIORITY)
+            .unwrap_or_else(|_| "10".to_string())
+            .parse::<u64>()
+            .map_err(|error| PyValueError::new_err(format!("invalid {PRIORITY} value: {error}")))?;
+        Some(FixedRetention {
+            priority,
+            ttl_seconds,
+        })
+    } else {
+        None
+    };
+
+    SessionKvHintPolicy::new(fixed_retention)
+        .map(Some)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr

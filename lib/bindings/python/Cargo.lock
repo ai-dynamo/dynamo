@@ -2134,6 +2134,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-kv-hint-policy-example"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "dynamo-llm",
+ "serde_json",
+]
+
+[[package]]
 name = "dynamo-kv-router"
 version = "1.5.0"
 dependencies = [
@@ -2399,6 +2408,7 @@ dependencies = [
  "dashmap",
  "dynamo-backend-common",
  "dynamo-custom-policy-builtin",
+ "dynamo-kv-hint-policy-example",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-mocker",

@@ -126,6 +126,7 @@ pythonize = "0.23"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dynamo-llm = { path = "../../llm" }
+dynamo-kv-hint-policy-example = { path = "../../../examples/router/kv-hint-policy-example" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 dynamo-llm = { path = "../../llm", default-features = false }
