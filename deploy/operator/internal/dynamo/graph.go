@@ -290,6 +290,28 @@ func GenerateDynamoComponentsDeployments(
 		if err != nil {
 			return nil, err
 		}
+		// Drop any elastic-EP annotation the user supplied, BEFORE synthesis writes the real
+		// ones. These four keys are operator-set control signals, and a DGD component's
+		// annotations reach the generated DCD verbatim -- both its object metadata
+		// (applyDGDComponentAlphaCompatibilityToDCD copies them) and its pod template (the
+		// component's PodTemplate is deep-copied). Without this strip a user could forge any
+		// of them, and each has a consumer that acts on it:
+		//
+		//   elastic-ep-follower          preserveExistingDCDState stops enforcing the
+		//                                declared replica count, so `replicas: 8` is
+		//                                silently ignored on every reconcile; the renderer
+		//                                also runs the component as RoleFollower, replacing
+		//                                its serve command with a bare `ray start`; and
+		//                                admission exempts it from the single-replica rule
+		//   elastic-ep-follower-replicas the leader waits for Ray nodes nothing will create
+		//   elastic-ep-leader-service    the follower joins an arbitrary address
+		//   elastic-ep-leader-component  per-component lookups resolve to the wrong component
+		//
+		// Stripping at the source rather than at each consumer is what makes the annotations
+		// trustworthy everywhere they are read. consts documents them as "Operator-set,
+		// never user-set"; this is what enforces it.
+		stripOperatorOwnedElasticEPAnnotations(dcd)
+
 		deployments[componentName] = dcd
 
 		// An elastic-EP leader also gets a follower DCD, scaled on demand without
@@ -324,6 +346,33 @@ func GenerateDynamoComponentsDeployments(
 
 // maxKubeNameLength is the DNS-1123 label limit for both resource names and label values.
 const maxKubeNameLength = 63
+
+// operatorOwnedElasticEPAnnotations are the elastic-EP keys only the operator may set. Each
+// is a control signal some consumer acts on, so a user-supplied copy is a forged instruction
+// rather than inert metadata. See stripOperatorOwnedElasticEPAnnotations' call site.
+var operatorOwnedElasticEPAnnotations = []string{
+	commonconsts.KubeAnnotationElasticEPFollower,
+	commonconsts.KubeAnnotationElasticEPFollowerReplicas,
+	commonconsts.KubeAnnotationElasticEPLeaderService,
+	commonconsts.KubeAnnotationElasticEPLeaderComponent,
+}
+
+// stripOperatorOwnedElasticEPAnnotations removes user-supplied elastic-EP control
+// annotations from a generated DCD, on both the object and its pod template.
+//
+// Called before synthesis, which then writes the genuine values, so stripping cannot erase
+// the operator's own stamp.
+func stripOperatorOwnedElasticEPAnnotations(dcd *v1beta1.DynamoComponentDeployment) {
+	if dcd == nil {
+		return
+	}
+	for _, key := range operatorOwnedElasticEPAnnotations {
+		delete(dcd.Annotations, key)
+		if dcd.Spec.PodTemplate != nil {
+			delete(dcd.Spec.PodTemplate.Annotations, key)
+		}
+	}
+}
 
 // elasticEPFollowerName derives a follower identity from the leader's, bounded to the
 // Kubernetes name limit. A 60-63 character leader name is valid, but the suffix pushes it

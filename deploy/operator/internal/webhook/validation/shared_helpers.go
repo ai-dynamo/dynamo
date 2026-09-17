@@ -325,6 +325,20 @@ func validateElasticEPRequiresCommand(
 // follower set each) is not rendered yet, and without this check the operator silently
 // emits neither the Ray Service nor the follower, leaving leaders that can never grow and
 // no indication why.
+//
+// It must therefore fire on EXACTLY the shapes that derive a follower, and no others. The
+// component type and node-count guards below are what keep it from rejecting shapes the
+// feature never touches:
+//
+//   - a non-worker component (a frontend carrying the flags) never reaches synthesis --
+//     IsWorkerComponent excludes it -- so it has no Ray Service or follower to collide over
+//   - a multinode component takes the LWS path, which never renders RoleFollower, so its
+//     replicas are LWS groups rather than competing Ray heads
+//
+// Both were accepted before this rule existed. Rejecting them now would be a regression for
+// configurations that have nothing to do with elastic EP's single-leader constraint, and the
+// error message -- "capacity is added by scaling followers" -- would name a follower those
+// shapes will never get.
 func validateElasticEPSingleReplica(
 	backendFramework string,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -335,6 +349,12 @@ func validateElasticEPSingleReplica(
 		return allErrs
 	}
 	if spec.Replicas == nil || *spec.Replicas <= 1 {
+		return allErrs
+	}
+	if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+		return allErrs
+	}
+	if spec.GetNumberOfNodes() > 1 {
 		return allErrs
 	}
 	containers := spec.PodTemplate.Spec.Containers

@@ -151,8 +151,15 @@ func assertBetaValidationErrors(t *testing.T, err error, wantErrs []string) {
 	}
 }
 
+// elasticEPSharedSpec builds the shape the elastic-EP rules target: a single-node WORKER.
+//
+// ComponentType is set deliberately. The single-replica rule only fires on shapes that
+// actually derive a follower, so a spec without a component type is not a shape the rule
+// applies to -- and a fixture that omits it would exercise the early return rather than the
+// rule.
 func elasticEPSharedSpec(command, args []string) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: consts.ComponentTypeWorker,
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:    consts.MainContainerName,
@@ -295,6 +302,37 @@ func TestValidateElasticEPSingleReplica(t *testing.T) {
 			backend: sglangBackendFramework,
 			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
 			want:    nil,
+		},
+		{
+			// The rule exists because one follower and one "<component>-ray" Service are
+			// derived per component, so two leaders would share one identity. A MULTINODE
+			// component derives neither: it takes the LWS path, which never renders
+			// RoleFollower. Its replicas are LWS groups, not competing Ray heads.
+			//
+			// Rejecting it would be a regression -- the merge base accepted this shape --
+			// and the error would tell the user to "add followers instead" when multinode
+			// can never have one.
+			name:    "multinode elastic EP may scale: it derives no follower to collide over",
+			backend: vllm,
+			spec: withReplicas(func() *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+				s := elasticEPSharedSpec(command, rayArgs)
+				s.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				return s
+			}(), k8sptr.To(int32(2))),
+			want: nil,
+		},
+		{
+			// Same reasoning by the other axis: synthesis requires IsWorkerComponent, so a
+			// frontend carrying the flags never reaches it and has no Ray Service or
+			// follower either. Also a regression against the merge base if rejected.
+			name:    "a non-worker component carrying the flags may scale freely",
+			backend: vllm,
+			spec: withReplicas(func() *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+				s := elasticEPSharedSpec(command, rayArgs)
+				s.ComponentType = consts.ComponentTypeFrontend
+				return s
+			}(), k8sptr.To(int32(3))),
+			want: nil,
 		},
 		{
 			name:    "nil pod template is ignored",

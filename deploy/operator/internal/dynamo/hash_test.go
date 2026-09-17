@@ -295,54 +295,44 @@ func TestComputeBetaDGDWorkersSpecHash_ExcludesSynthesizedElasticEPFollower(t *t
 // workerHashSpec covers spec.podTemplate.annotations, and GetDCDKubeAnnotations copies the
 // pod-template annotations into the separate Annotations field of the hashed struct.
 func TestComputeBetaDGDWorkersSpecHash_DerivedFollowerCountDoesNotRoll(t *testing.T) {
-	// A PLAIN worker, deliberately not elastic-EP. Generation therefore never stamps this
-	// component, so a hand-set annotation survives into both hashed routes and the test can
-	// observe whether they are stripped.
+	// The annotation cannot arrive from user input any more -- generation strips the
+	// operator-owned elastic-EP keys before synthesis (stripOperatorOwnedElasticEPAnnotations).
+	// Its only remaining source at hash time is the operator's OWN stamp on a genuine
+	// elastic-EP leader, which is exactly the value that must not create a worker generation.
 	//
-	// An elastic-EP fixture cannot test this: generation OVERWRITES any hand-set value with
-	// the derived one, so both sides hash identically whether or not the strip is present.
-	// That version of this test passed with the strip disabled -- it proved nothing.
-	build := func(annotations map[string]string) *v1beta1.DynamoGraphDeployment {
-		dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-			"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
-		}))
-		dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{
-					Name:    commonconsts.MainContainerName,
-					Command: []string{"/bin/sh", "-c"},
-					Args:    []string{"python3 -m dynamo.vllm --model m"},
-				}},
+	// So this asserts the strip where that stamp is hashed, rather than trying to smuggle a
+	// hand-set value in: workerHashSpec must drop the key from the pod template it hashes.
+	//
+	// End-to-end proof that the hash is restored lives in the commit for this fix, measured
+	// against the merge base: an unchanged Grove dp=2 component moved b61319fa -> 9761526a
+	// before, and back to b61319fa after.
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.KubeAnnotationElasticEPFollowerReplicas: "3",
+						"nvidia.com/unrelated":                               "keep-me",
+					}},
+				},
 			},
-		}
-		return dgd
+		},
 	}
 
-	t.Log("confirm generation leaves this component's annotation alone, or the test is vacuous")
-	dcds, err := GenerateDynamoComponentsDeployments(
-		build(map[string]string{commonconsts.KubeAnnotationElasticEPFollowerReplicas: "7"}),
-		nil, nil, RollingUpdateContext{})
-	if err != nil {
-		t.Fatalf("GenerateDynamoComponentsDeployments: %v", err)
+	hashed := workerHashSpec(dcd)
+	if hashed.PodTemplate == nil {
+		t.Fatal("workerHashSpec dropped the pod template entirely")
 	}
-	leader := dcds["decode"]
-	if leader == nil || leader.Spec.PodTemplate == nil {
-		t.Fatal("no leader DCD generated")
+	if _, present := hashed.PodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas]; present {
+		t.Error("the derived follower count must not be hashed: it is computed from " +
+			"--data-parallel-size, which the container args already contribute, so hashing " +
+			"it only makes a newer operator disagree with an older one about an unchanged " +
+			"declaration -- restarting every elastic-EP worker, Grove included")
 	}
-	if got := leader.Spec.PodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas]; got != "7" {
-		t.Fatalf("generation rewrote the annotation to %q; this fixture cannot observe the strip", got)
+	if got := hashed.PodTemplate.Annotations["nvidia.com/unrelated"]; got != "keep-me" {
+		t.Errorf("unrelated pod annotations must still be hashed, got %q", got)
 	}
-
-	t.Log("the annotation must not contribute to the worker hash by either route")
-	assert.Equal(t,
-		mustComputeBetaDGDWorkersSpecHash(t, build(nil)),
-		mustComputeBetaDGDWorkersSpecHash(t, build(map[string]string{
-			commonconsts.KubeAnnotationElasticEPFollowerReplicas: "7",
-		})),
-		"the derived follower count must not contribute to the worker hash; if it does, an "+
-			"operator upgrade restarts every elastic-EP worker -- Grove included, where the "+
-			"value is never even read -- for a spec that renders identically")
 }
 
 func TestComputeBetaDGDWorkersSpecHash_IgnoresGeneratedDCDObjectIdentity(t *testing.T) {
