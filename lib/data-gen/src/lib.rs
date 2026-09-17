@@ -13,7 +13,6 @@
 pub mod mooncake;
 pub mod request_trace;
 pub mod satf;
-pub mod weka;
 
 pub use mooncake::{
     AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
@@ -22,4 +21,3 @@ pub use mooncake::{
     RollingHashIdMapper, WriterStats, hash_token_blocks, ids_for_sequence_hashes, require_positive,
     sequence_hashes_for_tokens, try_hash_token_blocks, write_empty_files,
 };
-pub use weka::{WekaImportSummary, WekaImporter, load_weka_agentic_rows, stream_weka_agentic_rows};

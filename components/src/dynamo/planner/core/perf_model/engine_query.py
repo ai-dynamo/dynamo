@@ -218,9 +218,11 @@ class AicCoreEnginePerfModel:
         attention_dp_size: int,
     ) -> AicCoreEnginePerfModel:
         if aic_config is None:
-            model = AicForwardPassPerfModel.from_regression(options)
+            model = AicForwardPassPerfModel.from_regression(worker_type, options)
         else:
-            model = AicForwardPassPerfModel.best_available(aic_config, options)
+            model = AicForwardPassPerfModel.best_available(
+                aic_config, worker_type, options
+            )
         return cls(
             model=model,
             worker_type=worker_type,

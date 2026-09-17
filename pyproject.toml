@@ -14,7 +14,10 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.12.0.dev2; python_version >= '3.11' and python_version < '3.14'",
+    # Temporary: the pinned source identifies itself as 0.12.0, which is not
+    # published on PyPI. Before merge, align all pins with a release containing
+    # the Weka API; the uv source override below does not apply to wheel installs.
+    "aisimulate==0.12.0; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -102,6 +105,10 @@ conflicts = [
         { extra = "trtllm" },
     ],
 ]
+
+[tool.uv.sources]
+# Remove this source override once the matching AISimulate release is on PyPI.
+aisimulate = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d71203e489541bc98c5f4a616dcec3b225b8fb72", subdirectory = "python/aisimulate" }
 
 
 [tool.uv.dependency-groups]
