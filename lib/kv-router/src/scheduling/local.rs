@@ -252,6 +252,12 @@ where
                         current_workers,
                         &mut last_workers,
                     );
+                    if outcome == WorkerConfigReconcileOutcome::Applied {
+                        queue_config_updates.update().await;
+                        let _ = queue_updates_config.send(());
+                    }
+                    // Acknowledgement lets the catalog publish its next snapshot.
+                    // Finish rechecking the queue before releasing that ordering.
                     if let Some((worker, ack)) = barrier {
                         let result = if removed && outcome != WorkerConfigReconcileOutcome::Rejected
                         {
@@ -262,10 +268,6 @@ where
                             )))
                         };
                         let _ = ack.send(result);
-                    }
-                    if outcome == WorkerConfigReconcileOutcome::Applied {
-                        queue_config_updates.update().await;
-                        let _ = queue_updates_config.send(());
                     }
                 }
             });
