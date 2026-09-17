@@ -42,11 +42,15 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 		name        string
 		replicas    *int32
 		seed        int32
+		owner       string
 		err         error
 		wantUpdates int
 	}{
 		{name: "scale out", replicas: ptr.To(int32(12)), wantUpdates: 1},
 		{name: "scale in", replicas: ptr.To(int32(2)), wantUpdates: 1},
+		{name: "foreign scale in", replicas: ptr.To(int32(2)), owner: "foreign"},
+		{name: "ownerless scale in", replicas: ptr.To(int32(2)), owner: "absent"},
+		{name: "wrong kind scale in", replicas: ptr.To(int32(2)), owner: "wrong kind"},
 		{name: "unchanged", replicas: ptr.To(int32(9))},
 		{name: "omitted scale out", seed: 3},
 		{name: "omitted scale in", seed: 12},
@@ -59,6 +63,14 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 			r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, source)
 			objects := lpxMaterializedObjects(t, r, child, source, selected)
 			pcs := findLPXTestPodCliqueSet(t, objects)
+			switch tc.owner {
+			case "foreign":
+				pcs.OwnerReferences[0].UID = "foreign-owner"
+			case "absent":
+				pcs.OwnerReferences = nil
+			case "wrong kind":
+				pcs.OwnerReferences[0].Kind = consts.ResourceTypeDynamoGraphDeployment
+			}
 			if tc.replicas == nil {
 				pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas = ptr.To(tc.seed)
 			}
@@ -99,11 +111,16 @@ func TestLPXReplicaUpdatesUseScaleSubresource(t *testing.T) {
 
 			t.Log("Only explicit changes write scale, preserving the observed resource-version precondition")
 			_, _, err = r.reconcileWorkload(t.Context(), child, source, selected, pcs)
-			require.ErrorIs(t, err, tc.err)
+			if tc.owner != "" {
+				var ownershipConflict *commoncontroller.OwnershipConflictError
+				require.ErrorAs(t, err, &ownershipConflict)
+			} else {
+				require.ErrorIs(t, err, tc.err)
+			}
 			require.Equal(t, tc.wantUpdates, updates)
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
 			want := int32(9)
-			if tc.replicas != nil && tc.err == nil {
+			if tc.replicas != nil && err == nil {
 				want = *tc.replicas
 			}
 			require.Equal(t, want, group.Spec.Replicas)

@@ -314,6 +314,9 @@ func (r *graphReconciler) reconcileWorkload(
 	// PCS instead and must not try to mutate its old group.
 	scaled := false
 	if pcs != nil && pcs.DeletionTimestamp.IsZero() && pcs.Annotations[lpx.WorkloadDigestAnnotation] == selected.workloadDigest {
+		if err := commoncontroller.CheckControllerOwnership(pcs, deployment, r.Scheme()); err != nil {
+			return state, ctrl.Result{}, err
+		}
 		scaled, err = r.reconcileLPXScalingGroupScale(ctx, source, pcs, selected.plan.LPXScalingGroup, true)
 		if err != nil {
 			return state, ctrl.Result{}, err
