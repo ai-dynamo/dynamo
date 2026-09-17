@@ -36,6 +36,15 @@ serving the native gRPC path without advertising `/generate`.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 
+The sidecar also subscribes to SGLang's engine-state stream. A new SGLang
+process gets a new instance ID. When that ID changes, the sidecar removes and
+restores its discovery record so Dynamo clears stale KV-routing state. By
+default, the sidecar also removes the worker from discovery while generation
+is paused. Set `--unregister-on-pause=false` or
+`DYN_SGLANG_UNREGISTER_ON_PAUSE=false` to keep a paused worker in discovery.
+SGLang's computed health controls discovery; its server status gives the
+reason for health changes.
+
 SGLang remains the source of truth for the worker's aggregated, prefill, or decode role. The inherited `--disaggregation-mode` option and `DYN_DISAGGREGATION_MODE` environment variable have no effect in this sidecar. The SGLang sidecar rejects `--route-to-encoder` because its native protocol does not support encoder workers. Disaggregated workers continue to register under their fixed role components; aggregated workers honor `--component` or `DYN_COMPONENT`.
 
 The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.

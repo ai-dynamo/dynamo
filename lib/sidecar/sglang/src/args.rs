@@ -22,4 +22,14 @@ pub struct Args {
     /// wildcard addresses.
     #[arg(long, env = "SGLANG_DISAGGREGATION_BOOTSTRAP_HOST")]
     pub bootstrap_host: Option<String>,
+
+    /// Remove this worker from Dynamo discovery while SGLang generation is
+    /// paused. Disable this when pause is used without draining routed traffic.
+    #[arg(
+        long,
+        env = "DYN_SGLANG_UNREGISTER_ON_PAUSE",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub unregister_on_pause: bool,
 }
