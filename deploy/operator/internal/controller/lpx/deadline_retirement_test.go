@@ -39,6 +39,14 @@ func TestLPXExpiredScaleOutPreservesServingEngine(t *testing.T) {
 	requests, err := r.listOwnedLPXRequests(ctx, child, pcs)
 	require.NoError(t, err)
 
+	t.Log("Reject ambiguous replica ownership without changing the live engine")
+	invalid := source.DeepCopy()
+	invalid.Spec.Components = nil
+	require.ErrorContains(t, r.retireExpiredLPXRequests(ctx, child, invalid, pcs, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}), "without an LPX serving component")
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	require.Equal(t, int32(2), group.Spec.Replicas)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(expired), &lpxv1alpha1.LPUPipelineRequest{}))
+
 	t.Log("Lower Grove and delete only the expired scheduler intent in one reconciliation")
 	err = r.retireExpiredLPXRequests(ctx, child, source, pcs, requests, []*lpxv1alpha1.LPUPipelineRequest{expired})
 	require.NoError(t, err)

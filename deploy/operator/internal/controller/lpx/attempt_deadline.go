@@ -13,6 +13,7 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -64,8 +65,8 @@ func completeLPXDeadline(
 
 // reconcileLPXRequestDeadlines derives every scheduling clock from the start
 // of the corresponding desired LPR's current scheduler-owned scheduling cycle.
-// pcs is nil when no current PodCliqueSet was observed, which leaves no active
-// clock.
+// Recorded expiry survives phase/input changes until the exact request disappears.
+// A nil PCS leaves no active clock; already recorded cleanup waits for owner GC.
 func (r *graphReconciler) reconcileLPXRequestDeadlines(
 	ctx context.Context,
 	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
@@ -74,7 +75,9 @@ func (r *graphReconciler) reconcileLPXRequestDeadlines(
 	desired []lpxModelMaterializing,
 ) (lpxClassification, time.Time, error) {
 	deadlineSeconds := lpxRequestDeadlineSeconds(source)
-	if deadlineSeconds == nil || pcs == nil || !pcs.DeletionTimestamp.IsZero() || !metav1.IsControlledBy(pcs, deployment) {
+	active := deadlineSeconds != nil && pcs != nil && pcs.DeletionTimestamp.IsZero() && metav1.IsControlledBy(pcs, deployment)
+	recorded := sets.New(deployment.Status.ExpiredRequestUIDs...)
+	if !active && recorded.Len() == 0 {
 		return nil, time.Time{}, nil
 	}
 	requests, err := r.listOwnedLPXRequests(ctx, deployment, pcs)
@@ -88,11 +91,22 @@ func (r *graphReconciler) reconcileLPXRequestDeadlines(
 
 	// Expire each desired nonterminal request independently and retain the earliest future wake.
 	now := time.Now()
-	duration := time.Duration(*deadlineSeconds) * time.Second
 	expired := make([]*lpxv1alpha1.LPUPipelineRequest, 0)
+	deployment.Status.ExpiredRequestUIDs = nil
+	recordFailure := false
 	var nextDeadline time.Time
 	for index := range requests {
 		request := &requests[index]
+		if recorded.Has(request.UID) {
+			deployment.Status.ExpiredRequestUIDs = append(deployment.Status.ExpiredRequestUIDs, request.UID)
+			if request.DeletionTimestamp.IsZero() {
+				expired = append(expired, request)
+			}
+			continue
+		}
+		if !active {
+			continue
+		}
 		if _, current := desiredNames[request.Name]; !current {
 			continue
 		}
@@ -103,27 +117,29 @@ func (r *graphReconciler) reconcileLPXRequestDeadlines(
 		if !known {
 			continue
 		}
-		deadline := startedAt.Add(duration)
+		deadline := startedAt.Add(time.Duration(*deadlineSeconds) * time.Second)
 		if !now.Before(deadline) {
-			expired = append(expired, request)
+			deployment.Status.ExpiredRequestUIDs = append(deployment.Status.ExpiredRequestUIDs, request.UID)
+			recordFailure = true
 			continue
 		}
 		if nextDeadline.IsZero() || deadline.Before(nextDeadline) {
 			nextDeadline = deadline
 		}
 	}
-	if len(expired) == 0 {
+
+	// Persist exact request identities and retry authorization before cleanup.
+	if recordFailure {
+		return &lpxDeadlineExceeded{requeueAfter: time.Nanosecond, recordFailure: true}, time.Time{}, nil
+	}
+	if recorded.Len() == 0 {
 		return nil, nextDeadline, nil
 	}
 
-	// Persist retry authorization before cleanup removes the request that proves expiry.
-	if !lpxDeadlineFailureCovers(deployment, expired) {
-		return &lpxDeadlineExceeded{requeueAfter: time.Nanosecond, recordFailure: true}, time.Time{}, nil
-	}
-
 	// Lower Grove before deleting the affected engine suffix; convergence is asynchronous.
+	// Requeue even after the last recorded UID disappears so an authorized retry can proceed.
 	retirementErr := r.retireExpiredLPXRequests(ctx, deployment, source, pcs, requests, expired)
-	return &lpxDeadlineExceeded{requeueAfter: lpxRetirementRequeueAfter}, time.Time{}, retirementErr
+	return &lpxDeadlineExceeded{requeueAfter: lpxRetirementRequeueAfter}, nextDeadline, retirementErr
 }
 
 func lpxRequestHasTerminalSchedulingDisposition(request *lpxv1alpha1.LPUPipelineRequest) bool {
@@ -159,43 +175,13 @@ func lpxRequestDeadlineSeconds(source *nvidiacomv1beta1.DynamoGraphDeployment) *
 	return source.Spec.Scheduling.AttemptDeadlineSeconds
 }
 
-// lpxDeadlineFailureCurrent reports whether the current generation must remain
-// failed until a later input revision explicitly authorizes another publication.
+// lpxDeadlineFailureCurrent fences publication until expired requests disappear
+// and a later input revision explicitly authorizes a retry.
 func lpxDeadlineFailureCurrent(deployment *nvidiacomv1alpha1.LPXGraphDeployment) bool {
 	failed := meta.FindStatusCondition(deployment.Status.Conditions, lpxSchedulingFailedCondition)
-	return lpxDeadlineFailureRecorded(deployment) &&
-		failed.ObservedGeneration >= deployment.Generation
-}
-
-func lpxDeadlineFailureRecorded(deployment *nvidiacomv1alpha1.LPXGraphDeployment) bool {
-	failed := meta.FindStatusCondition(deployment.Status.Conditions, lpxSchedulingFailedCondition)
-	return failed != nil && failed.Status == metav1.ConditionTrue && failed.Reason == lpxSchedulingDeadlineExceededReason
-}
-
-// lpxDeadlineFailureCovers reports whether every expired scheduling cycle
-// predates the recorded failure. A later cycle needs its own durable failure
-// before cleanup.
-func lpxDeadlineFailureCovers(
-	deployment *nvidiacomv1alpha1.LPXGraphDeployment,
-	requests []*lpxv1alpha1.LPUPipelineRequest,
-) bool {
-	failed := meta.FindStatusCondition(deployment.Status.Conditions, lpxSchedulingFailedCondition)
-	if failed == nil || failed.Status != metav1.ConditionTrue || failed.Reason != lpxSchedulingDeadlineExceededReason {
-		return false
-	}
-	if failed.ObservedGeneration < deployment.Generation {
-		return false
-	}
-	if failed.LastTransitionTime.IsZero() {
-		return false
-	}
-	for _, request := range requests {
-		startedAt, known := lpxSchedulingStartedAt(request)
-		if !known || !startedAt.Before(failed.LastTransitionTime.Time) {
-			return false
-		}
-	}
-	return true
+	return len(deployment.Status.ExpiredRequestUIDs) > 0 || (failed != nil &&
+		failed.Status == metav1.ConditionTrue && failed.Reason == lpxSchedulingDeadlineExceededReason &&
+		failed.ObservedGeneration >= deployment.Generation)
 }
 
 // projectLPXSchedulingFailureCondition keeps retry authorization independent
@@ -224,7 +210,7 @@ func projectLPXSchedulingFailureCondition(
 	if prior == nil {
 		return
 	}
-	if deployment.Generation <= prior.ObservedGeneration {
+	if deployment.Generation <= prior.ObservedGeneration || len(deployment.Status.ExpiredRequestUIDs) > 0 {
 		return
 	}
 	meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{

@@ -174,6 +174,7 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	}
 	pcs, err = r.observeCurrentLPXPodCliqueSet(ctx, deployment)
 	if err != nil {
+		pcs = nil
 		return ctrl.Result{}, err
 	}
 	// Invalid source authority retires existing LPX state before reporting rejection.
@@ -246,10 +247,16 @@ func (r *graphReconciler) completeReconcile(
 	deadlineExceeded := false
 	recordDeadlineFailure := false
 	requestScopedRetirement := state.Reason == lpxRetiringReason && state.retirementScope == lpxRequestRetirement
-	if completion.unavailableReason == "" && completion.selected != nil &&
+	if completion.unavailableReason == "" && completion.source != nil &&
+		(completion.selected != nil || len(deployment.Status.ExpiredRequestUIDs) > 0) &&
 		(state.Reason != lpxRetiringReason || requestScopedRetirement) {
+		// Recorded cleanup survives errors preparing the next workload; only new clocks need selection.
+		var desired []lpxModelMaterializing
+		if completion.selected != nil {
+			desired = completion.selected.requests
+		}
 		classification, wake, deadlineErr := r.reconcileLPXRequestDeadlines(
-			ctx, deployment, completion.source, completion.pcs, completion.selected.requests,
+			ctx, deployment, completion.source, completion.pcs, desired,
 		)
 		deadlineAt, err = wake, errors.Join(err, deadlineErr)
 		if classification != nil {

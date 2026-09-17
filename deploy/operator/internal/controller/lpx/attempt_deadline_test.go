@@ -42,6 +42,16 @@ func TestLPXDeadlineUsesEachSchedulingCycleStart(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, classification)
 	require.True(t, firstStarted.Add(30*time.Second).Equal(wake))
+
+	t.Log("Keep that deadline wake while a recorded expiry waits for its finalizer")
+	second.Finalizers = []string{"scheduler.example/cleanup"}
+	require.NoError(t, r.Update(t.Context(), second))
+	require.NoError(t, r.Delete(t.Context(), second))
+	dgd.Status.ExpiredRequestUIDs = []types.UID{second.UID}
+	classification, wake, err = r.reconcileLPXRequestDeadlines(t.Context(), dgd, source, pcs, deadlineTestDesired(first, second))
+	require.NoError(t, err)
+	require.IsType(t, &lpxDeadlineExceeded{}, classification)
+	require.True(t, firstStarted.Add(30*time.Second).Equal(wake))
 }
 
 func TestLPXDeadlineIgnoresRequestsOutsideCurrentPublication(t *testing.T) {
@@ -203,35 +213,28 @@ func TestLPXDeadlineFailureRequiresPostFailureGeneration(t *testing.T) {
 	require.False(t, lpxDeadlineFailureCurrent(dgd))
 }
 
-func TestLPXDeadlineFailureOnlyCoversPreviouslyPublishedRequests(t *testing.T) {
-	t.Log("Record a deadline failure for the current deployment generation")
-	dgd, _, _ := newLPXTestDGD(t, "single")
-	failureTime := time.Now().Add(-time.Minute)
-	dgd.Status.Conditions = []metav1.Condition{{
-		Type: lpxSchedulingFailedCondition, Status: metav1.ConditionTrue,
-		Reason: lpxSchedulingDeadlineExceededReason, ObservedGeneration: dgd.Generation,
-		LastTransitionTime: metav1.NewTime(failureTime),
-	}}
-
-	t.Log("The failure covers cleanup of a scheduling cycle that started before it")
-	pcs := deadlineTestPCS(dgd, "pcs-uid")
-	oldRequest := deadlineTestRequest(dgd, pcs, "old", failureTime.Add(-time.Minute), lpxv1alpha1.RequestPhasePending)
-	require.True(t, lpxDeadlineFailureCovers(dgd, []*lpxv1alpha1.LPUPipelineRequest{oldRequest}))
-
-	t.Log("A failure from an earlier deployment generation cannot cover current cleanup")
-	dgd.Generation++
-	require.False(t, lpxDeadlineFailureCovers(dgd, []*lpxv1alpha1.LPUPipelineRequest{oldRequest}))
-	dgd.Generation--
-
-	t.Log("A later scheduling cycle on the same request requires a new durable failure")
-	restartedRequest := deadlineTestRequest(dgd, pcs, "restarted", failureTime.Add(-time.Hour), lpxv1alpha1.RequestPhasePending)
-	restartedRequest.Status.LastPlanRevision = 1
-	restartedRequest.Status.SchedulingStartedAt = ptr.To(metav1.NewTime(failureTime.Add(time.Second)))
-	require.False(t, lpxDeadlineFailureCovers(dgd, []*lpxv1alpha1.LPUPipelineRequest{restartedRequest}))
-
-	t.Log("An unknown cycle start is never covered by an older failure")
-	restartedRequest.Status.SchedulingStartedAt = nil
-	require.False(t, lpxDeadlineFailureCovers(dgd, []*lpxv1alpha1.LPUPipelineRequest{restartedRequest}))
+func TestLPXDeadlineRetainsOnlyRecordedRequestUIDs(t *testing.T) {
+	for _, uid := range []types.UID{"recorded", "replacement"} {
+		t.Run(string(uid), func(t *testing.T) {
+			t.Log("Retain exact expiry identity even without a current deadline, desired request or PCS")
+			dgd, source, _ := newLPXTestDGD(t, "single")
+			dgd.Status.ExpiredRequestUIDs = []types.UID{"recorded"}
+			pcs := deadlineTestPCS(dgd, "pcs-uid")
+			request := deadlineTestRequest(dgd, pcs, "same-name", time.Now(), lpxv1alpha1.RequestPhaseBound)
+			request.UID = uid
+			r := newLPXTestReconciler(t, nil, dgd, source, request)
+			request = getLPXRequest(t, t.Context(), r.Client, request.Namespace, request.Name)
+			classification, _, err := r.reconcileLPXRequestDeadlines(t.Context(), dgd, source, nil, nil)
+			require.NoError(t, err)
+			require.Positive(t, projectLPXLifecycleStatus(classification).RequeueAfter)
+			if uid == "recorded" {
+				require.Equal(t, []types.UID{uid}, dgd.Status.ExpiredRequestUIDs)
+			} else {
+				require.Nil(t, dgd.Status.ExpiredRequestUIDs)
+			}
+			require.Equal(t, request, getLPXRequest(t, t.Context(), r.Client, request.Namespace, request.Name))
+		})
+	}
 }
 
 func TestProjectLPXDeadlineFailureAdvancesAStaleFailureFence(t *testing.T) {
@@ -274,6 +277,12 @@ func TestProjectLPXDeadlineFailureRemainsStickyAtRecordedGeneration(t *testing.T
 	require.NotNil(t, failed)
 	require.Equal(t, metav1.ConditionTrue, failed.Status)
 	require.Equal(t, lpxSchedulingDeadlineExceededReason, failed.Reason)
+
+	t.Log("A later shape edit cannot clear retry authorization while expired requests survive")
+	dgd.Generation++
+	dgd.Status.ExpiredRequestUIDs = []types.UID{"expired"}
+	projectLPXSchedulingFailureCondition(dgd, previous, reconcileOutcome{Reason: lpxRetiringReason}, false)
+	require.Equal(t, previous.Conditions[0], *meta.FindStatusCondition(dgd.Status.Conditions, lpxSchedulingFailedCondition))
 }
 
 func TestCompleteLPXDeadlineBoundsTransientErrors(t *testing.T) {

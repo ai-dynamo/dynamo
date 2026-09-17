@@ -81,7 +81,11 @@ func (r *graphReconciler) retireExpiredLPXRequests(
 	}
 	// Omitted replicas leave capacity externally managed; expire only scheduler
 	// intent so a later input revision can reuse the unchanged Grove ordinal.
-	if lpx.ServingComponent(source).Replicas != nil && group.Spec.Replicas > replicas {
+	component := lpx.ServingComponent(source)
+	if component == nil {
+		return fmt.Errorf("cannot determine replica ownership without an LPX serving component")
+	}
+	if component.Replicas != nil && group.Spec.Replicas > replicas {
 		scale := &autoscalingv1.Scale{
 			ObjectMeta: metav1.ObjectMeta{ResourceVersion: group.ResourceVersion},
 			Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},

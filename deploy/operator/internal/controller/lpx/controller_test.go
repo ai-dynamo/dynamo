@@ -428,7 +428,8 @@ func TestLPXModelScaleDownRecreatesPodCliqueSet(t *testing.T) {
 }
 
 func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {
-	t.Run("deadline", func(t *testing.T) {
+	for _, phase := range []lpxv1alpha1.RequestPhase{lpxv1alpha1.RequestPhasePending, lpxv1alpha1.RequestPhaseBound} {
+		t.Logf("Scheduler phase after recorded expiry: %s", phase)
 		t.Log("Observe a completed engine and a newer pending request in their shared PCS")
 		ctx := t.Context()
 		child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
@@ -440,7 +441,7 @@ func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {
 		publishSelectedLPXForTest(t, ctx, r, child, selected)
 		pcs := findLPXTestPodCliqueSet(t, objects)
 		serving := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].requestName)
-		serving.Status = deadlineTestRequest(child, pcs, serving.Name, time.Now(), lpxv1alpha1.RequestPhaseBound).Status
+		serving.Status = deadlineTestRequest(child, pcs, serving.Name, time.Now().Add(-time.Hour), lpxv1alpha1.RequestPhaseBound).Status
 		require.NoError(t, r.Update(ctx, serving))
 		pending := getLPXRequest(t, ctx, r.Client, child.Namespace, selected.requests[1].requestName)
 		pending.Status = deadlineTestRequest(child, pcs, pending.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
@@ -450,12 +451,57 @@ func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {
 		t.Log("Persist failure before changing Grove or deleting scheduler intent")
 		request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
 		group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
+		persistErr := errors.New("status unavailable")
+		original := r.Client
+		r.Client = interceptor.NewClient(original.(client.WithWatch), interceptor.Funcs{
+			SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subresource == "status" {
+					return persistErr
+				}
+				return delegated.SubResource(subresource).Update(ctx, object, opts...)
+			},
+		})
 		_, err := r.Reconcile(ctx, request)
+		require.ErrorIs(t, err, persistErr)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+		require.Empty(t, child.Status.ExpiredRequestUIDs)
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+		require.Equal(t, int32(2), group.Spec.Replicas)
+		require.True(t, getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name).DeletionTimestamp.IsZero())
+		r.Client = original
+		_, err = r.Reconcile(ctx, request)
 		require.NoError(t, err)
 		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
 		require.Equal(t, int32(2), group.Spec.Replicas)
 		pending = getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
 		require.True(t, pending.DeletionTimestamp.IsZero())
+		if phase == lpxv1alpha1.RequestPhaseBound {
+			deleteErr := apierrors.NewConflict(lpxv1alpha1.GroupVersion.WithResource("lpupipelinerequests").GroupResource(), pending.Name, errors.New("scheduler updated status"))
+			r.Client = interceptor.NewClient(original.(client.WithWatch), interceptor.Funcs{
+				Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error { return deleteErr },
+			})
+			_, err = r.Reconcile(ctx, request)
+			require.ErrorIs(t, err, deleteErr)
+			r.Client = original
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			require.Len(t, child.Status.ExpiredRequestUIDs, 1)
+			require.Equal(t, pending.UID, child.Status.ExpiredRequestUIDs[0])
+		}
+		pending.Status.Phase = phase
+		require.NoError(t, r.Update(ctx, pending))
+		conductorReplicas := lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas
+		if phase == lpxv1alpha1.RequestPhaseBound {
+			t.Log("An edit after recorded expiry cannot rescue the old request")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(source), source))
+			source.Spec.Scheduling = nil
+			lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
+			require.NoError(t, r.Update(ctx, source))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
+			require.NoError(t, err)
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
+		}
 
 		t.Log("Retire only the failed scale-out and keep Grove below the authored scale while cleanup is pending")
 		for range 3 {
@@ -470,14 +516,25 @@ func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {
 		pending = getLPXRequest(t, ctx, r.Client, pending.Namespace, pending.Name)
 		require.False(t, pending.DeletionTimestamp.IsZero())
 		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
-		child.Generation++
-		require.NoError(t, r.Update(ctx, child))
+		if phase == lpxv1alpha1.RequestPhasePending {
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
+		}
 		_, err = r.Reconcile(ctx, request)
 		require.NoError(t, err)
 		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
 		require.Equal(t, int32(1), group.Spec.Replicas)
 
 		t.Log("After cleanup the later edit can retry without replacing the serving engine")
+		if phase == lpxv1alpha1.RequestPhaseBound {
+			lpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = conductorReplicas
+			require.NoError(t, r.Update(ctx, source))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
+			require.NoError(t, err)
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
+		}
 		retiredUID := pending.UID
 		pending.Finalizers = nil
 		require.NoError(t, r.Update(ctx, pending))
@@ -491,7 +548,7 @@ func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {
 		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
 		require.Equal(t, int32(2), group.Spec.Replicas)
 		require.True(t, apiequality.Semantic.DeepEqual(serving, getLPXRequest(t, ctx, r.Client, serving.Namespace, serving.Name)), "serving request changed")
-	})
+	}
 }
 
 func TestLPXDeadlineContinuesDuringRequestRetirement(t *testing.T) {
@@ -526,8 +583,10 @@ func TestLPXDeadlineContinuesDuringRequestRetirement(t *testing.T) {
 	prefix = getLPXRequest(t, ctx, r.Client, child.Namespace, prefix.Name)
 	prefix.Status = deadlineTestRequest(child, pcs, prefix.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
 	require.NoError(t, r.Update(ctx, prefix))
-	_, err := r.Reconcile(ctx, reconcileRequest)
-	require.NoError(t, err)
+	for range 2 {
+		_, err := r.Reconcile(ctx, reconcileRequest)
+		require.NoError(t, err)
+	}
 	requireLPXRequestNotFound(t, ctx, r.Client, child.Namespace, prefix.Name)
 }
 

@@ -6,6 +6,7 @@ package v1alpha1
 import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // LPXGraphDeploymentSpec is the operator's handoff for all LPX components in a DGD.
@@ -30,6 +31,11 @@ type LPXGraphDeploymentStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// expiredRequestUIDs records requests selected for deadline cleanup until they disappear,
+	// even if their scheduler phase or the deployment input changes.
+	// +optional
+	// +listType=set
+	ExpiredRequestUIDs []types.UID `json:"expiredRequestUIDs,omitempty"`
 	// components reports logical replicas by authored component name, never Agent Pods.
 	// +optional
 	Components map[string]v1beta1.ComponentReplicaStatus `json:"components,omitempty"`
