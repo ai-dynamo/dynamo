@@ -1232,8 +1232,6 @@ mod oip_datatype_tests {
 mod kserve_metadata_shape_tests {
     use super::kserve_metadata_shape;
 
-    /// Native Triton's KServe adapter prepends a variable batch dim (`-1`)
-    /// when `max_batch_size > 0`. Empty `dims` still get that leading axis.
     #[test]
     fn prepends_variable_batch_dim_when_batching_enabled() {
         assert_eq!(kserve_metadata_shape(&[-1], 4), vec![-1, -1]);
@@ -1241,8 +1239,6 @@ mod kserve_metadata_shape_tests {
         assert_eq!(kserve_metadata_shape(&[], 1), vec![-1]);
     }
 
-    /// `max_batch_size == 0` means the model is not batched; wire shape is
-    /// `dims` unchanged, including the empty-dims case.
     #[test]
     fn leaves_dims_unchanged_when_batching_disabled() {
         assert_eq!(kserve_metadata_shape(&[-1], 0), vec![-1]);
