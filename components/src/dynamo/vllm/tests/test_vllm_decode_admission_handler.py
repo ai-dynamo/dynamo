@@ -37,11 +37,16 @@ def _make_handler(limit: int = 1) -> handlers.DecodeWorkerHandler:
     handler.config = config
     handler.use_vllm_tokenizer = False
     handler.dp_range = (0, 2)
+    handler.shutdown_event = None
     handler._multimodal_request_processor = MagicMock()
     return handler
 
 
-def _request(name: str, dp_rank: int = 0, remote_prefill: bool = True) -> dict:
+def _request(
+    name: str,
+    dp_rank: int | None = 0,
+    remote_prefill: bool = True,
+) -> dict:
     return {
         "name": name,
         "routing": {"dp_rank": dp_rank},
@@ -58,6 +63,9 @@ def _request(name: str, dp_rank: int = 0, remote_prefill: bool = True) -> dict:
 def _context(request_id: str) -> MagicMock:
     context = MagicMock()
     context.id.return_value = request_id
+    context.async_killed_or_stopped.return_value = (
+        asyncio.get_event_loop().create_future()
+    )
     return context
 
 
@@ -116,6 +124,52 @@ async def test_zero_limit_preserves_the_existing_decode_path():
         {"token_ids": [1]}
     ]
     handler._to_local_dp_rank.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "routing",
+    [
+        {},
+        {"dp_rank": 4},
+    ],
+)
+async def test_multi_rank_worker_rejects_unresolved_dp_rank(routing):
+    handler = _make_handler()
+    handler._generate_token_mode = MagicMock(
+        side_effect=AssertionError("invalid routing must not start generation")
+    )
+    request = _request("invalid")
+    request["routing"] = routing
+
+    with pytest.raises(handlers.InvalidArgument, match="valid routing.dp_rank"):
+        await _collect(handler, request, _context("invalid"))
+
+    handler._generate_token_mode.assert_not_called()
+    assert handler._decode_remote_prefill_admission.snapshot(0).admissions == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "routing",
+    [
+        {},
+        {"dp_rank": 9},
+    ],
+)
+async def test_single_rank_worker_uses_rank_zero_for_unresolved_routing(routing):
+    handler = _make_handler()
+    handler.dp_range = (4, 1)
+
+    async def generate(request, context, request_id):
+        yield {"token_ids": [1]}
+
+    handler._generate_token_mode = generate
+    request = _request("single")
+    request["routing"] = routing
+
+    assert await _collect(handler, request, _context("single")) == [{"token_ids": [1]}]
+    assert handler._decode_remote_prefill_admission.snapshot(0).admissions == 1
 
 
 @pytest.mark.asyncio
@@ -221,6 +275,112 @@ async def test_cancellation_before_first_output_releases_waiting_request():
     await asyncio.wait_for(second_started.wait(), timeout=1)
     assert await second_task == [{"token_ids": [1]}]
     assert handler._decode_remote_prefill_admission.snapshot(0).active == 0
+
+
+@pytest.mark.asyncio
+async def test_client_stop_removes_queued_request_before_generation():
+    handler = _make_handler()
+    first_started = asyncio.Event()
+    first_can_yield = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def generate(request, context, request_id):
+        if request["name"] == "first":
+            first_started.set()
+            await first_can_yield.wait()
+        else:
+            second_started.set()
+        yield {"token_ids": [1]}
+
+    handler._generate_token_mode = generate
+    first_task = asyncio.create_task(
+        _collect(handler, _request("first"), _context("first"))
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    second_context = _context("second")
+    second_task = asyncio.create_task(
+        _collect(handler, _request("second"), second_context)
+    )
+    await _wait_for_waiters(handler, expected=1)
+
+    second_context.async_killed_or_stopped.return_value.set_result(None)
+    with pytest.raises(asyncio.CancelledError):
+        await second_task
+
+    snapshot = handler._decode_remote_prefill_admission.snapshot(0)
+    assert snapshot.waiting == 0
+    assert snapshot.cancelled_waiters == 1
+    assert not second_started.is_set()
+
+    first_can_yield.set()
+    assert await first_task == [{"token_ids": [1]}]
+
+
+@pytest.mark.asyncio
+async def test_shutdown_removes_queued_request_before_generation():
+    handler = _make_handler()
+    handler.shutdown_event = asyncio.Event()
+    first_started = asyncio.Event()
+    first_can_yield = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def generate(request, context, request_id):
+        if request["name"] == "first":
+            first_started.set()
+            await first_can_yield.wait()
+        else:
+            second_started.set()
+        yield {"token_ids": [1]}
+
+    handler._generate_token_mode = generate
+    first_task = asyncio.create_task(
+        _collect(handler, _request("first"), _context("first"))
+    )
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+
+    second_task = asyncio.create_task(
+        _collect(handler, _request("second"), _context("second"))
+    )
+    await _wait_for_waiters(handler, expected=1)
+
+    handler.shutdown_event.set()
+    with pytest.raises(
+        handlers.EngineShutdown,
+        match="waiting for decode admission",
+    ):
+        await second_task
+
+    snapshot = handler._decode_remote_prefill_admission.snapshot(0)
+    assert snapshot.waiting == 0
+    assert snapshot.cancelled_waiters == 1
+    assert not second_started.is_set()
+
+    first_can_yield.set()
+    assert await first_task == [{"token_ids": [1]}]
+
+
+@pytest.mark.asyncio
+async def test_client_stop_releases_concurrently_acquired_lease():
+    handler = _make_handler()
+    lease = MagicMock()
+
+    async def acquire(dp_rank):
+        return lease
+
+    async def wait_for_all(waiters, *, return_when):
+        await asyncio.gather(*waiters)
+        return set(waiters), set()
+
+    handler._decode_remote_prefill_admission.acquire = acquire
+    context = _context("stopped")
+    context.async_killed_or_stopped.return_value.set_result(None)
+
+    with patch.object(handlers.asyncio, "wait", new=wait_for_all):
+        with pytest.raises(asyncio.CancelledError):
+            await handler._acquire_decode_remote_prefill_admission(context, 0)
+
+    lease.release.assert_called_once_with("terminal_before_first_output")
 
 
 @pytest.mark.asyncio

@@ -96,6 +96,7 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 from .decode_admission import (
     DecodeRemotePrefillAdmission,
     DecodeRemotePrefillAdmissionMetrics,
+    DecodeRemotePrefillLease,
 )
 from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
@@ -3453,6 +3454,70 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             metrics=decode_remote_prefill_admission_metrics,
         )
 
+    def _resolve_decode_remote_prefill_admission_dp_rank(
+        self,
+        routed_dp_rank: int | None,
+    ) -> int:
+        """Resolve the concrete local DP rank used by the admission gate."""
+        local_dp_rank = self._to_local_dp_rank(routed_dp_rank)
+        if local_dp_rank is not None:
+            return local_dp_rank
+        if self.dp_range[1] == 1:
+            return 0
+        raise InvalidArgument(
+            "Remote-prefill admission requires a valid routing.dp_rank when "
+            "a decode worker serves multiple data-parallel ranks."
+        )
+
+    async def _acquire_decode_remote_prefill_admission(
+        self,
+        context: Context,
+        local_dp_rank: int,
+    ) -> DecodeRemotePrefillLease | None:
+        """Wait for admission while observing request and engine termination."""
+        stopped = context.async_killed_or_stopped()
+        acquire_task = asyncio.create_task(
+            self._decode_remote_prefill_admission.acquire(local_dp_rank)
+        )
+        shutdown_task = None
+        waiters = [acquire_task, stopped]
+        if self.shutdown_event is not None:
+            shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+            waiters.append(shutdown_task)
+
+        lease_returned = False
+        try:
+            done, _ = await asyncio.wait(
+                waiters,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if shutdown_task is not None and shutdown_task in done:
+                raise EngineShutdown(
+                    "Engine was shut down while waiting for decode admission."
+                )
+            if stopped in done:
+                raise asyncio.CancelledError()
+
+            lease = acquire_task.result()
+            lease_returned = True
+            return lease
+        finally:
+            pending = [waiter for waiter in waiters if not waiter.done()]
+            for waiter in pending:
+                waiter.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            if (
+                not lease_returned
+                and acquire_task.done()
+                and not acquire_task.cancelled()
+                and acquire_task.exception() is None
+            ):
+                lease = acquire_task.result()
+                if lease is not None:
+                    lease.release("terminal_before_first_output")
+
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
         request_id = context.id()
@@ -3468,9 +3533,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             and self.config.disaggregation_mode == DisaggregationMode.DECODE
             and _has_remote_prefill_kv_transfer(request)
         ):
-            local_dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-            admission_lease = await self._decode_remote_prefill_admission.acquire(
-                local_dp_rank
+            local_dp_rank = self._resolve_decode_remote_prefill_admission_dp_rank(
+                routing.get("dp_rank")
+            )
+            admission_lease = await self._acquire_decode_remote_prefill_admission(
+                context,
+                local_dp_rank,
             )
 
         first_token = True
