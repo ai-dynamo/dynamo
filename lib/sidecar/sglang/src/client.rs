@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -143,12 +144,17 @@ impl NodeMetadata {
         validate_endpoint(&url)?;
         // Match the in-process group key using the shared rendezvous address,
         // not the local source or gRPC address.
-        let resolved = address.socket_addrs(|| None)?;
-        let address = resolved
-            .first()
-            .context("dist_init_addr resolved to no addresses")?;
-        Ok(Some(format!("dist_init:tcp://{address}")))
+        worker_group_id_from_addresses(address.socket_addrs(|| None)?).map(Some)
     }
+}
+
+fn worker_group_id_from_addresses(mut resolved: Vec<SocketAddr>) -> anyhow::Result<String> {
+    // Nodes may receive the same DNS answers in different orders.
+    resolved.sort_unstable();
+    let address = resolved
+        .first()
+        .context("dist_init_addr resolved to no addresses")?;
+    Ok(format!("dist_init:tcp://{address}"))
 }
 
 fn validate_endpoint(endpoint: &str) -> anyhow::Result<()> {
@@ -512,7 +518,7 @@ mod tests {
 
     use super::{
         NodeMetadata, client_from_channel, discover, discovery_mode, json_u32, json_u64,
-        parse_discovery,
+        parse_discovery, worker_group_id_from_addresses,
     };
     use crate::proto as pb;
 
@@ -618,6 +624,25 @@ mod tests {
         assert_eq!(
             metadata.worker_group_id().unwrap().as_deref(),
             Some("dist_init:tcp://[::1]:2345")
+        );
+    }
+
+    #[test]
+    fn worker_group_id_is_independent_of_dns_answer_order() {
+        let addresses = vec![
+            "[::1]:2345".parse().unwrap(),
+            "127.0.0.2:2345".parse().unwrap(),
+            "127.0.0.1:2345".parse().unwrap(),
+        ];
+        let reversed = addresses.iter().copied().rev().collect();
+        let expected = "dist_init:tcp://127.0.0.1:2345";
+        assert_eq!(worker_group_id_from_addresses(addresses).unwrap(), expected);
+        assert_eq!(worker_group_id_from_addresses(reversed).unwrap(), expected);
+        assert_eq!(
+            worker_group_id_from_addresses(Vec::new())
+                .unwrap_err()
+                .to_string(),
+            "dist_init_addr resolved to no addresses"
         );
     }
 
