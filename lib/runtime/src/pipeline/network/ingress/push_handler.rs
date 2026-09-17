@@ -618,6 +618,8 @@ where
         let forwarder_ctx = context_arc.clone();
         let payload_adapter = self.payload_adapter.clone();
         tokio::spawn(async move {
+            let stopped = forwarder_ctx.stopped();
+            tokio::pin!(stopped);
             let mut rx = request_stream_recv.rx;
             while let Some(bytes) = rx.recv().await {
                 // Stop forwarding on either kill or soft-stop, matching the
@@ -629,7 +631,12 @@ where
                 }
                 match payload_adapter.decode_request(payload_codec, bytes).await {
                     Ok(item) => {
-                        if frame_tx.send(item).await.is_err() {
+                        let sent = tokio::select! {
+                            biased;
+                            _ = &mut stopped => break,
+                            sent = frame_tx.send(item) => sent,
+                        };
+                        if sent.is_err() {
                             tracing::debug!(
                                 "engine consumer dropped; bidirectional input forwarder exiting"
                             );
