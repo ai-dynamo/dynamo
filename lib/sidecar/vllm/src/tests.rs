@@ -485,7 +485,7 @@ fn model_info() -> pb::ModelInfo {
         served_model_aliases: vec!["model-alias".to_string()],
         supports_text_input: true,
         supports_token_ids_input: true,
-        supports_lora: false,
+        supports_lora: true,
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
@@ -510,7 +510,7 @@ fn server_info() -> pb::ServerInfo {
         total_kv_blocks: 4096,
         max_running_requests: 128,
         max_batched_tokens: 2048,
-        max_loras: 0,
+        max_loras: 4,
         rl_capabilities: Some(pb::RlCapabilities {
             weight_transfer_enabled: true,
             weight_transfer_backend: "nccl".to_string(),
@@ -521,13 +521,20 @@ fn server_info() -> pb::ServerInfo {
 }
 
 #[test]
-fn released_protocol_does_not_advertise_native_generate() {
+fn engine_config_advertises_supported_capabilities() {
     let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
     assert!(
         !model
             .engine_config()
             .runtime_data
             .contains_key("vllm_inference_v1_generate")
+    );
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
+        Some(&json!(true))
     );
 }
 
@@ -1516,6 +1523,7 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert_eq!(registration.total_kv_blocks, Some(2048));
     assert_eq!(registration.max_num_seqs, Some(128));
     assert_eq!(registration.max_num_batched_tokens, Some(2048));
+    assert_eq!(registration.max_gpu_lora_count, Some(4));
     assert_eq!(registration.data_parallel_size, Some(2));
     assert_eq!(registration.data_parallel_start_rank, Some(0));
 

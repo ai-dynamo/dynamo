@@ -11,12 +11,18 @@ homepage.workspace = true
 repository.workspace = true
 description = "Rust sidecar for vLLM's native gRPC server"
 
+[package.metadata.cargo-machete]
+# LoRA dependencies are used by the next stacked PR.
+ignored = ["dynamo-runtime", "tempfile"]
+
 [[bin]]
 name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+dynamo-runtime = { workspace = true }
 dynamo-sidecar-common = { workspace = true, features = ["tonic-v14"] }
 
 anyhow = { workspace = true }
@@ -36,4 +42,5 @@ vllm-proto = { workspace = true }
 
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }

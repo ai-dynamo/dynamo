@@ -17,6 +17,8 @@ struct ModelIdentity {
     aliases: Vec<String>,
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
+    supports_lora: bool,
+    max_loras: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -61,12 +63,16 @@ impl DiscoveredModel {
         }
         let reasoning_parser = nonempty(model.reasoning_parser);
         let tool_call_parser = nonempty(model.tool_call_parser);
+        let supports_lora = model.supports_lora;
+        let max_loras = server.max_loras;
         let identity = ModelIdentity {
             source: source.clone(),
             served_name: served_name.clone(),
             aliases: model.served_model_aliases,
             reasoning_parser: reasoning_parser.clone(),
             tool_call_parser: tool_call_parser.clone(),
+            supports_lora,
+            max_loras,
         };
         Ok(Self {
             source,
@@ -169,15 +175,19 @@ impl DiscoveredModel {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            // The released protocol lacks native sampling JSON and its capability
-            // flag. Advertise native Generate only once upstream supports both.
-            runtime_data: Default::default(),
+            runtime_data: [(
+                dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into_iter()
+            .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),
                 total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
+                max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
                 data_parallel_size: parallelism
                     .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
                 data_parallel_start_rank: parallelism.map(|_| 0),
@@ -191,6 +201,14 @@ impl DiscoveredModel {
             .parallelism
             .as_ref()
             .map_or(1, |parallelism| parallelism.data_parallel_size)
+    }
+
+    pub(crate) fn supports_lora(&self) -> bool {
+        self.identity.supports_lora && self.identity.max_loras > 0
+    }
+
+    pub(crate) fn max_loras(&self) -> u32 {
+        self.identity.max_loras
     }
 
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
