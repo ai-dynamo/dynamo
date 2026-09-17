@@ -572,10 +572,18 @@ async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
     logger.info("FPM GC policy stopped in all model workers")
 
 
+async def _restore_benchmark_workers(bench_cfg: dict, engine_client: AsyncLLM) -> None:
+    try:
+        if bench_cfg.get("randomize_kda_state", False):
+            await engine_client.collective_rpc("finish_benchmark_kda_state")
+    finally:
+        await _stop_worker_gc_policy(engine_client)
+
+
 async def _await_benchmark_then_restore_workers(
     bench_cfg: dict, vllm_config: VllmConfig, engine_client: AsyncLLM
 ) -> dict:
-    """Wait for the self-benchmark and restore worker GC on every exit path.
+    """Wait for the self-benchmark and restore worker state and GC on every exit path.
 
     The worker stop must not depend on the wait succeeding: ``_bench_abort``
     publishes ``status="failed"`` artifacts, so an aborted benchmark makes
@@ -594,17 +602,17 @@ async def _await_benchmark_then_restore_workers(
         # always wins.
         try:
             await asyncio.wait_for(
-                _stop_worker_gc_policy(engine_client),
+                _restore_benchmark_workers(bench_cfg, engine_client),
                 timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
             )
         except BaseException:
             logger.exception(
-                "Failed to stop the FPM GC policy in model workers while "
+                "Failed to restore model workers while "
                 "handling a self-benchmark failure"
             )
         raise
     await asyncio.wait_for(
-        _stop_worker_gc_policy(engine_client),
+        _restore_benchmark_workers(bench_cfg, engine_client),
         timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
     )
     return results

@@ -27,6 +27,7 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
+from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -291,7 +292,11 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            else:
+                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -442,6 +447,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
