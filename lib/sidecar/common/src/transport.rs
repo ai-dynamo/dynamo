@@ -143,7 +143,7 @@ async fn connect_until_ready(
                     // gets levels, timestamps, and filtering.
                     if bootstrap {
                         eprintln!(
-                            "{peer} gRPC connection attempt failed; retrying (endpoint={endpoint_label}, pool_slot={pool_slot}, attempt={attempt}, elapsed={:?}, remaining={:?}, retry_interval={:?}, suppressed_attempts={suppressed_attempts}, error={error})",
+                            "{peer} gRPC connection attempt failed; retrying (endpoint={endpoint_label}, pool_slot={pool_slot}, attempt={attempt}, elapsed={:?}, remaining={:?}, retry_interval={:?}, suppressed_attempts={suppressed_attempts}, error={detailed_error})",
                             started.elapsed(),
                             deadline.saturating_duration_since(now),
                             transport.retry_interval,
