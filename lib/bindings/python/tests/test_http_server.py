@@ -313,7 +313,7 @@ async def test_streaming_chat_completion_http_error_waits_for_first_item(http_se
         async with session.post(url, json=data) as response:
             assert response.status == 400
             assert await response.json() == expected_error_body(
-                400, MSG_CONTAINS_ERROR, "Bad Request"
+                400, "Bad Request", "Bad Request"
             )
 
 
