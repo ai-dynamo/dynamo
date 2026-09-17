@@ -54,14 +54,16 @@ impl NamespaceFilter {
     /// `myns-dgd2`, a different deployment in the same Kubernetes namespace.
     /// The scope is the prefix itself plus the hyphen-delimited worker
     /// generations beneath it — the shape `DYN_NAMESPACE_WORKER_SUFFIX`
-    /// produces.
+    /// produces. A prefix ending in `-` already includes that boundary.
     pub fn matches(&self, namespace: &str) -> bool {
         match self {
             NamespaceFilter::Global => true,
             NamespaceFilter::Exact(target) => namespace == target,
-            NamespaceFilter::Prefix(prefix) => namespace
-                .strip_prefix(prefix.as_str())
-                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-')),
+            NamespaceFilter::Prefix(prefix) => {
+                namespace.strip_prefix(prefix.as_str()).is_some_and(|rest| {
+                    prefix.ends_with('-') || rest.is_empty() || rest.starts_with('-')
+                })
+            }
         }
     }
 
