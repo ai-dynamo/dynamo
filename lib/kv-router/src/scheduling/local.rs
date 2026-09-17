@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -46,6 +46,11 @@ enum WorkerConfigReconcileOutcome {
     Rejected,
 }
 
+type WorkerConfigBarrier = (
+    Option<WorkerId>,
+    oneshot::Sender<Result<(), KvSchedulerError>>,
+);
+
 pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
 where
     P: SequencePublisher,
@@ -57,6 +62,8 @@ where
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
     request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
+    config_barriers: mpsc::Sender<WorkerConfigBarrier>,
+    config_monitor_cancel: CancellationToken,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -183,7 +190,9 @@ where
         ));
 
         let (queue_updates, _) = watch::channel(());
+        let config_monitor_cancel = cancellation_token.clone();
 
+        let (config_barriers, mut barrier_rx) = mpsc::channel::<WorkerConfigBarrier>(1);
         if monitor_worker_configs {
             let slots_monitor = Arc::clone(&slots);
             let queue_config_updates = Arc::clone(&queue);
@@ -200,7 +209,7 @@ where
                 );
 
                 loop {
-                    tokio::select! {
+                    let barrier = tokio::select! {
                         _ = monitor_cancel_token.cancelled() => {
                             tracing::trace!("LocalScheduler workers monitoring task shutting down");
                             break;
@@ -210,16 +219,35 @@ where
                                 tracing::warn!("LocalScheduler worker config watch dropped, shutting down");
                                 break;
                             }
+                            None
                         }
-                    }
+                        barrier = barrier_rx.recv() => {
+                            let Some(barrier) = barrier else { break; };
+                            Some(barrier)
+                        }
+                    };
 
                     let current_workers = monitor_rx.borrow_and_update().clone();
-                    if Self::reconcile_worker_configs(
+                    let removed = barrier.as_ref().is_none_or(|(worker, _)| {
+                        worker.is_none_or(|worker| !current_workers.contains_key(&worker))
+                    });
+                    let outcome = Self::reconcile_worker_configs(
                         &slots_monitor,
                         current_workers,
                         &mut last_workers,
-                    ) == WorkerConfigReconcileOutcome::Applied
-                    {
+                    );
+                    if let Some((worker, ack)) = barrier {
+                        let result = if removed && outcome != WorkerConfigReconcileOutcome::Rejected
+                        {
+                            Ok(())
+                        } else {
+                            Err(KvSchedulerError::InitFailed(format!(
+                                "worker config barrier {worker:?} was not reconciled"
+                            )))
+                        };
+                        let _ = ack.send(result);
+                    }
+                    if outcome == WorkerConfigReconcileOutcome::Applied {
                         queue_config_updates.update().await;
                         let _ = queue_updates_config.send(());
                     }
@@ -276,8 +304,38 @@ where
             queue,
             queue_updates,
             request_classifier: OnceLock::new(),
+            config_barriers,
+            config_monitor_cancel,
             track_prefill_tokens_default,
             worker_type,
+        }
+    }
+
+    /// Wait for a freshly processed snapshot while the caller holds the
+    /// catalog mutation lock. This is a completion barrier, not a cached
+    /// membership check that could accept an older absent-worker snapshot.
+    pub(crate) async fn wait_for_worker_config(&self) -> Result<(), KvSchedulerError> {
+        self.worker_config_barrier(None).await
+    }
+
+    pub(crate) async fn wait_for_worker_removal(
+        &self,
+        worker: WorkerId,
+    ) -> Result<(), KvSchedulerError> {
+        self.worker_config_barrier(Some(worker)).await
+    }
+
+    async fn worker_config_barrier(
+        &self,
+        removed_worker: Option<WorkerId>,
+    ) -> Result<(), KvSchedulerError> {
+        tokio::select! {
+            _ = self.config_monitor_cancel.cancelled() => Err(KvSchedulerError::SubscriberShutdown),
+            result = async {
+                let (ack, result) = oneshot::channel();
+                self.config_barriers.send((removed_worker, ack)).await.map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+                result.await.map_err(|_| KvSchedulerError::SubscriberShutdown)?
+            } => result,
         }
     }
 
