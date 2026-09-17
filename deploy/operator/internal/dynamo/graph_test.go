@@ -6232,6 +6232,47 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 	}
 }
 
+func TestResolveImagePullSecrets_RegistryNames(t *testing.T) {
+	cases := []struct {
+		name, auth, image string
+		want              bool
+	}{
+		{"explicit hub control", "docker.io", "docker.io/acme/private:v1", true},
+		{"canonical Docker login key", "https://index.docker.io/v1/", "docker.io/acme/private:v1", true},
+		{"implicit hub", "docker.io", "acme/private:v1", true},
+		{"implicit library", "https://index.docker.io/v1/", "busybox:latest", true},
+		{"untagged image", "https://index.docker.io/v1/", "acme/private", true},
+		{"legacy hub image prefix", "docker.io", "index.docker.io/acme/private:v1", true},
+		{"digest reference", "docker.io", "acme/private@sha256:" + strings.Repeat("a", 64), true},
+		{"custom registry port", "registry.example:5000", "registry.example:5000/acme/private:v1", true},
+		{"custom registry auth URL", "https://registry.example:5000/team", "registry.example:5000/team/private:v1", true},
+		{"localhost port", "localhost:5000", "localhost:5000/acme/private:v1", true},
+		{"unrelated registry", "docker.io", "registry.example/acme/private:v1", false},
+		{"invalid image", "docker.io", "not an image", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Index one synthetic credential, preserving the registry-key API")
+			credential := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "pull-credential", Namespace: "workload"},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"` + tc.auth + `":{}}}`)},
+			}
+			reader := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(credential).Build()
+			index := secrets.NewDockerSecretIndexer(reader, "workload")
+			require.NoError(t, index.RefreshIndex(t.Context()))
+			t.Log("Resolve credentials through the renderer's actual image-to-registry boundary")
+			got := resolveImagePullSecrets(index, "workload", tc.image)
+			if tc.want {
+				require.Equal(t, []corev1.LocalObjectReference{{Name: "pull-credential"}}, got)
+			} else {
+				require.Empty(t, got)
+			}
+			require.Empty(t, resolveImagePullSecrets(index, "another-namespace", tc.image))
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_InitContainerPullSecrets(t *testing.T) {
 	cases := []struct {
 		name      string

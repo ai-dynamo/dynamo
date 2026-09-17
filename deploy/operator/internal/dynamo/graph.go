@@ -42,6 +42,7 @@ import (
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/distribution/reference"
 	"github.com/imdario/mergo"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 	istioNetworking "istio.io/api/networking/v1beta1"
@@ -722,7 +723,14 @@ type SecretsRetriever interface {
 }
 
 func resolveImagePullSecrets(retriever SecretsRetriever, namespace, image string) []corev1.LocalObjectReference {
-	names, err := retriever.GetSecrets(namespace, image)
+	// Image names may omit Docker Hub, unlike the registry keys in credentials.
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return nil
+	}
+
+	// Query the credential index with the normalized registry host.
+	names, err := retriever.GetSecrets(namespace, reference.Domain(named))
 	if err != nil {
 		return nil
 	}
