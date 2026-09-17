@@ -171,14 +171,13 @@ triton:
   # (nvcr.io/nvidia/tritonserver:<tag>-py3), with Dynamo's source-built wheels on
   # top. base_image (cuda-dl-base) builds the dynamo_base and wheel_builder helper
   # stages. Override --build-arg RUNTIME_IMAGE_TAG for a different Triton release.
-  cuda13.2:
+  cuda13.4:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tritonserver
-    # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects 13.2 at build time.
-    # The wheels load CUDA dynamically, so they run on the 13.2 runtime image regardless.
+    # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects 13.4 at build time.
+    # The wheels load CUDA dynamically, so they run on the 13.4 runtime image regardless.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    # This value will be updated monthly by the Triton Team after each release.
-    runtime_image_tag: 26.07-py3
+    runtime_image_tag: 26.08-py3
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
   # KVBM is disabled: it is an LLM KV-cache feature whose Python NIXL path

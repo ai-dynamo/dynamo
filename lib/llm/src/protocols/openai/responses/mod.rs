@@ -1228,7 +1228,24 @@ pub fn chat_completion_to_response(
         if let Some(content_text) = content_text
             && !content_text.is_empty()
         {
-            let parsed_calls = parse_tool_call_text(&content_text);
+            let has_enabled_tools = params.tools.as_ref().is_some_and(|tools| {
+                tools.iter().any(|tool| match tool {
+                    Tool::Function(_) => true,
+                    Tool::Namespace(namespace) => namespace
+                        .tools
+                        .iter()
+                        .any(|tool| matches!(tool, NamespaceToolParamTool::Function(_))),
+                    _ => false,
+                })
+            }) && !matches!(
+                params.tool_choice,
+                Some(ToolChoiceParam::Mode(ToolChoiceOptions::None))
+            );
+            let parsed_calls = if has_enabled_tools {
+                parse_tool_call_text(&content_text)
+            } else {
+                Vec::new()
+            };
             if !parsed_calls.is_empty() {
                 for (name, arguments) in parsed_calls {
                     let namespace = params.namespace_for_function(&name);
@@ -3046,6 +3063,104 @@ Let me check the weather.
         let text = "Just a regular message with no tool calls.";
         let calls = parse_tool_call_text(text);
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_text_tool_calls_preserved_when_tools_are_disabled() {
+        let text = r#"Example: <think>reasoning</think><tool_call>{"name":"get_weather","arguments":{"city":"Beijing"}}</tool_call>"#;
+        let tools = vec![
+            serde_json::from_value(serde_json::json!({
+                "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ];
+        for (tools, tool_choice) in [
+            (
+                Some(tools),
+                Some(ToolChoiceParam::Mode(ToolChoiceOptions::None)),
+            ),
+            (None, None),
+            (
+                Some(serde_json::from_value(serde_json::json!([{
+                    "type": "namespace", "name": "weather", "description": "Weather tools", "tools": []
+                }])).unwrap()),
+                Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ),
+        ] {
+            let params = ResponseParams {
+                tools,
+                tool_choice,
+                ..Default::default()
+            };
+            let response =
+                chat_completion_to_response(make_chat_resp_with_text(text), &params, None).unwrap();
+            assert_eq!(response.inner.output.len(), 1);
+            let OutputItem::Message(message) = &response.inner.output[0] else {
+                panic!("tool-disabled request must preserve literal tool-call text");
+            };
+            let OutputMessageContent::OutputText(content) = &message.content[0] else {
+                panic!("expected output text");
+            };
+            assert_eq!(content.text, text);
+        }
+    }
+
+    #[test]
+    fn test_text_tool_calls_parsed_when_tools_are_enabled() {
+        let text =
+            r#"<tool_call>{"name":"get_weather","arguments":{"city":"Beijing"}}</tool_call>"#;
+        let tools = serde_json::from_value(serde_json::json!([{
+            "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+        }]))
+        .unwrap();
+        let params = ResponseParams {
+            tools: Some(tools),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ..Default::default()
+        };
+        let response =
+            chat_completion_to_response(make_chat_resp_with_text(text), &params, None).unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected a function call for an enabled tool request");
+        };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+            serde_json::json!({"city":"Beijing"})
+        );
+    }
+
+    #[test]
+    fn test_text_tool_call_preserves_namespace() {
+        let params = ResponseParams {
+            tools: Some(
+                serde_json::from_value(serde_json::json!([{
+                    "type": "namespace",
+                    "name": "weather",
+                    "description": "Weather tools",
+                    "tools": [{"type": "function", "name": "get_weather"}]
+                }]))
+                .unwrap(),
+            ),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ..Default::default()
+        };
+        let response = chat_completion_to_response(
+            make_chat_resp_with_text(
+                r#"<tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#,
+            ),
+            &params,
+            None,
+        )
+        .unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected a namespaced function call");
+        };
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(call.namespace.as_deref(), Some("weather"));
+        assert_eq!(call.arguments, "{}");
     }
 
     #[test]
