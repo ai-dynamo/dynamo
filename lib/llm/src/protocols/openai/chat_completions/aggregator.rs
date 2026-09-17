@@ -78,6 +78,10 @@ async fn parse_complete_tool_output(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
 )> {
+    let parser = match parser {
+        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+        parser => parser,
+    };
     let version = super::tool_parser_v2::selected_version()?;
     if version == dynamo_runtime::config::ParserVersion::V2
         && !super::tool_parser_v2::supports_family(parser)

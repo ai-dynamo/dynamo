@@ -44,11 +44,18 @@ use super::{NvCreateChatCompletionStreamResponse, stream_choice_chunk_from_templ
 // entirely, so the ChoiceRecovery buffer and finish_reason=length synthetic-chunk
 // logic will not run. The aggregator.rs (non-streaming) half is parser-agnostic
 // and keeps working on both paths — only the streaming side needs porting.
-/// Tool-call families with a `dynamo-parsers-v2` parser wired into both the batch and
-/// the streaming path. Must stay a subset of the families
-/// `dynamo_parsers_v2::create_tool_parser_for_family` accepts; the strings match
-/// dynamo's `tool_call_parser` names so a parser name maps straight to a v2 family.
-pub(crate) const V2_FAMILIES: &[&str] = &["qwen3_coder", "deepseek_v4"];
+/// Map Dynamo tool-parser names onto the corresponding v2 registry family.
+#[cfg(test)]
+pub(crate) const V2_FAMILIES: &[&str] =
+    &["qwen3_coder", "deepseek_v4", "deepseek-v4", "deepseekv4"];
+
+fn v2_family(parser: &str) -> Option<&'static str> {
+    match parser {
+        "qwen3_coder" => Some("qwen3_coder"),
+        "deepseek_v4" | "deepseek-v4" | "deepseekv4" => Some("deepseek_v4"),
+        _ => None,
+    }
+}
 
 pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
     static VERSION: LazyLock<Result<ParserVersion, String>> =
@@ -103,7 +110,7 @@ fn validate_parser_version_for_mode(
             let qwen3_unified =
                 super::unified_parser::is_v2_configured_family(tool_call_parser, reasoning_parser);
             let tool_parser_is_v2 = tool_call_parser.is_none_or(|parser| {
-                V2_FAMILIES.contains(&parser) || UNIFIED_FAMILIES.contains(&parser) || qwen3_unified
+                v2_family(parser).is_some() || UNIFIED_FAMILIES.contains(&parser) || qwen3_unified
             });
             let reasoning_parser_is_v2 = reasoning_parser.is_none_or(|parser| {
                 UNIFIED_FAMILIES.contains(&parser) || qwen3_unified && parser == "qwen3"
@@ -121,7 +128,7 @@ fn validate_parser_version_for_mode(
 
 /// Whether `family` has a v2 parser and should bypass the v1 jail when [`enabled`].
 pub(crate) fn supports_family(family: &str) -> bool {
-    V2_FAMILIES.contains(&family)
+    v2_family(family).is_some()
 }
 
 /// Families served by the v2 UNIFIED parser (reasoning + content + tool calls in
@@ -1516,6 +1523,10 @@ mod tests {
             .is_err()
         );
         assert!(validate_parser_version_for_mode(ParserVersion::V2, Some("hermes"), None).is_err());
+        for alias in ["deepseek_v4", "deepseek-v4", "deepseekv4"] {
+            assert!(validate_parser_version_for_mode(ParserVersion::V2, Some(alias), None).is_ok());
+            assert!(supports_family(alias));
+        }
     }
 
     #[test]

@@ -4828,6 +4828,10 @@ impl OpenAIPreprocessor {
                     None | Some(ChatCompletionToolChoiceOption::Auto)
                 )
             {
+                let parser_name = match parser_name {
+                    "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+                    parser_name => parser_name,
+                };
                 return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
             }
             if selected_version == dynamo_runtime::config::ParserVersion::V2 {

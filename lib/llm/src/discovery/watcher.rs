@@ -1350,10 +1350,7 @@ fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
 
 fn should_validate_parser_version(card: &ModelDeploymentCard) -> bool {
     card.model_type.supports_chat()
-        && matches!(
-            effective_worker_type(card.worker_type, card.model_type),
-            WorkerType::Aggregated | WorkerType::Decode
-        )
+        && effective_worker_type(card.worker_type, card.model_type) != WorkerType::Prefill
 }
 
 fn effective_router_config<'a>(
@@ -2754,7 +2751,7 @@ mod tests {
         assert!(should_validate_parser_version(&card));
 
         card.worker_type = Some(WorkerType::Encode);
-        assert!(!should_validate_parser_version(&card));
+        assert!(should_validate_parser_version(&card));
 
         card.worker_type = Some(WorkerType::Prefill);
         assert!(!should_validate_parser_version(&card));
