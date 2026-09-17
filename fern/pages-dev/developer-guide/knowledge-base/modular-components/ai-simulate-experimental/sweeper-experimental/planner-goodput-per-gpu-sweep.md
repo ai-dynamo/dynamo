@@ -11,10 +11,10 @@ treat them as production capacity guidance or a performance commitment. Sweeper'
 and output may change without a standard deprecation period.
 </Warning>
 
-Enable the planner (SLA mode) on the same deployment as the
-[router experiment](router-end-to-end-latency-sweep.md), then use Sweeper's smart sweep to **find the
-planner configuration that maximizes goodput-per-GPU** on the Mooncake toolagent trace, and
-compare against the static deployment and the default planner.
+This experiment enabled the planner (SLA mode) on the same deployment as the
+[router experiment](router-end-to-end-latency-sweep.md), then used Sweeper's smart sweep to find the
+planner configuration that maximized goodput-per-GPU on the Mooncake toolagent trace and compared
+it against the static deployment and the default planner.
 
 ## Setup
 
@@ -51,8 +51,10 @@ scales the fleet to an average of ~13.5 GPUs instead of pinning 32.
 
 ## Sweep config
 
-`Sweeper.run`, `goal.target = goodput_per_gpu`. Deployment + router + workload + SLA
-fixed; only the planner knobs swept (full trace, open-loop):
+The experiment used `Sweeper.run` with `goal.target = goodput_per_gpu`. It fixed the deployment,
+router, workload, and SLA, and swept only the planner settings using the full open-loop trace. The
+configuration below documents the retired `aisimulate==0.1.0.dev1` API and is not accepted by
+AISimulate 0.12.0:
 
 ```yaml
 search_space:

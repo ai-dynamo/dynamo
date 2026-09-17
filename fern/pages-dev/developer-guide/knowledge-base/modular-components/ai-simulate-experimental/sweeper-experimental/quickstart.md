@@ -13,7 +13,7 @@ planning.
 Install AISimulate:
 
 ```bash
-python3 -m pip install "aisimulate==0.1.0.dev2"
+python3 -m pip install "aisimulate==0.12.0"
 ```
 
 Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:
