@@ -107,7 +107,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    # digest-pinned image has no semver tag for the operator to parse
+    # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 40Gi
     type: worker

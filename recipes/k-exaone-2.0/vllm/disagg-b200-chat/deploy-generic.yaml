@@ -116,7 +116,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    # digest-pinned image has no semver tag for the operator to parse
+    # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 40Gi
     type: worker
@@ -124,11 +124,9 @@ spec:
     name: DecodeWorker
     podTemplate:
       spec:
-        # Pack decode onto prefill's node so the NIXL KV hop stays on one fabric.
-        # PREFERRED, not required: the operator schedules the deployment as a gang, so a
-        # required affinity on a peer that is not placed yet leaves the whole gang Pending
-        # forever -- neither role can go first. Co-location is an optimisation here, not a
-        # correctness requirement: KV moves over IB RDMA, which works cross-node, just slower.
+        # Pack decode onto prefill's node so the KV hop stays on one fabric.
+        # PREFERRED, not required: a required peer affinity deadlocks the operator's
+        # gang scheduling, since neither role can be placed first.
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -212,7 +210,7 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    # digest-pinned image has no semver tag for the operator to parse
+    # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 40Gi
     type: worker
@@ -227,7 +225,7 @@ spec:
     value: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
   - name: VLLM_WORKER_MULTIPROC_METHOD
     value: spawn
-  # rc_x/rc are the InfiniBand RDMA transports. tcp is omitted on purpose -- see the header.
+  # rc_x/rc are the IB RDMA transports; tcp is omitted on purpose.
   - name: UCX_TLS
     value: rc_x,rc,cuda_copy,cuda_ipc
   - name: UCX_MEMTYPE_CACHE
@@ -236,7 +234,6 @@ spec:
     value: "1024"
   - name: UCX_NET_DEVICES
     value: all
-  # TP is intra-pod and belongs on NVLink. Exposing the HCAs makes NCCL probe IB for
-  # tensor-parallel traffic as well; pin it off so the two fabrics stay separated by role.
+  # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the fabrics stay separated.
   - name: NCCL_IB_DISABLE
     value: "1"

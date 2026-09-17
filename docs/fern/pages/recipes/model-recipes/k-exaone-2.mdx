@@ -163,6 +163,21 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
 | Aggregated | 4x B200 | Aggregated | TP4 | MTP, DL=2 | n/a |
 | Disaggregated | 8x B200 | 1P1D | TP4 / TP4 | MTP, DL=2 on both roles | NIXL/UCX over IB RDMA |
 
+## Supported Features
+
+| Feature | | Notes |
+| --- | --- | --- |
+| NVFP4 (W4A4) weights | ✅ | the FLASHINFER_CUTLASS MoE backend is **mandatory** — see [Notes](#notes) |
+| FP8 KV cache | ✅ | the checkpoint declares `kv_cache_quant_algo: FP8`; it is the default path |
+| Prefix caching | ✅ | on by default |
+| Speculative decoding (MTP) | ✅ | `--spec-method exaone_moe_mtp --spec-tokens 2` |
+| Reasoning parser | ✅ | `--dyn-reasoning-parser qwen3` |
+| Tool calling | ✅ | `--dyn-tool-call-parser qwen3_coder` |
+| Disaggregated serving | ✅ | NIXL over UCX; needs an RDMA device plugin |
+| KV-aware routing | ✅ | wired end to end; inert at the shipped `replicas: 1`, correct when you scale out |
+| 262,144-token context | ✅ | the checkpoint's native window, served in full with no rope scaling |
+| Expert parallelism | ➖ | measured within noise at TP4; not enabled |
+
 ## Notes
 
 - **The MoE backend pin is a correctness requirement.** vLLM's `auto` selection picks FLASHINFER_TRTLLM, which silently corrupts long-form output on this checkpoint — fluent, plausible, wrong, with no error. Both manifests pin `--kernel-config '{"moe_backend":"FLASHINFER_CUTLASS"}'`; the pinned kernel is slower and that cost is inside the figures above.
@@ -177,6 +192,8 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
   ```
 
   Divide `_sum` by `_count`: a ~1 GB KV transfer should take milliseconds, not seconds.
+- **KV-aware routing does nothing until you scale out — but scaling out is all it takes.** The frontend ships `--router-mode kv --router-kv-events` and the worker (prefill, in the disaggregated recipe) ships `--kv-events-config`, so the block index is published and consumed. Both halves are inert at `replicas: 1`, because one worker is one destination. Raising `replicas` is sufficient; no flag edit is needed. Measured on a 2 x TP4 deployment this workload sees no throughput gain from it — a 9.494% prefix hit rate against round-robin's 9.458% — because achieved reuse is capacity-capped, so it is shipped for correct scale-out behaviour rather than for throughput.
+- **There is no cache-clearing endpoint.** `dynamo.vllm` runs the Dynamo worker rather than vLLM's OpenAI server, so `POST /reset_prefix_cache` is not served anywhere and `VLLM_SERVER_DEV_MODE` has no effect. To isolate benchmark points, use a fresh `cache_salt` per run — the shipped `perf.yaml` does — or restart the deployment between measurements.
 - **Context length is 262,144**, the model's native maximum. The checkpoint uses unscaled rope, so longer contexts would require a rope-scaling override with unvalidated accuracy.
 
 ## Source
