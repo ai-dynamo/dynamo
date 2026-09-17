@@ -20,12 +20,23 @@
 # DYN-3838 records the leader surviving at restart=0 with inference stopped, and DYN-2660
 # records the orphaned placement group then blocking every later scale-up.
 #
-# Sequence: baseline dp=2 -> dp=4 -> dp=2
+# Sequence: baseline dp=2 -> 3 -> 4 -> 3 -> 2 -> 4 -> 2
 #
-# dp=3 is deliberately absent. EPLB requires the expert count to divide evenly across ranks
-# and DeepSeek-V2-Lite has 64 experts, so dp=3 fails with "EPLB currently only supports even
-# distribution of experts across ranks". The previous version of this script stepped through
-# dp=3 twice and could not have passed.
+# It walks through dp=3 on purpose, in both directions. An ODD width is the case that
+# catches asymmetric bugs: a leader plus an even number of followers hides off-by-one
+# errors in the derived count (dp-1), and 2 -> 4 -> 2 alone never exercises a single-step
+# grow or shrink.
+#
+# dp=3 requires the fixture to carry redundant experts. EPLB distributes
+# (n_routed_experts + num_redundant_experts) evenly across EP ranks, and with tp=1 the EP
+# size is the dp size. DeepSeek-V2-Lite has 64 routed experts, which divides by 2 and 4 but
+# not 3, so num_redundant_experts=0 rejects dp=3 with "EPLB currently only supports even
+# distribution of experts across ranks". moe_elastic_ep_demo.yaml therefore sets 8
+# redundant, giving 72 slots: 72/2=36, 72/3=24, 72/4=18.
+#
+# If you change the model or the redundant-expert count, recompute this: every dp in the
+# sequence must divide the total slot count, or the step fails for a reason that has
+# nothing to do with the operator.
 #
 # Usage:
 #   ./run_elastic_ep_scale_test.sh [NAMESPACE] [DEPLOYMENT_NAME]
@@ -273,6 +284,12 @@ snapshot "baseline dp=2"
 infer "dp=2"
 
 # ── Scale sequence ────────────────────────────────────────────────────────────
+# Single-step grow, single-step grow, then both shrink directions, then a two-step
+# grow and a two-step shrink. Every step serves a graded request before moving on.
+grow 3
+grow 4
+shrink 3
+shrink 2
 grow 4
 shrink 2
 

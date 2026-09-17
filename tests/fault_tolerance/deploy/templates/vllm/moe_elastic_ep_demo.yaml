@@ -22,9 +22,11 @@
 #   - 2 nodes with 1 free GPU each. The follower carries an anti-affinity that keeps it off
 #     the leader's node, and a pod affinity that keeps it in the leader's NVLink partition.
 #   - data-parallel-backend=ray (required for elastic EP)
-#   - Model: deepseek-ai/DeepSeek-V2-Lite (small MoE, ~16B)
-#   - The data-parallel size must divide the model's expert count (64 here), so dp=3 is
-#     invalid for this model.
+#   - Model: deepseek-ai/DeepSeek-V2-Lite (small MoE, ~16B, 64 routed experts)
+#   - Every data-parallel size you intend to scale to must divide the EPLB slot count,
+#     which is (routed experts + num_redundant_experts). This fixture sets 8 redundant for
+#     72 slots, so dp = 2, 3, 4, 6, 8, 9, 12 all work. See that flag below before changing
+#     the model or the width.
 #
 # CHANGING THE WIDTH TAKES TWO STEPS, in opposite order for grow and shrink, because
 # Kubernetes owns whether a pod exists and vLLM owns whether its GPU is used. Nothing in
@@ -140,8 +142,19 @@ spec:
             - --enable-expert-parallel
             - --enable-elastic-ep
             - --enable-eplb
-            # 0 redundant experts: keeps expert count divisible across dp ranks
+            # EPLB distributes (n_routed_experts + num_redundant_experts) evenly across the
+            # EP ranks and rejects any width where that does not divide. With tp=1 the EP
+            # size IS the data-parallel size, so this value decides which dp values the
+            # deployment can be scaled to at all.
+            #
+            # DeepSeek-V2-Lite has 64 routed experts. 8 redundant gives 72 slots, which
+            # divides by 2, 3 and 4 (36 / 24 / 18) -- so the scale test can walk
+            # dp = 2 -> 3 -> 4 -> 3 -> 2 -> 4 -> 2 end to end.
+            #
+            # Do not set this to 0 to "keep it simple": 64 divides by 2 and 4 but not 3,
+            # which silently removes dp=3 from every scaling path and makes it look like a
+            # model limitation rather than a choice made here.
             - --eplb-config.num_redundant_experts
-            - "0"
+            - "8"
             - --no-enable-prefix-caching
             - --enforce-eager
