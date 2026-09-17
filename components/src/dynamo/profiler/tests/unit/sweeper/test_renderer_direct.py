@@ -140,13 +140,8 @@ def test_tp_strategy_materializes_successfully_on_all_three_backends() -> None:
 
 
 def test_backend_framework_is_written_into_the_dgd_spec() -> None:
-    """Regression test: spec.backendFramework was never set anywhere in
-    this pipeline (confirmed by checking every base template, patch_dgd_
-    manifest, the legacy materialize_dgd() finalization it delegates to,
-    and every CONFIG_MODIFIERS file). A real DynamoGraphDeploymentCandidate
-    prints its Backend column from .spec.backendFramework directly --
-    without this, every DGDC materialized here would show a blank column.
-    """
+    """A real DynamoGraphDeploymentCandidate reads its Backend column from
+    .spec.backendFramework directly."""
     for backend in ("vllm", "sglang", "trtllm"):
         candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, backend=backend, strategy="tp")
         result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
