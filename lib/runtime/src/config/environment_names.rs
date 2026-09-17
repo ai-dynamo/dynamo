@@ -434,9 +434,8 @@ pub mod llm {
     ///   in one ordered stream, so reasoning that followed a tool call stays after it
     ///   instead of being hoisted to the front and fused with the first thought.
     ///
-    /// Accepted values are `auto`, `v1`, `v2`, and future parser generations. Explicit
-    /// generations fail during preprocessor construction when the configured family has
-    /// no compatible parser.
+    /// Accepted values are `auto`, `v1`, and `v2`. Explicit generations fail during
+    /// preprocessor construction when the configured family has no compatible parser.
     pub const DYN_PARSER_VERSION: &str = "DYN_PARSER_VERSION";
 
     /// Rollback lever for incremental guided-tool-call streaming.

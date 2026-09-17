@@ -32,7 +32,6 @@
 //! to preserve, so every [`UnifiedParserEvent`] becomes its own chunk.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
 
 use async_stream::stream;
 use dynamo_parsers::tool_calling::ToolDefinition;
@@ -73,13 +72,10 @@ const QWEN3_REASONING_PARSER: &str = "qwen3";
 /// Whether the v2 parser path is selected. An unset version selects the newest
 /// compatible parser generation.
 fn parsers_v2_enabled() -> bool {
-    static ENABLED: LazyLock<bool> = LazyLock::new(|| {
-        !matches!(
-            crate::protocols::openai::chat_completions::tool_parser_v2::selected_version(),
-            Ok(crate::protocols::openai::chat_completions::tool_parser_v2::ParserVersion::V1)
-        )
-    });
-    *ENABLED
+    matches!(
+        crate::protocols::openai::chat_completions::tool_parser_v2::selected_version(),
+        Ok(dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2)
+    )
 }
 
 /// The unified family this parser pair names, ignoring whether it is switched on.

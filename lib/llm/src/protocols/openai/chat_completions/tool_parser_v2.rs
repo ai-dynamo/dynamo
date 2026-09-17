@@ -21,7 +21,7 @@ use dynamo_protocols::types::{
     ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk, FinishReason,
     FunctionCallStream, FunctionType,
 };
-use dynamo_runtime::config::environment_names::llm as env_llm;
+use dynamo_runtime::config::{ParserVersion, environment_names::llm as env_llm, parser_version};
 use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -60,11 +60,10 @@ pub(crate) fn selected_version() -> anyhow::Result<ParserVersion> {
 }
 
 pub(crate) fn enabled() -> bool {
-    match selected_version() {
-        Ok(ParserVersion::Auto | ParserVersion::V2) => true,
-        Ok(ParserVersion::V1) => false,
-        Err(error) => panic!("invalid {}: {error:#}", env_llm::DYN_PARSER_VERSION),
-    }
+    matches!(
+        selected_version(),
+        Ok(ParserVersion::Auto | ParserVersion::V2)
+    )
 }
 
 /// Validate that an explicit parser generation exists for the configured family.
@@ -117,29 +116,6 @@ fn validate_parser_version_for_mode(
             }
             Ok(())
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ParserVersion {
-    Auto,
-    V1,
-    V2,
-}
-
-fn parser_version() -> anyhow::Result<ParserVersion> {
-    match std::env::var(env_llm::DYN_PARSER_VERSION).as_deref() {
-        Ok("v1") => Ok(ParserVersion::V1),
-        Ok("v2") => Ok(ParserVersion::V2),
-        Ok("auto") | Err(std::env::VarError::NotPresent) => Ok(ParserVersion::Auto),
-        Ok(value) => anyhow::bail!(
-            "{} must be unset, auto, v1, or v2; got {value:?}",
-            env_llm::DYN_PARSER_VERSION
-        ),
-        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!(
-            "{} must be unset, auto, v1, or v2; value is not valid UTF-8",
-            env_llm::DYN_PARSER_VERSION
-        ),
     }
 }
 

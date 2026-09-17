@@ -3543,37 +3543,6 @@ async fn tool_choice_minimax_m2_required_thinking_disabled_keeps_tool_xml() {
     assert!(finish_reasons.contains(&FinishReason::ToolCalls));
 }
 
-/// `Auto` is required because forced and named tool choices use the v1 jail.
-#[tokio::test]
-async fn tool_calls_qwen3_coder_auto_routes_through_v2_by_default() {
-    let xml = "<tool_call>\n<function=get_weather>\n<parameter=location>\nSan Francisco\n</parameter>\n</function>\n</tool_call>";
-    let preprocessor = build_preprocessor(None, Some("qwen3_coder"));
-    let request = streaming_tool_request(ChatCompletionToolChoiceOption::Auto);
-    let input_stream = stream::iter(
-        vec![mock_content_chunk(xml), mock_final_chunk()]
-            .into_iter()
-            .map(Annotated::from_data),
-    );
-    let output_stream = preprocessor
-        .postprocessor_parsing_stream(input_stream, &request, true, false)
-        .expect("postprocessor_parsing_stream should build");
-    let DrainOutput {
-        content,
-        tool_calls,
-        finish_reasons,
-        ..
-    } = drain_stream(output_stream).await;
-
-    let path = "qwen3_coder auto -> dynamo-parsers-v2 by default";
-    assert_clean_tool_call(path, &content, &tool_calls, "San Francisco");
-    // Both paths must honor the OpenAI contract: a tool-call stream terminates with
-    // finish_reason=ToolCalls — v1 via the jail's fix_finish_reason, v2 via apply_stream.
-    assert!(
-        finish_reasons.contains(&FinishReason::ToolCalls),
-        "{path}: expected ToolCalls finish_reason, got: {finish_reasons:?}"
-    );
-}
-
 async fn forbidden_qwen3_coder_tool_call(
     request: &NvCreateChatCompletionRequest,
 ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {

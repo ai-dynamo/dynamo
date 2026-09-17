@@ -78,6 +78,15 @@ async fn parse_complete_tool_output(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
 )> {
+    let version = super::tool_parser_v2::selected_version()?;
+    if version == dynamo_runtime::config::ParserVersion::V2
+        && !super::tool_parser_v2::supports_family(parser)
+    {
+        anyhow::bail!(
+            "{}=v2 was requested, but parser {parser:?} has no compatible v2 implementation",
+            dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION
+        );
+    }
     if constraint.installs_guided_json() {
         match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
             Ok(calls) => return Ok((calls, Some(String::new()))),
@@ -95,13 +104,16 @@ async fn parse_complete_tool_output(
         }
     }
 
-    let result =
-        if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
-            super::tool_parser_v2::parse_complete(content, None, parser)
-                .map(|(calls, normal)| (calls, Some(normal)))
-        } else {
-            try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
-        };
+    let result = if matches!(
+        version,
+        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2
+    ) && super::tool_parser_v2::supports_family(parser)
+    {
+        super::tool_parser_v2::parse_complete(content, None, parser)
+            .map(|(calls, normal)| (calls, Some(normal)))
+    } else {
+        try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+    };
 
     result.and_then(|(calls, normal)| {
         let filtered = filter_calls_to_forced_tool_name(calls, constraint);

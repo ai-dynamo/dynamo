@@ -320,7 +320,7 @@ impl RuntimeConfig {
     /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         use environment_names::runtime::system as env_system;
-        Self::reject_deprecated_parser_env()?;
+        Self::validate_parser_env()?;
         // Check for deprecated environment variables
         if std::env::var(env_system::DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS).is_ok() {
             tracing::warn!(
@@ -343,14 +343,14 @@ impl RuntimeConfig {
         Ok(config)
     }
 
-    pub fn reject_deprecated_parser_env() -> Result<()> {
-        use environment_names::llm::DYN_PARSER_VERSION;
-
+    pub(crate) fn validate_parser_env() -> Result<()> {
         if std::env::var_os("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2").is_some() {
             anyhow::bail!(
-                "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. The latest compatible parser is selected by default. Set {DYN_PARSER_VERSION}=v1 or v2 to select an explicit parser generation."
+                "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported; remove it. The latest compatible parser is selected by default. Set {}=v1 or v2 to select an explicit parser generation.",
+                environment_names::llm::DYN_PARSER_VERSION
             );
         }
+        parser_version()?;
         Ok(())
     }
 
@@ -411,6 +411,28 @@ impl RuntimeConfig {
     /// Create a new default runtime configuration
     pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
         self.tokio_builder().build()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Parser generation selected for this process.
+pub enum ParserVersion {
+    Auto,
+    V1,
+    V2,
+}
+
+/// Parse `DYN_PARSER_VERSION`, defaulting to automatic compatible selection.
+pub fn parser_version() -> Result<ParserVersion> {
+    let name = environment_names::llm::DYN_PARSER_VERSION;
+    match std::env::var(name).as_deref() {
+        Ok("v1") => Ok(ParserVersion::V1),
+        Ok("v2") => Ok(ParserVersion::V2),
+        Ok("auto") | Err(std::env::VarError::NotPresent) => Ok(ParserVersion::Auto),
+        Ok(value) => anyhow::bail!("{name} must be unset, auto, v1, or v2; got {value:?}"),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must be unset, auto, v1, or v2; value is not valid UTF-8")
+        }
     }
 }
 
@@ -580,7 +602,7 @@ mod tests {
     #[test]
     fn test_rejects_deprecated_v2_parser_env() {
         temp_env::with_var("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2", Some("1"), || {
-            let error = RuntimeConfig::reject_deprecated_parser_env()
+            let error = RuntimeConfig::validate_parser_env()
                 .expect_err("the deprecated parser switch must be rejected");
             assert!(
                 error
@@ -589,6 +611,59 @@ mod tests {
             );
             assert!(error.to_string().contains("DYN_PARSER_VERSION"));
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rejects_non_unicode_deprecated_v2_parser_env() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        temp_env::with_var(
+            "DYN_ENABLE_EXPERIMENTAL_PARSERS_V2",
+            Some(OsString::from_vec(vec![0xff])),
+            || {
+                let error = RuntimeConfig::validate_parser_env()
+                    .expect_err("the deprecated parser switch must be rejected by presence");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is no longer supported")
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_rejects_invalid_parser_version() {
+        temp_env::with_var("DYN_PARSER_VERSION", Some("v3"), || {
+            let error = RuntimeConfig::from_settings()
+                .expect_err("an unavailable parser version must be rejected at startup");
+            assert_eq!(
+                error.to_string(),
+                "DYN_PARSER_VERSION must be unset, auto, v1, or v2; got \"v3\""
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_rejects_non_unicode_parser_version() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        temp_env::with_var(
+            "DYN_PARSER_VERSION",
+            Some(OsString::from_vec(vec![0xff])),
+            || {
+                let error = RuntimeConfig::from_settings()
+                    .expect_err("a non-Unicode parser version must be rejected at startup");
+                assert_eq!(
+                    error.to_string(),
+                    "DYN_PARSER_VERSION must be unset, auto, v1, or v2; value is not valid UTF-8"
+                );
+            },
+        );
     }
 
     /// The builder given to the pyo3 bridge must carry the configured worker count.
