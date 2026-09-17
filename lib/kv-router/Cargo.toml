@@ -96,6 +96,10 @@ name = "tracking_hash"
 harness = false
 
 [[bench]]
+name = "indexer_delegate"
+harness = false
+
+[[bench]]
 name = "worker_selection"
 harness = false
 

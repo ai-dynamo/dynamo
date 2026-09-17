@@ -9,11 +9,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::services::indexer::registry::WorkerRegistry;
 use dynamo_kv_router::services::selection::KvEventIngress;
+use dynamo_kv_router::{SessionPrefixIndexer, WorkerType};
 use dynamo_runtime::component::Endpoint;
 use tokio_util::sync::CancellationToken;
 
@@ -36,6 +36,7 @@ pub(crate) struct RuntimeIngressArgs<'a> {
     pub kv_event_source_requirement: KvEventSourceRequirement,
     pub kv_source_membership: Option<KvSourceMembershipWatch>,
     pub cancellation_token: CancellationToken,
+    pub session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
 pub(crate) struct RuntimeIngress {
@@ -57,6 +58,7 @@ impl RuntimeIngress {
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token,
+            session_prefix_index,
         } = args;
         let component = endpoint.component();
         let indexer = if cache_required {
@@ -66,6 +68,7 @@ impl RuntimeIngress {
                 block_size,
                 model_name,
                 cancellation_token.child_token(),
+                session_prefix_index,
             )
             .await?
         } else {

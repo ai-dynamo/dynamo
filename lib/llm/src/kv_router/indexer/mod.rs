@@ -9,7 +9,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use dynamo_kv_router::{
-    ConcurrentRadixTreeCompressed,
+    ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     approx::PruneConfig,
     config::{ApproximateCachePolicyKind, KvRouterConfig},
     indexer::{
@@ -25,6 +25,7 @@ pub(crate) use dynamo_kv_router::indexer::TieredMatchDetails;
 pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
 pub use dynamo_kv_router::services::indexer::backend::{Indexer, RemotePrimary, SideIndexer};
 pub(crate) use dynamo_kv_router::services::indexer::recording::ApproximateRequestLease;
+use dynamo_kv_router::services::indexer::session_updates::SessionUpdateSender;
 use dynamo_runtime::component::Component;
 pub(crate) use ingress::{RuntimeIngress, RuntimeIngressArgs};
 use tokio_util::sync::CancellationToken;
@@ -90,6 +91,7 @@ pub(crate) async fn build(
     block_size: u32,
     model_name: Option<&str>,
     cancellation_token: CancellationToken,
+    session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 ) -> Result<Indexer> {
     let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
     if approximate_policy == ResolvedApproximatePrimaryPolicy::Disabled {
@@ -131,7 +133,7 @@ pub(crate) async fn build(
             cancellation_token.child_token(),
         );
         return Ok(Indexer::Remote {
-            primary: Arc::new(remote) as Arc<dyn RemotePrimary>,
+            primary: Arc::new(remote),
             approx,
             primary_records_routing_decisions: !kv_router_config.use_kv_events,
         });
@@ -153,16 +155,19 @@ pub(crate) async fn build(
             ApproximateRetentionConfig::Ttl(prune_config)
         };
         if kv_router_config.router_event_threads > 1 {
-            return Ok(Indexer::Concurrent {
-                primary: Arc::new(
-                    ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
-                        ConcurrentRadixTreeCompressed::new(),
-                        kv_router_config.router_event_threads as usize,
-                        block_size,
-                        Some(kv_indexer_metrics.clone()),
-                        Some(retention),
-                    ),
+            let primary = Arc::new(
+                ThreadPoolIndexer::new_with_metrics_and_approximate_retention(
+                    ConcurrentRadixTreeCompressed::new(),
+                    kv_router_config.router_event_threads as usize,
+                    block_size,
+                    Some(kv_indexer_metrics.clone()),
+                    Some(retention),
                 ),
+            );
+            let session_updates = session_prefix_index
+                .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
+            return Ok(Indexer::Concurrent {
+                primary,
                 lower_tier: LowerTierIndexers::new_with_metrics(
                     kv_router_config.router_event_threads as usize,
                     block_size,
@@ -170,16 +175,20 @@ pub(crate) async fn build(
                 ),
                 approx: None,
                 primary_records_routing_decisions: true,
+                session_updates,
             });
         }
 
+        let primary = KvIndexer::new_with_approximate_retention(
+            cancellation_token.child_token(),
+            block_size,
+            kv_indexer_metrics.clone(),
+            Some(retention),
+        );
+        let session_updates = session_prefix_index
+            .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
         return Ok(Indexer::Single {
-            primary: KvIndexer::new_with_approximate_retention(
-                cancellation_token.child_token(),
-                block_size,
-                kv_indexer_metrics.clone(),
-                Some(retention),
-            ),
+            primary,
             lower_tier: LowerTierIndexers::new_with_metrics(
                 1,
                 block_size,
@@ -187,6 +196,7 @@ pub(crate) async fn build(
             ),
             approx: None,
             primary_records_routing_decisions: true,
+            session_updates,
         });
     }
 
@@ -199,13 +209,16 @@ pub(crate) async fn build(
 
     if kv_router_config.router_event_threads > 1 {
         let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+        let primary = Arc::new(ThreadPoolIndexer::new_with_metrics(
+            ConcurrentRadixTreeCompressed::new(),
+            kv_router_config.router_event_threads as usize,
+            block_size,
+            Some(kv_indexer_metrics.clone()),
+        ));
+        let session_updates = session_prefix_index
+            .map(|index| SessionUpdateSender::for_concurrent(index, Arc::clone(&primary)));
         return Ok(Indexer::Concurrent {
-            primary: Arc::new(ThreadPoolIndexer::new_with_metrics(
-                ConcurrentRadixTreeCompressed::new(),
-                kv_router_config.router_event_threads as usize,
-                block_size,
-                Some(kv_indexer_metrics.clone()),
-            )),
+            primary,
             lower_tier: LowerTierIndexers::new_with_metrics(
                 kv_router_config.router_event_threads as usize,
                 block_size,
@@ -213,20 +226,25 @@ pub(crate) async fn build(
             ),
             approx,
             primary_records_routing_decisions: false,
+            session_updates,
         });
     }
 
     let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
+    let primary = KvIndexer::new_with_pruning(
+        cancellation_token.child_token(),
+        block_size,
+        kv_indexer_metrics.clone(),
+        None,
+    );
+    let session_updates =
+        session_prefix_index.map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
     Ok(Indexer::Single {
-        primary: KvIndexer::new_with_pruning(
-            cancellation_token.child_token(),
-            block_size,
-            kv_indexer_metrics.clone(),
-            None,
-        ),
+        primary,
         lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics)),
         approx,
         primary_records_routing_decisions: false,
+        session_updates,
     })
 }
 

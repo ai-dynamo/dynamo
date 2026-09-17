@@ -19,11 +19,12 @@ use crate::indexer::{
     record_unsupported_residency_event,
 };
 use crate::protocols::{
-    DpRank, KvCacheEventData, LocalBlockHash, OverlapScores, ResidencyProjection,
-    ResidencyRoutingSnapshot, RouterEvent, WorkerId, WorkerWithDpRank,
+    DpRank, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, OverlapScores,
+    ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, WorkerId, WorkerWithDpRank,
 };
 
 use super::lookup::{HashInput, merge_side_or_warn};
+use super::session_updates::{SessionMutation, SessionUpdateSender};
 
 /// How the device-tier primary is populated.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,12 +253,14 @@ pub enum Indexer {
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
+        session_updates: Option<SessionUpdateSender>,
     },
     Concurrent {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
         primary_records_routing_decisions: bool,
+        session_updates: Option<SessionUpdateSender>,
     },
     /// Primary served by another process. Lower tiers are that process's
     /// concern and arrive in its tiered response; only the side indexer is
@@ -441,6 +444,21 @@ impl Indexer {
                 return Ok(());
             }
         };
+        let session_update = if targets_primary {
+            match self {
+                Self::Single {
+                    session_updates, ..
+                }
+                | Self::Concurrent {
+                    session_updates, ..
+                } => session_updates.as_ref().and_then(|sender| {
+                    SessionMutation::from_event(&event).map(|mutation| (sender.clone(), mutation))
+                }),
+                Self::Remote { .. } | Self::None => None,
+            }
+        } else {
+            None
+        };
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Self::Single {
@@ -493,7 +511,66 @@ impl Indexer {
                 tracing::trace!("Dropping KV event: no local primary indexer");
             }
         }
+        if let Some((sender, update)) = session_update {
+            sender.enqueue(update)?;
+        }
         Ok(())
+    }
+
+    pub fn session_residency_version(&self, worker: WorkerWithDpRank) -> Option<u64> {
+        match self {
+            Self::Single {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => session_updates
+                .as_ref()
+                .map(|sender| sender.residency_version(worker)),
+            Self::Remote { .. } | Self::None => None,
+        }
+    }
+
+    pub fn enqueue_session_match(
+        &self,
+        session_id: &str,
+        worker: WorkerWithDpRank,
+        matched_hash: ExternalSequenceBlockHash,
+        residency_version: u64,
+    ) -> Result<(), KvRouterError> {
+        match self {
+            Self::Single {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => match session_updates {
+                Some(sender) => sender.enqueue(SessionMutation::Matched {
+                    worker,
+                    session_id: session_id.to_owned(),
+                    matched_hash,
+                    residency_version,
+                }),
+                None => Ok(()),
+            },
+            Self::Remote { .. } | Self::None => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    async fn flush_session_updates(&self) -> Result<(), KvRouterError> {
+        match self {
+            Self::Single {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => match session_updates {
+                Some(updates) => updates.flush().await,
+                None => Ok(()),
+            },
+            Self::Remote { .. } | Self::None => Ok(()),
+        }
     }
 
     /// Cold-reset one logical rank and wait until every local tier (and the
@@ -552,6 +629,21 @@ impl Indexer {
                 }
             }
             Self::None => {}
+        }
+        let session_updates = match self {
+            Self::Single {
+                session_updates, ..
+            }
+            | Self::Concurrent {
+                session_updates, ..
+            } => session_updates.as_ref(),
+            Self::Remote { .. } | Self::None => None,
+        };
+        if let Some(session_updates) = session_updates {
+            session_updates.enqueue(SessionMutation::Cleared {
+                worker: WorkerWithDpRank::new(worker_id, dp_rank),
+            })?;
+            session_updates.flush().await?;
         }
         Ok(())
     }
@@ -1524,6 +1616,7 @@ pub fn create_indexer_with_policy(
             lower_tier: LowerTierIndexers::new(num_threads, block_size),
             approx,
             primary_records_routing_decisions,
+            session_updates: None,
         }
     } else {
         Indexer::Single {
@@ -1536,6 +1629,314 @@ pub fn create_indexer_with_policy(
             lower_tier: LowerTierIndexers::new(1, block_size),
             approx,
             primary_records_routing_decisions,
+            session_updates: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::test_util::store_event;
+    use super::*;
+    use crate::SessionPrefixIndexer;
+    use crate::protocols::{KvCacheEvent, KvCacheRemoveData, StorageTier};
+
+    fn make_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
+        let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
+        let primary = KvIndexer::new(
+            CancellationToken::new(),
+            4,
+            Arc::new(KvIndexerMetrics::new_unregistered()),
+        );
+        let indexer = Indexer::Single {
+            primary: primary.clone(),
+            lower_tier: LowerTierIndexers::new(1, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: Some(SessionUpdateSender::for_legacy(
+                Arc::clone(&session_prefix_index),
+                primary,
+            )),
+        };
+        (indexer, session_prefix_index)
+    }
+
+    fn make_concurrent_session_test_indexer() -> (Indexer, Arc<SessionPrefixIndexer>) {
+        let session_prefix_index = Arc::new(SessionPrefixIndexer::new());
+        let primary = Arc::new(ThreadPoolIndexer::new(
+            ConcurrentRadixTreeCompressed::new(),
+            2,
+            4,
+        ));
+        let indexer = Indexer::Concurrent {
+            primary: Arc::clone(&primary),
+            lower_tier: LowerTierIndexers::new(2, 4),
+            approx: None,
+            primary_records_routing_decisions: false,
+            session_updates: Some(SessionUpdateSender::for_concurrent(
+                Arc::clone(&session_prefix_index),
+                primary,
+            )),
+        };
+        (indexer, session_prefix_index)
+    }
+
+    pub(crate) fn remove_event(
+        worker_id: u64,
+        dp_rank: u32,
+        event_id: u64,
+        block_hashes: Vec<ExternalSequenceBlockHash>,
+    ) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank,
+            },
+        )
+    }
+
+    pub(crate) fn clear_event(worker_id: u64, dp_rank: u32, event_id: u64) -> RouterEvent {
+        RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Cleared,
+                dp_rank,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn only_attributed_stored_events_update_session_lineage() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+
+        indexer
+            .try_apply_event(
+                store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-1"),
+            )
+            .await
+            .unwrap();
+        indexer
+            .try_apply_event(store_event(7, 0, 2, &[], &[51], StorageTier::HostPinned))
+            .await
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", WorkerWithDpRank::new(7, 0), None)
+                .unwrap(),
+            vec![vec![ExternalSequenceBlockHash(41)]]
+        );
+        assert_eq!(session_prefix_index.session_count(), 1);
+        assert_eq!(session_prefix_index.node_count(), 1);
+        assert!(
+            session_prefix_index
+                .get_node_from_hash(ExternalSequenceBlockHash(51))
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_events_update_worker_local_session_frontiers_in_order() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let first_worker = WorkerWithDpRank::new(7, 0);
+        let second_worker = WorkerWithDpRank::new(8, 0);
+        let first_store = store_event(7, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+            .with_session_id("session-1");
+        let block_hashes = match &first_store.event.data {
+            KvCacheEventData::Stored(stored) => stored
+                .blocks
+                .iter()
+                .map(|block| block.block_hash)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        let second_store = store_event(8, 0, 1, &[], &[41, 42, 43], StorageTier::Device)
+            .with_session_id("session-1");
+
+        indexer.try_apply_event(first_store).await.unwrap();
+        indexer.try_apply_event(second_store).await.unwrap();
+        indexer
+            .try_apply_event(remove_event(7, 0, 2, block_hashes[1..].to_vec()))
+            .await
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", first_worker, None)
+                .unwrap(),
+            vec![vec![block_hashes[0]]]
+        );
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", second_worker, None)
+                .unwrap(),
+            vec![block_hashes.clone()]
+        );
+
+        indexer.try_apply_event(clear_event(8, 0, 2)).await.unwrap();
+        indexer.flush_session_updates().await.unwrap();
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", second_worker, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            session_prefix_index.node_count(),
+            3,
+            "physical removal preserves logical topology"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_physical_events_precede_session_updates() {
+        let (indexer, session_prefix_index) = make_concurrent_session_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let store =
+            store_event(7, 0, 1, &[], &[41, 42], StorageTier::Device).with_session_id("session-1");
+        let block_hashes = match &store.event.data {
+            KvCacheEventData::Stored(stored) => stored
+                .blocks
+                .iter()
+                .map(|block| block.block_hash)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+
+        indexer.try_apply_event(store).await.unwrap();
+        indexer
+            .try_apply_event(remove_event(7, 0, 2, vec![block_hashes[1]]))
+            .await
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", worker, None)
+                .unwrap(),
+            vec![vec![block_hashes[0]]]
+        );
+    }
+
+    #[tokio::test]
+    async fn route_match_is_ordered_after_pending_remove_and_store() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let initial_store =
+            store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-old");
+        let block_hash = match &initial_store.event.data {
+            KvCacheEventData::Stored(stored) => stored.blocks[0].block_hash,
+            _ => unreachable!(),
+        };
+
+        indexer.try_apply_event(initial_store).await.unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        indexer
+            .try_apply_event(remove_event(7, 0, 2, vec![block_hash]))
+            .await
+            .unwrap();
+        indexer
+            .try_apply_event(
+                store_event(7, 0, 3, &[], &[41], StorageTier::Device).with_session_id("session-a"),
+            )
+            .await
+            .unwrap();
+        let residency_version = indexer.session_residency_version(worker).unwrap();
+        indexer
+            .enqueue_session_match("session-b", worker, block_hash, residency_version)
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        for session in ["session-a", "session-b"] {
+            assert_eq!(
+                session_prefix_index
+                    .get_session_block_lineage(session, worker, None)
+                    .unwrap(),
+                vec![vec![block_hash]]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_route_match_does_not_undo_removal() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let store =
+            store_event(7, 0, 1, &[], &[41], StorageTier::Device).with_session_id("session-b");
+        let block_hash = match &store.event.data {
+            KvCacheEventData::Stored(stored) => stored.blocks[0].block_hash,
+            _ => unreachable!(),
+        };
+
+        indexer.try_apply_event(store).await.unwrap();
+        indexer.flush_session_updates().await.unwrap();
+        indexer
+            .try_apply_event(remove_event(7, 0, 2, vec![block_hash]))
+            .await
+            .unwrap();
+        // The physical removal is queued, but its ordered session mutation has
+        // not run yet. A match observed in this window must still be invalidated.
+        let stale_version = indexer.session_residency_version(worker).unwrap();
+        indexer
+            .enqueue_session_match("session-b", worker, block_hash, stale_version)
+            .unwrap();
+        indexer.flush_session_updates().await.unwrap();
+
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("session-b", worker, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn rank_reset_waits_for_session_frontier_clear() {
+        let (indexer, session_prefix_index) = make_session_test_indexer();
+        let reset_rank = WorkerWithDpRank::new(7, 0);
+        let retained_rank = WorkerWithDpRank::new(7, 1);
+        let block_hash = ExternalSequenceBlockHash(41);
+
+        for rank in [reset_rank, retained_rank] {
+            indexer
+                .try_apply_event(
+                    store_event(
+                        rank.worker_id,
+                        rank.dp_rank,
+                        1,
+                        &[],
+                        &[block_hash.0],
+                        StorageTier::Device,
+                    )
+                    .with_session_id("session-1"),
+                )
+                .await
+                .unwrap();
+        }
+        indexer.flush_session_updates().await.unwrap();
+
+        indexer
+            .reset_worker_dp_rank_and_wait(reset_rank.worker_id, reset_rank.dp_rank)
+            .await
+            .unwrap();
+
+        assert!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", reset_rank, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            session_prefix_index
+                .get_session_block_lineage("session-1", retained_rank, None)
+                .unwrap(),
+            vec![vec![block_hash]]
+        );
     }
 }

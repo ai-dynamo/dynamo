@@ -114,6 +114,15 @@ impl Indexer {
             .await
     }
 
+    pub async fn find_primary_match_details_ref(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<MatchDetails, KvRouterError> {
+        self.lookup_pipeline()
+            .find_primary_match_details(HashInput::Borrowed(sequence))
+            .await
+    }
+
     /// Device match details plus per-tier hits, with router-hint chain retention
     /// disabled. Use [`Indexer::find_tiered_matches_with_options`] to request
     /// retention through the capability-gated variant.
@@ -439,6 +448,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            session_updates: None,
         }
     }
 
@@ -452,6 +462,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
             primary_records_routing_decisions: false,
+            session_updates: None,
         }
     }
 
@@ -468,6 +479,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
             primary_records_routing_decisions: true,
+            session_updates: None,
         }
     }
 
@@ -889,6 +901,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
         assert!(indexer.records_routing_decisions());
 
@@ -1023,6 +1036,7 @@ mod tests {
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
 
         let primary_worker = WorkerWithDpRank::new(10, 0);

@@ -11,8 +11,8 @@ use std::{
 use anyhow::Result;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
-    SharedKvCache, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
-    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
+    TrackingHashScope, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -586,6 +586,8 @@ pub struct KvRouter {
     shared_cache: Option<Arc<dyn SharedKvCache>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+    /// Optional session-aware logical prefix index.
+    session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 }
 
 fn resolve_tracking_model_name(
@@ -724,6 +726,7 @@ impl KvRouter {
             KvEventSourceRequirement::derive(worker_role, &kv_router_config);
         let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
             || kv_router_config.serve_indexer
+            || kv_router_config.enable_session_prefix_index
             || matches!(
                 kv_event_source_requirement,
                 KvEventSourceRequirement::ConditionalDisaggDecodeCache
@@ -734,6 +737,9 @@ impl KvRouter {
         let cancellation_token = parent_token.child_token();
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
+        let session_prefix_index = kv_router_config
+            .enable_session_prefix_index
+            .then(|| Arc::new(SessionPrefixIndexer::new()));
 
         let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
             endpoint: &endpoint,
@@ -746,6 +752,7 @@ impl KvRouter {
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token: cancellation_token.clone(),
+            session_prefix_index: session_prefix_index.clone(),
         })
         .await?;
         let indexer = ingress.indexer().clone();
@@ -854,6 +861,7 @@ impl KvRouter {
             shared_cache,
             endpoint_registration: None,
             teardown_task_guard: None,
+            session_prefix_index,
         })
     }
 
@@ -1217,6 +1225,14 @@ impl KvRouter {
             anyhow::bail!("context_id must be provided if update_states is true");
         }
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission);
+        let session_index_context = if is_admitted_routing {
+            self.session_prefix_index
+                .as_ref()
+                .and(session_context.as_ref())
+                .map(|session| session.session_id().to_owned())
+        } else {
+            None
+        };
         let core_admission = match admission {
             FindBestMatchAdmission::WithAdmission if update_states => SelectionAdmission::Lease {
                 request_id: context_id.expect("validated above").to_string(),
@@ -1259,7 +1275,7 @@ impl KvRouter {
                 routing_constraints,
                 admission: core_admission,
                 track_active_blocks: self.kv_router_config.router_track_active_blocks,
-                return_routing_hashes,
+                return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
                 replay_id: None,
             })
             .await;
@@ -1298,7 +1314,64 @@ impl KvRouter {
         if update_states && is_admitted_routing && booking.is_none() {
             anyhow::bail!("booked selection returned no booking handle");
         }
-        let routing_hashes = routing_hashes.map(RoutingDecisionHashes::from_local_hashes);
+        // Indexing failures never affect routing.
+        if let (Some(session_id), Some(block_hashes)) =
+            (session_index_context.as_ref(), routing_hashes.as_deref())
+            && let Some(mut residency_version) =
+                self.indexer.session_residency_version(response.best_worker)
+        {
+            for attempt in 0..2 {
+                match self
+                    .indexer
+                    .find_primary_match_details_ref(block_hashes)
+                    .await
+                {
+                    Ok(match_details) => {
+                        let Some(current_version) =
+                            self.indexer.session_residency_version(response.best_worker)
+                        else {
+                            break;
+                        };
+                        if current_version != residency_version {
+                            if attempt == 0 {
+                                residency_version = current_version;
+                                continue;
+                            }
+                            tracing::debug!(
+                                worker = ?response.best_worker,
+                                "skipping session prefix match during concurrent KV eviction"
+                            );
+                            break;
+                        }
+
+                        if let Some(matched_hash) = match_details
+                            .last_matched_hashes
+                            .get(&response.best_worker)
+                            .copied()
+                            && let Err(err) = self.indexer.enqueue_session_match(
+                                session_id,
+                                response.best_worker,
+                                matched_hash,
+                                residency_version,
+                            )
+                        {
+                            tracing::warn!(%err, "failed to record session prefix match");
+                        }
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "failed to refresh session prefix match");
+                        break;
+                    }
+                }
+            }
+        }
+
+        let routing_hashes = if return_routing_hashes {
+            routing_hashes.map(RoutingDecisionHashes::from_local_hashes)
+        } else {
+            None
+        };
         let overlap_blocks = response.effective_overlap_blocks.round() as u32;
 
         // Routing metrics stay scoped to requests admitted by this call.
@@ -2313,6 +2386,139 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[rstest::rstest]
+    #[case::single(1)]
+    #[case::concurrent(2)]
+    #[tokio::test]
+    async fn session_prefix_tracking_survives_shared_core_selection(#[case] threads: u32) {
+        use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, StorageTier};
+
+        let router = make_router(
+            "session-prefix-core",
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+            2,
+            SelectionPolicySource::Registry,
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            KvRouterConfig {
+                enable_session_prefix_index: true,
+                router_event_threads: threads,
+                router_temperature: 0.0,
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let session_index = router.session_prefix_index.as_ref().unwrap();
+        let worker = WorkerWithDpRank::new(7, 0);
+        let tokens = [11, 12, 13, 14];
+        let hashes = compute_block_hash_for_seq(&tokens, 2, BlockHashOptions::default());
+        let expected = RoutingDecisionHashes::from_local_hashes(hashes.clone())
+            .sequence_hashes
+            .into_iter()
+            .map(ExternalSequenceBlockHash)
+            .collect::<Vec<_>>();
+        router
+            .indexer
+            .try_apply_event(
+                indexer::test_util::store_event(
+                    7,
+                    0,
+                    1,
+                    &[],
+                    &hashes.iter().map(|hash| hash.0).collect::<Vec<_>>(),
+                    StorageTier::Device,
+                )
+                .with_session_id("seed"),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while session_index
+                .get_session_block_lineage("seed", worker, None)
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        for (session, admission, update_states, return_hashes) in [
+            (
+                "advisory",
+                FindBestMatchAdmission::WithoutAdmission,
+                false,
+                false,
+            ),
+            ("query", FindBestMatchAdmission::WithAdmission, false, false),
+            ("booked", FindBestMatchAdmission::WithAdmission, true, true),
+        ] {
+            let selected = router
+                .find_best_match_details_with_policy_class_inner(
+                    Some(session),
+                    &tokens,
+                    None,
+                    None,
+                    update_states,
+                    return_hashes,
+                    None,
+                    None,
+                    0.0,
+                    0,
+                    None,
+                    Some(dynamo_kv_router::SessionContext::new(
+                        session.into(),
+                        None,
+                        None,
+                        None,
+                    )),
+                    None,
+                    None,
+                    None,
+                    None,
+                    RoutingConstraints::default(),
+                    admission,
+                )
+                .await
+                .unwrap();
+            let FindBestMatchOutcome::Routed { routing_hashes, .. } = selected.outcome else {
+                panic!("session request should route");
+            };
+            assert_eq!(routing_hashes.is_some(), return_hashes);
+        }
+        // The last match observes all earlier queued session updates.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while session_index
+                .get_session_block_lineage("booked", worker, None)
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for session in ["seed", "query", "booked"] {
+            assert_eq!(
+                session_index
+                    .get_session_block_lineage(session, worker, None)
+                    .unwrap(),
+                vec![expected.clone()],
+            );
+        }
+        assert!(
+            session_index
+                .get_session_block_lineage("advisory", worker, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(session_index.session_count(), 3);
     }
 
     /// Advisory best-match query with default routing arguments.
