@@ -120,7 +120,7 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 # enabled. This prevents per-request dictionary construction for deployments
 # that do not collect the funnel.
 CACHE_REUSE_METRICS_ENABLED: Final[bool] = os.environ.get(
-    "DYN_CACHE_REUSE_METRICS_ENABLED", ""
+    "DYN_ROUTER_CACHE_REUSE_METRICS", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 # Marker set by the Rust conditional-disagg bypass path. When present on a
