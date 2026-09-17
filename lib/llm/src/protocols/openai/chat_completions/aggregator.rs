@@ -78,6 +78,19 @@ async fn parse_complete_tool_output(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
 )> {
+    let parser = match parser {
+        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+        parser => parser,
+    };
+    let version = super::tool_parser_v2::selected_version()?;
+    if version == dynamo_runtime::config::ParserVersion::V2
+        && !super::tool_parser_v2::supports_family(parser)
+    {
+        anyhow::bail!(
+            "{}=v2 was requested, but parser {parser:?} has no compatible v2 implementation",
+            dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION
+        );
+    }
     if constraint.installs_guided_json() {
         match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
             Ok(calls) => return Ok((calls, Some(String::new()))),

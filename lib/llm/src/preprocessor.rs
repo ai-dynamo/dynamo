@@ -4874,6 +4874,7 @@ impl OpenAIPreprocessor {
         use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
 
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
+        let selected_version = tool_parser_v2::selected_version()?;
         if let Some(family) = tool_parser_v2::unified_family(
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
@@ -4929,8 +4930,38 @@ impl OpenAIPreprocessor {
                 None | Some(ChatCompletionToolChoiceOption::Auto)
             )
         {
-            Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()))
-        } else {
+            if selected_version == dynamo_runtime::config::ParserVersion::V2
+                && effective_tool_call_parser.is_none()
+            {
+                anyhow::bail!(
+                    "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
+                    env_llm::DYN_PARSER_VERSION
+                );
+            }
+
+            if let Some(parser_name) = effective_tool_call_parser.as_deref()
+                && tool_parser_v2::enabled()
+                && tool_parser_v2::supports_family(parser_name)
+            {
+                if !uses_tool_call_structural_tag
+                    && matches!(
+                        request.inner.tool_choice.as_ref(),
+                        None | Some(ChatCompletionToolChoiceOption::Auto)
+                    )
+                {
+                    let parser_name = match parser_name {
+                        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+                        parser_name => parser_name,
+                    };
+                    return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
+                }
+                if selected_version == dynamo_runtime::config::ParserVersion::V2 {
+                    anyhow::bail!(
+                        "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
+                        env_llm::DYN_PARSER_VERSION
+                    );
+                }
+            }
             Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
         }
     }

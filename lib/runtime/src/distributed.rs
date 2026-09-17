@@ -843,6 +843,37 @@ impl DistributedRuntime {
     }
 }
 
+#[cfg(test)]
+mod parser_env_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn distributed_runtime_rejects_invalid_parser_version() {
+        const CHILD: &str = "DYNAMO_DISTRIBUTED_RUNTIME_PARSER_ENV_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "distributed::parser_env_tests::distributed_runtime_rejects_invalid_parser_version",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env(crate::config::environment_names::llm::DYN_PARSER_VERSION, "v3")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let runtime = Runtime::from_current().unwrap();
+        let error = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .expect_err("invalid parser configuration must fail runtime construction");
+        assert!(error.to_string().contains("DYN_PARSER_VERSION"));
+    }
+}
+
 /// Selects which discovery backend to use and, for KV store backends, which KV store.
 #[derive(Clone, Debug)]
 pub enum DiscoveryBackend {
