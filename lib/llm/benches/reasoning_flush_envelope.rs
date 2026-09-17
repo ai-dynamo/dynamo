@@ -60,8 +60,6 @@ fn content_chunk(
     })
 }
 
-/// A reasoning turn: a `<think>` block, an answer, then a terminal chunk — the
-/// ordinary shape, with nothing malformed and nothing left buffered.
 fn reasoning_stream_chunks(chunks: usize) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
     let mut out = Vec::with_capacity(chunks + 2);
     out.push(content_chunk("<think>", Some(Role::Assistant)));

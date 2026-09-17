@@ -6914,7 +6914,12 @@ impl OpenAIPreprocessor {
             let mut pending_usage = None;
             let mut transport_failed = false;
             while let Some(response) = stream.next().await {
-                if response.error.is_some() {
+                // `is_error()` keys on the annotation event, and an error event
+                // is valid without a `DynamoError` payload — `cloned_error`
+                // falls back to `comment`, or to "unknown error". Testing
+                // `error.is_some()` would miss that shape and release the held
+                // trailer after the error as if the turn had succeeded.
+                if response.is_error() {
                     transport_failed = true;
                     pending_usage = None;
                     yield response;
@@ -8147,11 +8152,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn held_usage_trailer_is_discarded_after_an_event_only_error() {
+        // An error annotation is valid without a `DynamoError` payload:
+        // `is_error()` keys on `event == "error"`, and `cloned_error` falls back
+        // to `comment` or to "unknown error". A held usage trailer must be
+        // dropped for that shape too, or the stream reports a successful trailer
+        // after a terminal error.
+        let mut usage_chunk = reasoning_flush_chunk(None, false);
+        {
+            let data = usage_chunk.data.as_mut().unwrap();
+            data.inner.choices.clear();
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 7,
+                total_tokens: 12,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+        }
+        // event-only: `error` is deliberately None.
+        let event_only_error: Annotated<NvCreateChatCompletionStreamResponse> = Annotated {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: Some(vec!["backend went away".to_string()]),
+            error: None,
+        };
+        assert!(
+            event_only_error.is_error() && event_only_error.error.is_none(),
+            "fixture must be an event-only error"
+        );
+
+        let output = OpenAIPreprocessor::hold_usage_until_stream_end(stream::iter(vec![
+            reasoning_flush_chunk(Some("Answer"), false),
+            usage_chunk,
+            event_only_error,
+        ]))
+        .collect::<Vec<_>>()
+        .await;
+
+        assert!(
+            output.iter().any(|response| response.is_error()),
+            "the error must still reach the client"
+        );
+        assert!(
+            !output.iter().any(|response| {
+                response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.inner.choices.is_empty() && data.inner.usage.is_some())
+            }),
+            "a held usage trailer must not be emitted after a terminal error: {:?}",
+            output
+                .iter()
+                .map(|response| response.data.is_some())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
     async fn reasoning_eof_flush_does_not_double_emit_on_the_deferral_path() {
-        // Nemotron-style `force_nonempty_content` requests already flushed at
-        // EOF. Widening the gate must not make them flush twice — `drained` and
-        // `parser_finished` are what prevent the terminal-chunk drain and the
-        // end-of-stream fallback from both emitting the same bytes.
+        // Terminal-chunk draining and the EOF fallback must stay mutually
+        // exclusive; `drained` and `parser_finished` are what enforce that.
         let output = run_reasoning_flush(
             vec![
                 reasoning_flush_chunk(Some("reasoned answer"), false),
