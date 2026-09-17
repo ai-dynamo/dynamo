@@ -7739,7 +7739,13 @@ mod tests {
             return;
         }
 
-        assert!(LifecycleTrace::from_request_id("knob-probe".to_string()).is_enabled());
+        assert!(
+            LifecycleTrace::from_request_id_with_role(
+                "knob-probe",
+                dynamo_runtime::telemetry::LifecycleOperationRole::Worker,
+            )
+            .is_enabled()
+        );
         let mut context = PipelineContext::new(());
         assert!(!preprocessing_lifecycle(&context).is_enabled());
         context.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(false));

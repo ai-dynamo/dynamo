@@ -788,9 +788,8 @@ fn register_model<'p>(
     let lifecycle_role = match worker_type_unwrapped {
         WorkerType::Prefill => rs::telemetry::LifecycleOperationRole::Prefill,
         WorkerType::Decode => rs::telemetry::LifecycleOperationRole::Decode,
-        WorkerType::Encode | WorkerType::Aggregated => {
-            rs::telemetry::LifecycleOperationRole::Worker
-        }
+        WorkerType::Encode => rs::telemetry::LifecycleOperationRole::Encode,
+        WorkerType::Aggregated => rs::telemetry::LifecycleOperationRole::Worker,
     };
     endpoint
         .inner

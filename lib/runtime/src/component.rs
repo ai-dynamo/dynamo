@@ -453,26 +453,12 @@ impl Endpoint {
         &self,
         role: crate::telemetry::LifecycleOperationRole,
     ) -> anyhow::Result<()> {
-        if let Some(existing) = self.lifecycle_operation_role.get() {
-            anyhow::ensure!(
-                *existing == role,
-                "endpoint {} lifecycle role is already {existing:?}, cannot set it to {role:?}",
-                self.id()
-            );
-            return Ok(());
-        }
-
-        if self.lifecycle_operation_role.set(role).is_err() {
-            let existing = self
-                .lifecycle_operation_role
-                .get()
-                .expect("lifecycle role was concurrently initialized");
-            anyhow::ensure!(
-                *existing == role,
-                "endpoint {} lifecycle role is already {existing:?}, cannot set it to {role:?}",
-                self.id()
-            );
-        }
+        let existing = *self.lifecycle_operation_role.get_or_init(|| role);
+        anyhow::ensure!(
+            existing == role,
+            "endpoint {} lifecycle role is already {existing:?}, cannot set it to {role:?}",
+            self.id()
+        );
         Ok(())
     }
 

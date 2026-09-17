@@ -161,12 +161,10 @@ fn classify_lifecycle_response(
     let mut guard = TaskLifecycleTerminal(Some(terminal));
     async move {
         let response = response.await;
-        if let Err(error) = &response {
-            guard
-                .0
-                .as_ref()
-                .expect("terminal guard is armed")
-                .finish(terminal_outcome_for_error_response(error));
+        if let Err(error) = &response
+            && let Some(terminal) = &guard.0
+        {
+            terminal.finish(terminal_outcome_for_error_response(error));
         }
         // A successful SSE response owns its own cancellation guard; unary
         // success has already been recorded by the request task.
@@ -389,6 +387,26 @@ fn responses_error_code(status_code: StatusCode) -> &'static str {
         StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
         code if code.is_client_error() => "invalid_prompt",
         _ => "server_error",
+    }
+}
+
+fn stream_error_type(error: &dynamo_runtime::error::DynamoError) -> ErrorType {
+    use super::metrics::{
+        request_was_cancelled, request_was_rejected, request_was_timed_out, request_was_unavailable,
+    };
+
+    if request_was_timed_out(error) {
+        ErrorType::ResponseTimeout
+    } else if find_queue_rejection_in_chain(error).is_some() || request_was_rejected(error) {
+        ErrorType::Overload
+    } else if request_was_unavailable(error) {
+        ErrorType::Unavailable
+    } else if find_invalid_argument_in_chain(error).is_some() {
+        ErrorType::Validation
+    } else if request_was_cancelled(error) {
+        ErrorType::Cancelled
+    } else {
+        ErrorType::Internal
     }
 }
 
@@ -3606,15 +3624,9 @@ async fn chat_completions(
                 events.clear();
                 let semantic_error =
                     set_stream_semantic_error(&response, &producer_error_signal);
-                let response_error_type = response
-                    .error
-                    .as_ref()
-                    .map(|error| {
-                        extract_error_type_from_response(&ErrorMessage::from_anyhow(
-                            anyhow::Error::new(error.clone()),
-                            "Backend stream error",
-                        ))
-                    });
+                // Conversion consumes the typed error. Preserve only its cheap,
+                // borrowed classification before it becomes an SSE error string.
+                let response_error_type = response.error.as_ref().map(stream_error_type);
 
                 // When parallel_tool_calls is false, surface only the first tool call
                 // Keep index 0 and drop any higher indexes
@@ -8735,6 +8747,48 @@ mod tests {
                 TerminalOutcome::TimedOut,
                 "{error_type:?}",
             );
+        }
+    }
+
+    #[test]
+    fn lifecycle_stream_error_classifies_borrowed_typed_errors() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
+
+        for (kind, expected) in [
+            (DynamoErrorType::ResponseTimeout, ErrorType::ResponseTimeout),
+            (
+                DynamoErrorType::ConnectionTimeout,
+                ErrorType::ResponseTimeout,
+            ),
+            (
+                DynamoErrorType::Backend(BackendError::ResponseTimeout),
+                ErrorType::ResponseTimeout,
+            ),
+            (
+                DynamoErrorType::Backend(BackendError::ConnectionTimeout),
+                ErrorType::ResponseTimeout,
+            ),
+            (DynamoErrorType::Cancelled, ErrorType::Cancelled),
+            (
+                DynamoErrorType::Backend(BackendError::Cancelled),
+                ErrorType::Cancelled,
+            ),
+            (DynamoErrorType::ResourceExhausted, ErrorType::Overload),
+            (DynamoErrorType::WorkerOverloaded, ErrorType::Overload),
+            (DynamoErrorType::Unavailable, ErrorType::Unavailable),
+            (DynamoErrorType::WorkerUnavailable, ErrorType::Unavailable),
+            (DynamoErrorType::InvalidArgument, ErrorType::Validation),
+            (
+                DynamoErrorType::Backend(BackendError::InvalidArgument),
+                ErrorType::Validation,
+            ),
+            (DynamoErrorType::Internal, ErrorType::Internal),
+        ] {
+            let error = DynamoError::builder()
+                .error_type(kind)
+                .message("typed failure")
+                .build();
+            assert_eq!(stream_error_type(&error), expected, "{kind:?}");
         }
     }
 

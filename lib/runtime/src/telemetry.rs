@@ -36,10 +36,11 @@ static INSTANCE_ID: OnceLock<String> = OnceLock::new();
 static LIFECYCLE_ENABLED: OnceLock<bool> = OnceLock::new();
 static LIFECYCLE_MODE: OnceLock<&'static str> = OnceLock::new();
 
-/// Operation owner used to distinguish the frontend and P/D worker waves.
+/// Operation owner used to distinguish the frontend and worker stages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleOperationRole {
     Frontend,
+    Encode,
     Prefill,
     Decode,
     Worker,
@@ -49,6 +50,7 @@ impl LifecycleOperationRole {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Frontend => "frontend",
+            Self::Encode => "encode",
             Self::Prefill => "prefill",
             Self::Decode => "decode",
             Self::Worker => "worker",
@@ -130,9 +132,11 @@ pub enum LifecycleStage {
     WorkerAdmission,
     RequestDispatch,
     WorkerOperation,
+    WorkerOperationEncode,
     WorkerOperationPrefill,
     WorkerOperationDecode,
     ResponseStreaming,
+    ResponseStreamingEncode,
     ResponseStreamingPrefill,
     ResponseStreamingDecode,
     ResponseStreamingWorker,
@@ -147,9 +151,11 @@ impl LifecycleStage {
             Self::WorkerAdmission
             | Self::RequestDispatch
             | Self::WorkerOperation
+            | Self::WorkerOperationEncode
             | Self::WorkerOperationPrefill
             | Self::WorkerOperationDecode
             | Self::ResponseStreamingPrefill
+            | Self::ResponseStreamingEncode
             | Self::ResponseStreamingDecode
             | Self::ResponseStreamingWorker => "worker",
         }
@@ -159,7 +165,7 @@ impl LifecycleStage {
         macro_rules! common_span {
             ($name:literal) => {
                 tracing::info_span!(
-                    target: "dynamo.request_lifecycle", $name,
+                    target: LIFECYCLE_TARGET, $name,
                     "dynamo.request.id" = %identity.request_id,
                     "dynamo.operation.id" = %identity.operation_id,
                     "dynamo.operation.role" = identity.role.as_str(),
@@ -176,7 +182,7 @@ impl LifecycleStage {
         // Each branch is a static callsite, allowing inexpensive target filtering.
         match self {
             Self::RequestLifecycle => tracing::info_span!(
-                target: "dynamo.request_lifecycle", "request.lifecycle",
+                target: LIFECYCLE_TARGET, "request.lifecycle",
                 "dynamo.request.id" = %identity.request_id,
                 "dynamo.operation.id" = %identity.operation_id,
                 "dynamo.operation.role" = identity.role.as_str(),
@@ -196,9 +202,11 @@ impl LifecycleStage {
             Self::WorkerAdmission => common_span!("worker.admission"),
             Self::RequestDispatch => common_span!("request.dispatch"),
             Self::WorkerOperation => common_span!("worker.operation"),
+            Self::WorkerOperationEncode => common_span!("worker.operation.encode"),
             Self::WorkerOperationPrefill => common_span!("worker.operation.prefill"),
             Self::WorkerOperationDecode => common_span!("worker.operation.decode"),
             Self::ResponseStreaming => common_span!("response.streaming"),
+            Self::ResponseStreamingEncode => common_span!("response.streaming.encode"),
             Self::ResponseStreamingPrefill => common_span!("response.streaming.prefill"),
             Self::ResponseStreamingDecode => common_span!("response.streaming.decode"),
             Self::ResponseStreamingWorker => common_span!("response.streaming.worker"),
@@ -214,39 +222,16 @@ impl LifecycleStage {
 pub struct LifecycleTrace {
     enabled: bool,
     identity: Option<LifecycleIdentity>,
-    session: Option<(String, &'static str)>,
 }
 
 impl LifecycleTrace {
-    /// Capture the lifecycle feature gate for a newly-created request.
-    pub fn from_environment() -> Self {
-        Self::from_environment_with_role(LifecycleOperationRole::Worker)
-    }
-
-    /// Capture worker state using the role configured once at worker startup.
-    pub fn from_environment_with_role(role: LifecycleOperationRole) -> Self {
-        if lifecycle_tracing_enabled() {
-            Self::enabled(LifecycleIdentity::new(None, role), None)
-        } else {
-            Self::disabled()
-        }
-    }
-
     /// Construct capture state explicitly, primarily for integrations and tests.
     pub fn new(enabled: bool) -> Self {
         if enabled {
-            Self::enabled(
-                LifecycleIdentity::new(None, LifecycleOperationRole::Worker),
-                None,
-            )
+            Self::enabled(LifecycleIdentity::new(None, LifecycleOperationRole::Worker))
         } else {
             Self::disabled()
         }
-    }
-
-    /// Construct worker capture state using the request ID propagated at ingress.
-    pub fn from_request_id(request_id: impl Into<String>) -> Self {
-        Self::from_request_id_with_role(request_id, LifecycleOperationRole::Worker)
     }
 
     /// Construct worker capture state with its statically configured role.
@@ -257,23 +242,7 @@ impl LifecycleTrace {
         if !lifecycle_tracing_enabled() {
             return Self::disabled();
         }
-        Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role), None)
-    }
-
-    /// Construct frontend capture state and root-only session identity.
-    pub fn frontend_request(request_id: impl Into<String>, session_id: Option<String>) -> Self {
-        if !lifecycle_tracing_enabled() {
-            return Self::disabled();
-        }
-        let request_id = request_id.into();
-        let session = match session_id.filter(|id| !id.is_empty()) {
-            Some(id) => (id, "agent_context"),
-            None => (request_id.clone(), "request_id_fallback"),
-        };
-        Self::enabled(
-            LifecycleIdentity::new(Some(request_id), LifecycleOperationRole::Frontend),
-            Some(session),
-        )
+        Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role))
     }
 
     /// Construct a frontend trace before request parsing has made a session ID available.
@@ -283,17 +252,16 @@ impl LifecycleTrace {
 
     fn with_role(request_id: impl Into<String>, role: LifecycleOperationRole) -> Self {
         if lifecycle_tracing_enabled() {
-            Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role), None)
+            Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role))
         } else {
             Self::disabled()
         }
     }
 
-    fn enabled(identity: LifecycleIdentity, session: Option<(String, &'static str)>) -> Self {
+    fn enabled(identity: LifecycleIdentity) -> Self {
         Self {
             enabled: true,
             identity: Some(identity),
-            session,
         }
     }
 
@@ -301,7 +269,6 @@ impl LifecycleTrace {
         Self {
             enabled: false,
             identity: None,
-            session: None,
         }
     }
 
@@ -314,10 +281,6 @@ impl LifecycleTrace {
     #[must_use]
     pub fn start_request(&self) -> LifecycleRequest {
         let span = self.start(LifecycleStage::RequestLifecycle);
-        if let Some((session_id, source)) = &self.session {
-            span.record("dynamo.session.id", session_id.as_str());
-            span.record("dynamo.session.source", *source);
-        }
         LifecycleRequest {
             span: span.clone(),
             terminal: LifecycleTerminal(Arc::new(TerminalState {
@@ -453,6 +416,7 @@ fn instance_id() -> &'static str {
 
 fn worker_operation_stage(role: Option<LifecycleOperationRole>) -> LifecycleStage {
     match role {
+        Some(LifecycleOperationRole::Encode) => LifecycleStage::WorkerOperationEncode,
         Some(LifecycleOperationRole::Prefill) => LifecycleStage::WorkerOperationPrefill,
         Some(LifecycleOperationRole::Decode) => LifecycleStage::WorkerOperationDecode,
         _ => LifecycleStage::WorkerOperation,
@@ -461,6 +425,7 @@ fn worker_operation_stage(role: Option<LifecycleOperationRole>) -> LifecycleStag
 
 fn worker_response_streaming_stage(role: Option<LifecycleOperationRole>) -> LifecycleStage {
     match role {
+        Some(LifecycleOperationRole::Encode) => LifecycleStage::ResponseStreamingEncode,
         Some(LifecycleOperationRole::Prefill) => LifecycleStage::ResponseStreamingPrefill,
         Some(LifecycleOperationRole::Decode) => LifecycleStage::ResponseStreamingDecode,
         _ => LifecycleStage::ResponseStreamingWorker,
@@ -484,6 +449,20 @@ mod tests {
     struct CapturedSpan {
         name: &'static str,
         target: &'static str,
+        role: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct RoleCapture(Option<String>);
+
+    impl tracing::field::Visit for RoleCapture {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "dynamo.operation.role" {
+                self.0 = Some(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
     }
 
     struct CaptureLayer(Arc<Mutex<Vec<CapturedSpan>>>);
@@ -496,9 +475,12 @@ mod tests {
             _ctx: Context<'_, S>,
         ) {
             let metadata = attrs.metadata();
+            let mut role = RoleCapture::default();
+            attrs.record(&mut role);
             self.0.lock().unwrap().push(CapturedSpan {
                 name: metadata.name(),
                 target: metadata.target(),
+                role: role.0,
             });
         }
     }
@@ -515,6 +497,7 @@ mod tests {
             [CapturedSpan {
                 name: "request.preprocessing",
                 target: LIFECYCLE_TARGET,
+                role: Some("worker".to_string()),
             }]
         );
     }
@@ -538,13 +521,14 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
         for role in [
             LifecycleOperationRole::Worker,
+            LifecycleOperationRole::Encode,
             LifecycleOperationRole::Prefill,
             LifecycleOperationRole::Decode,
         ] {
-            let trace = LifecycleTrace::enabled(
-                LifecycleIdentity::new(Some("request-id".to_string()), role),
-                None,
-            );
+            let trace = LifecycleTrace::enabled(LifecycleIdentity::new(
+                Some("request-id".to_string()),
+                role,
+            ));
             let _operation = trace.start_worker_operation();
             let _streaming = trace.start_worker_response_streaming();
         }
@@ -552,10 +536,28 @@ mod tests {
         let captured = captured.lock().unwrap();
         assert!(captured.iter().all(|span| span.target == LIFECYCLE_TARGET));
         assert_eq!(
+            captured
+                .iter()
+                .map(|span| span.role.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("worker"),
+                Some("worker"),
+                Some("encode"),
+                Some("encode"),
+                Some("prefill"),
+                Some("prefill"),
+                Some("decode"),
+                Some("decode")
+            ]
+        );
+        assert_eq!(
             captured.iter().map(|span| span.name).collect::<Vec<_>>(),
             [
                 "worker.operation",
                 "response.streaming.worker",
+                "worker.operation.encode",
+                "response.streaming.encode",
                 "worker.operation.prefill",
                 "response.streaming.prefill",
                 "worker.operation.decode",
