@@ -27,16 +27,20 @@
 # errors in the derived count (dp-1), and 2 -> 4 -> 2 alone never exercises a single-step
 # grow or shrink.
 #
-# dp=3 requires the fixture to carry redundant experts. EPLB distributes
-# (n_routed_experts + num_redundant_experts) evenly across EP ranks, and with tp=1 the EP
-# size is the dp size. DeepSeek-V2-Lite has 64 routed experts, which divides by 2 and 4 but
-# not 3, so num_redundant_experts=0 rejects dp=3 with "EPLB currently only supports even
-# distribution of experts across ranks". moe_elastic_ep_demo.yaml therefore sets 8
-# redundant, giving 72 slots: 72/2=36, 72/3=24, 72/4=18.
+# On the EPLB expert count: the steps here go through scale_elastic_ep, which derives its
+# own redundancy per step to keep the per-rank slot count fixed, so the widths below do not
+# themselves require a particular num_redundant_experts. What does require it is the
+# LAUNCH: moe_elastic_ep_demo.yaml declares its width up front, and EPLB rejects a launch
+# where (n_routed_experts + num_redundant_experts) does not divide the EP size -- which at
+# tp=1 is the dp size.
 #
-# If you change the model or the redundant-expert count, recompute this: every dp in the
-# sequence must divide the total slot count, or the step fails for a reason that has
-# nothing to do with the operator.
+# DeepSeek-V2-Lite has 64 routed experts, so the fixture carries 8 redundant for 72 slots
+# (72/2=36, 72/3=24, 72/4=18). That keeps every width in this sequence valid as a starting
+# width too, so you can set --data-parallel-size to any of them and cold-start there.
+#
+# If you change the model or the redundant count, recompute it: launching at a width that
+# does not divide fails with "EPLB currently only supports even distribution of experts
+# across ranks", which has nothing to do with the operator.
 #
 # Usage:
 #   ./run_elastic_ep_scale_test.sh [NAMESPACE] [DEPLOYMENT_NAME]

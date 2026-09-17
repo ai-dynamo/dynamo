@@ -143,17 +143,27 @@ spec:
             - --enable-elastic-ep
             - --enable-eplb
             # EPLB distributes (n_routed_experts + num_redundant_experts) evenly across the
-            # EP ranks and rejects any width where that does not divide. With tp=1 the EP
-            # size IS the data-parallel size, so this value decides which dp values the
-            # deployment can be scaled to at all.
+            # EP ranks. With tp=1 the EP size IS the data-parallel size, so this value
+            # decides which dp values the engine can LAUNCH at.
             #
-            # DeepSeek-V2-Lite has 64 routed experts. 8 redundant gives 72 slots, which
-            # divides by 2, 3 and 4 (36 / 24 / 18) -- so the scale test can walk
-            # dp = 2 -> 3 -> 4 -> 3 -> 2 -> 4 -> 2 end to end.
+            # It binds at launch, not when scaling. scale_elastic_ep derives its own
+            # redundancy per step to keep the per-rank slot count fixed, so a running engine
+            # can reach widths it could not have started at -- which is why
+            # bare_multinode_elastic_ep.yaml walks dp=2->3->4 at 0 redundant (#8183).
+            # THIS deployment declares its width up front: the operator reads
+            # --data-parallel-size to size the follower set, so the engine cold-starts at
+            # the declared width and the launch rule is the one that applies.
             #
-            # Do not set this to 0 to "keep it simple": 64 divides by 2 and 4 but not 3,
-            # which silently removes dp=3 from every scaling path and makes it look like a
-            # model limitation rather than a choice made here.
+            # DeepSeek-V2-Lite has 64 routed experts (the 2 shared experts are replicated
+            # per rank, not sharded, so they do not count). 8 redundant gives 72 slots,
+            # which divides by 2, 3 and 4 -- 36 / 24 / 18.
+            #
+            # Do not set this to 0 to "keep it simple". 64 divides by 2 and 4 but not 3, so
+            # raising --data-parallel-size to 3 would fail at startup with
+            #   ValueError: EPLB currently only supports even distribution of experts
+            #               across ranks. Got 64 experts and 3 EP ranks.
+            # Verified on gb300: this fixture at dp=3 with 0 redundant CrashLoops on exactly
+            # that error, and at 8 redundant it starts and serves.
             - --eplb-config.num_redundant_experts
             - "8"
             - --no-enable-prefix-caching
