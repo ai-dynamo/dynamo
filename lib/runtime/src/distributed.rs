@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use derive_getters::Dissolve;
 use figment::error;
 use std::collections::HashMap;
@@ -374,8 +374,7 @@ impl DistributedRuntime {
                         .expect("System status server info should only be set once");
                 }
                 Err(e) => {
-                    distributed_runtime.runtime.shutdown();
-                    return Err(e.context("system status server startup failed"));
+                    tracing::error!("System status server startup failed: {e}");
                 }
             }
         } else {
