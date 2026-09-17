@@ -10,16 +10,16 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
-use dynamo_kv_router::protocols::{HEADER_POLICY_CLASS, RoutingConstraints, WorkerWithDpRank};
+use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::QueueRejection;
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::prefill_router::PrefillReservation;
+use dynamo_llm::kv_router::prefill_router::{PrefillError, PrefillReservation};
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -33,6 +33,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
+use crate::envoy_helpers::find_header;
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
@@ -147,13 +148,14 @@ static SHED_RETRY_AFTER_SECS: LazyLock<Option<u64>> = LazyLock::new(|| {
 
 /// Resolve the router policy-class family for a request from its headers.
 ///
-/// [`HEADER_POLICY_CLASS`] names a family directly, matching the selection
-/// service so both entry points read the same wire name. Otherwise a retry marker
-/// selects the retry family: the router pairs whichever family it gets with an
-/// uncached-ISL bucket it derives itself, so the header only carries what the
-/// gateway knows and the router cannot see. `None` lets the router apply its
-/// configured default family, which keeps deployments without a policy config
-/// unchanged.
+/// The `x-dynamo-meta-policy-class` request-metadata header names a family
+/// directly; it is read through [`requested_policy_class`] so this picker and
+/// the standalone one share one wire name, one parser and one size guard.
+/// Otherwise a retry marker selects the retry family: the router pairs
+/// whichever family it gets with an uncached-ISL bucket it derives itself, so
+/// the header only carries what the gateway knows and the router cannot see.
+/// `None` lets the router apply its configured default family, which keeps
+/// deployments without a policy config unchanged.
 ///
 /// Trust model: this header is a self-declared classification hint, not an
 /// authorization decision, and it is intentionally not in
@@ -171,14 +173,11 @@ static SHED_RETRY_AFTER_SECS: LazyLock<Option<u64>> = LazyLock::new(|| {
 /// (2) Deployments that must enforce (not just advise) classification should
 /// have the gateway overwrite this header at the edge with a
 /// `RequestHeaderModifier` `set` action rather than relying on caller input.
-fn policy_class_from_headers(headers: &[(String, String)]) -> Option<String> {
-    if let Some(class) = find_header(headers, HEADER_POLICY_CLASS)
-        .map(str::trim)
-        .filter(|class| !class.is_empty())
-    {
-        return Some(class.to_owned());
+fn policy_class_from_headers(headers: &[(String, String)]) -> Result<Option<String>, PickError> {
+    if let Some(class) = requested_policy_class(headers)?.filter(|class| !class.is_empty()) {
+        return Ok(Some(class));
     }
-    is_retry_attempt(headers).then(|| POLICY_FAMILY_RETRY.to_string())
+    Ok(is_retry_attempt(headers).then(|| POLICY_FAMILY_RETRY.to_string()))
 }
 
 fn is_retry_attempt(headers: &[(String, String)]) -> bool {
@@ -225,18 +224,18 @@ pub enum DecodeRouteOutcome {
     },
 }
 
-/// Result of a prefill routing query. As with [`DecodeRouteOutcome`], a
-/// policy-class refusal is a deliberate shed, not a signal to fall back to
-/// aggregated routing the way other prefill errors are.
-#[derive(Debug)]
-pub enum PrefillRouteOutcome {
-    Routed {
-        worker_id: u64,
-        dp_rank: Option<u32>,
-    },
-    Shed {
-        rejection: QueueRejection,
-    },
+/// Recover the typed policy-class refusal from a prefill reservation failure.
+///
+/// As with [`DecodeRouteOutcome`], a refusal is a deliberate shed, not a signal
+/// to fall back to aggregated routing the way other prefill errors are. The
+/// reservation API returns one `anyhow::Error` for every failure, so the
+/// distinction has to be recovered from the chain.
+fn prefill_queue_rejection(err: &anyhow::Error) -> Option<&QueueRejection> {
+    err.chain()
+        .find_map(|cause| match cause.downcast_ref::<PrefillError>() {
+            Some(PrefillError::QueueRejected(rejection)) => Some(rejection),
+            _ => None,
+        })
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -607,6 +606,10 @@ impl Router {
     /// queues under. `routing_constraints` carries the request's
     /// required/preferred taints (lifted from `nvext.routing_constraints`); a
     /// hard `required_taints` mismatch excludes a worker from selection.
+    ///
+    /// Every failure is an `Err`, but they are not equivalent: a policy-class
+    /// refusal stays recoverable through [`prefill_queue_rejection`] so the
+    /// caller can shed instead of falling back to aggregated routing.
     #[expect(clippy::too_many_arguments)]
     pub async fn route_prefill(
         &self,
@@ -633,7 +636,7 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
+            .context("Prefill reservation failed")
     }
 
     /// Route a decode request.
@@ -645,8 +648,9 @@ impl Router {
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
     ///
-    /// A per-class queue limit rejection surfaces as an error here, the same as
-    /// it does for the integrated frontend.
+    /// A per-class queue rejection comes back as [`DecodeRouteOutcome::Shed`],
+    /// not an `Err`: the class explicitly refused rather than queued, so the
+    /// caller sheds with a retry hint instead of reporting a routing failure.
     #[allow(clippy::too_many_arguments)]
     pub async fn route_decode(
         &self,
@@ -658,7 +662,7 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(WorkerWithDpRank, u32)> {
+    ) -> Result<DecodeRouteOutcome> {
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -684,16 +688,19 @@ impl Router {
             .await
             .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
 
-        match outcome {
+        Ok(match outcome {
             FindBestMatchOutcome::Routed {
                 worker,
                 overlap_blocks,
                 ..
-            } => Ok((worker, overlap_blocks)),
+            } => DecodeRouteOutcome::Routed {
+                worker,
+                overlap_blocks,
+            },
             FindBestMatchOutcome::QueueRejected { rejection } => {
-                Err(anyhow::anyhow!("Decode query failed: {rejection}"))
+                DecodeRouteOutcome::Shed { rejection }
             }
-        }
+        })
     }
 
     /// Register a request with the decode router for bookkeeping.
@@ -1582,17 +1589,18 @@ impl EndpointPicker for Router {
             .tokenize(body_str, &req.headers)
             .await
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
-        let policy_class = requested_policy_class(&req.headers)?;
-        let reservation_id = Uuid::new_v4().to_string();
-
         // Derived once and reused for both routers below, so a retry marked on
         // the request lands on the same class whichever stage evaluates it.
-        let policy_class = policy_class_from_headers(&req.headers);
+        let policy_class = policy_class_from_headers(&req.headers)?;
+        let reservation_id = Uuid::new_v4().to_string();
 
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
-        // router has been deactivated), fall back to aggregated routing.
+        // router has been deactivated), fall back to aggregated routing. A policy-class
+        // refusal is different: the class exists and explicitly said no, so that
+        // sheds the whole request rather than silently falling back to
+        // aggregated and defeating the shed.
         let prefill_booking = self
             .route_prefill(
                 &format!("epp-prefill/{reservation_id}"),
@@ -1608,16 +1616,21 @@ impl EndpointPicker for Router {
 
         let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
+            // The refusal happens before anything is booked, so a shed here
+            // leaves no reservation to roll back.
+            Err(e) => match prefill_queue_rejection(e) {
+                Some(rejection) => return Err(shed_error("prefill", rejection.clone())),
+                None => {
+                    tracing::debug!(
+                        error = %e,
+                        "Prefill routing failed; falling back to aggregated mode"
+                    );
+                    false
+                }
+            },
         };
 
-        let (decode_worker, _overlap) = self
+        let decode_outcome = self
             .route_decode(
                 &tokens,
                 is_disaggregated,
@@ -1807,18 +1820,26 @@ impl EndpointPicker for Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::protocols::HEADER_POLICY_CLASS;
     use k8s_openapi::api::core::v1::Pod;
 
     use std::sync::{Arc, atomic::Ordering};
+
+    /// Every policy-class case below is a well-formed header set, so the
+    /// metadata-size guard never fires; unwrapping keeps the assertions about
+    /// the classification itself.
+    fn policy_class(headers: &[(String, String)]) -> Option<String> {
+        policy_class_from_headers(headers).expect("well-formed metadata headers")
+    }
 
     /// No retry marker means no explicit class, which leaves the router on its
     /// configured default family. Deployments with no policy config must be
     /// unaffected by per-class shedding.
     #[test]
     fn absent_retry_marker_leaves_policy_class_unset() {
-        assert_eq!(policy_class_from_headers(&[]), None);
+        assert_eq!(policy_class(&[]), None);
         assert_eq!(
-            policy_class_from_headers(&[(HEADER_RETRY_ATTEMPT.to_string(), "0".to_string())]),
+            policy_class(&[(HEADER_RETRY_ATTEMPT.to_string(), "0".to_string())]),
             None
         );
     }
@@ -1829,10 +1850,7 @@ mod tests {
     fn retry_marker_selects_the_retry_family() {
         let headers = vec![(HEADER_RETRY_ATTEMPT.to_string(), "1".to_string())];
 
-        assert_eq!(
-            policy_class_from_headers(&headers).as_deref(),
-            Some(POLICY_FAMILY_RETRY)
-        );
+        assert_eq!(policy_class(&headers).as_deref(), Some(POLICY_FAMILY_RETRY));
     }
 
     /// Envoy counts the first attempt as 1, so treating any non-empty value as a
@@ -1842,11 +1860,8 @@ mod tests {
         let first = vec![(HEADER_ENVOY_ATTEMPT_COUNT.to_string(), "1".to_string())];
         let second = vec![(HEADER_ENVOY_ATTEMPT_COUNT.to_string(), "2".to_string())];
 
-        assert_eq!(policy_class_from_headers(&first), None);
-        assert_eq!(
-            policy_class_from_headers(&second).as_deref(),
-            Some(POLICY_FAMILY_RETRY)
-        );
+        assert_eq!(policy_class(&first), None);
+        assert_eq!(policy_class(&second).as_deref(), Some(POLICY_FAMILY_RETRY));
     }
 
     /// Documents the trust model (see `policy_class_from_headers`): the caller's
@@ -1860,10 +1875,7 @@ mod tests {
             (HEADER_RETRY_ATTEMPT.to_string(), "2".to_string()),
         ];
 
-        assert_eq!(
-            policy_class_from_headers(&headers).as_deref(),
-            Some("batch")
-        );
+        assert_eq!(policy_class(&headers).as_deref(), Some("batch"));
     }
 
     fn sample_rejection(policy_class: &str) -> QueueRejection {

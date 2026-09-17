@@ -972,22 +972,12 @@ impl ExtProcError {
 
     fn from_pick_error(e: PickError) -> Self {
         match e {
-            PickError::NoEndpoints => Self {
-                status_code: StatusCode::ServiceUnavailable,
-                message: e.to_string(),
-            },
-            PickError::RoutingFailed(msg) => Self {
-                status_code: StatusCode::ServiceUnavailable,
-                message: msg,
-            },
-            PickError::InvalidRequest(msg) => Self {
-                status_code: StatusCode::BadRequest,
-                message: msg,
-            },
-            PickError::MetadataHeadersTooLarge(err) => Self {
-                status_code: StatusCode::RequestHeaderFieldsTooLarge,
-                message: err.to_string(),
-            },
+            PickError::NoEndpoints => Self::new(StatusCode::ServiceUnavailable, e.to_string()),
+            PickError::RoutingFailed(msg) => Self::new(StatusCode::ServiceUnavailable, msg),
+            PickError::InvalidRequest(msg) => Self::new(StatusCode::BadRequest, msg),
+            PickError::MetadataHeadersTooLarge(err) => {
+                Self::new(StatusCode::RequestHeaderFieldsTooLarge, err.to_string())
+            }
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
             // client-safe variant message; the detailed cause is logged upstream.
