@@ -37,6 +37,7 @@ from .sglang_prepost import (
     create_parsers,
     detect_force_reasoning_from_template,
     preprocess_chat_request,
+    resolve_skip_special_tokens,
 )
 from .thinking import runtime_default_thinking_mode
 from .utils import (
@@ -415,6 +416,22 @@ def _build_dynamo_preproc(
     nvext_routing = (
         _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
     )
+    if isinstance(nvext, dict):
+        # Preserve explicit targets for the router to resolve in the current phase.
+        # Rank zero is a valid target; only absent/null values are omitted.
+        worker_routing = {
+            key: nvext[key]
+            for key in (
+                "backend_instance_id",
+                "decode_worker_id",
+                "prefill_worker_id",
+                "dp_rank",
+                "prefill_dp_rank",
+            )
+            if nvext.get(key) is not None
+        }
+        if worker_routing:
+            nvext_routing = {**(nvext_routing or {}), **worker_routing}
     if isinstance(routing, dict):
         if nvext_routing:
             routing = {**nvext_routing, **routing}
@@ -450,8 +467,9 @@ def _build_dynamo_preproc(
             "prompt_logprobs": None,
             # Preserve special tokens when a parser is active so delimiters
             # remain visible. Mirrors the post-processor's decode behavior.
-            "skip_special_tokens": (
-                tool_call_parser is None and reasoning_parser is None
+            "skip_special_tokens": resolve_skip_special_tokens(
+                request.get("skip_special_tokens"),
+                has_parser=tool_call_parser is not None or reasoning_parser is not None,
             ),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
@@ -622,6 +640,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
@@ -685,6 +704,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
         )
 

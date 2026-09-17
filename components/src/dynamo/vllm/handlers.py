@@ -48,6 +48,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -113,6 +114,8 @@ from .state_agent import state_agent_settings
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+_FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
+
 
 # Marker set by the Rust conditional-disagg bypass path. When present on a
 # DECODE-mode worker, the request runs as local prefill+decode instead of
@@ -831,6 +834,10 @@ def build_sampling_params(
     # Apply output_options (logprobs, prompt_logprobs, etc.)
     output_options = request.get("output_options", {}) or {}
     logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
+    logprobs = -1 if logprobs == _FULL_VOCAB_LOGPROBS_SENTINEL else logprobs
+    prompt_logprobs = (
+        -1 if prompt_logprobs == _FULL_VOCAB_LOGPROBS_SENTINEL else prompt_logprobs
+    )
     # Explicit `logprob_token_ids` replace vLLM's natural top-k selection, so the
     # requested width no longer applies. vLLM's own OpenAI adapters null `logprobs`
     # in this case and let `num_logprobs` derive the width from the id list; mirror
@@ -842,6 +849,15 @@ def build_sampling_params(
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
+        explicit_cache_setting = sampling_options.get(
+            "skip_reading_prefix_cache",
+            extra_args.get("skip_reading_prefix_cache")
+            if isinstance(extra_args, dict)
+            else None,
+        )
+        sampling_params.skip_reading_prefix_cache = (
+            True if explicit_cache_setting is None else explicit_cache_setting
+        )
 
     # skip_special_tokens is intentionally NOT forwarded to vLLM here: this path
     # forces detokenize=False (below), so vLLM never detokenizes and ignores it.
@@ -2493,6 +2509,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             base_model_path=self.config.model,
             worker_type=lora_worker_type,
             needs=lora_needs,
+            # LoRA cards need base-model metadata, not weights.
+            ignore_weights=True,
             max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
         )
 
@@ -3221,6 +3239,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        session_id=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3239,6 +3258,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     data_parallel_rank=data_parallel_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    session_id=session_id,
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
@@ -3669,6 +3689,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        session_id = session_id_from_request(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -3717,6 +3738,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        session_id=session_id,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3767,6 +3789,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         first_token_output_seen = False
 
         trace_headers = context.trace_headers()
+        session_id = session_id_from_request(request)
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
@@ -3800,6 +3823,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    session_id=session_id,
                 )
 
                 async for res in gen:
@@ -3984,6 +4008,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        session_id = session_id_from_request(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -3997,6 +4022,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         lora_request=admitted_lora_request,
                         trace_headers=trace_headers,
                         priority=priority,
+                        session_id=session_id,
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,

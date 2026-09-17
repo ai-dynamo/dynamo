@@ -29,7 +29,7 @@ spec:
     type: frontend
   - experimental:
       gpuMemoryService: {}
-    name: VllmWorker
+    name: worker
     podTemplate:
       spec:
         containers:

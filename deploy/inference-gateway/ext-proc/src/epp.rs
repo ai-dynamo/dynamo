@@ -22,10 +22,7 @@ use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{FindBestMatchOutcome, ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::protocols::common::extensions::{
-    HEADER_TENANT_ID, NvExt, last_non_empty_trimmed_value, request_cache_salt,
-    routing_constraints_to_kv,
-};
+use dynamo_llm::protocols::common::extensions::{NvExt, NvExtProvider, routing_constraints_to_kv};
 use dynamo_llm::types::openai::completions::NvCreateCompletionRequest;
 use dynamo_protocols::types::Prompt;
 use dynamo_runtime::discovery::{
@@ -37,22 +34,28 @@ use uuid::Uuid;
 
 use crate::admission::{RouterRejection, classify_router_error};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
-use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
+    ResponseUsage, resolve_cache_namespace,
+};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
-/// `(token_ids, cache_namespace, priority_jump, strict_priority,
-/// routing_constraints, tokens_safe_to_inject)`, as returned by
-/// [`Router::tokenize`] and its chat/completion helpers.
-///
 /// `tokens_safe_to_inject` is `false` when `token_ids` were computed from
 /// only one prompt of a multi-prompt text batch (routing-only, matching
 /// [`OpenAIPreprocessor::gather_tokens`]'s own refusal to trust `token_data`
 /// for a `TextInput::Batch` of more than one prompt) — injecting them as
 /// `nvext.token_data` would apply prompt 1's tokens to every split of the
 /// batch. Chat and single/pre-tokenized completion requests are always safe.
-type TokenizeResult = (Vec<u32>, Option<String>, f64, u32, RoutingConstraints, bool);
+struct TokenizeResult {
+    tokens: Vec<u32>,
+    cache_namespace: Option<String>,
+    priority_jump: f64,
+    strict_priority: u32,
+    routing_constraints: RoutingConstraints,
+    tokens_safe_to_inject: bool,
+}
 
 /// Validate `DYN_KUBE_DISCOVERY_MODE` and report whether *container* discovery
 /// is in effect. Read once at startup and threaded down to the pod reflector
@@ -88,18 +91,17 @@ fn decode_router_config_override(is_disaggregated: bool) -> Option<RouterConfigO
     })
 }
 
-fn cache_namespace_with_header_override(
+/// Resolve a typed request's body inputs together with the HTTP headers.
+fn cache_namespace_from_request<R: NvExtProvider>(
+    request: &R,
     headers: &[(String, String)],
-    body_cache_namespace: Option<String>,
 ) -> Option<String> {
-    last_non_empty_trimmed_value(
-        headers
-            .iter()
-            .filter(|(key, _)| key.eq_ignore_ascii_case(HEADER_TENANT_ID))
-            .map(|(_, value)| value.as_str()),
-    )
-    .map(str::to_owned)
-    .or(body_cache_namespace)
+    let nvext_cache_salt = request.nvext().and_then(|n| n.cache_salt.as_deref());
+    let top_level_cache_salt = request
+        .unsupported_fields()
+        .and_then(|fields| fields.get("cache_salt"))
+        .and_then(|value| value.as_str());
+    resolve_cache_namespace(headers, nvext_cache_salt, top_level_cache_salt)
 }
 
 /// Name of the inference-serving HTTP port on a Dynamo worker pod.
@@ -260,12 +262,16 @@ impl Router {
     /// Tokenize a JSON request body and extract router queue priorities and
     /// routing constraints.
     ///
-    /// Returns `(token_ids, cache_namespace, priority_jump, strict_priority,
-    /// routing_constraints)`. Priorities default to zero and constraints
-    /// default to empty when absent. Supports both `/v1/chat/completions` and
-    /// `/v1/completions` bodies; the request kind is discriminated by a
-    /// non-empty `messages` array (chat) versus a `prompt` (completions).
-    pub async fn tokenize(&self, request_json: &str) -> Result<TokenizeResult> {
+    /// Returns the routing inputs, including the cache namespace resolved from
+    /// the headers and body. Priorities default to zero and constraints default
+    /// to empty when absent. Supports both `/v1/chat/completions` and
+    /// `/v1/completions` bodies, discriminated by a non-empty `messages` array
+    /// (chat) versus a `prompt` (completions).
+    async fn tokenize(
+        &self,
+        request_json: &str,
+        headers: &[(String, String)],
+    ) -> Result<TokenizeResult> {
         // Discriminating on a borrowed `Value` costs one scan plus the tree it
         // allocates; `from_value` then consumes that tree rather than re-reading
         // the body.
@@ -295,17 +301,18 @@ impl Router {
             .is_some_and(|messages| !messages.is_empty());
         if !has_messages && value.get("prompt").is_some() {
             let request: NvCreateCompletionRequest = serde_json::from_value(value)?;
-            return self.tokenize_completion(request).await;
+            return self.tokenize_completion(request, headers).await;
         }
         let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
             serde_json::from_value(value)?;
-        self.tokenize_chat(&request)
+        self.tokenize_chat(&request, headers)
     }
 
     /// Tokenize a `/v1/chat/completions` body via the chat template.
     fn tokenize_chat(
         &self,
         request: &dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest,
+        headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
         // TODO(epp-request-routing): Reuse shared preprocessing so expected output
         // length, LoRA, pins, sessions, topology constraints, additional protocols,
@@ -313,20 +320,20 @@ impl Router {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let cache_namespace = request_cache_salt(request).map(str::to_owned);
+        let cache_namespace = cache_namespace_from_request(request, headers);
 
         let encoding = match self.preprocessor.apply_template(request)? {
             Some(prompt) => self.preprocessor.tokenize_rendered_prompt(&prompt)?,
             None => self.preprocessor.tokenize("")?,
         };
-        Ok((
-            encoding.token_ids().to_vec(),
+        Ok(TokenizeResult {
+            tokens: encoding.token_ids().to_vec(),
             cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
-            true,
-        ))
+            tokens_safe_to_inject: true,
+        })
     }
 
     /// Tokenize a `/v1/completions` body.
@@ -345,11 +352,12 @@ impl Router {
     async fn tokenize_completion(
         &self,
         request: NvCreateCompletionRequest,
+        headers: &[(String, String)],
     ) -> Result<TokenizeResult> {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
-        let cache_namespace = request_cache_salt(&request).map(str::to_owned);
+        let cache_namespace = cache_namespace_from_request(&request, headers);
 
         let pre_tokenized = completion_prompt_token_ids(&request.inner.prompt);
         let (tokens, tokens_safe_to_inject) = match pre_tokenized {
@@ -361,14 +369,14 @@ impl Router {
             }
         };
 
-        Ok((
+        Ok(TokenizeResult {
             tokens,
             cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
-        ))
+        })
     }
 
     /// Tokenize `text` as a raw `/v1/completions` prompt — no chat template —
@@ -476,10 +484,6 @@ impl Router {
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> Result<PrefillReservation> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.prefill_router.register_workers(ids);
-        }
-
         self.prefill_router
             .reserve_prefill_worker(
                 reservation_id,
@@ -520,10 +524,6 @@ impl Router {
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
     ) -> std::result::Result<(WorkerWithDpRank, u32), PickError> {
-        if let Some(ref ids) = allowed_worker_ids {
-            self.decode_router.register_workers(ids);
-        }
-
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
@@ -952,8 +952,9 @@ fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
 /// The mode is exclusive, and so are the identities. A worker process picks one
 /// `KubeDiscoveryTarget` from its own mode, so under container discovery
 /// nothing registers under the bare pod identity — emitting it there would
-/// invent a worker that `register_workers` upserts at zero load and zero KV
-/// overlap, making it the most attractive candidate the scheduler sees.
+/// put a worker id in `allowed_worker_ids` that no backend registered. The
+/// scheduler filters unknown ids out, so the pod contributes nothing, and a
+/// subset made only of such ids selects no worker at all.
 /// `"main"` hashes to the pod identity (`hash_container_name`), so a pod whose
 /// main container is Ready still contributes that id through the container
 /// path; one whose main container is *not* Ready correctly contributes nothing
@@ -1410,11 +1411,9 @@ impl EndpointPicker for Router {
             // Only pod discovery registers a worker under its pod identity.
             // Under container discovery each engine container registers under
             // its own (`KubeDiscoveryTarget::Container`), so a hand-built pod
-            // hash names a worker present in no registry: `register_workers`
-            // would upsert it at zero load and zero KV overlap, making it the
-            // scheduler's most attractive candidate, and the reverse lookup
-            // below would then fail to match and silently forward to
-            // `endpoints[0]`. The index is the one place that knows which
+            // hash names a worker present in no registry, which the scheduler
+            // filters out, leaving the subset short one candidate or empty.
+            // The index is the one place that knows which
             // identity scheme is in effect (see `pod_worker_ids`), so ask it.
             let wm: Vec<(u64, &Endpoint)> = {
                 let index = read_index(&self.worker_index);
@@ -1462,19 +1461,17 @@ impl EndpointPicker for Router {
         let body_str = std::str::from_utf8(&req.body)
             .map_err(|e| PickError::InvalidRequest(format!("Invalid UTF-8: {e}")))?;
 
-        let (
+        let TokenizeResult {
             tokens,
-            body_cache_namespace,
+            cache_namespace,
             priority_jump,
             strict_priority,
             routing_constraints,
             tokens_safe_to_inject,
-        ) = self
-            .tokenize(body_str)
+        } = self
+            .tokenize(body_str, &req.headers)
             .await
             .map_err(|e| PickError::InvalidRequest(e.to_string()))?;
-        let cache_namespace =
-            cache_namespace_with_header_override(&req.headers, body_cache_namespace);
         let policy_class = requested_policy_class(&req.headers)?;
         let reservation_id = Uuid::new_v4().to_string();
 
@@ -1552,7 +1549,7 @@ impl EndpointPicker for Router {
                 decode_worker.worker_id,
                 decode_worker.dp_rank,
                 is_disaggregated,
-                cache_namespace,
+                cache_namespace.clone(),
             )
             .await
         {
@@ -1638,6 +1635,9 @@ impl EndpointPicker for Router {
             // worker to a callable endpoint for authoritative sidecar injection.
             selected_prefill_endpoint: None,
             token_ids,
+            cache_namespace,
+            // The Dynamo runtime encodes salt itself so leave the forwarded body's salt alone.
+            cache_salt_forwarding: CacheSaltForwarding::Preserve,
             reservation_id: Some(reservation_id),
         })
     }
@@ -1687,51 +1687,6 @@ mod tests {
     use k8s_openapi::api::core::v1::Pod;
 
     use std::sync::{Arc, atomic::Ordering};
-
-    #[test]
-    fn tenant_header_overrides_body_cache_namespace() {
-        let headers = vec![("X-Tenant-ID".to_string(), "tenant-header".to_string())];
-
-        assert_eq!(
-            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
-                .as_deref(),
-            Some("tenant-header")
-        );
-    }
-
-    #[test]
-    fn empty_tenant_header_falls_back_to_body_cache_namespace() {
-        let headers = vec![
-            (HEADER_TENANT_ID.to_string(), String::new()),
-            ("X-Tenant-ID".to_string(), "   ".to_string()),
-        ];
-
-        assert_eq!(
-            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
-                .as_deref(),
-            Some("tenant-body")
-        );
-    }
-
-    #[test]
-    fn absent_cache_namespace_stays_absent() {
-        assert_eq!(cache_namespace_with_header_override(&[], None), None);
-    }
-
-    #[test]
-    fn last_non_empty_trimmed_tenant_header_wins() {
-        let headers = vec![
-            (HEADER_TENANT_ID.to_string(), "tenant-client".to_string()),
-            ("X-Tenant-ID".to_string(), "   ".to_string()),
-            (HEADER_TENANT_ID.to_string(), " tenant-gateway ".to_string()),
-        ];
-
-        assert_eq!(
-            cache_namespace_with_header_override(&headers, Some("tenant-body".to_string()))
-                .as_deref(),
-            Some("tenant-gateway")
-        );
-    }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this
@@ -2207,10 +2162,7 @@ mod tests {
     }
 
     /// Under pod discovery a worker registers under its pod identity alone, so
-    /// a pod's ready sidecars must contribute no worker ids. Emitting them
-    /// would invent workers no backend registered under: they miss
-    /// `register_workers`' discovery lookup, default to `(0, 1)` with no load
-    /// and no KV overlap, and so look maximally attractive to the scheduler.
+    /// a pod's ready sidecars must contribute no worker ids.
     #[test]
     fn pod_worker_ids_ignores_containers_under_pod_discovery() {
         let pod = pod_mode_worker_pod();
@@ -2276,7 +2228,7 @@ mod tests {
     }
 
     /// End of the chain that made this matter: the index feeds
-    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> `register_workers`,
+    /// `subset_to_worker_ids` -> `allowed_worker_ids` -> the scheduler,
     /// so one backend pod must contribute exactly one worker id under pod
     /// discovery rather than one per ready container.
     #[test]
@@ -2511,8 +2463,7 @@ mod tests {
     /// An externally supplied endpoint must resolve to the identity the
     /// reflector actually holds. Under container discovery that is the engine
     /// container's id, never `hash_pod_name` -- deriving the latter names a
-    /// worker no registry contains, which `register_workers` then upserts at
-    /// zero load as the scheduler's most attractive candidate.
+    /// worker no registry contains.
     #[test]
     fn external_endpoint_resolves_to_the_indexed_container_identity() {
         let mut index = WorkerEndpointIndex::new(true);
