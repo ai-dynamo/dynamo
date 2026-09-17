@@ -6077,8 +6077,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-client"
-version = "0.5.0"
-source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=3db6bdc4e64a5df2d44bb688d6a895581dc3399f#3db6bdc4e64a5df2d44bb688d6a895581dc3399f"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56f80d83a885aff05ce27544fec671fa9c166535e4a76b88f369b02be0ff88ca"
 dependencies = [
  "anyhow",
  "clap",
@@ -6097,8 +6098,9 @@ dependencies = [
 
 [[package]]
 name = "modelexpress-common"
-version = "0.5.0"
-source = "git+https://github.com/ai-dynamo/modelexpress.git?rev=3db6bdc4e64a5df2d44bb688d6a895581dc3399f#3db6bdc4e64a5df2d44bb688d6a895581dc3399f"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b929b0c7d8515819f7858d809620afdee4cb2e37cdefc328cbbfd1f3466c698"
 dependencies = [
  "anyhow",
  "async-trait",
