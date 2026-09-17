@@ -19,13 +19,18 @@ Four configurations run Dynamo + TensorRT-LLM on 6x GB200 nodes (24 GPUs, MNNVL)
 <span><b>Model</b> nvidia/Kimi-K2.5-NVFP4</span>
 <span><b>GPUs</b> 24x GB200 (6 nodes, MNNVL)</span>
 <span><b>Runtime</b> TensorRT-LLM</span>
-<span><b>Workload</b> Mooncake-style agentic coding trace (~200K-token context, multi-turn), one-hour replay</span>
+<span><b>Workload</b> Mooncake-style agentic coding trace (~200K-token context, multi-turn), 30-minute replay</span>
 <span><b>Metrics</b> tok/s/user, tok/s/GPU, goodput at TTFT 5s / ITL 10ms</span>
 <span><b>Held constant</b> Model, runtime, GPU count, trace, duration, and goodput thresholds across all configurations</span>
 </div>
 </div>
 
 ## Results
+
+<Warning>
+The values below come from the earlier one-hour qualification. The current manifests cap each measured run at 30
+minutes, so these numbers require requalification before they can be treated as expected 30-minute results.
+</Warning>
 
 The disaggregated configuration with KV-aware routing, Eagle3 decoding, and KV offloading achieves the best system throughput and interactivity. Each row is that configuration's chosen operating point on the source Pareto plot — concurrency differs by row and the values are approximate plot readings, so read them as per-configuration operating points rather than an equal-load sweep:
 
@@ -81,7 +86,7 @@ aiperf profile -m nvidia/Kimi-K2.5-NVFP4 \
   --url http://<frontend>:8000 \
   --streaming --extra-inputs ignore_eos:true \
   --concurrency <8|24|32> --random-seed 42 \
-  --benchmark-duration 3600 --concurrency-ramp-duration 60 \
+  --benchmark-duration 1800 --concurrency-ramp-duration 60 \
   --goodput "time_to_first_token:5000 inter_token_latency:10"
 ```
 

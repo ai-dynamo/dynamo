@@ -432,6 +432,7 @@ async def run_thorough(
 
     config_modifier = CONFIG_MODIFIERS[backend]
     dgd_override = dgdr.overrides.dgd if dgdr.overrides else None
+    trust_remote_code = bool(dgdr.overrides and dgdr.overrides.trustRemoteCode)
     job_tolerations = get_profiling_job_tolerations(dgdr)
     for candidate in chain(prefill_candidates, decode_candidates):
         candidate.dgd_config = materialize_dgd(
@@ -441,6 +442,7 @@ async def run_thorough(
             tolerations=job_tolerations,
             runtime_backend=backend,
             model_name_or_path=local_or_hf_model,
+            trust_remote_code=trust_remote_code,
         )
 
     if backend == "trtllm":

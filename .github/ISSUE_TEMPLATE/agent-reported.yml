@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Agent-reported instruction gap
 description: For AI agents using the optimization skills — report instructions that misled, blocked, or contradicted live verification.
 title: "[AGENT]: "

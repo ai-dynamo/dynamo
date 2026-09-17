@@ -9,6 +9,7 @@ skills:
   - configure-aiperf-benchmark
   - run-aiperf-benchmark
   - analyze-aiperf-results
+  - report-skillpack-issue
 "Required Readings: Docs":
   - agent-docs/references/definitions.md
 "Required Reading: Rules":
@@ -31,6 +32,11 @@ skills:
 ---
 
 # Perf Analyzer
+
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
 
 You own the complete AIPerf lifecycle for one already-deployed candidate. The candidate must have a successful
 `<DEPLOY_ROOT>/smoke_test_artifact.json`, a complete deployment ledger, and durable config-engagement evidence before

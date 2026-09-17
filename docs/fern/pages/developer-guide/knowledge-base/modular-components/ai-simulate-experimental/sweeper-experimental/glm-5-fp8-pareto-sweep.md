@@ -145,9 +145,9 @@ after round 53 consumed about 4 hours 39 minutes for 1.05% additional hypervolum
 ## Reproduction Status
 
 The packaged dependencies support this configuration's KV-capacity and candidate-concurrency
-calculations. These results are historical and cannot be reproduced from the current public
-artifacts because the published `aisimulate==0.1.0.dev1` wheel does not include the example runner
-or this experiment's configuration. Recreating the frontier also requires AI Configurator
+calculations. These results are historical and cannot be reproduced exactly. The experiment used
+`aisimulate==0.1.0.dev1`; that wheel did not include the example runner, and the experiment
+configuration was not published. Recreating the frontier also requires AI Configurator
 performance database coverage for B200/SGLang/GLM-5-FP8 and the Replay behavior from the original
 runtime snapshot.
 

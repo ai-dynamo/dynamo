@@ -30,6 +30,7 @@ import (
 
 const (
 	profilerEntrypoint        = "python"
+	profilerOverrideImage     = "custom-profiler:v2"
 	outputCopierShell         = "/bin/sh"
 	outputCopierScriptStub    = "echo sidecar-script"
 	outputCopierOverrideImage = "internal-registry/kubectl:1.29"
@@ -766,13 +767,13 @@ func TestApplyProfilingJobOverrides_ContainerImage(t *testing.T) {
 		Template: corev1.PodTemplateSpec{
 			Spec: corev1.PodSpec{
 				Containers: []corev1.Container{
-					{Image: "custom-profiler:v2"},
+					{Image: profilerOverrideImage},
 				},
 			},
 		},
 	})
-	if job.Spec.Template.Spec.Containers[0].Image != "custom-profiler:v2" {
-		t.Errorf("expected image=custom-profiler:v2, got %s", job.Spec.Template.Spec.Containers[0].Image)
+	if job.Spec.Template.Spec.Containers[0].Image != profilerOverrideImage {
+		t.Errorf("expected image=%s, got %s", profilerOverrideImage, job.Spec.Template.Spec.Containers[0].Image)
 	}
 }
 
@@ -1143,6 +1144,144 @@ func TestApplyProfilingJobOverrides_NamedProfilerAndOutputCopierOverrides(t *tes
 	}
 	if len(sidecar.Args) == 0 || sidecar.Args[0] != outputCopierScriptStub {
 		t.Error("output-copier args were unexpectedly overwritten")
+	}
+}
+
+func TestApplyProfilingJobOverrides_MergesByContainerNameNotIndex(t *testing.T) {
+	sidecarCPU := resource.MustParse("250m")
+	profilerCPU := resource.MustParse("2")
+	tests := []struct {
+		name      string
+		overrides []corev1.Container
+	}{
+		{
+			name: "sidecar-first named profiler",
+			overrides: []corev1.Container{
+				{
+					Name: ContainerNameOutputCopier,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: sidecarCPU},
+					},
+				},
+				{
+					Name:  ContainerNameProfiler,
+					Image: profilerOverrideImage,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: profilerCPU},
+					},
+				},
+			},
+		},
+		{
+			name: "sidecar-first unnamed profiler",
+			overrides: []corev1.Container{
+				{
+					Name: ContainerNameOutputCopier,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: sidecarCPU},
+					},
+				},
+				{
+					Name:  "",
+					Image: profilerOverrideImage,
+					Resources: corev1.ResourceRequirements{
+						Limits: corev1.ResourceList{corev1.ResourceCPU: profilerCPU},
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Build a generated job whose profiler is not at index 0")
+			job := baseJob()
+			spec := &job.Spec.Template.Spec
+			spec.Containers[0], spec.Containers[1] = spec.Containers[1], spec.Containers[0]
+
+			t.Log("Apply sidecar-first container overrides")
+			applyProfilingJobOverrides(job, &batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: test.overrides},
+				},
+			})
+
+			t.Log("Verify profiler got the named profiler override, not Containers[0]")
+			profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+			if profiler == nil {
+				t.Fatal("profiler container not found")
+			}
+			if profiler.Image != profilerOverrideImage {
+				t.Errorf("profiler image: want %s, got %s", profilerOverrideImage, profiler.Image)
+			}
+			if profiler.Resources.Limits.Cpu().Cmp(profilerCPU) != 0 {
+				t.Errorf("profiler CPU: want %s, got %v", profilerCPU.String(), profiler.Resources.Limits)
+			}
+
+			t.Log("Verify output-copier received its own resources, not the profiler budget")
+			sidecar := findContainer(job.Spec.Template.Spec.Containers, ContainerNameOutputCopier)
+			if sidecar == nil {
+				t.Fatal("output-copier container not found")
+			}
+			if sidecar.Resources.Limits.Cpu().Cmp(sidecarCPU) != 0 {
+				t.Errorf("output-copier CPU: want %s, got %v", sidecarCPU.String(), sidecar.Resources.Limits)
+			}
+		})
+	}
+}
+
+func TestApplyProfilingJobOverrides_UnnamedOverrideTargetsProfiler(t *testing.T) {
+	t.Log("Apply a legacy unnamed container override")
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "", Image: profilerOverrideImage},
+				},
+			},
+		},
+	})
+
+	t.Log("Verify the unnamed override still targets the profiler")
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != profilerOverrideImage {
+		t.Errorf("profiler image: want %s, got %s", profilerOverrideImage, profiler.Image)
+	}
+}
+
+func TestApplyProfilingJobOverrides_UnknownNameDoesNotOverrideProfiler(t *testing.T) {
+	t.Log("Apply an override whose only container has an unknown name")
+	job := baseJob()
+	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "extra-tools",
+						Image: profilerOverrideImage,
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	t.Log("Verify the profiler image and resources are unchanged")
+	profiler := findContainer(job.Spec.Template.Spec.Containers, ContainerNameProfiler)
+	if profiler == nil {
+		t.Fatal("profiler container not found")
+	}
+	if profiler.Image != "profiler:latest" {
+		t.Errorf("profiler image should be unchanged, got %s", profiler.Image)
+	}
+	if len(profiler.Resources.Limits) != 0 || len(profiler.Resources.Requests) != 0 {
+		t.Errorf("profiler resources should be unchanged, got %+v", profiler.Resources)
 	}
 }
 

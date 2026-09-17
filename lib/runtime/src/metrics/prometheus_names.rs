@@ -91,10 +91,6 @@ pub mod name_prefix {
     /// Prefix for work-handler transport breakdown metrics (backend side)
     pub const WORK_HANDLER: &str = "dynamo_work_handler";
 
-    /// Prefix for request admission/rejection control metrics (e.g.
-    /// `dynamo_rejection_request_total`).
-    pub const REJECTION: &str = "dynamo_rejection";
-
     /// Prefix for tokio runtime metrics (poll times, queue depths, stalls).
     pub const TOKIO: &str = "dynamo_tokio";
 
@@ -170,6 +166,9 @@ pub mod frontend_service {
     // use the fixed `dynamo_frontend_` prefix from `name_prefix::FRONTEND`.
     /// Environment variable that overrides the default metric prefix
     pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
+
+    /// Whether the frontend can route at least one inference request for a model
+    pub const MODEL_READY: &str = "model_ready";
 
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
@@ -463,10 +462,8 @@ pub mod work_handler {
     /// Configured capacity of the bounded work queue (gauge, static)
     pub const QUEUE_CAPACITY: &str = "queue_capacity";
 
-    /// Total times enqueuing work failed because the dispatcher channel was closed.
-    /// A full queue is shed via try_reserve() and counted under
-    /// `dynamo_rejection_request_total`. Saturation shows up as rising `QUEUE_DEPTH`
-    /// toward `QUEUE_CAPACITY`.
+    /// Requests rejected before TCP worker dispatch because the bounded work queue
+    /// was full or the dispatcher channel was closed.
     pub const ENQUEUE_REJECTED_TOTAL: &str = "enqueue_rejected_total";
 
     /// Time spent waiting to acquire a worker-pool permit (histogram)
@@ -722,6 +719,7 @@ pub mod tokio_perf {
     pub const WORKER_LOCAL_QUEUE_DEPTH: &str = "worker_local_queue_depth";
     pub const WORKER_STEAL_COUNT_TOTAL: &str = "worker_steal_count_total";
     pub const WORKER_OVERFLOW_COUNT_TOTAL: &str = "worker_overflow_count_total";
+    pub const QUEUE_OVERLOAD_WARNINGS_TOTAL: &str = "queue_overload_warnings_total";
     pub const BLOCKING_THREADS: &str = "blocking_threads";
     pub const BLOCKING_IDLE_THREADS: &str = "blocking_idle_threads";
     pub const BLOCKING_QUEUE_DEPTH: &str = "blocking_queue_depth";

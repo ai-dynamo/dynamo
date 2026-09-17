@@ -97,7 +97,7 @@ PLANNER_PROFILE_DATA_DIR = (
 ROUTER_AIC_CONFIG = {
     "aic_backend": "vllm",
     "aic_system": "h200_sxm",
-    "aic_backend_version": "0.14.0",
+    "aic_backend_version": "current",
     "aic_tp_size": 1,
     "aic_model_path": "Qwen/Qwen3-32B",
 }
@@ -324,66 +324,64 @@ class CounterWorkerProcess:
         return env, [system_port], []
 
     def __enter__(self):
-        cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
-        os.close(cpu_fd)
-        gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
-        os.close(gpu_fd)
+        with contextlib.ExitStack() as stack:
+            cpu_fd, self._cpu_count_file = tempfile.mkstemp(suffix=".txt")
+            os.close(cpu_fd)
+            stack.callback(Path(self._cpu_count_file).unlink, missing_ok=True)
 
-        cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
-        self._cpu_proc = ManagedProcess(
-            command=self._worker_command(
-                self._cpu_count_file,
-                "cpu",
-                self._initial_taints[0],
-            ),
-            env=cpu_env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=cpu_health_ports,
-            health_check_urls=cpu_health_urls,
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
-            display_name="counter-worker-cpu",
-        )
-        gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
-        self._gpu_proc = ManagedProcess(
-            command=self._worker_command(
-                self._gpu_count_file,
-                "gpu",
-                self._initial_taints[1],
-            ),
-            env=gpu_env,
-            timeout=60,
-            display_output=True,
-            health_check_ports=gpu_health_ports,
-            health_check_urls=gpu_health_urls,
-            log_dir=self._request.node.name,
-            terminate_all_matching_process_names=False,
-            display_name="counter-worker-gpu",
-        )
-        self._cpu_proc.__enter__()
-        self._gpu_proc.__enter__()
+            gpu_fd, self._gpu_count_file = tempfile.mkstemp(suffix=".txt")
+            os.close(gpu_fd)
+            stack.callback(Path(self._gpu_count_file).unlink, missing_ok=True)
+
+            cpu_env, cpu_health_ports, cpu_health_urls = self._worker_process_options(0)
+            self._cpu_proc = ManagedProcess(
+                command=self._worker_command(
+                    self._cpu_count_file,
+                    "cpu",
+                    self._initial_taints[0],
+                ),
+                env=cpu_env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=cpu_health_ports,
+                health_check_urls=cpu_health_urls,
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="counter-worker-cpu",
+            )
+            gpu_env, gpu_health_ports, gpu_health_urls = self._worker_process_options(1)
+            self._gpu_proc = ManagedProcess(
+                command=self._worker_command(
+                    self._gpu_count_file,
+                    "gpu",
+                    self._initial_taints[1],
+                ),
+                env=gpu_env,
+                timeout=60,
+                display_output=True,
+                health_check_ports=gpu_health_ports,
+                health_check_urls=gpu_health_urls,
+                log_dir=self._request.node.name,
+                terminate_all_matching_process_names=False,
+                display_name="counter-worker-gpu",
+            )
+            stack.enter_context(self._cpu_proc)
+            stack.enter_context(self._gpu_proc)
+            self._exit_stack = stack.pop_all()
+
         logger.info(
             f"Started CPU and GPU counter workers, endpoint: {self.endpoint_path}"
         )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        for proc, name in [
-            (self._cpu_proc, "CPU"),
-            (self._gpu_proc, "GPU"),
-        ]:
-            if proc is not None:
-                try:
-                    proc.__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    logger.warning(f"Error stopping {name} counter worker: {e}")
-        for path in [self._cpu_count_file, self._gpu_count_file]:
-            if path:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+        stack = getattr(self, "_exit_stack", None)
+        if stack is None:
+            return None
+        try:
+            return stack.__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self._exit_stack = None
 
 
 @pytest.mark.timeout(120)
@@ -840,22 +838,24 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.timeout(300)  # bumped for xdist contention (was 29s; ~9.55s serial avg)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
-    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,event_plane",
+    "use_kv_events,raw_kv_events,use_remote_indexer,router_predicted_ttl_secs,router_approximate_cache_policy,event_plane",
     [
-        (True, False, False, None, None),  # Event plane with local indexer
-        (True, False, False, 5.0, None),  # Event plane with local side indexer
-        (True, False, True, None, None),  # Event plane with remote indexer
-        (True, False, True, 5.0, None),  # Remote plus local side indexer
-        (False, False, False, None, None),  # Approximate (--no-kv-events)
+        (True, False, False, None, "ttl", None),  # Event plane with local indexer
+        (True, False, False, 5.0, "ttl", None),  # Event plane with local side indexer
+        (True, False, True, None, "ttl", None),  # Event plane with remote indexer
+        (True, False, True, 5.0, "ttl", None),  # Remote plus local side indexer
+        (False, False, False, None, "ttl", None),  # Approximate (--no-kv-events)
+        (False, False, False, None, "lru", None),  # Capacity-bounded approximate LRU
         (
             False,
             False,
             True,
             None,
+            "ttl",
             None,
         ),  # Approximate mode with a singleton served remote indexer
         # Raw engine ZMQ → relay → ZMQ event plane, with no NATS service.
-        (True, True, False, None, "zmq"),
+        (True, True, False, None, "ttl", "zmq"),
     ],
     ids=[
         "local_indexer",
@@ -863,6 +863,7 @@ def test_query_instance_id_returns_worker_and_tokens(
         "remote_indexer",
         "remote_indexer_predict_on_route",
         "no_kv_events",
+        "no_kv_events_lru",
         "no_kv_events_remote",
         "zmq_nats_free",
     ],
@@ -877,6 +878,7 @@ def test_router_decisions(
     raw_kv_events,
     use_remote_indexer,
     router_predicted_ttl_secs,
+    router_approximate_cache_policy,
     event_plane,
 ):
     """Validate KV cache prefix reuse and dp_rank routing by sending progressive requests with overlapping prefixes.
@@ -885,7 +887,7 @@ def test_router_decisions(
     - Event-plane mode with local indexers on workers
     - Event-plane mode with a served remote indexer
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
-      based on routing decisions with TTL-based expiration and pruning
+      based on routing decisions using either TTL or capacity-bounded LRU retention
     - Approximate mode with a singleton served remote indexer
     - NATS-free ZMQ mode: raw engine and Dynamo event-plane hops both use ZMQ
     """
@@ -896,10 +898,11 @@ def test_router_decisions(
 
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
-        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, event_plane=%s",
+        "Starting test router decisions: use_kv_events=%s, use_remote_indexer=%s, router_predicted_ttl_secs=%s, router_approximate_cache_policy=%s, event_plane=%s",
         use_kv_events,
         use_remote_indexer,
         router_predicted_ttl_secs,
+        router_approximate_cache_policy,
         event_plane,
     )
 
@@ -950,6 +953,7 @@ def test_router_decisions(
         test_kwargs={
             "use_kv_events": use_kv_events,
             "router_predicted_ttl_secs": router_predicted_ttl_secs,
+            "router_approximate_cache_policy": router_approximate_cache_policy,
         },
     )
 

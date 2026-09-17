@@ -12,9 +12,20 @@ code-generated from the Rust definitions; for now they are maintained
 manually and must be kept in sync.
 """
 
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, Field
+
+
+class AudioNvExt(BaseModel):
+    """NVIDIA extensions for audio generation requests."""
+
+    frontend_accepts_audio_chunks: Optional[bool] = None
+    """Internal compatibility signal for frontends that accept audio chunks.
+
+    Workers must aggregate when this is absent or false. Remove after v1.4
+    leaves the N-2 compatibility window in v1.7.
+    """
 
 
 class NvCreateAudioSpeechRequest(BaseModel):
@@ -22,6 +33,11 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     Follows vLLM-Omni's OpenAICreateSpeechRequest format.
     """
+
+    extra_args: Optional[Dict[str, Any]] = None
+    """Worker-boundary passthrough. The frontend nests unknown top-level
+    request fields (an OpenAI client's extra_body) under the
+    "media_passthrough" key."""
 
     # Standard OpenAI params
     input: str
@@ -63,6 +79,9 @@ class NvCreateAudioSpeechRequest(BaseModel):
 
     max_new_tokens: Optional[int] = None
     """Maximum tokens to generate (default: 2048)."""
+
+    nvext: Optional[AudioNvExt] = None
+    """NVIDIA extensions."""
 
 
 class AudioData(BaseModel):

@@ -139,9 +139,9 @@ Every distinct config the Vizier sweep evaluated (2k subset, c=32), best mean-e2
 
 ## Reproduction Status
 
-These results are historical and cannot be reproduced from the current public artifacts.
-The published `aisimulate==0.1.0.dev1` wheel does not include the example runner or the
-experiment configuration used for this sweep.
+These results are historical and cannot be reproduced exactly. The experiment used
+`aisimulate==0.1.0.dev1`; that wheel did not include the example runner, and the experiment
+configuration was not published.
 
 The original validation ran the winning router configuration against the full trace with
 `dynamo.replay.run_trace_replay`. It required the AI Configurator performance model and the

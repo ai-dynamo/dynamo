@@ -224,15 +224,11 @@ impl RouterPolicyConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
-    #[serde(default)]
     default_policy_family: Option<String>,
-    #[serde(default)]
     policy_classes: Option<Vec<RawPolicyClassConfig>>,
-    #[serde(default)]
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
-    #[serde(default)]
     worker_selection: Option<RawWorkerSelectionConfig>,
 }
 
@@ -310,22 +306,15 @@ struct RawUncachedIslBucket {
 #[serde(deny_unknown_fields)]
 struct RawPolicyClassConfig {
     name: String,
-    #[serde(default)]
     policy_family: Option<String>,
-    #[serde(default)]
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
     quantum: usize,
-    #[serde(default)]
     prefill_busy_threshold: Option<usize>,
-    #[serde(default)]
     prefill_busy_threshold_frac: Option<f64>,
-    #[serde(default)]
     request_queue_limit_per_worker: Option<usize>,
-    #[serde(default)]
     raw_isl_token_queue_limit_per_worker: Option<usize>,
-    #[serde(default)]
     cached_token_queue_limit_per_worker: Option<usize>,
 }
 

@@ -13,7 +13,6 @@ pub mod config;
 pub mod controller;
 mod downloader;
 pub mod filter;
-pub mod filtered_router;
 pub mod load_estimator;
 pub mod predictor;
 pub mod routing;
@@ -25,7 +24,6 @@ pub use config::{LoraAllocationConfig, McfConfig};
 pub use controller::LoraController;
 pub use downloader::LoRADownloader;
 pub use filter::LoraFilter;
-pub use filtered_router::LoraFilteredRouter;
 pub use load_estimator::{LoadEstimator, LoadEstimatorConfig};
 pub use routing::{
     AllocationAlgorithmType, LoraAllocator, LoraReplicaConfig, LoraRoutingTable,

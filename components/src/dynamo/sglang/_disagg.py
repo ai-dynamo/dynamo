@@ -20,15 +20,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 import sglang as sgl
+
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.engine_generate import native_generate_payload
 
 # Matches the prior in-tree value. Long enough for the slowest cold-start
 # we've seen (TP8 70B with FlashInfer JIT).
 _PREFILL_WARMUP_TIMEOUT_S = 1800.0
 
 SGLANG_WORKER_GROUP_ID_KEY = "sglang_worker_group_id"
+
+
+def validate_disagg_parallel_sampling(request: Mapping[str, Any]) -> None:
+    """Reject parallel samples before creating a single-room KV handoff."""
+    inner_request = request.get("request", request)
+    native_payload = native_generate_payload(inner_request)
+    sampling_options = [
+        inner_request.get("sampling_options"),
+        request.get("sampling_params"),
+        {"n": inner_request.get("n")},
+    ]
+    if native_payload is not None:
+        sampling_options.append(native_payload.get("sampling_params"))
+    for options in sampling_options:
+        if options is None:
+            continue
+        if not isinstance(options, Mapping):
+            raise InvalidArgument(
+                "SGLang disaggregated sampling parameters must be an object."
+            )
+        if options.get("n") not in (None, 1):
+            # Prefill produces one bootstrap room. SGLang expands parallel
+            # decode samples into independent transfers that cannot all finish.
+            raise InvalidArgument(
+                "SGLang disaggregated serving supports only n=1. "
+                "Use aggregated serving or send separate n=1 requests.",
+            )
 
 
 def _network_address_cls():

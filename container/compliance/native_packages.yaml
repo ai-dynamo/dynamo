@@ -35,7 +35,7 @@
 packages:
   # --- EFA (Elastic Fabric Adapter) components ---
   - name: libfabric
-    version: 2.4.0amzn5.0
+    version: 2.6.0amzn1.0
     license: BSD-2-Clause
     source: https://github.com/aws/libfabric
     images:
@@ -44,7 +44,7 @@ packages:
       - sglang-runtime-efa
 
   - name: aws-ofi-nccl
-    version: 1.20.0
+    version: 1.21.1
     license: Apache-2.0
     source: https://github.com/aws/aws-ofi-nccl
     images:

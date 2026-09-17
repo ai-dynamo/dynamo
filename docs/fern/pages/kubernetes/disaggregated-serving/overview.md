@@ -28,7 +28,7 @@ Structurally, that difference is one worker versus two. The rest of the
   services:
     Frontend:
       componentType: frontend
-    VLLMWorker:
+    worker:
       componentType: worker
       # one worker does both prefill and decode
 ```
@@ -40,10 +40,10 @@ Structurally, that difference is one worker versus two. The rest of the
   services:
     Frontend:
       componentType: frontend
-    VLLMPrefillWorker:
+    prefill:
       componentType: worker
       subComponentType: prefill   # prompt processing only
-    VLLMDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode    # token generation only
 ```
@@ -135,7 +135,7 @@ rather than a plain worker:
   KV cache instead of generating tokens.
 
 ```yaml
-    VLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -172,7 +172,7 @@ mirrors the prefill worker with `subComponentType: decode` and
 rather than prompt load.
 
 ```yaml
-    VLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -260,8 +260,8 @@ it, transfers fall back to TCP and KV movement can dominate TTFT and throughput.
 Multi-node adds RDMA fields to each worker (`rdma/ib` resource requests, the
 `IPC_LOCK` capability, and `UCX_*` transport env vars) plus an RDMA device plugin
 on the cluster. That setup is out of scope here — see the
-[Disaggregated Communication Guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md)
-for the transport configuration and [Multinode Deployments](../model-deployment/multinode-deployments.md)
+[RDMA Setup](../installation/rdma-setup/overview.md)
+for the transport configuration and [Multinode Orchestration](../installation/multinode-orchestration.md)
 for spanning workers across machines.
 
 </Step>
@@ -283,8 +283,6 @@ template and adapt it:
 Good recipe starting points:
 
 - [Qwen3-32B vLLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/qwen3-32b)
-- [DeepSeek V3.2 TensorRT-LLM disagg + KV router](https://github.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v32-fp4)
-- [Llama 3 70B vLLM disaggregated recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes/llama-3-70b)
 
 Backend deployment examples with concrete worker flags:
 

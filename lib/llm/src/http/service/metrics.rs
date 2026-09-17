@@ -16,6 +16,8 @@ use dynamo_runtime::{
 };
 use prometheus::{
     Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    core::{Collector, Desc},
+    proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use serde::Serialize;
 use std::{
@@ -23,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -46,9 +49,14 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, REJECTION, NON_REJECTION)
 }
 
-/// Check whether an error chain indicates that no backend worker is available.
+/// Check whether an error chain indicates that no backend worker is available
+/// to this request. Both flavors are HTTP 503; they differ only in whether
+/// migration may retry elsewhere.
 pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool {
-    const UNAVAILABLE: &[DynamoErrorType] = &[DynamoErrorType::Unavailable];
+    const UNAVAILABLE: &[DynamoErrorType] = &[
+        DynamoErrorType::Unavailable,
+        DynamoErrorType::WorkerUnavailable,
+    ];
     const AVAILABLE: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, UNAVAILABLE, AVAILABLE)
 }
@@ -68,6 +76,88 @@ use super::RouteDoc;
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+
+const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+
+fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    format!("{}_{}", prefix, frontend_service::MODEL_READY)
+}
+
+/// Collects current model readiness directly from the frontend's routing catalog.
+///
+/// This is evaluated at scrape time so worker registration and removal are
+/// reflected without maintaining a second, potentially stale readiness state.
+struct ModelReadyCollector {
+    manager: Arc<ModelManager>,
+    desc: Desc,
+    metric_name: String,
+}
+
+impl ModelReadyCollector {
+    fn new(
+        manager: Arc<ModelManager>,
+        metrics_prefix: Option<String>,
+    ) -> Result<Self, prometheus::Error> {
+        let metric_name = model_ready_metric_name(metrics_prefix.as_deref());
+        let desc = Desc::new(
+            metric_name.clone(),
+            MODEL_READY_HELP.to_string(),
+            vec!["model".to_string()],
+            Default::default(),
+        )?;
+        Ok(Self {
+            manager,
+            desc,
+            metric_name,
+        })
+    }
+}
+
+impl Collector for ModelReadyCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let readiness = self.manager.registered_model_readiness();
+        if readiness.is_empty() {
+            return Vec::new();
+        }
+
+        let mut metrics = Vec::with_capacity(readiness.len());
+        for (model, ready) in readiness {
+            let mut model_label = LabelPair::default();
+            model_label.set_name("model".to_string());
+            model_label.set_value(model);
+
+            let mut gauge = Gauge::default();
+            gauge.set_value(if ready { 1.0 } else { 0.0 });
+
+            let mut metric = Metric::default();
+            metric.set_label(vec![model_label]);
+            metric.set_gauge(gauge);
+            metrics.push(metric);
+        }
+
+        let mut family = MetricFamily::default();
+        family.set_name(self.metric_name.clone());
+        family.set_help(MODEL_READY_HELP.to_string());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(metrics);
+        vec![family]
+    }
+}
+
+/// Register the scrape-time model readiness collector with the frontend registry.
+pub fn register_model_ready_metric(
+    registry: &Registry,
+    manager: Arc<ModelManager>,
+    metrics_prefix: Option<String>,
+) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(ModelReadyCollector::new(manager, metrics_prefix)?))
+}
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -325,9 +415,68 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
         && count <= MAX_BUCKET_COUNT
 }
 
+/// How bucket settings are looked up. Injected rather than calling `std::env::var`
+/// directly so tests can supply values without mutating the process environment:
+/// concurrent `setenv`/`getenv` is undefined behavior on Unix, and many other tests in
+/// this module construct `Metrics` and read these same variables.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The real lookup, used everywhere outside tests.
+fn system_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Read one histogram bucket setting, e.g. `DYN_METRICS_ITL_MAX`, from the environment.
+///
+/// Falls back to the deprecated doubled form (`DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`),
+/// warning so operators can migrate off it.
+///
+/// Returns `default` when neither name is set. A name that *is* set but cannot be
+/// parsed also returns `default`, but warns first: silently ignoring a typo makes
+/// the whole knob look like it does not exist.
+fn bucket_env_var<T: std::str::FromStr>(
+    env: EnvLookup<'_>,
+    prefix: &str,
+    suffix: &str,
+    default: T,
+) -> T {
+    let name = format!("{prefix}_{suffix}");
+    let found = match env(&name) {
+        Some(value) => Some((name, value)),
+        None => {
+            let deprecated = format!(
+                "{}{prefix}_{suffix}",
+                env_metrics::DEPRECATED_HISTOGRAM_PREFIX
+            );
+            env(&deprecated).map(|value| {
+                tracing::warn!(
+                    deprecated = %deprecated,
+                    replacement = %name,
+                    "Deprecated histogram bucket environment variable; rename it, \
+                     support for the old name will be removed in a future release"
+                );
+                (deprecated, value)
+            })
+        }
+    };
+
+    match found {
+        None => default,
+        Some((name, value)) => value.parse::<T>().unwrap_or_else(|_| {
+            tracing::warn!(
+                env_var = %name,
+                value = %value,
+                "Could not parse histogram bucket environment variable, using default"
+            );
+            default
+        }),
+    }
+}
+
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
 fn parse_bucket_config(
+    env: EnvLookup<'_>,
     env_prefix: &str,
     default_min: f64,
     default_max: f64,
@@ -342,19 +491,9 @@ fn parse_bucket_config(
         );
         return (1.0, 10.0, 10);
     }
-    let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
-    let mut min = std::env::var(format!("{env_prefix}_MIN"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_min);
-    let mut max = std::env::var(format!("{env_prefix}_MAX"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_max);
-    let mut count = std::env::var(format!("{env_prefix}_COUNT"))
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default_count);
+    let mut min = bucket_env_var(env, env_prefix, "MIN", default_min);
+    let mut max = bucket_env_var(env, env_prefix, "MAX", default_max);
+    let mut count = bucket_env_var(env, env_prefix, "COUNT", default_count);
 
     if !validate_bucket_config(min, max, count) {
         tracing::warn!(
@@ -468,6 +607,9 @@ pub enum Endpoint {
     /// Classification (sequence classification / cross-encoder pooling)
     Classify,
 
+    /// Cross-encoder reranking
+    Rerank,
+
     /// Pooling (raw pooler output)
     Pooling,
 
@@ -514,6 +656,23 @@ pub struct CancellationLabels {
 pub enum Status {
     Success,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCompletion {
+    Success,
+    Cancelled,
+    Error,
+}
+
+impl RequestCompletion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// Error type classification for fine-grained observability
@@ -627,7 +786,7 @@ impl Metrics {
     /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
     /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
     ///
-    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 256.0, 10)
+    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
@@ -660,6 +819,12 @@ impl Metrics {
     /// Create Metrics with an explicit optional prefix. `None` uses the standard
     /// frontend prefix and does not read environment variables.
     pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
+        Self::build(metrics_prefix, &system_env)
+    }
+
+    /// Real constructor. `env` is injected so tests can pin bucket configuration
+    /// without touching the process environment.
+    fn build(metrics_prefix: Option<String>, env: EnvLookup<'_>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
@@ -727,8 +892,13 @@ impl Metrics {
         .unwrap();
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
-        let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
+        let (req_dur_min, req_dur_max, req_dur_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_REQUEST_DURATION,
+            1.0,
+            512.0,
+            10,
+        );
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -743,8 +913,13 @@ impl Metrics {
         .unwrap();
 
         // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (isl_min, isl_max, isl_count) =
-            parse_bucket_config("DYN_METRICS_INPUT_SEQUENCE", 50.0, 128000.0, 12);
+        let (isl_min, isl_max, isl_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_INPUT_SEQUENCE,
+            50.0,
+            128000.0,
+            12,
+        );
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
 
         let input_sequence_length = HistogramVec::new(
@@ -758,8 +933,13 @@ impl Metrics {
         .unwrap();
 
         // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (osl_min, osl_max, osl_count) =
-            parse_bucket_config("DYN_METRICS_OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
+        let (osl_min, osl_max, osl_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+            50.0,
+            32000.0,
+            10,
+        );
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
 
         let output_sequence_length = HistogramVec::new(
@@ -783,7 +963,7 @@ impl Metrics {
 
         // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
         let (ttft_min, ttft_max, ttft_count) =
-            parse_bucket_config("DYN_METRICS_TTFT", 0.001, 480.0, 18);
+            parse_bucket_config(env, env_metrics::DYN_METRICS_TTFT, 0.001, 480.0, 18);
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
         let time_to_first_token = HistogramVec::new(
@@ -797,7 +977,8 @@ impl Metrics {
         .unwrap();
 
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) = parse_bucket_config("DYN_METRICS_ITL", 0.001, 2.0, 13);
+        let (itl_min, itl_max, itl_count) =
+            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
@@ -814,8 +995,13 @@ impl Metrics {
         // sub-second (60-200 token inputs on L4-class GPUs land in the 5-50ms
         // range), so 1ms..10s on a log scale gives p50/p99 resolution that
         // the 1..512s `request_duration` buckets cannot.
-        let (emb_min, emb_max, emb_count) =
-            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+        let (emb_min, emb_max, emb_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_EMBEDDING_LATENCY,
+            0.001,
+            10.0,
+            14,
+        );
         let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
 
         let embedding_latency = HistogramVec::new(
@@ -1487,6 +1673,14 @@ impl InflightGuard {
         self.status = Status::Error;
         self.error_type = error_type;
     }
+
+    fn request_completion(&self) -> RequestCompletion {
+        match (&self.status, &self.error_type) {
+            (Status::Success, _) => RequestCompletion::Success,
+            (Status::Error, ErrorType::Cancelled) => RequestCompletion::Cancelled,
+            (Status::Error, _) => RequestCompletion::Error,
+        }
+    }
 }
 
 impl Drop for InflightGuard {
@@ -1506,12 +1700,14 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
+        let completion = self.request_completion();
+        self.span.record("request.outcome", completion.as_str());
+
         let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
-        match self.status {
-            Status::Error => {
+        match completion {
+            RequestCompletion::Error => {
                 let detail = match self.error_type {
-                    ErrorType::Cancelled => "cancelled before completion",
                     ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
@@ -1519,7 +1715,11 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
-                    ErrorType::None => "unknown error",
+                    // `request_completion()` routes `(Error, Cancelled)` to
+                    // `RequestCompletion::Cancelled`, so only `None` reaches
+                    // here. `Cancelled` is listed to keep the match total
+                    // without a panic in a `Drop` impl.
+                    ErrorType::None | ErrorType::Cancelled => "unknown error",
                 };
                 tracing::error!(
                     request_id = %self.request_id,
@@ -1533,7 +1733,20 @@ impl Drop for InflightGuard {
                     "request completed"
                 );
             }
-            Status::Success => {
+            RequestCompletion::Cancelled => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %completion.as_str(),
+                    error_type = %self.error_type,
+                    error_detail = "cancelled before completion",
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            RequestCompletion::Success => {
                 tracing::info!(
                     request_id = %self.request_id,
                     model = %self.model,
@@ -1555,6 +1768,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Rerank => write!(f, "rerank"),
             Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
@@ -1574,6 +1788,7 @@ impl Endpoint {
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
             Endpoint::Classify => "classify",
+            Endpoint::Rerank => "rerank",
             Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
@@ -2284,6 +2499,116 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 mod tests {
     use super::*;
 
+    fn model_ready_value_with_name(
+        registry: &Registry,
+        metric_name: &str,
+        model: &str,
+    ) -> Option<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "model" && label.value() == model)
+            })
+            .map(|metric| metric.get_gauge().value())
+    }
+
+    fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
+        model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
+    #[test]
+    fn model_ready_metric_tracks_live_routing_catalog() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), None);
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        assert!(manager.add_worker_set("test-model", "watched", worker_set));
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+
+        let custom_registry = Registry::new();
+        register_model_ready_metric(
+            &custom_registry,
+            manager.clone(),
+            Some("custom_frontend".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            model_ready_value_with_name(
+                &custom_registry,
+                "custom_frontend_model_ready",
+                "test-model"
+            ),
+            Some(0.0)
+        );
+        assert_eq!(model_ready_value(&custom_registry, "test-model"), None);
+
+        worker_tx.send(vec![1]).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+
+        worker_tx.send(Vec::new()).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+    }
+
+    #[test]
+    fn model_ready_metric_omits_alias_names() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        let worker_set = Arc::new(worker_set);
+
+        // `register_alias` refuses a name that is already a live primary, so it must
+        // run before the alias name gains its own WorkerSet.
+        assert!(manager.add_worker_set_arc("test-model", "watched", worker_set.clone()));
+        assert!(manager.register_alias("test-model-alias", "test-model"));
+        assert!(manager.add_worker_set_arc("test-model-alias", "watched", worker_set));
+
+        worker_tx.send(vec![1]).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+        assert_eq!(model_ready_value(&registry, "test-model-alias"), None);
+
+        let series = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == model_ready_metric_name(None))
+            .map(|family| family.get_metric().len());
+        assert_eq!(series, Some(1));
+    }
+
     #[test]
     fn test_round_to_sig_figs() {
         // Test rounding to 2 significant figures
@@ -2325,6 +2650,119 @@ mod tests {
                 buckets[i]
             );
         }
+    }
+
+    /// A stand-in for the process environment. Tests inject this instead of calling
+    /// `temp_env`: mutating the real environment races the many other tests in this
+    /// module that construct `Metrics` and read these same variables, which on Unix is
+    /// an unsafe `setenv`/`getenv` race, not merely an ordering hazard.
+    fn fake_env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn bucket_config_reads_the_documented_env_var_names() {
+        // These names were once read under an extra DYN_HISTOGRAM_ prefix, which
+        // silently stopped them working; they must resolve as documented.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "0.002"),
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.002, 80.0, 20));
+    }
+
+    #[test]
+    fn bucket_config_falls_back_to_the_deprecated_doubled_name() {
+        // The doubled form was the only name that worked for several releases, so it
+        // stays supported for one more rather than silently reverting to defaults.
+        let env = fake_env(&[("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "80")]);
+        let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(max, 80.0);
+    }
+
+    #[test]
+    fn bucket_config_prefers_the_new_name_over_the_deprecated_one() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "30"),
+        ]);
+        let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(max, 80.0);
+    }
+
+    #[test]
+    fn bucket_config_falls_back_to_defaults_for_unset_and_unparseable_values() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "not-a-number"),
+            ("DYN_METRICS_ITL_COUNT", "12.5"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.001, 2.0, 13));
+    }
+
+    #[test]
+    fn bucket_config_rejects_a_parseable_but_invalid_combination() {
+        // min >= max parses fine but cannot produce buckets, so the whole set reverts —
+        // including a COUNT that was valid on its own.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "5"),
+            ("DYN_METRICS_ITL_MAX", "1"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.001, 2.0, 13));
+    }
+
+    /// Upper bounds of a histogram's buckets, i.e. the `le` label values that a
+    /// dashboard's `histogram_quantile` query sees on `/metrics`.
+    fn bucket_upper_bounds(registry: &Registry, metric_name: &str) -> Vec<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)
+            .expect("histogram not registered")
+            .get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|b| b.upper_bound())
+            .collect()
+    }
+
+    #[test]
+    fn itl_ceiling_env_var_reaches_the_exported_le_labels() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &env);
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.5);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        assert_eq!(
+            bounds.last().copied(),
+            Some(80.0),
+            "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
+        );
     }
 
     #[test]
@@ -3181,6 +3619,41 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
+        // A choice-less Dynamo metadata frame is client-visible.
+        let metadata: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "nvext": {"engine_data": {"prompt_token_ids": [1, 2]}}
+            }))
+            .unwrap();
+        let metadata = Annotated {
+            id: None,
+            data: Some(metadata),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let mut http_queue_guard = None;
+        let event = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(metadata),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .expect("conversion ok")
+        .expect("nvext chunk should yield a client event");
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+        assert!(
+            wire.contains("engine_data") && wire.contains("prompt_token_ids"),
+            "nvext metadata did not reach client SSE: {wire}"
+        );
+
         // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
@@ -3198,10 +3671,11 @@ mod tests {
         };
 
         let mut http_queue_guard = None;
-        let result = process_response_using_event_converter_and_observe_metrics(
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
         .expect("conversion ok");
         assert!(
@@ -3496,6 +3970,39 @@ mod tests {
                 RequestType::Unary.as_str(),
                 Status::Error.as_str(),
                 ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_classifies_cancellation_separately_for_tracing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "cancelled-request",
+        );
+        guard.mark_error(ErrorType::Cancelled);
+
+        assert_eq!(guard.request_completion(), RequestCompletion::Cancelled);
+        drop(guard);
+
+        // Keep the existing Prometheus contract while tracing reports cancellation
+        // as an expected request outcome rather than a span error.
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Stream.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Cancelled.as_str(),
             ])
             .get();
         assert_eq!(counter_value, 1);

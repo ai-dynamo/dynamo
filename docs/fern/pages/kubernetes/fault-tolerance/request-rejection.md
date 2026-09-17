@@ -120,7 +120,7 @@ Optional. A worker can independently cap concurrent engine work and queue only a
 `--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
 
 ```yaml
-- name: VllmWorker
+- name: worker
   type: worker
   podTemplate:
     spec:

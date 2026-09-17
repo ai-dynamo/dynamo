@@ -115,6 +115,7 @@ class LlmRegistration:
 
     context_length: Optional[int] = None
     kv_cache_block_size: Optional[int] = None
+    # Physical KV capacity per router-visible DP rank, never a process aggregate.
     total_kv_blocks: Optional[int] = None
     max_num_seqs: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
@@ -130,6 +131,7 @@ class LlmRegistration:
     # them so the frontend's PrefillRouter can take its bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    enable_eagle: bool = False
 
 
 @dataclass

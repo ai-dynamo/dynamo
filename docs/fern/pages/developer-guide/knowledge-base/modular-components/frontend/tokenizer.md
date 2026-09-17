@@ -28,12 +28,56 @@ The `basetenkenizer` backend uses the Baseten Tokenizer implementation exposed b
 
 Use this backend for supported `tokenizer.json` models when you need Baseten Tokenizer behavior, including token-compatible Kimi tokenizer artifacts.
 
+The frontend selects the tokenizer backend as follows. When both `tokenizer.json` and a TikToken artifact are present, `tokenizer.json` takes precedence.
+
+```mermaid
+flowchart TD
+    A["Frontend resolves<br/>--tokenizer or DYN_TOKENIZER"] --> B{"Available tokenizer artifact?"}
+    B -->|"tiktoken.model / *.tiktoken"| C["TikToken backend<br/>backend flag has no effect"]
+    B -->|"tokenizer.json"| L{"HuggingFace<br/>loads?"}
+    B -->|"none"| K["Model load fails<br/>(dynamic discovery retries)"]
+    L -->|"no"| K
+    L -->|"yes"| D{"Requested backend?"}
+    D -->|"default"| E["HuggingFace<br/>encode + decode"]
+    D -->|"fastokens"| F{"fastokens loads?"}
+    D -->|"basetenkenizer"| G{"Baseten loads?"}
+    F -->|"yes"| H["fastokens encode<br/>HuggingFace decode"]
+    G -->|"yes"| I["Baseten encode<br/>Baseten decode"]
+    F -->|"no"| J{"Fallback allowed?"}
+    G -->|"no"| J
+    J -->|"yes, the default"| E
+    J -->|"no"| K
+
+    style A fill:#d6e9f8,stroke:#7fb3d5
+    style B fill:#fdf3d0,stroke:#e0c56e
+    style C fill:#e3e0f3,stroke:#a99fd4
+    style D fill:#fdf3d0,stroke:#e0c56e
+    style E fill:#d9f0dc,stroke:#8fc79a
+    style F fill:#fdf3d0,stroke:#e0c56e
+    style G fill:#fdf3d0,stroke:#e0c56e
+    style H fill:#d9f0dc,stroke:#8fc79a
+    style I fill:#d9f0dc,stroke:#8fc79a
+    style J fill:#fdf3d0,stroke:#e0c56e
+    style K fill:#f8d7da,stroke:#e08b93
+    style L fill:#fdf3d0,stroke:#e0c56e
+```
+
 #### Compatibility notes:
 
 - Works with standard BPE `tokenizer.json` files (Qwen, LLaMA, GPT-family, Mistral, DeepSeek, etc.).
 - If `fastokens` or `basetenkenizer` cannot load a particular tokenizer file, the frontend logs a warning and transparently falls back to HuggingFace by default. Use `--no-tokenizer-fallback` to reject incompatible tokenizers during model initialization.
-- Special tokens declared only in a sibling `tokenizer_config.json` are preserved for Baseten encoding and decoding and for Dynamo's L1 prefix-cache boundaries.
+- Special tokens declared only in a sibling `tokenizer_config.json` are merged into the
+  HuggingFace and Baseten paths, and into Dynamo's L1 prefix-cache boundaries. The FastTokenizer
+  encoder loads `tokenizer.json` alone and cannot receive that merge, so a model that declares a
+  special token only in `tokenizer_config.json` encodes it as ordinary text under `fastokens` and
+  produces different token IDs than the other two backends.
+- Multimodal KV routing is disabled while `fastokens` is active, because image placeholders such as
+  `<|image_pad|>` are frequently declared only in `tokenizer_config.json`. Requests still complete,
+  and per-image token metrics remain available when the model is supported by the image-token
+  counter; routing falls back to text-prefix overlap. See
+  [Multimodal KV Routing](../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
 - Has no effect on TikToken-format tokenizers (`.model` / `.tiktoken` files), which always use the TikToken backend.
+- Dedicated vLLM embedding workers let vLLM tokenize raw text by default. When [`--embedding-frontend-tokenization`](../../../../reference/backends/vllm-configuration.mdx) is enabled, raw-text requests use a request-specific Dynamo tokenizer. The request's `add_special_tokens` value overrides `DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS`; the default is `true`. For `tokenizer.json` models, `true` selects HuggingFace while `false` follows the configured backend selection shown above. TikToken artifacts always use TikToken, and token-ID inputs bypass frontend tokenization.
 
 ## Configuration
 
