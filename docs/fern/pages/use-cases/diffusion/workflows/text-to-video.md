@@ -56,7 +56,7 @@ The response returns a video URL or base64 data depending on `response_format` (
 
 ## MiniMax-H3
 
-**Experimental.** The initial MiniMax-H3 qualification serves text-to-video-and-audio (T2VA) with
+The initial MiniMax-H3 qualification serves text-to-video-and-audio (T2VA) with
 one aggregated diffusion worker. The launcher passes `--task-type fl2va`, which
 loads only H3's FL2VA checkpoint partition. Dynamo's standard image stays on
 its VP9-only media stack, so build the opt-in video-audio overlay to mux H.264
