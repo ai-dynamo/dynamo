@@ -845,6 +845,20 @@ impl DataType {
     }
 }
 
+/// KServe v2 `ModelMetadata` wire shape for a Triton tensor.
+///
+/// Triton's `ModelConfig` stores per-tensor `dims` without the batch dimension.
+/// When `max_batch_size > 0`, native Triton's KServe adapter prepends `-1`
+/// (variable batch) so clients can send batched inputs. Copying `dims`
+/// verbatim drops that axis and KServe v2 clients reject the tensor.
+pub fn kserve_metadata_shape(dims: &[i64], max_batch_size: i32) -> Vec<i64> {
+    if max_batch_size > 0 {
+        std::iter::once(-1).chain(dims.iter().copied()).collect()
+    } else {
+        dims.to_vec()
+    }
+}
+
 impl std::fmt::Display for tensor::DataType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
@@ -1211,5 +1225,28 @@ mod oip_datatype_tests {
                 "{name} is the model_config spelling, not the wire spelling"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod kserve_metadata_shape_tests {
+    use super::kserve_metadata_shape;
+
+    /// Native Triton's KServe adapter prepends a variable batch dim (`-1`)
+    /// when `max_batch_size > 0`. Empty `dims` still get that leading axis.
+    #[test]
+    fn prepends_variable_batch_dim_when_batching_enabled() {
+        assert_eq!(kserve_metadata_shape(&[-1], 4), vec![-1, -1]);
+        assert_eq!(kserve_metadata_shape(&[768], 8), vec![-1, 768]);
+        assert_eq!(kserve_metadata_shape(&[], 1), vec![-1]);
+    }
+
+    /// `max_batch_size == 0` means the model is not batched; wire shape is
+    /// `dims` unchanged, including the empty-dims case.
+    #[test]
+    fn leaves_dims_unchanged_when_batching_disabled() {
+        assert_eq!(kserve_metadata_shape(&[-1], 0), vec![-1]);
+        assert_eq!(kserve_metadata_shape(&[3, 224, 224], 0), vec![3, 224, 224]);
+        assert_eq!(kserve_metadata_shape(&[], 0), Vec::<i64>::new());
     }
 }
