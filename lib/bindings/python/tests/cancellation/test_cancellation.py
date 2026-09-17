@@ -11,6 +11,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.unit,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -31,7 +32,6 @@ class MockServer:
         self.context_is_stopped = False
         self.context_is_killed = False
         self.context_metadata = {}
-        self.context_cancelled.clear()
 
         method_name = request
         assert hasattr(
@@ -87,6 +87,7 @@ class MockServer:
                 self.context_is_stopped = True
                 self.context_is_killed = context.is_killed()
                 self.context_metadata = dict(context.metadata.items())
+                self.context_cancelled.set()
                 raise asyncio.CancelledError
 
             if context.is_killed():
@@ -94,6 +95,7 @@ class MockServer:
                 self.context_is_stopped = context.is_stopped()
                 self.context_is_killed = True
                 self.context_metadata = dict(context.metadata.items())
+                self.context_cancelled.set()
                 raise asyncio.CancelledError
 
             await asyncio.sleep(0.1)
@@ -225,8 +227,7 @@ async def test_client_context_cancel(temp_file_store, server, client):
 
         iteration_count += 1
 
-    # Give server a moment to process the cancellation
-    await asyncio.sleep(0.2)
+    await asyncio.wait_for(handler.context_cancelled.wait(), timeout=5)
 
     # Verify server detected the cancellation
     assert handler.context_is_stopped
@@ -260,7 +261,7 @@ async def test_client_context_cancel_preserves_metadata(
 
         iteration_count += 1
 
-    await asyncio.sleep(0.2)
+    await asyncio.wait_for(handler.context_cancelled.wait(), timeout=5)
 
     assert handler.context_is_stopped
     assert not handler.context_is_killed
@@ -357,8 +358,12 @@ async def test_server_raise_cancelled(temp_file_store, server, client):
 async def _wait_for_cancelled_request(request, handler):
     stream = await request
     # Cancellation propagates asynchronously, so responses can arrive before it completes.
-    async for _ in stream:
-        pass
+    try:
+        async for _ in stream:
+            pass
+    except ValueError as error:
+        if str(error) != "Cancelled: CancelledError":
+            raise
     await handler.context_cancelled.wait()
 
 
