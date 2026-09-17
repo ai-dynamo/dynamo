@@ -69,10 +69,22 @@ class BenchmarkWorker(Worker):
             raise ValueError(
                 "--benchmark-randomize-kda-state requires recurrent cache groups"
             )
-        if not callable(getattr(self.model_runner, "_zero_block_ids", None)):
+        # V1 wraps zeroing on the runner; V2 exposes the zeroer directly.
+        # Native initialization can omit the V2 zeroer when the cache dtype
+        # needs no automatic zeroing, but benchmark shadows still request it.
+        zero_blocks = getattr(self.model_runner, "_zero_block_ids", None)
+        if not callable(zero_blocks):
+            zeroer = getattr(self.model_runner, "kv_block_zeroer", None)
+            init_zeroer = getattr(self.model_runner, "_init_kv_zero_meta", None)
+            if zeroer is None and callable(init_zeroer):
+                init_zeroer()
+                zeroer = getattr(self.model_runner, "kv_block_zeroer", None)
+            zero_blocks = getattr(zeroer, "zero_block_ids", None)
+        if not callable(zero_blocks):
             raise ValueError(
-                "Random KDA benchmarking requires the vLLM V1 GPU model runner"
+                "Random KDA benchmarking requires a vLLM GPU runner KV-zeroing API"
             )
+        self._benchmark_zero_block_ids = zero_blocks
         self._benchmark_kda_active = True
 
     def finish_benchmark_kda_state(self) -> None:
@@ -97,7 +109,7 @@ class BenchmarkWorker(Worker):
                 # the typed KDA views alias the same backing pool as MLA.
                 scheduler_output = copy.copy(scheduler_output)
                 if scheduler_output.new_block_ids_to_zero:
-                    self.model_runner._zero_block_ids(
+                    self._benchmark_zero_block_ids(
                         scheduler_output.new_block_ids_to_zero
                     )
                     scheduler_output.new_block_ids_to_zero = None

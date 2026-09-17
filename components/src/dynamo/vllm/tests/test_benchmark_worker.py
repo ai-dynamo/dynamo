@@ -50,8 +50,10 @@ def test_random_state_rejects_null_or_invalid_blocks(block_id):
         )
 
 
+@pytest.mark.parametrize("runner_api", ["v1", "v2", "v2_lazy"])
 def test_worker_initializes_only_private_kda_after_zeroing_and_disables_before_serving(
     monkeypatch,
+    runner_api,
 ):
     # Different typed views share a pool, as in the hybrid allocator. Block 1
     # belongs to attention; block 2 to the source chain; only block 3 is KDA.
@@ -60,15 +62,42 @@ def test_worker_initializes_only_private_kda_after_zeroing_and_disables_before_s
     worker = BenchmarkWorker.__new__(BenchmarkWorker)
     worker.rank = 0
     worker.device = torch.device("cpu")
-    worker._benchmark_kda_active = True
-    worker._benchmark_kda_layers = [(1, "kda", states)]
     events = []
 
     def zero(block_ids):
         events.append("zero")
         pool[block_ids] = 0
 
-    worker.model_runner = SimpleNamespace(_zero_block_ids=zero)
+    if runner_api == "v1":
+        worker.model_runner = SimpleNamespace(_zero_block_ids=zero)
+    else:
+        zeroer = SimpleNamespace(zero_block_ids=zero)
+        worker.model_runner = SimpleNamespace(
+            kv_block_zeroer=None if runner_api == "v2_lazy" else zeroer,
+            _init_kv_zero_meta=Mock(
+                side_effect=lambda: setattr(
+                    worker.model_runner, "kv_block_zeroer", zeroer
+                )
+            ),
+        )
+    worker.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={"kda": SimpleNamespace(kv_cache=states)}
+        )
+    )
+    spec = MambaSpec(block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align")
+    cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=object(), layer_names=["mla"]),
+            SimpleNamespace(kv_cache_spec=spec, layer_names=["kda"]),
+        ]
+    )
+    monkeypatch.setattr(Worker, "initialize_from_config", lambda *_args: None)
+    worker.initialize_from_config(cache_config)
+    if runner_api != "v1":
+        assert worker.model_runner._init_kv_zero_meta.call_count == (
+            runner_api == "v2_lazy"
+        )
     monkeypatch.setattr(
         torch.cuda,
         "current_stream",
@@ -103,7 +132,10 @@ def test_worker_initializes_only_private_kda_after_zeroing_and_disables_before_s
     assert worker._benchmark_kda_layers == []
 
 
-def test_worker_binds_only_recurrent_layers_from_runtime_cache_groups(monkeypatch):
+@pytest.mark.parametrize("has_zeroing_api", [True, False])
+def test_worker_binds_only_recurrent_layers_from_runtime_cache_groups(
+    monkeypatch, has_zeroing_api
+):
     worker = BenchmarkWorker.__new__(BenchmarkWorker)
     state = (torch.zeros(4, 2, 4), torch.zeros(4, 2, 3, 4))
     worker.vllm_config = SimpleNamespace(
@@ -114,7 +146,9 @@ def test_worker_binds_only_recurrent_layers_from_runtime_cache_groups(monkeypatc
             }
         )
     )
-    worker.model_runner = SimpleNamespace(_zero_block_ids=lambda _ids: None)
+    worker.model_runner = SimpleNamespace(
+        _zero_block_ids=(lambda _ids: None) if has_zeroing_api else None
+    )
     spec = MambaSpec(block_size=16, shapes=(), dtypes=(), mamba_cache_mode="align")
     cache_config = SimpleNamespace(
         kv_cache_groups=[
@@ -123,6 +157,11 @@ def test_worker_binds_only_recurrent_layers_from_runtime_cache_groups(monkeypatc
         ]
     )
     monkeypatch.setattr(Worker, "initialize_from_config", lambda *_args: None)
+    if not has_zeroing_api:
+        with pytest.raises(ValueError, match="KV-zeroing API"):
+            worker.initialize_from_config(cache_config)
+        assert not worker._benchmark_kda_active
+        return
     worker.initialize_from_config(cache_config)
     assert worker._benchmark_kda_layers == [(1, "kda", state)]
     assert worker._benchmark_kda_active

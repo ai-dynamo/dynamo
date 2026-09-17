@@ -2010,9 +2010,8 @@ def test_prefill_feasibility_uses_native_split_with_local_prefix(kv_read_tokens)
 @pytest.mark.core
 @pytest.mark.parametrize("generated", [False, True])
 def test_prefill_grid_rejects_native_split_before_measurement(generated):
-    # GB300 regression: 4 x 192 was considered one 768-token forward, but the
-    # engine's KDA tail checkpoint schedules 4 x 128 first. Plenty of capacity
-    # isolates the split from the unrelated shared-pool feasibility check.
+    # Plenty of capacity isolates the native KDA split from shared-pool
+    # feasibility: four 192-token prompts first schedule four 128-token chunks.
     stub = _explicit_grid_stub("prefill")
     stub.cache_config.num_gpu_blocks = 1024
     stub.cache_config.block_size = 1536
