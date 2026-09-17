@@ -119,8 +119,8 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 # Keep cache-loss worker metadata off unless the matching frontend funnel is
 # enabled. This prevents per-request dictionary construction for deployments
 # that do not collect the funnel.
-CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED: Final[bool] = os.environ.get(
-    "DYN_CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED", ""
+CACHE_REUSE_METRICS_ENABLED: Final[bool] = os.environ.get(
+    "DYN_CACHE_REUSE_METRICS_ENABLED", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 # Marker set by the Rust conditional-disagg bypass path. When present on a
@@ -3389,7 +3389,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
-                        if CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED:
+                        if CACHE_REUSE_METRICS_ENABLED:
                             out.setdefault("engine_data", {})[
                                 "cache_loss"
                             ] = BaseWorkerHandler._cache_loss_engine_data(res)
