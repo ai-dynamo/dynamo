@@ -6,7 +6,7 @@ sidebar-title: Disaggregated Serving
 description: Split prefill and decode across independent workers
 ---
 
-Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected by a KV cache transport such as [NIXL](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) or Mooncake (Tokenspeed only). This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../../kubernetes/disaggregated-serving/overview.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
+Disaggregated serving separates the prefill and decode phases of inference into independent workers, each scalable on its own and connected via [NIXL](../../developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) for KV cache transfer. This is the local equivalent of the disaggregated pattern in the [Kubernetes Disaggregated Serving guide](../../kubernetes/disaggregated-serving/overview.md) — the same architecture, driven by CLI flags instead of a DynamoGraphDeployment.
 
 For the architecture and when to use it, see [Disaggregated Serving](../../kubernetes/disaggregated-serving/overview.md).
 
@@ -15,9 +15,9 @@ For the architecture and when to use it, see [Disaggregated Serving](../../kuber
 A disaggregated deployment is still a frontend plus workers (see the [Overview](overview.mdx)), except instead of one worker doing both phases, you run:
 
 - A **prefill worker** — computes the prompt's KV cache.
-- A **decode worker** — receives the KV cache over the backend's transfer protocol and generates tokens.
+- A **decode worker** — receives the KV cache over NIXL and generates tokens.
 
-The vLLM, SGLang, and TensorRT-LLM `launch/disagg.sh` presets start the frontend and both workers, pinned to separate GPUs with the KV-transfer config wired up. Requires 2 GPUs.
+The `launch/disagg.sh` presets start the frontend and both workers, pinned to separate GPUs with the KV-transfer config wired up. Requires 2 GPUs.
 
 ## Disaggregated serving
 
@@ -45,13 +45,6 @@ The vLLM, SGLang, and TensorRT-LLM `launch/disagg.sh` presets start the frontend
     ```
   </Tab>
 </Tabs>
-
-## TokenSpeed
-
-For LongCat-Flash with two prefill replicas and KV-aware routing, use the
-[TokenSpeed disaggregation example](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/tokenspeed).
-This experimental backend uses Mooncake for KV transfer and has its own hardware
-and launch requirements.
 
 ## Adding KV-aware routing
 

@@ -380,7 +380,6 @@
 /deploy/inference-gateway/scripts/                                                                      @ai-dynamo/dynamo-epp-codeowners
 
 # === tokenspeed  (@ai-dynamo/dynamo-tokenspeed-codeowners) ===
-/examples/backends/tokenspeed/                                                                          @ai-dynamo/dynamo-tokenspeed-codeowners
 /components/src/dynamo/tokenspeed/                                                                      @ai-dynamo/dynamo-tokenspeed-codeowners
 /components/src/dynamo/tokenspeed/tests/                                                                @ai-dynamo/dynamo-tokenspeed-codeowners
 

@@ -44,7 +44,6 @@ If you want to see advanced, framework-specific deployment patterns and best pra
 - **[vLLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm)** – vLLM-specific deployment and configuration
 - **[SGLang](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang)** – SGLang integration examples and workflows
 - **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/trtllm)** – TensorRT-LLM workflows and optimizations
-- **[TokenSpeed](backends/tokenspeed/README.md)** – LongCat-Flash prefill/decode disaggregation with KV-aware routing
 
 ## Deployment Examples
 

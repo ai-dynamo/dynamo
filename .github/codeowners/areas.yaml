@@ -455,7 +455,6 @@ areas:
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
-  - examples/backends/tokenspeed/
 - label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
