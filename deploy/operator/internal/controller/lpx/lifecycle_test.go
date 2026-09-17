@@ -708,6 +708,15 @@ func TestLPXPublicationWaitsForRequestGarbageCollectionBeforeRecreatingPodClique
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, reconciler.Get(ctx, client.ObjectKey{Namespace: dgd.Namespace, Name: desired.plan.PodCliqueSetName}, pcs))
+	t.Log("An unrelated live PCS also has a request with this deployment's copied UID label")
+	foreignPCS := pcs.DeepCopy()
+	foreignPCS.Name, foreignPCS.UID, foreignPCS.ResourceVersion = lpxTestOtherName, "foreign-pcs", ""
+	foreignPCS.OwnerReferences = nil
+	require.NoError(t, reconciler.Create(ctx, foreignPCS))
+	foreign := getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, desired.requests[0].requestName)
+	foreign.Name, foreign.UID, foreign.ResourceVersion = "foreign-request", "foreign-request-uid", ""
+	foreign.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(foreignPCS, grovev1alpha1.SchemeGroupVersion.WithKind(lpxPodCliqueSetKind))}
+	require.NoError(t, reconciler.Create(ctx, foreign))
 	require.NoError(t, reconciler.Delete(ctx, pcs))
 
 	t.Log("Keep the replacement PCS fenced while its predecessor's request remains persisted")
@@ -723,6 +732,8 @@ func TestLPXPublicationWaitsForRequestGarbageCollectionBeforeRecreatingPodClique
 	require.NoError(t, err)
 	require.Empty(t, currents)
 	require.Nil(t, classification)
+	require.Equal(t, foreign, getLPXRequest(t, ctx, reconciler.Client, dgd.Namespace, foreign.Name))
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(foreignPCS), &grovev1alpha1.PodCliqueSet{}))
 }
 
 func TestLPXScaleDownDeletesOnlyStaleRequests(t *testing.T) {
@@ -1527,8 +1538,8 @@ func TestLPXPublicationFenceRejectsForeignExactNameCollisionFromAuthoritativeLis
 			UID:       "foreign-collision-uid",
 			Labels:    map[string]string{lpxOwnerUIDLabel: string(dgd.UID)},
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-				Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
+				APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+				Kind:       lpxPodCliqueSetKind,
 				Name:       lpxTestOtherName,
 				UID:        "other-uid",
 				Controller: ptr.To(true),
@@ -1537,6 +1548,8 @@ func TestLPXPublicationFenceRejectsForeignExactNameCollisionFromAuthoritativeLis
 	}
 	second := foreign.DeepCopy()
 	second.Name, second.UID = "a-foreign-request", "second-foreign-collision-uid"
+	second.OwnerReferences[0].APIVersion = nvidiacomv1beta1.GroupVersion.String()
+	second.OwnerReferences[0].Kind = nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind
 	desired := &lpxMaterializing{requests: []lpxModelMaterializing{
 		{requestName: foreign.Name}, {requestName: second.Name},
 	}}

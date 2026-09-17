@@ -595,10 +595,8 @@ func ownsLPXRequest(
 		return metav1.IsControlledBy(pcs, deployment) && metav1.IsControlledBy(request, pcs)
 	}
 
-	// The deployment-UID label keeps owner-GC observation level-driven after the
-	// PCS disappears. The request's controller kind still prevents adopting an
-	// unrelated labeled object while the exact UID remains in its owner reference.
-	return request.Labels[lpxOwnerUIDLabel] == string(deployment.UID)
+	// Keep observing requests from the missing PCS, not another owner with a copied label.
+	return owner.Name == dynamo.PCSNameForLPX(deployment) && request.Labels[lpxOwnerUIDLabel] == string(deployment.UID)
 }
 
 // listOwnedLPXRequests filters the deployment-scoped list against the caller's
