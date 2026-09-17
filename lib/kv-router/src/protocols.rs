@@ -24,18 +24,18 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
 /// Enables request-level router/worker cache reuse stage telemetry.
 /// Disabled by default.
-pub const CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED_ENV: &str =
-    "DYN_CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED";
+pub const CACHE_REUSE_METRICS_ENABLED_ENV: &str =
+    "DYN_CACHE_REUSE_METRICS_ENABLED";
 
-static CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| dynamo_truthy::env_is_truthy(CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED_ENV));
+static CACHE_REUSE_METRICS_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| dynamo_truthy::env_is_truthy(CACHE_REUSE_METRICS_ENABLED_ENV));
 
 /// Returns the process-level worker-stage telemetry setting.
 ///
 /// The environment is read once so the disabled request path is only a cached
 /// boolean branch and performs no allocation or metadata collection.
 pub fn cache_reuse_funnel_f2_onward_enabled() -> bool {
-    *CACHE_REUSE_FUNNEL_F2_ONWARD_ENABLED
+    *CACHE_REUSE_METRICS_ENABLED
 }
 
 /// Seed for XXH3 hashing, consistent with indexer.rs
