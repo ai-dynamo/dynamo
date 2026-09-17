@@ -348,6 +348,16 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
+def supports_require_reasoning(engine: Any) -> bool:
+    """Return whether this SGLang engine supports the reasoning-gate argument."""
+    if not hasattr(engine, "async_generate"):
+        return False
+    return "require_reasoning" in filter_supported_async_generate_kwargs(
+        engine,
+        {"require_reasoning": False},
+    )
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
@@ -361,4 +371,5 @@ __all__ = [
     "require_reasoning_kwargs",
     "resolved_server_args",
     "sglang_uses_mla_backend",
+    "supports_require_reasoning",
 ]

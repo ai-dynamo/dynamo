@@ -1763,6 +1763,7 @@ mod tests {
             tool_index,
             name: name.map(str::to_string),
             arguments: arguments.to_string(),
+            complete: true,
         })
     }
 

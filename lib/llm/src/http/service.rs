@@ -63,13 +63,19 @@ fn apply_request_tool_call_parsing_options(
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
     let tools = request.inner.tools.as_deref().unwrap_or(&[]);
     let converted_tools = crate::preprocessor::tool_choice::convert_tools(tools);
+    let structural_tag_config = parsing_options.structural_tag.as_ref();
+    let has_structured_output = request
+        .inner
+        .response_format
+        .as_ref()
+        .is_some_and(|format| !matches!(format, dynamo_protocols::types::ResponseFormat::Text));
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
         parsing_options.tool_call_parser.as_deref(),
         &converted_tool_choice,
         &converted_tools,
         request.inner.parallel_tool_calls,
-        parsing_options.structural_tag_mode,
-        parsing_options.structural_tag_scope,
+        structural_tag_config,
+        has_structured_output,
         parsing_options.exclude_tools_when_tool_choice_none,
     )?
     .is_required();
@@ -172,15 +178,14 @@ mod tests {
     // The registry-builder gap this test suite exists to close: a non-Kimi parser
     // (qwen3_coder, which the parser registry does register a structural-tag builder
     // for) with a forced tool_choice must still resolve to `StructuralTag` once the
-    // operator has globally enabled structural-tag mode — matching the real
-    // preprocessing path (`apply_tool_choice_structural_tag`'s
-    // `structural_tag_mode != Off` branch), not the narrower Kimi-only reconstruction
-    // this helper used before this fix.
+    // operator has configured structural tags — matching the real preprocessing
+    // path, not the narrower Kimi-only reconstruction this helper used before
+    // this fix.
     #[test]
     fn operator_enabled_mode_resolves_structural_tag_for_a_non_kimi_parser() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+            structural_tag: Some(Default::default()),
             ..Default::default()
         };
         let result =
@@ -189,14 +194,14 @@ mod tests {
         assert_eq!(
             result.guided_tool_constraint,
             GuidedToolConstraint::StructuralTag,
-            "an operator-enabled structural_tag_mode must apply to any registry-supported \
+            "an operator-configured structural tag must apply to any registry-supported \
              parser, not only the Kimi-intrinsic case"
         );
     }
 
-    // With the operator default (`structural_tag_mode = Off`), the same non-Kimi
-    // parser must NOT get a structural tag — confirms the mode gate above is real,
-    // not a permanently-on regression.
+    // Without an operator configuration, the same non-Kimi parser must NOT get a
+    // structural tag — confirms the gate above is real, not a permanently-on
+    // regression.
     #[test]
     fn operator_default_mode_off_does_not_resolve_structural_tag_for_a_non_kimi_parser() {
         let parsing_options = ParsingOptions {
@@ -212,8 +217,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tools_with_structured_output_are_classified_as_structural_tag() {
+        let mut request = request(json!("auto"));
+        request.inner.response_format = Some(
+            serde_json::from_value(json!({
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": {"type": "object"}
+                }
+            }))
+            .expect("response_format must deserialize"),
+        );
+        let config = crate::local_model::runtime_config::StructuralTagConfig {
+            allow_tool_calls_with_structured_output: true,
+            ..Default::default()
+        };
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("qwen3_coder".to_string()),
+            structural_tag: Some(config),
+            ..Default::default()
+        };
+
+        let result = apply_request_tool_call_parsing_options(parsing_options, &request)
+            .expect("tools with structured output must resolve a constraint");
+
+        assert_eq!(
+            result.guided_tool_constraint,
+            GuidedToolConstraint::StructuralTag
+        );
+    }
+
     // `tool_choice: none` must never leave the client able to observe a tool call or
-    // a tool-call finish reason, regardless of the operator's structural-tag mode or
+    // a tool-call finish reason, regardless of the operator's structural-tag policy or
     // exclusion setting. The real preprocessing path may install a ban tag at
     // generation time for `none` (which is a request-time generation constraint on
     // the engine, tracked separately from this field), but that must not surface as
@@ -228,7 +265,7 @@ mod tests {
         for exclude_tools_when_tool_choice_none in [true, false] {
             let parsing_options = ParsingOptions {
                 tool_call_parser: Some("qwen3_coder".to_string()),
-                structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+                structural_tag: Some(Default::default()),
                 exclude_tools_when_tool_choice_none,
                 ..Default::default()
             };
@@ -428,7 +465,7 @@ mod tests {
     }
 
     // Same gap, operator-enabled path: qwen3_coder only gets a structural tag when
-    // `structural_tag_mode = On` (it is not Kimi-intrinsic). Confirms the fix isn't
+    // structural tags are configured (it is not Kimi-intrinsic). Confirms the fix isn't
     // narrowly scoped to the two Kimi-intrinsic parsers.
     #[test]
     fn operator_enabled_qwen3_coder_required_with_empty_tools_is_rejected() {
@@ -442,7 +479,7 @@ mod tests {
             serde_json::from_value(value).expect("request must deserialize");
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+            structural_tag: Some(Default::default()),
             ..Default::default()
         };
         let result = apply_request_tool_call_parsing_options(parsing_options, &request);
@@ -475,7 +512,7 @@ mod tests {
             serde_json::from_value(value).expect("request must deserialize");
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("qwen3_coder".to_string()),
-            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
+            structural_tag: Some(Default::default()),
             ..Default::default()
         };
         let result = apply_request_tool_call_parsing_options(parsing_options, &request);
