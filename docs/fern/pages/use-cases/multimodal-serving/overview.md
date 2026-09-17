@@ -117,15 +117,14 @@ different content for different authenticated sessions. Dynamo derives the
 scope from these headers, in precedence order:
 
 1. `x-dynamo-session-id`
-2. `x-session-affinity`
-3. Recognized agent headers: Claude Code `x-claude-code-session-id` (or
+2. Recognized agent headers: Claude Code `x-claude-code-session-id` (or
    `x-claude-code-agent-id` for a child agent), Codex `thread-id`, then OpenCode
    `x-session-id`
 
-Use `x-dynamo-session-id` for agent requests that need a Dynamo `AgentContext`
-and agent lifecycle metadata. Use `x-session-affinity` for non-agent callers
-that need sticky routing and cache isolation, such as a multi-turn application
-session, without creating an `AgentContext`.
+Use `x-dynamo-session-id` to provide an explicit Dynamo session identity.
+Dynamo normalizes it and the recognized agent headers into both an
+`AgentContext` and the session affinity used for routing and image-cache
+scoping.
 
 When session scoping is enabled, a missing or blank scope bypasses the local
 decoded-image cache, in-flight request deduplication, the shared encoded-image

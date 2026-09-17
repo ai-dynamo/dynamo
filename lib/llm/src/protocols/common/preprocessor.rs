@@ -415,10 +415,11 @@ pub struct PreprocessedRequest {
     pub agent_context: Option<AgentContext>,
 
     /// Opaque frontend-derived scope for partitioning backend `ImageLoader`
-    /// URL caches. This does not namespace engine KV or embedding caches.
+    /// URL caches and Dynamo-owned image embedding caches. This does not
+    /// namespace engine KV caches.
     ///
-    /// This is kept separate from `agent_context`: routing affinity is not
-    /// necessarily an agent identity and must not overwrite agent lineage.
+    /// This is carried separately from `agent_context` because backends need
+    /// only the opaque cache scope, not agent lifecycle metadata.
     /// The optional field is safe across rolling upgrades: older readers
     /// ignore it and newer readers default it when an older frontend omits it.
     #[builder(default)]

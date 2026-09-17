@@ -19,9 +19,6 @@ pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id"
 pub const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_PARENT_SESSION_ID: &str = "x-dynamo-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
-// Affinity-only identity for non-agent clients. Unlike x-dynamo-session-id,
-// this header must not create AgentContext or imply agent lifecycle semantics.
-pub(crate) const HEADER_SESSION_AFFINITY: &str = "x-session-affinity";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -126,9 +123,6 @@ fn codex_compaction_header_value(headers: &HeaderMap) -> Option<AgentCompaction>
 
 pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<String> {
     if let Some(session_id) = borrowed_header_value(headers, HEADER_DYNAMO_SESSION_ID) {
-        return Some(session_id.to_owned());
-    }
-    if let Some(session_id) = borrowed_header_value(headers, HEADER_SESSION_AFFINITY) {
         return Some(session_id.to_owned());
     }
     for mapping in AGENT_HEADER_MAPPINGS {
