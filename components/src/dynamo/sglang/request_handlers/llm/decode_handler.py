@@ -40,8 +40,8 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     IMAGE_URL_KEY,
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
-    extract_mm_hashes,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
 )
 

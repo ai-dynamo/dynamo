@@ -23,6 +23,11 @@ _SUPPORTED_MULTIMODAL_CONTENT_TYPES = frozenset(
 # BaseMultiModalProcessorOutput.organize_results() builds SGLang's mm_items in
 # this order, independent of their order in the original prompt.
 _SGLANG_MM_ITEM_MODALITY_ORDER = ("image", "video", "audio")
+_MM_DATA_KEY_BY_MODALITY = {
+    "image": IMAGE_URL_KEY,
+    "video": VIDEO_URL_KEY,
+    "audio": AUDIO_URL_KEY,
+}
 
 
 def _multi_modal_data(request: Dict[str, Any]) -> Dict[str, Any]:
@@ -156,11 +161,11 @@ def extract_mm_hashes(request: Dict[str, Any]) -> list[str] | None:
             )
             return None
 
-        flattened: list[str] = []
+        hashes_by_modality: dict[str, list[str]] = {}
         for modality in _SGLANG_MM_ITEM_MODALITY_ORDER:
             hashes = grouped.get(modality)
             if hashes is None:
-                continue
+                hashes = []
             if not isinstance(hashes, list) or not all(
                 isinstance(value, str) for value in hashes
             ):
@@ -168,6 +173,36 @@ def extract_mm_hashes(request: Dict[str, Any]) -> list[str] | None:
                     "extra_args.mm_hashes_by_modality[%s] is not a string "
                     "list; ignoring routing-side hashes and letting SGLang recompute",
                     modality,
+                )
+                return None
+            hashes_by_modality[modality] = hashes
+
+        mm_data = request.get("multi_modal_data")
+        if not isinstance(mm_data, dict):
+            logger.warning(
+                "extra_args.mm_hashes_by_modality has no matching "
+                "multi_modal_data object; ignoring routing-side hashes and "
+                "letting SGLang recompute"
+            )
+            return None
+
+        flattened: list[str] = []
+        for modality in _SGLANG_MM_ITEM_MODALITY_ORDER:
+            hashes = hashes_by_modality[modality]
+            media_items = mm_data.get(_MM_DATA_KEY_BY_MODALITY[modality])
+            if media_items is None:
+                media_items = []
+            if not isinstance(media_items, list) or len(hashes) != len(media_items):
+                media_count = (
+                    len(media_items) if isinstance(media_items, list) else None
+                )
+                logger.warning(
+                    "extra_args.mm_hashes_by_modality[%s] count (%d) does not "
+                    "match multi_modal_data count (%s); ignoring routing-side "
+                    "hashes and letting SGLang recompute",
+                    modality,
+                    len(hashes),
+                    media_count,
                 )
                 return None
             flattened.extend(hashes)

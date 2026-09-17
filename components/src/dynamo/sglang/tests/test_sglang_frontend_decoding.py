@@ -518,7 +518,10 @@ async def test_aggregated_forwards_grouped_mm_hashes_in_sglang_item_order():
     handler.engine = SimpleNamespace(async_generate=fake_async_generate)
     request = {
         "token_ids": [1, 2, 3],
-        "multi_modal_data": {},
+        "multi_modal_data": {
+            "image_url": ["https://example.com/a.jpg"],
+            "video_url": ["https://example.com/a.mp4"],
+        },
         "extra_args": {
             "mm_hashes_by_modality": {
                 "video": ["video-a"],

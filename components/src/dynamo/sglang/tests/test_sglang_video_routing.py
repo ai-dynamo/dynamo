@@ -45,9 +45,7 @@ def _engine(
         video_config=video_config or {},
         _processor=QwenProcessor.__new__(QwenProcessor),
     )
-    return SimpleNamespace(
-        tokenizer_manager=SimpleNamespace(mm_processor=mm_processor)
-    )
+    return SimpleNamespace(tokenizer_manager=SimpleNamespace(mm_processor=mm_processor))
 
 
 @pytest.fixture

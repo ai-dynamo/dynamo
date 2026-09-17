@@ -8,8 +8,8 @@ import pytest
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
-    extract_mm_hashes,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
 )
 from dynamo.sglang.request_handlers.multimodal.worker_handler import StreamProcessor
@@ -88,15 +88,37 @@ def test_extract_mm_hashes_preserves_legacy_image_protocol():
 
 def test_extract_mm_hashes_flattens_in_sglang_item_order():
     request = {
+        "multi_modal_data": {
+            "image_url": ["image-a", "image-b"],
+            "video_url": ["video-a"],
+        },
         "extra_args": {
             "mm_hashes_by_modality": {
                 "video": ["video-a"],
                 "image": ["image-a", "image-b"],
-            }
-        }
+            },
+        },
     }
 
     assert extract_mm_hashes(request) == ["image-a", "image-b", "video-a"]
+
+
+def test_extract_mm_hashes_rejects_per_modality_count_mismatch():
+    request = {
+        "multi_modal_data": {
+            "image_url": ["image-a", "image-b"],
+            "video_url": ["video-a"],
+        },
+        "extra_args": {
+            "mm_hashes_by_modality": {
+                # The total count still matches, but the modality association does not.
+                "image": ["image-a"],
+                "video": ["video-a", "video-b"],
+            }
+        },
+    }
+
+    assert extract_mm_hashes(request) is None
 
 
 @pytest.mark.parametrize(
@@ -109,10 +131,7 @@ def test_extract_mm_hashes_flattens_in_sglang_item_order():
     ],
 )
 def test_extract_mm_hashes_rejects_malformed_grouped_protocol(grouped):
-    assert (
-        extract_mm_hashes({"extra_args": {"mm_hashes_by_modality": grouped}})
-        is None
-    )
+    assert extract_mm_hashes({"extra_args": {"mm_hashes_by_modality": grouped}}) is None
 
 
 class TestMultimodalGuard:

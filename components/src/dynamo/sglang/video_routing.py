@@ -5,6 +5,7 @@
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any, Optional
 
 import transformers
@@ -16,12 +17,15 @@ try:
 except ImportError:
     sglang_qwen_vl = None
 
+qwen3_smart_resize: Optional[Callable[..., Any]]
 try:
     from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
-        smart_resize as qwen3_smart_resize,
+        smart_resize as _qwen3_smart_resize,
     )
 except ImportError:
     qwen3_smart_resize = None
+else:
+    qwen3_smart_resize = _qwen3_smart_resize
 
 logger = logging.getLogger(__name__)
 

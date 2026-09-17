@@ -416,15 +416,15 @@ impl ModelWatcher {
         validate_policy_worker_role(card, &self.selection_policy)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
-        let removed_video_contract = spec.video_contract.is_none()
-            && [
+        let mut removed_video_contract = false;
+        if spec.video_contract.is_none() {
+            for key in [
                 VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-            ]
-            .into_iter()
-            .fold(false, |removed, key| {
-                card.runtime_config.runtime_data.remove(key).is_some() || removed
-            });
+            ] {
+                removed_video_contract |= card.runtime_config.runtime_data.remove(key).is_some();
+            }
+        }
         if removed_video_contract {
             tracing::warn!(
                 target: "mm_routing",

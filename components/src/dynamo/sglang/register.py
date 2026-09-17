@@ -41,9 +41,7 @@ from dynamo.sglang.capacity import (
     runtime_capacity,
 )
 from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
-from dynamo.sglang.video_routing import (
-    publish_sglang_qwen_video_processor_contract,
-)
+from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_contract
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"

@@ -322,7 +322,9 @@ RUN set -eu; \
 
 # Frontend video decoding is part of the shipped SGLang CUDA contract. Fail the
 # image build if the runtime wheel was accidentally compiled without it.
+{% if target not in ("dev", "local-dev") %}
 RUN python3 -c 'from dynamo.llm import MediaDecoder; assert hasattr(MediaDecoder(), "enable_video")'
+{% endif %}
 {% else %}
 ENV IMAGEIO_FFMPEG_EXE=
 {% endif %}

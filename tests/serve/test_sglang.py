@@ -710,9 +710,9 @@ sglang_configs = {
         ],
         env={
             "DYN_MM_ALLOW_INTERNAL": "1",
-            # Keep enough video tokens to make the routing sequence materially
-            # larger than the shared text prefix (the fixture decodes 10 frames).
-            "DYN_MM_VIDEO_NUM_FRAMES": "32",
+            # Decode all 10 frames in the fixture so the routing sequence is
+            # materially larger than the shared text prefix.
+            "DYN_MM_VIDEO_NUM_FRAMES": "10",
         },
         timeout=450,
         frontend_port=DefaultPort.FRONTEND.value,
