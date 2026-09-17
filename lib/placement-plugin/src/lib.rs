@@ -21,10 +21,11 @@ use aisimulate_placement_abi::{
     AdmissionDecisionV1, ByteSliceV1, CAPABILITY_LOSSLESS_KV_EVENTS_V1, KvEventKindV1,
     KvEventSliceV1, KvEventV1, PlacementAdmissionV1, PlacementBatchResultV1,
     PlacementCacheSampleV1, PlacementCreateRequestV1, PlacementDiagnosticSliceV1,
-    PlacementHandleV1, PlacementMetadataV1, PlacementMutationKindV1, PlacementMutationSliceV1,
-    PlacementResultSliceV1, PlacementResultV1, PlacementSliceV1, PlacementV1, PluginDescriptorV1,
-    PluginVTableV1, PromptIdentityV1, StatusV1, WorkerTopologyV1, validate_create_request_v1,
-    validate_kv_event_batch_v1, validate_mutation_batch_v1,
+    PlacementDiagnosticV1, PlacementHandleV1, PlacementMetadataV1, PlacementMutationKindV1,
+    PlacementMutationSliceV1, PlacementMutationV1, PlacementResultSliceV1, PlacementResultV1,
+    PlacementSliceV1, PlacementV1, PluginDescriptorV1, PluginVTableV1, PromptIdentityV1, StatusV1,
+    WorkerCapacityV1, WorkerTopologyV1, validate_create_request_v1, validate_kv_event_batch_v1,
+    validate_mutation_batch_v1,
 };
 use dynamo_kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -196,10 +197,13 @@ fn decode_topology(
     capacities: aisimulate_placement_abi::WorkerCapacitySliceV1,
 ) -> Result<Vec<WorkerRoute>, String> {
     // Safety: the neutral ABI validation checked the outer borrowed slices.
-    let workers = unsafe { std::slice::from_raw_parts(workers.data, workers.len as usize) };
+    let worker_count = checked_slice_len::<WorkerTopologyV1>(workers.len)
+        .ok_or_else(|| "Dynamo placement worker count exceeds platform bounds".to_owned())?;
+    let capacity_count = checked_slice_len::<WorkerCapacityV1>(capacities.len)
+        .ok_or_else(|| "Dynamo placement capacity count exceeds platform bounds".to_owned())?;
+    let workers = unsafe { std::slice::from_raw_parts(workers.data, worker_count) };
     // Safety: the neutral ABI validation checked the outer borrowed slices.
-    let capacities =
-        unsafe { std::slice::from_raw_parts(capacities.data, capacities.len as usize) };
+    let capacities = unsafe { std::slice::from_raw_parts(capacities.data, capacity_count) };
     if workers.len() != capacities.len() {
         return Err("Dynamo placement requires one capacity record per worker".to_owned());
     }
@@ -240,8 +244,8 @@ fn decode_worker(
                 .to_owned(),
         );
     }
-    let scheduler_count = usize::try_from(worker.scheduler_ids.len)
-        .map_err(|_| "Dynamo placement scheduler count exceeds platform bounds".to_owned())?;
+    let scheduler_count = checked_slice_len::<u64>(worker.scheduler_ids.len)
+        .ok_or_else(|| "Dynamo placement scheduler count exceeds platform bounds".to_owned())?;
     // Safety: a non-empty scheduler slice is required by the V1 caller
     // contract. This provider only copies it while the create call borrows it.
     let scheduler_ids =
@@ -260,8 +264,9 @@ fn decode_capacity_profile(
     capacities: &aisimulate_placement_abi::WorkerCapacitySliceV1,
 ) -> Result<(usize, usize), String> {
     // Safety: create-request validation established a bounded, readable slice.
-    let capacities =
-        unsafe { std::slice::from_raw_parts(capacities.data, capacities.len as usize) };
+    let capacity_count = checked_slice_len::<WorkerCapacityV1>(capacities.len)
+        .ok_or_else(|| "Dynamo placement capacity count exceeds platform bounds".to_owned())?;
+    let capacities = unsafe { std::slice::from_raw_parts(capacities.data, capacity_count) };
     let Some(first) = capacities.first() else {
         return Err("Dynamo placement requires at least one capacity record".to_owned());
     };
@@ -374,7 +379,7 @@ fn apply_kv_events_impl(
             "Dynamo placement KV event time must be finite and monotonic".to_owned();
         return StatusV1::INVALID_ARGUMENT;
     }
-    let Ok(event_count) = usize::try_from(events.len) else {
+    let Some(event_count) = checked_slice_len::<KvEventV1>(events.len) else {
         placement.last_error = "Dynamo placement KV event count exceeds platform bounds".to_owned();
         return StatusV1::INVALID_ARGUMENT;
     };
@@ -547,7 +552,7 @@ fn apply_batch_impl(
     if batch.len == 0 {
         return StatusV1::OK;
     }
-    let Ok(batch_len) = usize::try_from(batch.len) else {
+    let Some(batch_len) = checked_slice_len::<PlacementMutationV1>(batch.len) else {
         placement.last_error = "Dynamo placement mutation count exceeds platform bounds".to_owned();
         return StatusV1::INVALID_ARGUMENT;
     };
@@ -858,8 +863,9 @@ fn decode_metadata(
         return Ok(None);
     }
     // Safety: ABI batch validation checked this non-empty JSON byte slice.
-    let bytes =
-        unsafe { std::slice::from_raw_parts(metadata.bytes.data, metadata.bytes.len as usize) };
+    let metadata_len =
+        checked_slice_len::<u8>(metadata.bytes.len).expect("validated placement metadata length");
+    let bytes = unsafe { std::slice::from_raw_parts(metadata.bytes.data, metadata_len) };
     serde_json::from_slice(bytes).map(Some).map_err(|error| {
         ApplyError::rejected(format!(
             "Dynamo placement metadata is not a replay context: {error}"
@@ -1030,7 +1036,7 @@ fn owned_slice<T, S>(values: Vec<T>, make_slice: impl FnOnce(*const T, u64) -> S
 /// # Safety
 /// Callers must have validated that every non-empty range is readable.
 unsafe fn copy_abi_slice<T: Copy>(data: *const T, len: usize) -> Vec<T> {
-    if len == 0 {
+    if len == 0 || len > isize::MAX as usize / std::mem::size_of::<T>() {
         return Vec::new();
     }
     // Safety: documented by this helper's caller contract.
@@ -1060,7 +1066,7 @@ unsafe fn release_slice<T>(data: *const T, len: u64) {
     if data.is_null() {
         return;
     }
-    let Ok(len) = usize::try_from(len) else {
+    let Some(len) = checked_slice_len::<T>(len) else {
         return;
     };
     // Safety: callers return only slices allocated by `owned_slice`.
@@ -1076,7 +1082,7 @@ unsafe fn release_diagnostics(diagnostics: PlacementDiagnosticSliceV1) {
     if diagnostics.data.is_null() {
         return;
     }
-    let Ok(len) = usize::try_from(diagnostics.len) else {
+    let Some(len) = checked_slice_len::<PlacementDiagnosticV1>(diagnostics.len) else {
         return;
     };
     // Safety: diagnostics follow the same output ownership contract, with an
@@ -1097,7 +1103,7 @@ unsafe extern "C" fn release_bytes(bytes: ByteSliceV1) {
     if bytes.data.is_null() {
         return;
     }
-    let Ok(len) = usize::try_from(bytes.len) else {
+    let Some(len) = checked_slice_len::<u8>(bytes.len) else {
         return;
     };
     // Safety: every non-empty byte slice this provider returns comes from
@@ -1159,7 +1165,16 @@ fn borrowed_bytes(bytes: &ByteSliceV1) -> &[u8] {
     }
     // Safety: V1 creation validation requires a non-null pointer for every
     // non-empty byte slice, and the bytes are borrowed for this call.
-    unsafe { std::slice::from_raw_parts(bytes.data, bytes.len as usize) }
+    let Some(len) = checked_slice_len::<u8>(bytes.len) else {
+        return &[];
+    };
+    unsafe { std::slice::from_raw_parts(bytes.data, len) }
+}
+
+fn checked_slice_len<T>(len: u64) -> Option<usize> {
+    usize::try_from(len)
+        .ok()
+        .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<T>())
 }
 
 fn owned_bytes(message: &str, maximum_bytes: usize) -> ByteSliceV1 {

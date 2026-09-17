@@ -868,7 +868,9 @@ pub enum DescriptorValidationError {
 ///
 /// `descriptor` must be null or point to readable memory containing at least
 /// a [`PluginDescriptorV1`]. When the descriptor's table pointer is non-null,
-/// it must point to readable memory containing at least a [`PluginVTableV1`].
+/// it must point to readable memory containing at least a
+/// [`PluginVTableV1Prefix`]. Optional compatible-minor tails are read only by
+/// helpers that first validate their declared extent.
 pub unsafe fn validate_descriptor_v1(
     descriptor: *const PluginDescriptorV1,
 ) -> Result<*const PluginVTableV1Prefix, DescriptorValidationError> {

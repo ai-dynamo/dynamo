@@ -752,6 +752,61 @@ fn copied_compact_submission_remains_available() {
 }
 
 #[test]
+fn ffi_rejects_slice_lengths_over_the_isize_byte_bound() {
+    let (table, handle) = create_replay();
+    let u32_limit = (isize::MAX as usize / std::mem::size_of::<u32>()) as u64;
+    let mut request_id = [0_u8; 16];
+    let mut oversized = request(&[], [60; 16]);
+    oversized.tokens = U32SliceV1 {
+        data: std::ptr::NonNull::<u32>::dangling().as_ptr(),
+        len: u32_limit + 1,
+    };
+    assert_eq!(
+        unsafe { table.submit.expect("submit")(handle, oversized, &mut request_id,) },
+        StatusV1::INVALID_ARGUMENT
+    );
+
+    let request_value = request(&[], [61; 16]);
+    let request_limit = (isize::MAX as usize / std::mem::size_of::<DirectRequestV1>()) as u64;
+    assert_eq!(
+        unsafe {
+            table.submit_batch.expect("submit batch")(
+                handle,
+                DirectRequestSliceV1 {
+                    data: &raw const request_value,
+                    len: request_limit + 1,
+                },
+                RequestIdMutSliceV1 {
+                    data: std::ptr::NonNull::<aiperf_steppable_abi::RequestIdV1>::dangling()
+                        .as_ptr(),
+                    len: request_limit + 1,
+                },
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+
+    let request_id_limit =
+        (isize::MAX as usize / std::mem::size_of::<aiperf_steppable_abi::RequestIdV1>()) as u64;
+    assert_eq!(
+        unsafe {
+            table.submit_batch.expect("submit batch")(
+                handle,
+                DirectRequestSliceV1::EMPTY,
+                RequestIdMutSliceV1 {
+                    data: std::ptr::NonNull::<aiperf_steppable_abi::RequestIdV1>::dangling()
+                        .as_ptr(),
+                    len: request_id_limit + 1,
+                },
+            )
+        },
+        StatusV1::INVALID_ARGUMENT
+    );
+
+    unsafe { table.destroy.expect("destroy")(handle) };
+}
+
+#[test]
 fn create_rejects_an_unsupported_backend_config_version() {
     let descriptor = dynamo_steppable_provider::aiperf_steppable_plugin_v1();
     let table = unsafe { &*validate_descriptor_v1(descriptor).expect("complete V1 descriptor") };

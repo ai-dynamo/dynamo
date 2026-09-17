@@ -42,9 +42,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(test)]
 static FORCE_FFI_PANIC: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
@@ -207,13 +204,13 @@ struct HostHashIdsLease {
 
 impl CompactHashIdsLease for HostHashIdsLease {
     fn hash_ids(&self) -> &[u32] {
-        if self.len == 0 {
+        let Some(len) = checked_slice_len::<u32>(self.len as u64) else {
             return &[];
-        }
+        };
         // Safety: registration validated this non-null, aligned buffer and the
         // host keeps it immutable and live until `Drop` invokes its release
         // callback. The selected range was bounds-checked before construction.
-        unsafe { std::slice::from_raw_parts(self.data, self.len) }
+        unsafe { std::slice::from_raw_parts(self.data, len) }
     }
 
     fn on_accepted(&self) {
@@ -324,28 +321,39 @@ unsafe fn backend_mut(handle: ReplayHandleV1) -> Result<&'static mut BackendRepl
 }
 
 unsafe fn borrowed_tokens(slice: U32SliceV1) -> Result<&'static [u32], StatusV1> {
-    if slice.len > usize::MAX as u64
-        || (slice.data.is_null() && slice.len != 0)
+    let Some(len) = checked_slice_len::<u32>(slice.len) else {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    };
+    if (slice.data.is_null() && len != 0)
         || (!slice.data.is_null()
             && !(slice.data as usize).is_multiple_of(std::mem::align_of::<u32>()))
     {
         return Err(StatusV1::INVALID_ARGUMENT);
     }
-    if slice.len == 0 {
+    if len == 0 {
         return Ok(&[]);
     }
     // Safety: a non-empty ABI input slice is borrowed and valid for the call.
-    Ok(unsafe { std::slice::from_raw_parts(slice.data, slice.len as usize) })
+    Ok(unsafe { std::slice::from_raw_parts(slice.data, len) })
+}
+
+fn checked_slice_len<T>(len: u64) -> Option<usize> {
+    usize::try_from(len)
+        .ok()
+        .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<T>())
 }
 
 unsafe fn borrowed_bytes(slice: ByteSliceV1) -> Result<&'static [u8], StatusV1> {
-    if slice.len > usize::MAX as u64 || (slice.data.is_null() && slice.len != 0) {
+    let Some(len) = checked_slice_len::<u8>(slice.len) else {
+        return Err(StatusV1::INVALID_ARGUMENT);
+    };
+    if slice.data.is_null() && len != 0 {
         return Err(StatusV1::INVALID_ARGUMENT);
     }
-    if slice.len == 0 {
+    if len == 0 {
         return Ok(&[]);
     }
-    Ok(unsafe { std::slice::from_raw_parts(slice.data, slice.len as usize) })
+    Ok(unsafe { std::slice::from_raw_parts(slice.data, len) })
 }
 
 unsafe fn utf8(slice: ByteSliceV1) -> Result<String, StatusV1> {
@@ -498,23 +506,22 @@ unsafe fn create_impl(
         *handle = ReplayHandleV1(std::ptr::null_mut());
         *error = ByteSliceV1::EMPTY;
     }
+    let Some(payload_len) = checked_slice_len::<u8>(request.provider_payload.len) else {
+        return StatusV1::INVALID_ARGUMENT;
+    };
     if request.provider_payload.len > MAX_PROVIDER_PAYLOAD_BYTES
-        || request.provider_payload.len > usize::MAX as u64
-        || (request.provider_payload.data.is_null() && request.provider_payload.len != 0)
+        || (request.provider_payload.data.is_null() && payload_len != 0)
     {
         return StatusV1::INVALID_ARGUMENT;
     }
     // Safety: the ABI guarantees borrowed input bytes remain valid for this
     // call; null is accepted only for an empty slice as checked above.
-    let payload = if request.provider_payload.len == 0 {
+    let payload = if payload_len == 0 {
         &[]
     } else {
         // Safety: a non-empty ABI input slice is valid for this call.
         unsafe {
-            std::slice::from_raw_parts(
-                request.provider_payload.data.cast::<u8>(),
-                request.provider_payload.len as usize,
-            )
+            std::slice::from_raw_parts(request.provider_payload.data.cast::<u8>(), payload_len)
         }
     };
     let config: BackendConfig = match serde_json::from_slice(payload) {
@@ -614,12 +621,13 @@ unsafe fn register_hash_buffer_impl(
     hash_ids: U32SliceV1,
     buffer_id: *mut HashBufferIdV1,
 ) -> StatusV1 {
+    let Some(hash_id_count) = checked_slice_len::<u32>(hash_ids.len) else {
+        return StatusV1::INVALID_ARGUMENT;
+    };
     if buffer_id.is_null()
         || hash_ids.len == 0
-        || hash_ids.len > usize::MAX as u64
         || hash_ids.data.is_null()
         || !(hash_ids.data as usize).is_multiple_of(std::mem::align_of::<u32>())
-        || hash_ids.len as usize > isize::MAX as usize / std::mem::size_of::<u32>()
     {
         return StatusV1::INVALID_ARGUMENT;
     }
@@ -640,7 +648,7 @@ unsafe fn register_hash_buffer_impl(
         id,
         RegisteredHashBuffer {
             data: hash_ids.data,
-            len: hash_ids.len as usize,
+            len: hash_id_count,
         },
     );
     if replaced.is_some() {
@@ -739,9 +747,13 @@ unsafe fn submit_batch_impl(
     requests: DirectRequestSliceV1,
     request_ids: RequestIdMutSliceV1,
 ) -> StatusV1 {
-    if requests.len > usize::MAX as u64
-        || request_ids.len != requests.len
-        || request_ids.len > usize::MAX as u64
+    let Some(request_count) = checked_slice_len::<DirectRequestV1>(requests.len) else {
+        return StatusV1::INVALID_ARGUMENT;
+    };
+    let Some(request_id_count) = checked_slice_len::<RequestIdV1>(request_ids.len) else {
+        return StatusV1::INVALID_ARGUMENT;
+    };
+    if request_ids.len != requests.len
         || (requests.data.is_null() && requests.len != 0)
         || (request_ids.data.is_null() && request_ids.len != 0)
     {
@@ -751,7 +763,7 @@ unsafe fn submit_batch_impl(
         &[]
     } else {
         // Safety: non-empty input batch is valid for this FFI call.
-        unsafe { std::slice::from_raw_parts(requests.data, requests.len as usize) }
+        unsafe { std::slice::from_raw_parts(requests.data, request_count) }
     };
     let converted = match requests
         .iter()
@@ -768,7 +780,7 @@ unsafe fn submit_batch_impl(
         &mut []
     } else {
         // Safety: caller supplies a writable output batch matching input size.
-        unsafe { std::slice::from_raw_parts_mut(request_ids.data, request_ids.len as usize) }
+        unsafe { std::slice::from_raw_parts_mut(request_ids.data, request_id_count) }
     };
     output.fill([0; 16]);
     let replay = match unsafe { backend_mut(handle) } {
@@ -854,17 +866,17 @@ unsafe fn cancel_batch_impl(
     request_ids: RequestIdSliceV1,
     events: *mut EngineEventSliceV1,
 ) -> StatusV1 {
-    if events.is_null()
-        || request_ids.len > usize::MAX as u64
-        || (request_ids.data.is_null() && request_ids.len != 0)
-    {
+    let Some(request_id_count) = checked_slice_len::<RequestIdV1>(request_ids.len) else {
+        return StatusV1::INVALID_ARGUMENT;
+    };
+    if events.is_null() || (request_ids.data.is_null() && request_ids.len != 0) {
         return StatusV1::INVALID_ARGUMENT;
     }
     let request_ids = if request_ids.len == 0 {
         &[]
     } else {
         // Safety: non-empty input batch is valid for this FFI call.
-        unsafe { std::slice::from_raw_parts(request_ids.data, request_ids.len as usize) }
+        unsafe { std::slice::from_raw_parts(request_ids.data, request_id_count) }
     };
     let replay = match unsafe { backend_mut(handle) } {
         Ok(replay) => replay,
@@ -1057,15 +1069,15 @@ unsafe fn release_bytes_impl(bytes: ByteSliceV1) {
     if bytes.data.is_null() {
         return;
     }
-    if bytes.len > usize::MAX as u64 {
+    let Some(len) = checked_slice_len::<u8>(bytes.len) else {
         return;
-    }
+    };
     // Safety: every non-empty output byte slice is allocated by
     // `allocated_bytes` as an exact-length boxed slice.
     unsafe {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             bytes.data.cast_mut(),
-            bytes.len as usize,
+            len,
         )));
     }
 }
@@ -1073,28 +1085,31 @@ unsafe fn release_events_impl(events: EngineEventSliceV1) {
     if events.data.is_null() {
         return;
     }
-    if events.len > usize::MAX as u64 {
+    let Some(len) = checked_slice_len::<EngineEventV1>(events.len) else {
         return;
-    }
+    };
     // Safety: `step` allocates exact-length boxed slices and transfers one
     // release obligation to the host.
     unsafe {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             events.data.cast_mut(),
-            events.len as usize,
+            len,
         )));
     }
 }
 unsafe fn release_request_facts_impl(facts: RequestFactSliceV1) {
-    if facts.data.is_null() || facts.len > usize::MAX as u64 {
+    if facts.data.is_null() {
         return;
     }
+    let Some(len) = checked_slice_len::<RequestFactV1>(facts.len) else {
+        return;
+    };
     // Safety: `step` allocates exact-length boxed slices and transfers one
     // release obligation to the host.
     unsafe {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
             facts.data.cast_mut(),
-            facts.len as usize,
+            len,
         )));
     }
 }
@@ -1323,12 +1338,18 @@ unsafe extern "C" fn submit_batch(
     requests: DirectRequestSliceV1,
     request_ids: RequestIdMutSliceV1,
 ) -> StatusV1 {
+    if checked_slice_len::<DirectRequestV1>(requests.len).is_none() {
+        return StatusV1::INVALID_ARGUMENT;
+    }
     if request_ids.len <= usize::MAX as u64 && (!request_ids.data.is_null() || request_ids.len == 0)
     {
+        let Some(len) = checked_slice_len::<RequestIdV1>(request_ids.len) else {
+            return StatusV1::INVALID_ARGUMENT;
+        };
         let output = if request_ids.len == 0 {
             &mut []
         } else {
-            unsafe { std::slice::from_raw_parts_mut(request_ids.data, request_ids.len as usize) }
+            unsafe { std::slice::from_raw_parts_mut(request_ids.data, len) }
         };
         output.fill([0; 16]);
     }
@@ -1506,6 +1527,32 @@ mod tests {
         REQUEST_FLAG_OUTPUT_TOKEN_IDS, REQUEST_FLAG_POLICY_CLASS, REQUEST_FLAG_PREFERRED_DP_RANK,
         REQUEST_FLAG_PREFERRED_PREFILL_DP_RANK, REQUEST_FLAG_REPLAY_CONTEXT,
     };
+
+    #[test]
+    fn checked_slice_len_rejects_lengths_that_exceed_isize_byte_bound() {
+        let u32_limit = (isize::MAX as usize / std::mem::size_of::<u32>()) as u64;
+        let request_limit = (isize::MAX as usize / std::mem::size_of::<DirectRequestV1>()) as u64;
+        let request_id_limit = (isize::MAX as usize / std::mem::size_of::<RequestIdV1>()) as u64;
+
+        assert_eq!(
+            checked_slice_len::<u32>(u32_limit),
+            Some(u32_limit as usize)
+        );
+        assert_eq!(checked_slice_len::<u32>(u32_limit + 1), None);
+        assert_eq!(
+            checked_slice_len::<DirectRequestV1>(request_limit),
+            Some(request_limit as usize)
+        );
+        assert_eq!(
+            checked_slice_len::<DirectRequestV1>(request_limit + 1),
+            None
+        );
+        assert_eq!(
+            checked_slice_len::<RequestIdV1>(request_id_limit),
+            Some(request_id_limit as usize)
+        );
+        assert_eq!(checked_slice_len::<RequestIdV1>(request_id_limit + 1), None);
+    }
 
     #[test]
     fn router_args_project_the_aggregate_engine_capacity() {

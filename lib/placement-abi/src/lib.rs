@@ -345,11 +345,15 @@ impl KvEventV1 {
         // Safety: `kind` selects this union member and the caller keeps the
         // borrowed packet and nested slice valid for the ABI call.
         let stored = unsafe { self.payload.stored };
-        Some(if stored.blocks.len == 0 {
+        let len = checked_slice_len::<KvStoredBlockV1>(stored.blocks.len)?;
+        if stored.blocks.data.is_null() && len != 0 {
+            return None;
+        }
+        Some(if len == 0 {
             &[]
         } else {
             // Safety: non-empty ABI slices require a valid non-null pointer.
-            unsafe { std::slice::from_raw_parts(stored.blocks.data, stored.blocks.len as usize) }
+            unsafe { std::slice::from_raw_parts(stored.blocks.data, len) }
         })
     }
 
@@ -361,11 +365,15 @@ impl KvEventV1 {
         // Safety: `kind` selects this union member and the caller keeps the
         // borrowed packet and nested slice valid for the ABI call.
         let removed = unsafe { self.payload.removed };
-        Some(if removed.len == 0 {
+        let len = checked_slice_len::<u64>(removed.len)?;
+        if removed.data.is_null() && len != 0 {
+            return None;
+        }
+        Some(if len == 0 {
             &[]
         } else {
             // Safety: non-empty ABI slices require a valid non-null pointer.
-            unsafe { std::slice::from_raw_parts(removed.data, removed.len as usize) }
+            unsafe { std::slice::from_raw_parts(removed.data, len) }
         })
     }
 }
@@ -1226,7 +1234,9 @@ pub unsafe fn validate_mutation_batch_v1(batch: PlacementMutationSliceV1) -> Res
     }
     // Safety: required by this function's contract and guarded by the null
     // check above.
-    let mutations = unsafe { std::slice::from_raw_parts(batch.data, batch.len as usize) };
+    let batch_len =
+        checked_slice_len::<PlacementMutationV1>(batch.len).ok_or(StatusV1::INVALID_ARGUMENT)?;
+    let mutations = unsafe { std::slice::from_raw_parts(batch.data, batch_len) };
     for mutation in mutations {
         if (mutation.struct_size as usize) < std::mem::size_of::<PlacementMutationV1>()
             || !mutation.now_ms.is_finite()
@@ -1260,7 +1270,8 @@ pub unsafe fn validate_kv_event_batch_v1(batch: KvEventSliceV1) -> Result<(), St
     }
     // Safety: required by this function's contract and guarded by the null
     // check above.
-    let events = unsafe { std::slice::from_raw_parts(batch.data, batch.len as usize) };
+    let batch_len = checked_slice_len::<KvEventV1>(batch.len).ok_or(StatusV1::INVALID_ARGUMENT)?;
+    let events = unsafe { std::slice::from_raw_parts(batch.data, batch_len) };
     for event in events {
         if event.storage_tier != KvStorageTierV1::DEVICE {
             return Err(StatusV1::INVALID_ARGUMENT);
@@ -1347,9 +1358,9 @@ fn valid_admission(admission: &PlacementAdmissionV1) -> bool {
                 return false;
             }
             // Safety: a non-empty metadata slice has a non-null pointer, checked above.
-            let bytes = unsafe {
-                std::slice::from_raw_parts(metadata.bytes.data, metadata.bytes.len as usize)
-            };
+            let len = checked_slice_len::<u8>(metadata.bytes.len)
+                .expect("valid metadata slice length was checked above");
+            let bytes = unsafe { std::slice::from_raw_parts(metadata.bytes.data, len) };
             serde_json::from_slice::<serde_json::Value>(bytes).is_ok()
         }
         _ => false,
@@ -1370,7 +1381,37 @@ fn valid_optional_identity_slice<T>(
 }
 
 fn valid_slice<T>(data: *const T, len: u64) -> bool {
-    len == 0 || !data.is_null()
+    checked_slice_len::<T>(len).is_some() && (len == 0 || !data.is_null())
+}
+
+fn checked_slice_len<T>(len: u64) -> Option<usize> {
+    usize::try_from(len)
+        .ok()
+        .filter(|&len| len <= isize::MAX as usize / std::mem::size_of::<T>())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_slice_rejects_lengths_that_exceed_isize_byte_bound() {
+        let data = std::ptr::NonNull::<u32>::dangling().as_ptr();
+        let limit = (isize::MAX as usize / std::mem::size_of::<u32>()) as u64;
+
+        assert!(valid_slice(data, limit));
+        assert!(!valid_slice(data, limit + 1));
+    }
+
+    #[test]
+    fn kv_event_accessors_reject_oversized_nested_slices() {
+        let limit = (isize::MAX as usize / std::mem::size_of::<u64>()) as u64;
+        let mut event = KvEventV1::removed(1, 0, KvStorageTierV1::DEVICE, 1, &[]);
+        // Safety: `removed` selects the active union arm.
+        event.payload.removed.data = std::ptr::NonNull::<u64>::dangling().as_ptr();
+        event.payload.removed.len = limit + 1;
+        assert!(event.removed_hashes().is_none());
+    }
 }
 
 /// Fixed entry point exported by every V1 placement plugin.

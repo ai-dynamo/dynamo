@@ -5,8 +5,8 @@ use std::ffi::c_void;
 
 use aiperf_steppable_abi::{
     ByteSliceV1, CAPABILITY_COMPACT_BUFFER_LEASES_V1, CompactRequestV1, CreateRequestV1,
-    HashBufferIdV1, HashBufferLeaseCallbacksV1, HashBufferRangeV1, PluginVTableV1, ReplayHandleV1,
-    RequestIdV1, StatusV1, U32SliceV1,
+    HashBufferIdV1, HashBufferLeaseCallbacksV1, HashBufferRangeV1, PluginVTableV1,
+    PluginVTableV1Prefix, ReplayHandleV1, RequestIdV1, StatusV1, U32SliceV1,
 };
 
 unsafe extern "C" fn release_hash_buffer(_: *mut c_void, _: HashBufferIdV1) {}
@@ -115,4 +115,21 @@ fn compact_buffer_lease_tail_is_complete_and_capability_gated() {
         .is_some()
     );
     assert!(unsafe { PluginVTableV1::compact_buffer_leases(prefix, 0) }.is_none());
+}
+
+#[test]
+fn legacy_v1_prefix_allocation_is_not_read_as_a_newer_tail() {
+    // Allocate only the legacy prefix. A host must not inspect optional fields
+    // after the allocation merely because a capability bit was supplied.
+    let mut prefix: Box<PluginVTableV1Prefix> = Box::new(unsafe { std::mem::zeroed() });
+    prefix.struct_size = std::mem::size_of::<PluginVTableV1Prefix>() as u32;
+    let raw = Box::into_raw(prefix);
+
+    assert!(
+        unsafe { PluginVTableV1::compact_buffer_leases(raw, CAPABILITY_COMPACT_BUFFER_LEASES_V1) }
+            .is_none()
+    );
+    assert!(unsafe { PluginVTableV1::compact_submit(raw) }.is_none());
+
+    unsafe { drop(Box::from_raw(raw)) };
 }
