@@ -24,72 +24,113 @@ import (
 	"time"
 )
 
-// unwindBudgetFloor keeps the post-fatal wait useful when renew interval and cleanup
-// timeout leave nothing to spend on it.
-const unwindBudgetFloor = time.Second
-
-// unwindBudget is how long Guard waits for work once lease renewal is unrecoverable: the
-// renewal loop leaves one renewInterval before expiry, and cleanupTimeout comes out of it.
-func unwindBudget(renewInterval, cleanupTimeout time.Duration) time.Duration {
-	budget := renewInterval - cleanupTimeout
-	if budget < unwindBudgetFloor {
-		return unwindBudgetFloor
-	}
-
-	return budget
+// leaseWorkResult carries a worker panic back to the goroutine that owns cleanup.
+type leaseWorkResult struct {
+	err        error
+	panicValue any
+	panicked   bool
 }
 
 // Guard holds the namespace scope marker lease while it runs work, releasing the
-// lease before returning. ctx and work must be non-nil.
+// lease before returning or propagating a worker panic. ctx and work must be non-nil.
+// cleanupTimeout must be positive. The caller must terminate after a fatal lease error.
 func (lm *LeaseManager) Guard(ctx context.Context, cleanupTimeout time.Duration, work func(context.Context) error) error {
-	if err := lm.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start namespace scope marker lease manager: %w", err)
+	if cleanupTimeout <= 0 {
+		return errors.New("lease cleanup timeout must be positive")
 	}
 
-	// The lease exists from here on, so every path out of this function has to release it.
+	// Register cleanup before acquisition: a failed response does not prove the write failed.
+	// Stop checks holder identity and resource version before deleting anything.
+	var shutdownDeadline time.Time
 	defer func() {
-		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), cleanupTimeout)
+		deadline := time.Now().Add(cleanupTimeout)
+		if !shutdownDeadline.IsZero() && shutdownDeadline.Before(deadline) {
+			deadline = shutdownDeadline
+		}
+		cleanupCtx, cancelCleanup := context.WithDeadline(context.Background(), deadline)
 		defer cancelCleanup()
-
 		if err := lm.Stop(cleanupCtx); err != nil {
 			lm.logger.Error(err, "Failed to stop namespace scope marker lease manager cleanly")
 		}
 	}()
+	if err := lm.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start namespace scope marker lease manager: %w", err)
+	}
 
+	// Do not launch work under an acquisition whose response arrived too late.
+	renewalDeadline, _ := lm.leaseDeadlines()
+	if !time.Now().Before(renewalDeadline) {
+		_, shutdownDeadline = lm.leaseDeadlines()
+		return errors.New("initial namespace lease response arrived after the renewal deadline")
+	}
+
+	// Work cancellation is independent of the renewal context owned by the manager.
 	workCtx, cancelWork := context.WithCancel(ctx)
 	defer cancelWork()
 
-	// work runs on its own goroutine so an unrecoverable lease error can stop waiting for it.
-	// The buffer keeps abandoned work from blocking forever on the send.
-	workDone := make(chan error, 1)
+	// Recover only to move the panic to the cleanup-owning goroutine, then re-panic there.
+	// The buffer also lets abandoned work finish without blocking its result delivery.
+	workDone := make(chan leaseWorkResult, 1)
 	go func() {
-		workDone <- work(workCtx)
+		result := leaseWorkResult{panicked: true}
+		defer func() {
+			result.panicValue = recover()
+			workDone <- result
+		}()
+		result.err = work(workCtx)
+		result.panicked = false
 	}()
 
-	var workErr, fatalErr error
-
-	select {
-	case workErr = <-workDone:
-	case fatalErr = <-lm.Errors():
-		// Cancelling work instead of ending the process lets the deferred release run first.
-		// The wait is bounded because the lease is expiring while it happens.
-		cancelWork()
-
-		budget := unwindBudget(lm.renewInterval, cleanupTimeout)
-		expired := time.NewTimer(budget)
-		defer expired.Stop()
-
+	// Watch expiry independently of RPC completion, reserving a shutdown window and
+	// a final safety margin instead of assuming a whole renewInterval remains.
+	expired := time.NewTimer(time.Until(renewalDeadline))
+	defer expired.Stop()
+	var result leaseWorkResult
+	var fatalErr error
+watch:
+	for {
 		select {
-		case workErr = <-workDone:
+		case result = <-workDone:
+			_, shutdownDeadline = lm.leaseDeadlines()
+			break watch
+		case fatalErr = <-lm.Errors():
+			break watch
+		case <-lm.leaseUpdated:
+			renewalDeadline, _ = lm.leaseDeadlines()
+			expired.Reset(time.Until(renewalDeadline))
 		case <-expired.C:
-			lm.logger.Error(nil, "Giving up on orderly shutdown after unrecoverable lease failure; releasing the lease before it expires to prevent split-brain",
-				"unwindBudget", budget)
+			// A successful renewal may have raced the timer; consult the latest expiry.
+			renewalDeadline, _ = lm.leaseDeadlines()
+			if time.Now().Before(renewalDeadline) {
+				expired.Reset(time.Until(renewalDeadline))
+				continue
+			}
+			fatalErr = errors.New("lease renewal did not complete before the shutdown window")
+			break watch
 		}
 	}
 
-	if fatalErr != nil && (workErr == nil || errors.Is(workErr, context.Canceled)) {
-		return fmt.Errorf("namespace scope marker lease is unrecoverable: %w", fatalErr)
+	// Derive both waits from the actual remaining lifetime, without a positive floor.
+	// Cleanup shares the same absolute deadline, so a late work return cannot extend it.
+	if fatalErr != nil {
+		cancelWork()
+		_, shutdownDeadline = lm.leaseDeadlines()
+		remaining := max(0, time.Until(shutdownDeadline))
+		cleanupBudget := min(cleanupTimeout, remaining/2)
+		expired.Reset(remaining - cleanupBudget)
+		select {
+		case result = <-workDone:
+		case <-expired.C:
+			lm.logger.Error(nil, "Giving up on orderly shutdown before namespace lease expiry")
+		}
 	}
 
-	return workErr
+	// Re-panicking here runs Guard's deferred lease cleanup first.
+	if result.panicked {
+		panic(result.panicValue)
+	}
+	if fatalErr != nil && (result.err == nil || errors.Is(result.err, context.Canceled)) {
+		return fmt.Errorf("namespace scope marker lease is unrecoverable: %w", fatalErr)
+	}
+	return result.err
 }

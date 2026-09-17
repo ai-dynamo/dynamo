@@ -88,8 +88,8 @@ var (
 	configScheme = k8sruntime.NewScheme()
 )
 
-// leaseCleanupTimeout bounds deletion of the namespace scope marker lease once startup
-// unwinds, so a wedged API server delays the exit by seconds rather than indefinitely.
+// leaseCleanupTimeout bounds stopping renewal and deleting the namespace scope marker
+// lease once startup unwinds, so a wedged API server cannot indefinitely delay exit.
 const leaseCleanupTimeout = 5 * time.Second
 
 // LoadAndValidateOperatorConfig loads the operator configuration from a file,
