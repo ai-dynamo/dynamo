@@ -38,7 +38,6 @@ pub use envelope::{
 pub(crate) use tap::ShadowTap;
 use tap::{TapCounters, TapQueue};
 
-/// The tap queues of one runtime, shared by every pipeline it builds.
 pub(crate) type ShadowTaps = Arc<[Arc<TapQueue>]>;
 
 /// Taps belong to the `DistributedRuntime` that created them: their

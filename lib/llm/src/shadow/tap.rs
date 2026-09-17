@@ -34,7 +34,6 @@ use crate::protocols::TokenIdType;
 use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest};
 
-/// What a joined record needs from a response chunk.
 pub(crate) trait ShadowChunk {
     fn token_ids(&self) -> &[TokenIdType];
     fn finish_reason(&self) -> Option<&FinishReason>;
@@ -151,8 +150,6 @@ impl ShadowTap {
         Operator::into_operator(self)
     }
 
-    /// Queue the request-only records and return the recorders for the taps
-    /// that also capture the response.
     fn mirror(
         &self,
         request: &PreprocessedRequest,

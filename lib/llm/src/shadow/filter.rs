@@ -45,7 +45,6 @@ bitflags! {
     }
 }
 
-/// Decides whether a request is mirrored at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Select {
     SkipMultimodal,
@@ -65,7 +64,6 @@ impl Select {
     }
 }
 
-/// The resolved filter set of one tap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterSet {
     pub projection: Projection,
