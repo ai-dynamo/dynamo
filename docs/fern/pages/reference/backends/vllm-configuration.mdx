@@ -112,7 +112,7 @@ These flags control which role this worker plays in a disaggregated deployment. 
 </ParamField>
 
 <ParamField path="--decode-max-remote-prefill-inflight" type="integer" default="0">
-  Limit remote-prefill decode requests admitted before first output per local data-parallel rank. Requests above the limit wait until a permit is released. Permits are released on first output, cancellation, or failure. This applies only to token-mode decode workers handling remote-prefill KV transfers. Set zero to disable the limit.
+  Limit remote-prefill decode requests admitted before first output per local data-parallel rank. Requests above the limit wait until a permit is released. Permits are released on first output, cancellation, failure, or empty-stream completion. Workers serving multiple local data-parallel ranks require a valid `routing.dp_rank` value. This applies only to token-mode decode workers handling remote-prefill KV transfers. Set zero to disable the limit.
 
   Environment variable: `DYN_DECODE_MAX_REMOTE_PREFILL_INFLIGHT`
 </ParamField>
