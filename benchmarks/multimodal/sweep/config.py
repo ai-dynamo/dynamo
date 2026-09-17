@@ -43,6 +43,8 @@ class SweepConfig:
     skip_plots: bool = False
     restart_server_every_benchmark: bool = True
     uuid_and_strip: bool = False
+    prompt_manifest: Optional[str] = None
+    prefix_cache_probe_min_cached_tokens: Optional[int] = None
     env: Dict[str, str] = field(default_factory=dict)
 
     @property
@@ -69,6 +71,16 @@ class SweepConfig:
         for f in self.input_files:
             if not Path(f).is_file():
                 raise FileNotFoundError(f"Input file not found: {f}")
+
+        if self.prompt_manifest and not Path(self.prompt_manifest).is_file():
+            raise FileNotFoundError(
+                f"Prompt manifest not found: {self.prompt_manifest}"
+            )
+        if (
+            self.prefix_cache_probe_min_cached_tokens is not None
+            and self.prefix_cache_probe_min_cached_tokens <= 0
+        ):
+            raise ValueError("prefix_cache_probe_min_cached_tokens must be positive")
 
         for cfg in self.configs:
             script = Path(cfg.workflow)
@@ -140,6 +152,10 @@ def load_config(
         skip_plots=raw.get("skip_plots", False),
         restart_server_every_benchmark=raw.get("restart_server_every_benchmark", True),
         uuid_and_strip=raw.get("uuid_and_strip", False),
+        prompt_manifest=raw.get("prompt_manifest"),
+        prefix_cache_probe_min_cached_tokens=raw.get(
+            "prefix_cache_probe_min_cached_tokens"
+        ),
         env=raw.get("env", {}),
     )
 

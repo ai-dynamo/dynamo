@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
@@ -45,6 +46,18 @@ def _print_banner(title: str, char: str = "=", width: int = 70) -> None:
     print(f"\n{char * width}")
     print(f"  {title}")
     print(f"{char * width}", flush=True)
+
+
+def _first_user_text(input_file: str) -> str:
+    with open(input_file, encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            value = json.loads(line).get("text")
+            if not isinstance(value, str):
+                raise ValueError(f"First row in {input_file} has no string text field")
+            return value
+    raise ValueError(f"Dataset is empty: {input_file}")
 
 
 def _expand_arm_env(env: dict[str, str]) -> dict[str, str]:
@@ -195,6 +208,13 @@ def _run_config(
                 )
 
             try:
+                if config.prefix_cache_probe_min_cached_tokens is not None:
+                    server.validate_prefix_cache(
+                        model=config.model,
+                        user_text=_first_user_text(input_file),
+                        min_cached_tokens=(config.prefix_cache_probe_min_cached_tokens),
+                        output_path=artifact_dir / "prefix_cache_probe.json",
+                    )
                 run_aiperf_single(
                     model=config.model,
                     port=config.port,

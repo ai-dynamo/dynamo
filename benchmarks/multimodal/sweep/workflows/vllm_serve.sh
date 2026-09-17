@@ -53,6 +53,20 @@ if [[ -z "$MODEL" ]]; then
     exit 1
 fi
 
+if [[ -n "${DYN_VLLM_EXPECTED_ROOT:-}" ]]; then
+    expected_root="${DYN_VLLM_EXPECTED_ROOT%%:*}"
+    active_vllm="$(python -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve())')"
+    case "$active_vllm" in
+        "$expected_root"/*) ;;
+        *)
+            echo "ERROR: active vLLM $active_vllm is not under $expected_root" >&2
+            exit 2
+            ;;
+    esac
+    python -c 'import vllm._C_stable_libtorch, vllm._custom_ops'
+    echo "[vllm] source=${DYN_VLLM_SOURCE_REVISION:-unknown} file=$active_vllm"
+fi
+
 EC_ARGS=()
 if [[ "$CAPACITY_GB" != "0" ]]; then
     EC_ARGS=(--ec-transfer-config "{

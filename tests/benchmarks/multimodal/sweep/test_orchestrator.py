@@ -219,6 +219,33 @@ def test_uuid_and_strip_propagates_to_aiperf(
     )
 
 
+@patch("benchmarks.multimodal.sweep.orchestrator.run_aiperf_single")
+@patch("benchmarks.multimodal.sweep.orchestrator.ServerManager")
+def test_prefix_cache_probe_runs_before_aiperf(
+    mock_server_cls: MagicMock,
+    mock_aiperf: MagicMock,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(
+        tmp_path,
+        num_configs=1,
+        num_input_files=1,
+        request_rates=[4],
+    )
+    Path(config.input_files[0]).write_text('{"text":"same question"}\n')
+    config.prefix_cache_probe_min_cached_tokens = 7936
+    mock_server_cls.return_value.is_running = False
+
+    run_sweep(config, repo_root=tmp_path)
+
+    probe = mock_server_cls.return_value.validate_prefix_cache
+    probe.assert_called_once()
+    assert probe.call_args.kwargs["user_text"] == "same question"
+    assert probe.call_args.kwargs["min_cached_tokens"] == 7936
+    assert probe.call_args.kwargs["output_path"].name == "prefix_cache_probe.json"
+    assert mock_aiperf.call_count == 1
+
+
 def test_per_arm_env_expands_and_overrides_top_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -26,13 +26,22 @@ def test_embedding_cache_sweep_selects_only_requested_arms() -> None:
     config = yaml.safe_load(CONFIG.read_text())
 
     assert [item["label"] for item in config["configs"]] == [
-        "vllm-serve",
         "vllm-serve-native-ec-baseline",
         "vllm-serve-native-ec-overlap",
     ]
     assert config["env"]["DYN_DISABLE_NSYS"] == "1"
+    assert config["prefix_cache_probe_min_cached_tokens"] == 7936
+    assert len(config["input_files"]) == 2
     assert config["configs"][0]["env"]["PYTHONPATH"] == ("${VLLM_BASELINE_PYTHONPATH}")
-    assert config["configs"][2]["env"]["PYTHONPATH"] == ("${VLLM_PATCHED_PYTHONPATH}")
+    assert config["configs"][1]["env"]["PYTHONPATH"] == ("${VLLM_PATCHED_PYTHONPATH}")
+    for benchmark in config["configs"]:
+        assert "--enable-prefix-caching" in benchmark["extra_args"]
+        assert "--enable-prompt-tokens-details" in benchmark["extra_args"]
+        assert "--chat-template" in benchmark["extra_args"]
+        ec_config = benchmark["extra_args"][
+            benchmark["extra_args"].index("--ec-transfer-config") + 1
+        ]
+        assert '"ec_cpu_bytes":8589934592' in ec_config
 
 
 def _run_workflow(tmp_path: Path, *args: str, enable_nsys: bool = False):

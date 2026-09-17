@@ -9,7 +9,9 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pytest
+from PIL import Image
 
 pytest.importorskip("PIL", reason="Pillow required for image generation benchmarks")
 
@@ -17,6 +19,7 @@ pytest.importorskip("PIL", reason="Pillow required for image generation benchmar
 JSONL_DIR = Path(__file__).resolve().parents[4] / "benchmarks" / "multimodal" / "jsonl"
 sys.path.insert(0, str(JSONL_DIR))
 
+from generate_images import generate_image_pool_base64  # noqa: E402
 from generate_videos import generate_synthetic_video_pool  # noqa: E402
 from main import main  # noqa: E402
 
@@ -77,6 +80,14 @@ class TestSingleTurnDefault:
             assert "text" in line
             assert len(line["images"]) == 2
             assert "session_id" not in line
+
+    def test_non_square_image_size_is_width_then_height(self, tmp_path: Path) -> None:
+        pool = generate_image_pool_base64(
+            np.random.default_rng(1), 1, tmp_path / "imgs", (40, 24)
+        )
+
+        with Image.open(pool[0]) as image:
+            assert image.size == (40, 24)
 
 
 class TestSlidingWindow:

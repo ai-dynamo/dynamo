@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,3 +95,77 @@ def test_start_treats_empty_timeout_override_as_unset(tmp_path) -> None:
         )
 
     assert manager.terminate_timeout == 15.0
+
+
+def test_validate_prefix_cache_persists_successful_probe(tmp_path) -> None:
+    responses = [
+        {"usage": {"prompt_tokens": 8016, "prompt_tokens_details": {}}},
+        {
+            "usage": {
+                "prompt_tokens": 8016,
+                "prompt_tokens_details": {"cached_tokens": 8000},
+            }
+        },
+    ]
+
+    class FakeResponse:
+        def __init__(self, value: dict) -> None:
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(self.value).encode()
+
+    output = tmp_path / "probe.json"
+    with patch(
+        "benchmarks.multimodal.sweep.server.urllib.request.urlopen",
+        side_effect=[FakeResponse(value) for value in responses],
+    ) as urlopen:
+        result = ServerManager(port=8123).validate_prefix_cache(
+            model="model",
+            user_text="question",
+            min_cached_tokens=7936,
+            output_path=output,
+        )
+
+    assert urlopen.call_count == 2
+    assert result["passed"] is True
+    assert json.loads(output.read_text()) == result
+
+
+def test_validate_prefix_cache_rejects_uncached_prompt(tmp_path) -> None:
+    response = {
+        "usage": {
+            "prompt_tokens": 8016,
+            "prompt_tokens_details": {"cached_tokens": 128},
+        }
+    }
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(response).encode()
+
+    with (
+        patch(
+            "benchmarks.multimodal.sweep.server.urllib.request.urlopen",
+            side_effect=[FakeResponse(), FakeResponse()],
+        ),
+        pytest.raises(RuntimeError, match="cached 128 tokens"),
+    ):
+        ServerManager().validate_prefix_cache(
+            model="model",
+            user_text="question",
+            min_cached_tokens=7936,
+            output_path=tmp_path / "probe.json",
+        )

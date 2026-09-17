@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Qwen3.5-122B three-arm native embedding-cache comparison on two GPUs.
-# Repeated image payloads carry stable UUIDs and are stripped after their first
-# use in each session. The baseline source tree runs both the no-EC control and
-# synchronous native EC; the patched tree runs native EC with same-step H2D /
-# vision-encoder overlap. All other vLLM arguments are identical.
+# Qwen3.5-122B native CPU embedding-cache comparison on two GPUs. A custom
+# server-side chat template injects the same 8000-token system prompt into
+# every request while AIPerf keeps its stock input-file and UUID-strip paths.
+# The only measured difference is the vLLM source tree: synchronous native EC
+# baseline versus same-step H2D / vision-encoder overlap.
 
 model: Qwen/Qwen3.5-122B-A10B-FP8
 concurrencies: [30]
@@ -14,10 +14,12 @@ conversation_num: 30
 warmup_count: 2
 port: 8000
 timeout: 2400
-output_dir: /dynamo-tmp/logs/09-15/qwen35-122b-vllm-ec-h2d-overlap/default
+output_dir: /dynamo-tmp/logs/09-16/qwen35-122b-vllm-ec-h2d-overlap-shared8k/default
 skip_plots: true
 restart_server_every_benchmark: true
 uuid_and_strip: true
+prompt_manifest: /dynamo-tmp/data/qwen35_ec_h2d_overlap_manifest.json
+prefix_cache_probe_min_cached_tokens: 7936
 
 env:
   DYN_DISABLE_NSYS: "1"
@@ -25,42 +27,50 @@ env:
   VLLM_USE_V2_MODEL_RUNNER: "1"
 
 input_files:
-  - /dynamo-tmp/data/30u_8t_5w_8000word_base64_uuid_seed42.jsonl
+  - /dynamo-tmp/data/30u_8t_5w_shared8k_base64_uuid_seed42.jsonl
+  - /dynamo-tmp/data/30u_8t_10w_shared8k_base64_uuid_seed42.jsonl
 
 configs:
-  - label: vllm-serve
-    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
-    env:
-      PYTHONPATH: "${VLLM_BASELINE_PYTHONPATH}"
-      DYN_VLLM_SOURCE_REVISION: "${VLLM_BASELINE_SOURCE_REVISION}"
-    extra_args:
-      - --tensor-parallel-size
-      - "2"
-      - --quantization
-      - fp8
-      - --enable-expert-parallel
-      - --gpu-memory-utilization
-      - "0.90"
-      - --max-model-len
-      - "32768"
-      - --max-num-batched-tokens
-      - "32768"
-      - --max-num-seqs
-      - "50"
-      - --mm-encoder-tp-mode
-      - data
-      - --mm-processor-cache-gb
-      - "30"
-      - --limit-mm-per-prompt
-      - '{"image":5}'
-      - --no-enable-prefix-caching
-      - --no-enable-log-requests
+  # The no-EC control is intentionally parked: this experiment isolates the
+  # scheduling difference between two otherwise identical native EC servers.
+  # - label: vllm-serve
+  #   workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+  #   env:
+  #     PYTHONPATH: "${VLLM_BASELINE_PYTHONPATH}"
+  #     DYN_VLLM_SOURCE_REVISION: "${VLLM_BASELINE_SOURCE_REVISION}"
+  #     DYN_VLLM_EXPECTED_ROOT: "${VLLM_BASELINE_PYTHONPATH}"
+  #   extra_args:
+  #     - --tensor-parallel-size
+  #     - "2"
+  #     - --quantization
+  #     - fp8
+  #     - --enable-expert-parallel
+  #     - --gpu-memory-utilization
+  #     - "0.90"
+  #     - --max-model-len
+  #     - "65536"
+  #     - --max-num-batched-tokens
+  #     - "32768"
+  #     - --max-num-seqs
+  #     - "50"
+  #     - --mm-encoder-tp-mode
+  #     - data
+  #     - --mm-processor-cache-gb
+  #     - "30"
+  #     - --limit-mm-per-prompt
+  #     - '{"image":10}'
+  #     - --chat-template
+  #     - /dynamo-tmp/data/qwen35_shared_system_8000.jinja
+  #     - --enable-prefix-caching
+  #     - --enable-prompt-tokens-details
+  #     - --no-enable-log-requests
 
   - label: vllm-serve-native-ec-baseline
     workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
     env:
       PYTHONPATH: "${VLLM_BASELINE_PYTHONPATH}"
       DYN_VLLM_SOURCE_REVISION: "${VLLM_BASELINE_SOURCE_REVISION}"
+      DYN_VLLM_EXPECTED_ROOT: "${VLLM_BASELINE_PYTHONPATH}"
     extra_args:
       - --tensor-parallel-size
       - "2"
@@ -70,7 +80,7 @@ configs:
       - --gpu-memory-utilization
       - "0.90"
       - --max-model-len
-      - "32768"
+      - "65536"
       - --max-num-batched-tokens
       - "32768"
       - --max-num-seqs
@@ -80,17 +90,21 @@ configs:
       - --mm-processor-cache-gb
       - "30"
       - --limit-mm-per-prompt
-      - '{"image":5}'
-      - --no-enable-prefix-caching
+      - '{"image":10}'
+      - --chat-template
+      - /dynamo-tmp/data/qwen35_shared_system_8000.jinja
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
       - --no-enable-log-requests
       - --ec-transfer-config
-      - '{"ec_connector":"ECCPUConnector","ec_role":"ec_both","ec_connector_extra_config":{"ec_cpu_bytes":4294967296}}'
+      - '{"ec_connector":"ECCPUConnector","ec_role":"ec_both","ec_connector_extra_config":{"ec_cpu_bytes":8589934592}}'
 
   - label: vllm-serve-native-ec-overlap
     workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
     env:
       PYTHONPATH: "${VLLM_PATCHED_PYTHONPATH}"
       DYN_VLLM_SOURCE_REVISION: "${VLLM_PATCHED_SOURCE_REVISION}"
+      DYN_VLLM_EXPECTED_ROOT: "${VLLM_PATCHED_PYTHONPATH}"
     extra_args:
       - --tensor-parallel-size
       - "2"
@@ -100,7 +114,7 @@ configs:
       - --gpu-memory-utilization
       - "0.90"
       - --max-model-len
-      - "32768"
+      - "65536"
       - --max-num-batched-tokens
       - "32768"
       - --max-num-seqs
@@ -110,11 +124,14 @@ configs:
       - --mm-processor-cache-gb
       - "30"
       - --limit-mm-per-prompt
-      - '{"image":5}'
-      - --no-enable-prefix-caching
+      - '{"image":10}'
+      - --chat-template
+      - /dynamo-tmp/data/qwen35_shared_system_8000.jinja
+      - --enable-prefix-caching
+      - --enable-prompt-tokens-details
       - --no-enable-log-requests
       - --ec-transfer-config
-      - '{"ec_connector":"ECCPUConnector","ec_role":"ec_both","ec_connector_extra_config":{"ec_cpu_bytes":4294967296}}'
+      - '{"ec_connector":"ECCPUConnector","ec_role":"ec_both","ec_connector_extra_config":{"ec_cpu_bytes":8589934592}}'
 
   # Dynamo EC is parked while this experiment isolates native vLLM EC.
   # - label: vllm-serve-dynamo-ec
