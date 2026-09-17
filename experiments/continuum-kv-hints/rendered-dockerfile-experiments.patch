@@ -1,0 +1,18 @@
+--- rendered.Dockerfile.fresh	2026-09-17 15:52:49.804220701 -0700
++++ rendered.Dockerfile.patched	2026-09-17 15:53:08.001075673 -0700
+@@ -608,6 +608,7 @@
+ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+ COPY lib/ /opt/dynamo/lib/
+ COPY components/ /opt/dynamo/components/
++COPY experiments/ /opt/dynamo/experiments/
+ 
+ # Build ai-dynamo (pure Python) and ai-dynamo-runtime (maturin) wheels
+ ARG USE_SCCACHE
+@@ -856,6 +857,7 @@
+ COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
+ COPY lib/ /opt/dynamo/lib/
+ COPY components/ /opt/dynamo/components/
++COPY experiments/ /opt/dynamo/experiments/
+ 
+ # Build kvbm wheel (with nixl linkage via auditwheel repair)
+ ARG ENABLE_KVBM

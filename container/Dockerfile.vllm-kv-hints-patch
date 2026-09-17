@@ -1,0 +1,29 @@
+FROM nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm
+
+# Overlay vLLM branch karenc/kv-hints-on-v0.29.0 (cherry-picked onto v0.29.0)
+# over the base image's vLLM installation.
+# Build context must be ~/vllm checked out to karenc/kv-hints-on-v0.29.0.
+# Only the files changed by the feature branch are copied — no .so files touched.
+
+ARG VLLM_SITE=/usr/local/lib/python3.12/dist-packages/vllm
+
+COPY vllm/v1/kv_hints/ ${VLLM_SITE}/v1/kv_hints/
+
+COPY vllm/v1/core/retained_block_queue.py  ${VLLM_SITE}/v1/core/retained_block_queue.py
+COPY vllm/v1/core/block_pool.py            ${VLLM_SITE}/v1/core/block_pool.py
+COPY vllm/v1/core/kv_cache_manager.py      ${VLLM_SITE}/v1/core/kv_cache_manager.py
+COPY vllm/v1/core/sched/scheduler.py       ${VLLM_SITE}/v1/core/sched/scheduler.py
+
+COPY vllm/v1/engine/__init__.py            ${VLLM_SITE}/v1/engine/__init__.py
+COPY vllm/v1/engine/async_llm.py          ${VLLM_SITE}/v1/engine/async_llm.py
+COPY vllm/v1/engine/input_processor.py    ${VLLM_SITE}/v1/engine/input_processor.py
+COPY vllm/v1/engine/llm_engine.py         ${VLLM_SITE}/v1/engine/llm_engine.py
+
+COPY vllm/v1/request.py                   ${VLLM_SITE}/v1/request.py
+COPY vllm/v1/kv_offload/base.py           ${VLLM_SITE}/v1/kv_offload/base.py
+COPY vllm/v1/kv_offload/tiering/kvcr/manager.py \
+                                           ${VLLM_SITE}/v1/kv_offload/tiering/kvcr/manager.py
+
+COPY vllm/engine/protocol.py              ${VLLM_SITE}/engine/protocol.py
+COPY vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py \
+                                           ${VLLM_SITE}/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
