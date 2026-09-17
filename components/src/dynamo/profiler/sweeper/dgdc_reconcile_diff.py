@@ -6,6 +6,12 @@ Callers perform all I/O -- fetching current state and applying the
 returned actions. Identity deliberately excludes Status.Rank, which is
 mutable; only a status update is possible for an identity present in both
 desired and current.
+
+This module detects and safely refuses duplicate identities in its inputs
+(DiffInputError); it cannot prevent them from being created. Whatever
+applies `creates` against a real cluster must guarantee identity
+uniqueness at creation time -- this module's error is a safety net, not a
+substitute for that guarantee.
 """
 
 from __future__ import annotations
