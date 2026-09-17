@@ -49,11 +49,12 @@ fn endpoint_device_type() -> Option<DeviceType> {
     Some(DeviceType::Cuda)
 }
 
-/// A registered endpoint whose exact callable instance is ready for use.
+/// A started endpoint and its exact callable instance descriptor.
 ///
 /// Dropping this handle does not stop the endpoint. Call [`shutdown`](Self::shutdown)
 /// for scoped endpoint lifetimes, or [`wait`](Self::wait) for the traditional
-/// runtime-owned lifetime.
+/// runtime-owned lifetime. The descriptor may not yet be published to discovery when
+/// [`EndpointConfigBuilder::initially_registered`] is false.
 pub struct StartedEndpoint {
     instance: Instance,
     shutdown_token: CancellationToken,
@@ -96,6 +97,14 @@ pub struct EndpointConfig {
     #[builder(default = "true")]
     graceful_shutdown: bool,
 
+    /// Whether to publish this endpoint instance to discovery during startup.
+    ///
+    /// The request-plane handler and local health-check target are started regardless.
+    /// A deferred endpoint can be published later with
+    /// [`Endpoint::register_endpoint_instance`].
+    #[builder(default = "true")]
+    initially_registered: bool,
+
     /// Health check payload for this endpoint
     /// This payload will be sent to the endpoint during health checks
     /// to verify it's responding properly
@@ -129,10 +138,16 @@ impl EndpointConfigBuilder {
         self.start_with_registration().await?.wait().await
     }
 
-    /// Start an endpoint and return once its exact discovery instance is callable.
+    /// Start an endpoint and return once its exact request-plane instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            metrics_labels,
+            graceful_shutdown,
+            initially_registered,
+            health_check_payload,
+        ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -158,6 +173,15 @@ impl EndpointConfigBuilder {
         // Get the unified request plane server
         let server = endpoint.drt().request_plane_server().await?;
         let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
+        let instance = Instance {
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+            namespace: endpoint_id.namespace.clone(),
+            instance_id: connection_id,
+            transport: transport.clone(),
+            device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+        };
 
         // Register health check target in SystemHealth if provided
         if let Some(health_check_payload) = &health_check_payload {
@@ -176,20 +200,11 @@ impl EndpointConfigBuilder {
                 );
             }
 
-            let instance = Instance {
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-                namespace: endpoint_id.namespace.clone(),
-                instance_id: connection_id,
-                transport: transport.clone(),
-                device_type: endpoint_device_type(),
-                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-            };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
             guard.register_health_check_target(
                 &endpoint.name,
-                instance,
+                instance.clone(),
                 health_check_payload.clone(),
             );
             if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
@@ -242,31 +257,41 @@ impl EndpointConfigBuilder {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        let discovery_instance = match discovery.register(discovery_spec).await {
-            Ok(instance) => instance,
-            Err(e) => {
-                tracing::error!(
-                    %endpoint_id,
-                    error = %e,
-                    "Unable to register service for discovery"
-                );
-                let _ = server
-                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
-                    .await;
-                if let Some(tracker) = tracker_clone {
-                    tracker.unregister_endpoint();
+        let discovery_instance = if initially_registered {
+            match discovery.register(discovery_spec).await {
+                Ok(instance) => instance,
+                Err(e) => {
+                    tracing::error!(
+                        %endpoint_id,
+                        error = %e,
+                        "Unable to register service for discovery"
+                    );
+                    let _ = server
+                        .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                        .await;
+                    if let Some(tracker) = tracker_clone {
+                        tracker.unregister_endpoint();
+                    }
+                    anyhow::bail!(
+                        "Unable to register service for discovery. Check discovery service status"
+                    );
                 }
-                anyhow::bail!(
-                    "Unable to register service for discovery. Check discovery service status"
-                );
             }
+        } else {
+            tracing::info!(
+                %endpoint_id,
+                "Endpoint request plane started with discovery registration deferred"
+            );
+            crate::discovery::DiscoveryInstance::Endpoint(instance)
         };
         let instance = match &discovery_instance {
             crate::discovery::DiscoveryInstance::Endpoint(instance) => instance.clone(),
             _ => unreachable!("endpoint discovery spec returned a non-endpoint instance"),
         };
 
-        // Create cleanup task that unregisters on cancellation.
+        // Create cleanup task that unregisters on cancellation. This is deliberately
+        // attempted for deferred endpoints too: they may have been registered after
+        // startup through Endpoint::register_endpoint_instance.
         let endpoint_name_for_cleanup = endpoint_name_for_task;
         let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
@@ -471,5 +496,88 @@ impl Endpoint {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        discovery::DiscoveryQuery,
+        distributed::DistributedConfig,
+        pipeline::{ManyOut, SingleIn, network::Ingress},
+        protocols::annotated::Annotated,
+    };
+
+    type TestIngress = Ingress<SingleIn<String>, ManyOut<Annotated<String>>>;
+
+    async fn endpoint_count(drt: &crate::DistributedRuntime, endpoint: &str) -> usize {
+        drt.discovery()
+            .list(DiscoveryQuery::Endpoint {
+                namespace: "deferred_registration_test".to_string(),
+                component: "backend".to_string(),
+                endpoint: endpoint.to_string(),
+            })
+            .await
+            .unwrap()
+            .len()
+    }
+
+    #[tokio::test]
+    async fn endpoint_start_can_defer_discovery_registration() {
+        let runtime = crate::Runtime::from_current().unwrap();
+        let drt =
+            crate::DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+                .await
+                .unwrap();
+        let component = drt
+            .namespace("deferred_registration_test")
+            .unwrap()
+            .component("backend")
+            .unwrap();
+
+        let automatic_endpoint = component.endpoint("automatic");
+        let automatic = automatic_endpoint
+            .endpoint_builder()
+            .handler(TestIngress::new())
+            .start_with_registration()
+            .await
+            .unwrap();
+        assert_eq!(endpoint_count(&drt, "automatic").await, 1);
+
+        let deferred_endpoint = component.endpoint("deferred");
+        let deferred = deferred_endpoint
+            .endpoint_builder()
+            .handler(TestIngress::new())
+            .initially_registered(false)
+            .start_with_registration()
+            .await
+            .unwrap();
+        assert_eq!(endpoint_count(&drt, "deferred").await, 0);
+
+        deferred_endpoint
+            .register_endpoint_instance()
+            .await
+            .unwrap();
+        deferred_endpoint
+            .register_endpoint_instance()
+            .await
+            .unwrap();
+        assert_eq!(endpoint_count(&drt, "deferred").await, 1);
+
+        deferred_endpoint
+            .unregister_endpoint_instance()
+            .await
+            .unwrap();
+        deferred_endpoint
+            .unregister_endpoint_instance()
+            .await
+            .unwrap();
+        assert_eq!(endpoint_count(&drt, "deferred").await, 0);
+
+        deferred.shutdown().await.unwrap();
+        automatic.shutdown().await.unwrap();
+        assert_eq!(endpoint_count(&drt, "automatic").await, 0);
+        runtime.shutdown();
     }
 }
