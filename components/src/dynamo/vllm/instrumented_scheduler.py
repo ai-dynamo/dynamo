@@ -4791,10 +4791,12 @@ class InstrumentedScheduler(AsyncScheduler):
             return (
                 "real_attention_kv_random_kda" if self._bench_random_kda else "real_kv"
             )
-        if self._bench_random_kda:
-            return "fake_attention_kv_random_kda"
         if "kvwarm_fake_fallback" in reasons:
-            return "fake_fallback"
+            return (
+                "fake_attention_kv_random_kda"
+                if self._bench_random_kda
+                else "fake_fallback"
+            )
         if not self._kvwarm_flag_on():
             return "legacy"
         meta = getattr(self, "_kvwarm_meta", None) or {}

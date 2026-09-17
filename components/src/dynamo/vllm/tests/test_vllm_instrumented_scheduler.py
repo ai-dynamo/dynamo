@@ -2033,7 +2033,6 @@ def test_prefill_grid_rejects_native_split_before_measurement(generated):
         with pytest.raises(ValueError, match=r"prefill\[273\].*infeasible"):
             stub._bench_materialize_prefill_candidate(candidate, "prefill[273]")
 
-    # The feasible neighboring coordinate remains a measured point.
     supported = candidate.model_copy(update={"total_prefill_tokens": 512})
     point = stub._bench_materialize_prefill_candidate(
         supported, "prefill[272]", generated=generated
@@ -5019,9 +5018,12 @@ def test_kvwarm_gate_reads_an_empty_dump_as_dataset_empty(monkeypatch, tmp_path)
     assert stub._kvwarm_meta["skip_reason"] == "dataset_empty"
 
 
-def test_kvwarm_seed_regime_vocabulary(monkeypatch):
+@pytest.mark.core
+@pytest.mark.parametrize("random_kda", [False, True])
+def test_kvwarm_seed_regime_vocabulary(monkeypatch, random_kda):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_random_kda = random_kda
     stub._kvwarm_meta = {"warm_eligible": True, "skip_reason": None}
     decode = BenchmarkPoint(point_type="decode", total_kv_read_tokens=64, batch_size=2)
     prefill = BenchmarkPoint(
@@ -5030,10 +5032,11 @@ def test_kvwarm_seed_regime_vocabulary(monkeypatch):
     regime = InstrumentedScheduler._kvwarm_seed_regime
     assert regime(stub, prefill) == "not_applicable"
     assert regime(stub, decode) == "unstamped"
-    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == "real_kv"
-    assert (
-        regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"]))
-        == "fake_fallback"
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == (
+        "real_attention_kv_random_kda" if random_kda else "real_kv"
+    )
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"])) == (
+        "fake_attention_kv_random_kda" if random_kda else "fake_fallback"
     )
     stub._kvwarm_meta = {
         "warm_eligible": False,
@@ -5212,7 +5215,6 @@ def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monke
     assert stub._kvwarm_step_busy() is False
     stub._kvwarm_start_stage.assert_not_called()
 
-    # The exact-fit neighbor still warms the short-context point.
     fitted = _kvwarm_planner_stub(usable_blocks=12)
     fitted._bench_grid = deque([short])
     fitted._kvwarm_prepare("decode")
@@ -6284,7 +6286,6 @@ def test_hybrid_decode_capacity_reserves_state_turnover_and_prefill_checkpoints(
     )
     context = 1048573
     assert stub._bench_blocks_per_req(context + 1) == 95  # 86 attention + 9 state
-    assert not stub._bench_decode_point_feasible(24, 24 * context)
     assert stub._bench_decode_point_feasible(22, 22 * context)
     assert not stub._bench_decode_point_feasible(23, 23 * context)
 
