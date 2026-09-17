@@ -7046,11 +7046,8 @@ impl
             &self.speculative_prefill_tasks,
         );
 
-        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
-            final_stream,
-            trace_state,
-            request_id,
-        );
+        let final_stream =
+            crate::request_trace::wrap_chat_request_end_stream(final_stream, trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -7184,11 +7181,8 @@ impl
             MultimodalCounts::default(),
         );
 
-        let stream = crate::request_trace::wrap_completion_request_end_stream(
-            Box::pin(stream),
-            trace_state,
-            request_id,
-        );
+        let stream =
+            crate::request_trace::wrap_completion_request_end_stream(Box::pin(stream), trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);

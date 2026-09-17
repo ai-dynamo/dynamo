@@ -175,7 +175,6 @@ pub(crate) fn finish_reason_metadata_handle(
 fn wrap_request_end_stream<Resp>(
     stream: Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
-    request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<Resp>> + Send>>
 where
     Resp: Send + 'static,
@@ -187,7 +186,6 @@ where
     let (stream, done) = crate::telemetry::stream::notify_on_completion(stream);
     tokio::spawn(async move {
         done.await;
-        trace_state.request_id = request_id;
         trace_state.emit();
     });
     stream
@@ -196,33 +194,31 @@ where
 pub(crate) fn wrap_chat_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
-    request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>> {
     let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
-        return wrap_request_end_stream(stream, trace_state, request_id);
+        return wrap_request_end_stream(stream, trace_state);
     };
 
     let stream = stream.map(move |response| {
         super::record_chat_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
-    wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
+    wrap_request_end_stream(Box::pin(stream), trace_state)
 }
 
 pub(crate) fn wrap_completion_request_end_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>>,
     trace_state: Option<RequestEndTraceState>,
-    request_id: String,
 ) -> Pin<Box<dyn Stream<Item = Annotated<NvCreateCompletionResponse>> + Send>> {
     let Some(finish_reason_metadata) = finish_reason_metadata_handle(&trace_state) else {
-        return wrap_request_end_stream(stream, trace_state, request_id);
+        return wrap_request_end_stream(stream, trace_state);
     };
 
     let stream = stream.map(move |response| {
         super::record_completion_finish_reason_metadata(&finish_reason_metadata, &response);
         response
     });
-    wrap_request_end_stream(Box::pin(stream), trace_state, request_id)
+    wrap_request_end_stream(Box::pin(stream), trace_state)
 }
 
 #[cfg(test)]
@@ -443,8 +439,7 @@ mod tests {
             dropped: dropped.clone(),
         };
 
-        let wrapped =
-            wrap_request_end_stream(Box::pin(stream), Some(state), "req-drop".to_string());
+        let wrapped = wrap_request_end_stream(Box::pin(stream), Some(state));
         drop(wrapped);
 
         let record = tokio::time::timeout(Duration::from_secs(5), async {
@@ -491,6 +486,7 @@ mod tests {
             crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
             "llm-call-1".to_string(),
         );
+        let expected_request_id = context.id().to_string();
         let state = build_request_end_trace_state_for_policy(
             &request,
             &Some(tracker.clone()),
@@ -504,8 +500,7 @@ mod tests {
             dropped: dropped.clone(),
         };
 
-        let wrapped =
-            wrap_request_end_stream(Box::pin(stream), Some(state), "req-agent".to_string());
+        let wrapped = wrap_request_end_stream(Box::pin(stream), Some(state));
         drop(wrapped);
 
         let record = tokio::time::timeout(Duration::from_secs(5), async {
@@ -514,7 +509,7 @@ mod tests {
                 if record
                     .request
                     .as_ref()
-                    .is_some_and(|request| request.request_id == "req-agent")
+                    .is_some_and(|request| request.request_id == expected_request_id)
                 {
                     break record;
                 }
