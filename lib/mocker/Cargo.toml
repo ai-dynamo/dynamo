@@ -18,12 +18,15 @@ profile = []
 # Test/benchmark-only deterministic replay plumbing. Production replay never
 # enables this feature and keeps the existing random selector behavior.
 replay-bench = ["aisimulate-core/replay-bench", "dynamo-kv-router/bench"]
+# Offline builtin comparisons without changing request identities or default selector randomness.
+replay-builtin = ["dep:dynamo-custom-policy-builtin"]
 test-support = []
 zmq-events = ["dep:tmq"]
 
 [dependencies]
 # repo
 aisimulate-core = { workspace = true }
+dynamo-custom-policy-builtin = { path = "../router-plugins/builtin", optional = true }
 dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
