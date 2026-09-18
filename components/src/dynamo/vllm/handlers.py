@@ -1037,7 +1037,6 @@ def _engine_generate_reasoning_kwargs(
 def _engine_generate_session_kwargs(
     engine_client: Any, session_id: str | None
 ) -> dict[str, str | None]:
-    """Return session_id only when the installed vLLM engine accepts it."""
     try:
         parameters = inspect.signature(engine_client.generate).parameters.values()
     except (TypeError, ValueError):
@@ -3840,7 +3839,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
-                    session_id=session_id,
+                    **_engine_generate_session_kwargs(self.engine_client, session_id),
                 )
 
                 async for res in gen:
@@ -4039,7 +4038,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         lora_request=admitted_lora_request,
                         trace_headers=trace_headers,
                         priority=priority,
-                        session_id=session_id,
+                        **_engine_generate_session_kwargs(
+                            self.engine_client, session_id
+                        ),
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,
