@@ -60,6 +60,30 @@ class TPConsistency:
             raise GmsTPConsistencyError(f"SGLang GMS TP stage mismatch: {stage}")
         return all(vote[1] for vote in votes), result
 
+    def leader_true(self, stage: str, value: bool) -> bool:
+        """Broadcast the leader's conservative candidate predicate.
+
+        A stale false on the leader only delays a cache hit and falls back to
+        recompute. A stale true is verified by the existing common-prefix
+        lookup before mutation. Using a broadcast avoids an unnecessary
+        reduction on every native prefix miss.
+        """
+        if not self.enabled:
+            return bool(value)
+        import torch
+        import torch.distributed as dist
+
+        vote = torch.tensor(
+            [bool(value) if self._rank() == 0 else False], dtype=torch.uint8
+        )
+        try:
+            dist.broadcast(vote, src=0, group=self.group)
+        except Exception as exc:
+            raise GmsTPConsistencyError(
+                f"SGLang GMS TP agreement channel failed during {stage}"
+            ) from exc
+        return bool(vote.item())
+
     def _rank(self) -> int:
         if not self.enabled:
             return 0
@@ -92,6 +116,53 @@ class TPConsistency:
             common.intersection_update(values)
         return sorted(common)
 
+    def _gather_digest(
+        self, stage: str, ok: bool, agreement: bytes
+    ) -> list[tuple[bool, bytes]]:
+        from hashlib import sha256
+
+        import torch
+        import torch.distributed as dist
+
+        identity = sha256(stage.encode("utf-8") + b"\0" + bytes(agreement)).digest()
+        vote = torch.tensor([ok, *identity], dtype=torch.uint8)
+        votes = [torch.empty_like(vote) for _ in range(self.world_size)]
+        try:
+            dist.all_gather(votes, vote, group=self.group)
+        except Exception as exc:
+            raise GmsTPConsistencyError(
+                f"SGLang GMS TP agreement channel failed during {stage}"
+            ) from exc
+        return [
+            (bool(candidate[0].item()), bytes(candidate[1:].tolist()))
+            for candidate in votes
+        ]
+
+    def transact_digest(self, stage: str, agreement: bytes, operation):
+        """Run one local transaction and agree a fixed-size identity once.
+
+        Publication is on SGLang's completion hot path. A 33-byte tensor vote
+        avoids pickling a page-layout object on every rank while preserving the
+        same fail-closed success and identity checks. Callers must compensate
+        local side effects if this raises.
+        """
+        if not self.enabled:
+            return operation()
+        error = None
+        result = None
+        try:
+            result = operation()
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        votes = self._gather_digest(stage, error is None, agreement)
+        if any(not ok for ok, _identity in votes):
+            raise GmsTPConsistencyError(
+                f"SGLang GMS TP transaction failed during {stage}"
+            ) from error
+        if any(identity != votes[0][1] for _ok, identity in votes[1:]):
+            raise GmsTPConsistencyError(f"SGLang GMS TP disagreement during {stage}")
+        return result
+
     def run(self, stage: str, operation):
         """No rank proceeds after a peer's local operation failed."""
         if not self.enabled:
@@ -122,3 +193,24 @@ class TPConsistency:
                 break
             result.append(entries[0])
         return result
+
+    def run_common_prefix(self, stage: str, operation):
+        """Run a local lookup and agree its usable prefix in one collective."""
+        value = None
+        candidates = []
+        error = None
+        try:
+            value, candidates = operation()
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        votes = self._gather((stage, error is None, candidates))
+        if any(vote[:2] != (stage, True) for vote in votes):
+            raise GmsTPConsistencyError(
+                f"SGLang GMS TP operation failed during {stage}"
+            ) from error
+        common = []
+        for entries in zip(*(vote[2] for vote in votes)):
+            if any(entry != entries[0] for entry in entries[1:]):
+                break
+            common.append(entries[0])
+        return value, common

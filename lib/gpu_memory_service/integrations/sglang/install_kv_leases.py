@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 
 from gpu_memory_service.integrations.common.kv_lease_client import (
@@ -60,6 +61,7 @@ def adopt_hbm_pages(allocator, pages: list[int], generations: list[int]):
     page_size = int(allocator.page_size)
     if allocator.need_sort:
         allocator.merge_and_sort_free()
+        st["tp_reservation_aligned"] = False
     page_tensor = torch.tensor(
         pages, dtype=allocator.free_pages.dtype, device=allocator.free_pages.device
     )
@@ -135,6 +137,7 @@ def rollback_adopted_hbm_pages(allocator, leases: list[KVLease]) -> None:
         pages, dtype=allocator.free_pages.dtype, device=allocator.free_pages.device
     )
     allocator.free_pages = torch.cat((page_tensor, allocator.free_pages))
+    st["tp_reservation_aligned"] = False
     if allocator.need_sort:
         allocator.free_pages, _ = torch.sort(allocator.free_pages)
 
@@ -182,8 +185,14 @@ def _state(self) -> dict[str, object] | None:
 
 
 def _agree_native_capacity(self, operation: str, required: int, available: int) -> None:
+    """Coordinate only the exceptional native-capacity path.
+
+    Successful allocations consume pages from an already-agreed reservation
+    window. Repeating a Python-object collective for their identical local
+    capacity values put network synchronization on every scheduler step.
+    """
     cohort = getattr(self, "_gms_tp_consistency", None)
-    if cohort is not None and cohort.enabled:
+    if cohort is not None and cohort.enabled and int(required) > int(available):
         cohort.agree(f"{operation}:capacity", (int(required), int(available)))
 
 
@@ -375,6 +384,13 @@ def _release_tracked_leases(st: dict[str, object], leases: list[KVLease]) -> Non
     assert isinstance(lease_map, dict)
 
     st["client"].release(leases)
+    released_pages = {int(lease.block_id) for lease in leases}
+    queue = st.get("tp_reserved_pages")
+    if isinstance(queue, list):
+        remaining = [page for page in queue if int(page) not in released_pages]
+        if len(remaining) != len(queue):
+            st["tp_reservation_aligned"] = False
+        queue[:] = remaining
     for lease in leases:
         page = int(lease.block_id)
         if lease_map.get(page) == lease:
@@ -382,10 +398,13 @@ def _release_tracked_leases(st: dict[str, object], leases: list[KVLease]) -> Non
 
 
 def _rollback_reserved_pages(st: dict[str, object], leases: list[KVLease]) -> None:
+    st["tp_reservation_aligned"] = False
     _release_tracked_leases(st, leases)
 
 
-def _reserve_tp_pages(self, pages: list[int], operation: str) -> list[KVLease] | None:
+def _reserve_tp_pages(
+    self, pages: list[int], operation: str, *, reclaim: bool = True
+) -> list[KVLease] | None:
     """Hold leader-selected pages until every rank reserves the same layout.
 
     Contention with a standby produces a reversible NACK. All successful
@@ -478,17 +497,124 @@ def _reserve_tp_pages(self, pages: list[int], operation: str) -> list[KVLease] |
             release_candidate()
             raise
         tried.update(chosen or pages)
-        if not reclaimed:
+        if reclaim and not reclaimed:
             reclaimed = True
             if _ensure_directory_capacity(self, len(pages)):
                 tried.clear()
     return None
 
 
+def _tp_reservation_window_pages() -> int:
+    raw = os.environ.get("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4096")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Ignoring invalid GMS_SGLANG_TP_LEASE_WINDOW_PAGES=%r", raw)
+        return 4096
+
+
+def _consume_tp_reservation(self, count: int) -> list[KVLease] | None:
+    """Take the next agreed pages without another cross-rank collective."""
+    st = _state(self)
+    if st is None:
+        return None
+    queue = st.setdefault("tp_reserved_pages", [])
+    lease_map = st["leases_by_page"]
+    assert isinstance(queue, list) and isinstance(lease_map, dict)
+    if len(queue) < count:
+        return None
+    pages = [int(page) for page in queue[:count]]
+    leases: list[KVLease] = []
+    for page in pages:
+        lease = lease_map.get(page)
+        if lease is None:
+            raise RuntimeError("SGLang TP reservation window lost a lease")
+        leases.append(lease)
+
+    if not st.get("tp_reservation_aligned", False):
+        # Re-establish the invariant for the entire remaining window, not only
+        # this allocation. Token frees and sorted merges can displace later
+        # reservations too; marking the window aligned after moving only its
+        # first entry would let a later allocation consume a different page.
+        reserved = [int(page) for page in queue]
+        current = _pages_to_list(self.free_pages[: len(reserved)])
+        if current != reserved:
+            page_tensor = torch.tensor(
+                reserved, dtype=self.free_pages.dtype, device=self.free_pages.device
+            )
+            selected = torch.isin(self.free_pages, page_tensor)
+            if int(selected.sum().item()) != len(reserved):
+                raise RuntimeError(
+                    "SGLang TP reservation window diverged from native free pages"
+                )
+            self.free_pages = torch.cat((page_tensor, self.free_pages[~selected]))
+        st["tp_reservation_aligned"] = True
+    del queue[:count]
+    return leases
+
+
+def _refill_tp_reservation(self, count: int, operation: str) -> list[KVLease] | None:
+    """Amortize TP agreement over a deterministic window of free pages."""
+    st = _state(self)
+    if st is None:
+        return None
+    queue = st.setdefault("tp_reserved_pages", [])
+    lease_map = st["leases_by_page"]
+    retained = st["retained_pages"]
+    assert isinstance(queue, list)
+    assert isinstance(lease_map, dict) and isinstance(retained, set)
+
+    cohort = self._gms_tp_consistency
+    cohort.agree(f"{operation}:window-state", (int(count), tuple(queue)))
+    needed = int(count) - len(queue)
+    target = max(int(count), _tp_reservation_window_pages()) - len(queue)
+
+    def available_candidates():
+        # Rank-local retained maps may differ after a failed publication. Agree
+        # the eligible set before taking branches or choosing a batch size.
+        native = cohort.run(
+            f"{operation}:window-free", lambda: _pages_to_list(self.free_pages)
+        )
+        candidates = [
+            page
+            for page in native
+            if page > 0 and page not in lease_map and page not in retained
+        ]
+        common = set(cohort.intersection(f"{operation}:window-eligible", candidates))
+        return [page for page in candidates if page in common]
+
+    candidates = available_candidates()
+    if len(candidates) < needed:
+        # A full retained cache still has evictable native-free pages. Reclaim
+        # only actual demand, never the speculative reservation window.
+        if not _ensure_directory_capacity(self, needed):
+            return None
+        candidates = available_candidates()
+        if len(candidates) < needed:
+            return None
+    candidates = candidates[:target]
+    leases = _reserve_tp_pages(self, candidates, f"{operation}:window", reclaim=False)
+    if leases is None and len(candidates) > needed:
+        # One competing owner must not turn a large speculative window into
+        # backpressure when the request itself needs only a few pages.
+        leases = _reserve_tp_pages(self, candidates[:needed], operation)
+    elif leases is None and _ensure_directory_capacity(self, needed):
+        leases = _reserve_tp_pages(self, candidates[:needed], operation)
+    if leases is None:
+        return None
+    queue.extend(int(lease.block_id) for lease in leases)
+    # Filtering retained pages can leave them at the front of the native free
+    # list even if the ring granted every proposed page. Verify the whole
+    # window once per refill before allowing allocation without readback.
+    st["tp_reservation_aligned"] = False
+    return _consume_tp_reservation(self, count)
+
+
 def _reserve_pages(
     self,
-    pages: list[int],
+    pages: list[int] | None,
     *,
+    count: int | None = None,
     local_free: int,
     operation: str,
 ) -> list[KVLease] | None:
@@ -505,8 +631,14 @@ def _reserve_pages(
     client = st["client"]
     assert isinstance(client, GMSKVLeaseClient) or hasattr(client, "acquire")
     cohort = getattr(self, "_gms_tp_consistency", None)
+    requested = len(pages) if count is None else int(count)
     if cohort is not None and cohort.enabled:
-        return _reserve_tp_pages(self, pages, operation)
+        leases = _consume_tp_reservation(self, requested)
+        if leases is not None:
+            return leases
+        return _refill_tp_reservation(self, requested, operation)
+    if pages is None:
+        raise RuntimeError("single-rank SGLang reservation requires page IDs")
     if not pages:
         return []
     try:
@@ -631,6 +763,8 @@ def _initialize_allocator(self) -> None:
         "client": client,
         "leases_by_page": lease_map,
         "retained_pages": retained_pages,
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": False,
     }
     self._gms_kv_lease_client = client
     self._gms_kv_leases_by_page = lease_map
@@ -659,12 +793,24 @@ def _gms_token_alloc(self, need_size: int):
         return orig_token_alloc(self, need_size)
     if self.need_sort and int(need_size) > len(self.free_pages):
         self.merge_and_sort_free()
+        st["tp_reservation_aligned"] = False
     local_free = len(self.free_pages)
     _agree_native_capacity(self, "token_alloc", need_size, local_free)
     if int(need_size) > local_free:
         return None
-    pages = _pages_to_list(self.free_pages[: int(need_size)])
-    leases = _reserve_pages(self, pages, local_free=local_free, operation="token_alloc")
+    cohort = getattr(self, "_gms_tp_consistency", None)
+    pages = (
+        None
+        if cohort is not None and cohort.enabled
+        else _pages_to_list(self.free_pages[: int(need_size)])
+    )
+    leases = _reserve_pages(
+        self,
+        pages,
+        count=int(need_size),
+        local_free=local_free,
+        operation="token_alloc",
+    )
     if leases is None:
         return None
     try:
@@ -683,6 +829,9 @@ def _gms_token_free(self, free_index):
     # last reference to the page. Base.free_group_end sets ``free_group`` to
     # None and calls ``self.free`` again, which releases the lease exactly once.
     result = orig_token_free(self, free_index)
+    st = _state(self)
+    if st is not None:
+        st["tp_reservation_aligned"] = False
     if self.free_group is None:
         _release_indices(self, free_index)
     return result
@@ -713,6 +862,10 @@ def _gms_token_clear(self):
         client.release(outstanding)
         lease_map.clear()
         retained.clear()
+        queue = st.get("tp_reserved_pages")
+        if isinstance(queue, list):
+            queue.clear()
+        st["tp_reservation_aligned"] = False
     return result
 
 
@@ -725,12 +878,24 @@ def _gms_paged_alloc(self, need_size: int):
         return orig_paged_alloc(self, need_size)
     if self.need_sort and num_pages > len(self.free_pages):
         self.merge_and_sort_free()
+        st["tp_reservation_aligned"] = False
     local_free = len(self.free_pages)
     _agree_native_capacity(self, "paged_alloc", num_pages, local_free)
     if num_pages > local_free:
         return None
-    pages = _pages_to_list(self.free_pages[:num_pages])
-    leases = _reserve_pages(self, pages, local_free=local_free, operation="paged_alloc")
+    cohort = getattr(self, "_gms_tp_consistency", None)
+    pages = (
+        None
+        if cohort is not None and cohort.enabled
+        else _pages_to_list(self.free_pages[:num_pages])
+    )
+    leases = _reserve_pages(
+        self,
+        pages,
+        count=num_pages,
+        local_free=local_free,
+        operation="paged_alloc",
+    )
     if leases is None:
         return None
     try:
@@ -768,6 +933,7 @@ def _gms_paged_alloc_extend(
     premerge_pages = extend_num_tokens // int(self.page_size) + len(prefix_lens) + 1
     if self.need_sort and premerge_pages > len(self.free_pages):
         self.merge_and_sort_free()
+        st["tp_reservation_aligned"] = False
     if num_new_pages is None:
         num_new_pages = get_num_new_pages(
             seq_lens=seq_lens_cpu,
@@ -790,9 +956,18 @@ def _gms_paged_alloc_extend(
     _agree_native_capacity(self, "paged_alloc_extend", num_new_pages, local_free)
     if num_new_pages > local_free:
         return None
-    pages = _pages_to_list(self.free_pages[:num_new_pages])
+    cohort = getattr(self, "_gms_tp_consistency", None)
+    pages = (
+        None
+        if cohort is not None and cohort.enabled
+        else _pages_to_list(self.free_pages[:num_new_pages])
+    )
     leases = _reserve_pages(
-        self, pages, local_free=local_free, operation="paged_alloc_extend"
+        self,
+        pages,
+        count=num_new_pages,
+        local_free=local_free,
+        operation="paged_alloc_extend",
     )
     if leases is None:
         return None
@@ -821,6 +996,7 @@ def _gms_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc):
         return orig_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc)
     if self.need_sort and len(seq_lens) > len(self.free_pages):
         self.merge_and_sort_free()
+        st["tp_reservation_aligned"] = False
     num_new_pages = int(
         get_num_new_pages(
             seq_lens=seq_lens_cpu,
@@ -834,9 +1010,18 @@ def _gms_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc):
     _agree_native_capacity(self, "paged_alloc_decode", num_new_pages, local_free)
     if num_new_pages > local_free:
         return None
-    pages = _pages_to_list(self.free_pages[:num_new_pages])
+    cohort = getattr(self, "_gms_tp_consistency", None)
+    pages = (
+        None
+        if cohort is not None and cohort.enabled
+        else _pages_to_list(self.free_pages[:num_new_pages])
+    )
     leases = _reserve_pages(
-        self, pages, local_free=local_free, operation="paged_alloc_decode"
+        self,
+        pages,
+        count=num_new_pages,
+        local_free=local_free,
+        operation="paged_alloc_decode",
     )
     if leases is None:
         return None
@@ -855,6 +1040,23 @@ def _gms_paged_release_page_ids(self, *page_ids):
     # primitive. Publish the shared release only after native state owns the
     # pages again, so another engine can never lease a page still in use here.
     result = orig_paged_release_page_ids(self, *page_ids)
+    st = _state(self)
+    if (
+        st is not None
+        and st.get("tp_reservation_aligned", False)
+        and not self.need_sort
+    ):
+        queue = st.get("tp_reserved_pages")
+        released = sum(int(values.numel()) for values in page_ids)
+        if isinstance(queue, list) and queue and released:
+            queued = len(queue)
+            self.free_pages = torch.cat(
+                (
+                    self.free_pages[released : released + queued],
+                    self.free_pages[:released],
+                    self.free_pages[released + queued :],
+                )
+            )
     _release_pages(self, *page_ids)
     return result
 
@@ -881,6 +1083,10 @@ def _gms_paged_clear(self):
         client.release(outstanding)
         lease_map.clear()
         retained.clear()
+        queue = st.get("tp_reserved_pages")
+        if isinstance(queue, list):
+            queue.clear()
+        st["tp_reservation_aligned"] = False
 
     # Base.__init__ has not created ``free_pages`` yet, while Paged.clear
     # has. Warm the exact-page adoption operators here, once per allocator,

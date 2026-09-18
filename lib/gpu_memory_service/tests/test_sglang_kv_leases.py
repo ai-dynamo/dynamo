@@ -69,6 +69,43 @@ def test_release_failure_preserves_leases_for_retry():
         _cleanup(allocator)
 
 
+def test_release_removes_pages_from_tp_reservation_window():
+    leases = {1: KVLease(1, 7), 2: KVLease(2, 9)}
+    client = _Client()
+    allocator = _allocator(client, leases)
+    adapter._STATE[id(allocator)]["tp_reserved_pages"] = [1, 2]
+    try:
+        adapter._release_pages(allocator, torch.tensor([1]))
+        assert adapter._STATE[id(allocator)]["tp_reserved_pages"] == [2]
+        assert leases == {2: KVLease(2, 9)}
+    finally:
+        _cleanup(allocator)
+
+
+def test_paged_free_preserves_agreed_reservation_prefix(monkeypatch):
+    # install() binds the running SGLang torch module before this wrapper can
+    # execute in production; direct unit invocation must establish that seam.
+    monkeypatch.setattr(adapter, "torch", torch)
+    leases = {4: KVLease(4, 7)}
+    allocator = _allocator(_Client(), leases)
+    allocator.free_pages = torch.tensor([2, 3, 5])
+    allocator.need_sort = False
+    state = adapter._STATE[id(allocator)]
+    state["tp_reserved_pages"] = [2, 3]
+    state["tp_reservation_aligned"] = True
+
+    def native_release(self, *page_ids):
+        self.free_pages = torch.cat((*page_ids, self.free_pages))
+
+    monkeypatch.setattr(adapter, "orig_paged_release_page_ids", native_release)
+    try:
+        adapter._gms_paged_release_page_ids(allocator, torch.tensor([4]))
+        assert allocator.free_pages.tolist() == [2, 3, 4, 5]
+        assert state["tp_reservation_aligned"] is True
+    finally:
+        _cleanup(allocator)
+
+
 def test_release_does_not_remove_a_successor_generation():
     leases = {1: KVLease(1, 7)}
 

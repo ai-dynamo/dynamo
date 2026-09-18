@@ -35,11 +35,26 @@ def test_publish_worker_survives_a_failing_mutation():
             return len(items)
 
         directory.publish = flaky_publish  # type: ignore[method-assign]
-        directory._defer_mutation("publish", [{"a": 1}])
-        directory._defer_mutation("publish", [{"b": 2}])
-
+        # Queue both writes atomically so this test covers a failed combined
+        # batch instead of depending on whether the worker wins a scheduling
+        # race after the first enqueue.
+        with directory._mutation_condition:
+            directory._mutation_sequence = 2
+            directory._mutations.extend(
+                [
+                    (1, "publish", [{"a": 1}]),
+                    (2, "publish", [{"b": 2}]),
+                ]
+            )
+            directory._start_mutation_worker_locked()
+            directory._mutation_condition.notify()
         assert directory.flush_deferred(timeout=5.0) is True
-        assert len(calls) == 2, "worker died instead of continuing past the failure"
+
+        # A failed batch is a safe miss for every item in it. The worker must
+        # remain available for the next independent mutation.
+        directory._defer_mutation("publish", [{"c": 3}])
+        assert directory.flush_deferred(timeout=5.0) is True
+        assert calls == [[{"a": 1}, {"b": 2}], [{"c": 3}]]
         assert directory._mutation_failed == 1
         assert (
             directory._mutation_error is None
@@ -50,6 +65,31 @@ def test_publish_worker_survives_a_failing_mutation():
         )
     finally:
         directory.close()
+
+
+def test_publish_worker_batches_adjacent_mutations_in_order():
+    directory = ContentDirectory(
+        "/tmp/gms-directory-writer-batching.sock",
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    calls = []
+    directory.publish = lambda items: calls.append(items) or len(items)  # type: ignore[method-assign]
+    with directory._mutation_condition:
+        directory._mutation_sequence = 2
+        directory._mutations.extend(
+            [
+                (1, "publish", [{"a": 1}]),
+                (2, "publish", [{"b": 2}]),
+            ]
+        )
+        directory._mutation_stop = True
+
+    directory._mutation_loop()
+
+    assert calls == [[{"a": 1}, {"b": 2}]]
+    assert directory._mutation_committed == 2
 
 
 def test_zero_capacity_request_preserves_ready_hbm_entry():
@@ -174,6 +214,38 @@ def test_active_hbm_is_claimable_only_during_adoption(
     assert (response["entries"][0] is not None) is expected_hit
     assert (response["claim_token"] is not None) is expected_hit
     assert entry["_claim_count"] == int(expected_hit)
+
+
+def test_hbm_candidate_probe_is_conservative_until_view_is_ready():
+    content_hash = b"h" * 32
+    directory = ContentDirectory(
+        "/tmp/gms-directory-candidate-probe.sock",
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+
+    assert directory.may_have_hbm_candidate([content_hash]) is True
+    directory._view_ready.set()
+    assert directory.may_have_hbm_candidate([content_hash]) is True
+    directory._view_caught_up = True
+    assert directory.may_have_hbm_candidate([content_hash]) is False
+
+
+@pytest.mark.parametrize("state", ["ready", "active"])
+def test_hbm_candidate_probe_includes_claimable_states(state):
+    content_hash = b"h" * 32
+    directory = ContentDirectory(
+        "/tmp/gms-directory-candidate-state.sock",
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    directory._view = {content_hash: {"tier": "hbm", "state": state}}
+    directory._view_caught_up = True
+    directory._view_ready.set()
+
+    assert directory.may_have_hbm_candidate([content_hash]) is True
 
 
 def test_async_view_does_not_hide_tp_adoption_pending_hbm(monkeypatch):
