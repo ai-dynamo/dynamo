@@ -256,12 +256,15 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
 
-# Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
-# vendored ffmpeg build to drop the software h264/hevc/aac decoders
-# (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1; the base
-# image here carries 2.1.0, which predates it.
+# Hold DALI at a version that carries its own media-codec cleanup. Upstream
+# restricted DALI's vendored ffmpeg build to drop the software h264/hevc/aac
+# decoders (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1.
+# The base image carried 2.1.0 through 1.3.0rc26, which predates it, and carries
+# 2.2.0 from 1.3.0rc27, which does not. So on this base the install below is a
+# no-op and what the block still buys is the two checks around it: the version
+# tripwire and the decoder enumeration.
 #
-# Upgrade rather than remove. The vendored libav*/libsw* set cannot be trimmed
+# Pin rather than remove. The vendored libav*/libsw* set cannot be trimmed
 # on its own -- every one of them is DT_NEEDED by libdali.so and its siblings, so
 # deleting the codec libraries breaks `import nvidia.dali` outright -- and while
 # nothing in this image imports DALI today, it belongs to TensorRT-LLM rather
@@ -270,21 +273,25 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 #
 # Measured on the shipped image: 2.1.0 registers 446 decoders including h264,
 # hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
-# five absent and vp8/vp9/mjpeg/av1 retained.
+# five absent and vp8/vp9/mjpeg/av1 retained. 2.2.0 measured again on
+# tensorrt-llm/release:1.3.0rc27 itself, now that DALI arrives with the base.
 #
-# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest -- 2.2.0
-# at the time of writing -- which is a minor-version jump into a component this
-# repo does not own, taken silently at build time. 2.1.1 is the smallest change
-# that removes the decoders, so it is the one to take.
+# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest, which is
+# a jump into a component this repo does not own, taken silently at build time.
+# The pin names the version that was measured, so moving it means measuring the
+# new one.
 #
-# A pin can go stale in the one direction that matters: if TensorRT-LLM later
-# ships a base image with a newer DALI, installing 2.1.1 over it is a downgrade.
+# The pin can go stale in the one direction that matters: if TensorRT-LLM later
+# ships a base image with a newer DALI, installing 2.2.0 over it is a downgrade.
 # The check below turns that into a build failure with instructions rather than a
-# silent regression, which also makes this block self-retiring -- when upstream
-# catches up, the build tells whoever is looking to delete it.
+# silent regression. The pin now equals the base version, so the next base image
+# that moves DALI past 2.2.0 stops the build, which is the point: a human
+# re-measures and moves the pin, or deletes this RUN and lets the base version
+# stand. A base that moves DALI back below 2.2.0 passes that check and the
+# install below puts the measured version back, which is what it is there for.
 #
-# THIS BLOCK IS TRANSITIONAL. It exists because the base image predates upstream's
-# own cleanup. The guards after it and the bundled-libavcodec assertion in
+# THIS BLOCK IS TRANSITIONAL, and on this base it is already down to its checks.
+# The guards after it and the bundled-libavcodec assertion in
 # tests/dependencies/test_no_software_video_codecs.py are NOT transitional: they
 # are the permanent statement of what this image may contain, and they must
 # outlive the workaround.
@@ -293,10 +300,15 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # VIRTUAL_ENV set, plain pip targets the venv and leaves the system-site copy in
 # place. The guard enumerates what the library actually registers rather than
 # trusting the version string, so a wheel that reintroduces a decoder fails the
-# build. Mirrored by the pre_runtime whiteout below, which matters more here than
-# for a deletion: DALI's libraries are hash-named, so an upgrade RENAMES them and
-# the squash COPY would otherwise leave the old codec-carrying copy in place
-# beside the new one.
+# build. It finds that library by filename, and a loop over an empty glob checks
+# nothing and exits 0, so it fails on an empty match as well: a release that
+# links the codec into a differently named library has to be looked at, not
+# waved through.
+#
+# Mirrored by the pre_runtime whiteout below, which is inert while the install is
+# a no-op and load-bearing again the moment it is not: DALI's libraries are
+# hash-named, so an upgrade RENAMES them and the squash COPY would otherwise
+# leave the old codec-carrying copy in place beside the new one.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
@@ -315,7 +327,16 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
     [ "$v" = "2.2.0" ] || { echo "ERROR: wanted DALI 2.2.0, got $v" >&2; exit 1; }; \
-    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); do \
+    libs=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); \
+    if [ -z "$libs" ]; then \
+        echo "ERROR: DALI $v ships no libavcodec under .libs, so the enumeration" >&2; \
+        echo "       below would check nothing and pass. Either the vendored ffmpeg" >&2; \
+        echo "       moved, or the codec is now linked into another library, the way" >&2; \
+        echo "       PyNvVideoCodec 2.2.0 links it into libavformat. Look before this" >&2; \
+        echo "       ships: widen the glob to the library that carries it." >&2; \
+        exit 1; \
+    fi; \
+    for lib in $libs; do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
@@ -644,10 +665,20 @@ COPY --from=runtime_full / /
 # back; with it, one copy and clean.
 #
 # Every match is checked, not just the first: the whole point is catching the
-# case where more than one exists.
+# case where more than one exists. Zero matches is a failure too, for the reason
+# the DALI block above gives: a loop over an empty glob checks nothing and exits
+# 0, so an empty match here means DALI's vendored library moved or changed name,
+# and a human has to say whether the new shape is clean.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
-    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
+    libs=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); \
+    if [ -z "$libs" ]; then \
+        echo "ERROR: post-overlay DALI carries no libavcodec under .libs, so this" >&2; \
+        echo "       guard checked nothing. Match what the runtime_full block says" >&2; \
+        echo "       about the same glob before changing either one." >&2; \
+        exit 1; \
+    fi; \
+    for lib in $libs; do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
     if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' 2>/dev/null | grep -q .; then \
