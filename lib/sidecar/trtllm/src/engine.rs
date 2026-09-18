@@ -147,6 +147,10 @@ impl LLMEngine for TrtllmSidecarEngine {
             connections = self.transport.connections.get(),
             "connecting to TensorRT-LLM gRPC"
         );
+        // One deadline for the whole startup path. `GrpcChannelPool::connect`
+        // derives its own from the same duration, so taking this before
+        // connecting is what stops the two stages spending a full budget each.
+        let deadline = startup_deadline(self.transport.startup_deadline)?;
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
@@ -160,6 +164,12 @@ impl LLMEngine for TrtllmSidecarEngine {
             // value and to learn its output cap. It may not answer at all --
             // an older server has no Control service -- and that must not stop
             // a worker whose window the operator already supplied.
+            //
+            // Neither branch waits for the engine to be *ready*, only to answer.
+            // Readiness belongs to the engine's health service, which is what
+            // the Kubernetes probes use and what DEP #14897 standardises on
+            // (`grpc.health.v1` Check/Watch, with registration driven by
+            // `Watch`). Do not grow a second readiness protocol here.
             Some(configured) => {
                 let reported = match client.model_limits(&model.source).await {
                     Ok(reported) => reported,
@@ -187,30 +197,25 @@ impl LLMEngine for TrtllmSidecarEngine {
                     ..reported
                 }
             }
-            // Nothing configured: the engine is the only source, and it binds
-            // its port before the model finishes loading, so wait for it.
+            // Nothing configured: the engine is the only source. It binds its
+            // gRPC port only after the model has loaded, but the sidecar and the
+            // engine start independently, so wait for it either way.
             None => {
-                match client
-                    .wait_for_model_limits(
-                        &model.source,
-                        startup_deadline(self.transport.startup_deadline)?,
-                        self.transport.retry_interval,
-                    )
+                // Failing here beats registering a worker that advertises
+                // capacity and then rejects, with a non-migratable 4xx, every
+                // request that omits `max_tokens` -- which is most chat
+                // traffic. The operator gets one startup error naming the fix
+                // instead of a worker that looks healthy and serves half.
+                client
+                    .wait_for_model_limits(&model.source, deadline, self.transport.retry_interval)
                     .await
-                {
-                    Ok(limits) => limits,
-                    // Registering without a window is still useful: requests
-                    // that carry their own `max_tokens` are served, and only
-                    // the ones that omit it are rejected.
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "no context length is available; requests that omit max_tokens \
-                             will be rejected. Supply --context-length."
-                        );
-                        ModelLimits::default()
-                    }
-                }
+                    .map_err(|error| {
+                        client::invalid_argument(format!(
+                            "no context length is available: {error}. TensorRT-LLM reports one \
+                             only when it was started with --max_seq_len; otherwise supply \
+                             --context-length."
+                        ))
+                    })?
             }
         };
         model.context_length = limits.context_length;
