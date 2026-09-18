@@ -695,11 +695,9 @@ mod tests {
     }
 
     /// The owned executor must still poll work queued after the last handle is dropped, while the shutdown phases run.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owned_executor_outlives_the_drop_while_phases_are_in_flight() {
+    async fn assert_owned_executor_outlives_drop(runtime: Runtime) {
         const PROBE: &str = "polled by the owned executor";
 
-        let runtime = Runtime::single_threaded().unwrap();
         let tracker = runtime.graceful_shutdown_tracker();
 
         // Held across the drop and the probe below, so phase 2 has something to wait for.
@@ -743,5 +741,21 @@ mod tests {
             .await
             .expect("shutdown coordinator never reached phase 3");
         assert!(main_token.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_executor_outlives_the_drop_while_phases_are_in_flight() {
+        assert_owned_executor_outlives_drop(Runtime::single_threaded().unwrap()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn from_settings_executor_outlives_the_drop_while_phases_are_in_flight() {
+        temp_env::async_with_vars(
+            [(env_runtime::DYN_RUNTIME_NUM_WORKER_THREADS, Some("1"))],
+            async {
+                assert_owned_executor_outlives_drop(Runtime::from_settings().unwrap()).await;
+            },
+        )
+        .await;
     }
 }
