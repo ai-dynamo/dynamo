@@ -73,19 +73,6 @@ def test_setup_gms_declares_memory_saver(monkeypatch, fake_gms_model_loader):
     assert gms_sglang.is_gms_active()
 
 
-def test_setup_gms_uses_override_when_declaration_is_unavailable(
-    monkeypatch,
-    fake_gms_model_loader,
-):
-    override = Mock()
-    server_args = SimpleNamespace(override=override)
-    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
-
-    gms_sglang.setup_gms(server_args)
-
-    override.assert_called_once_with("dynamo.gms", enable_memory_saver=True)
-
-
 def test_setup_gms_assigns_memory_saver_for_legacy_args(
     monkeypatch,
     fake_gms_model_loader,

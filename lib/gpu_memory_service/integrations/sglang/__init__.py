@@ -9,9 +9,19 @@ import logging
 from typing import TYPE_CHECKING, Type
 
 try:
+    # Prefer the guarded launcher API on SGLang 0.5.19; its declare_resolution
+    # does not yet reject updates after publication. Remove when the minimum
+    # supported SGLang version is 0.5.20+.
     from sglang.srt.arg_groups.overrides import declare_late_resolution
 except ImportError:
-    declare_late_resolution = None
+    try:
+        from sglang.srt.arg_groups.overrides import (
+            declare_resolution as declare_late_resolution,
+        )
+    except ImportError:
+        # The separately pinned XPU SGLang 0.5.11 predates declarations.
+        # Remove when that pin is upgraded to 0.5.19+.
+        declare_late_resolution = None
 
 if TYPE_CHECKING:
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
@@ -58,15 +68,9 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     if declare_late_resolution is not None:
         declare_late_resolution(server_args, "dynamo.gms", enable_memory_saver=True)
     else:
-        # Fallback for SGLang 0.5.17. Remove when the minimum supported version
-        # is 0.5.18+.
-        override = getattr(server_args, "override", None)
-        if callable(override):
-            override("dynamo.gms", enable_memory_saver=True)
-        else:
-            # The separately pinned XPU image still uses SGLang 0.5.11, which
-            # predates ServerArgs.override. Remove after that pin reaches 0.5.16+.
-            server_args.enable_memory_saver = True
+        # The separately pinned XPU image still uses SGLang 0.5.11, which
+        # predates declarations. Remove when that pin is upgraded to 0.5.19+.
+        server_args.enable_memory_saver = True
 
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.

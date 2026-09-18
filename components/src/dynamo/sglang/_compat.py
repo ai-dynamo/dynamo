@@ -100,11 +100,19 @@ def publish_server_args(server_args: Any, *, role: str) -> None:
 
 
 try:
+    # Prefer the guarded launcher API on SGLang 0.5.19; its declare_resolution
+    # does not yet reject updates after publication. Remove when the minimum
+    # supported SGLang version is 0.5.20+.
     from sglang.srt.arg_groups.overrides import declare_late_resolution
 except ImportError:
-    # The separately pinned XPU SGLang 0.5.11 predates declarations. Remove
-    # when the XPU SGLang pin is upgraded to 0.5.18+.
-    declare_late_resolution = None
+    try:
+        from sglang.srt.arg_groups.overrides import (
+            declare_resolution as declare_late_resolution,
+        )
+    except ImportError:
+        # The separately pinned XPU SGLang 0.5.11 predates declarations.
+        # Remove when that pin is upgraded to 0.5.19+.
+        declare_late_resolution = None
 
 try:
     from sglang.srt.arg_groups.model_override_base import (
