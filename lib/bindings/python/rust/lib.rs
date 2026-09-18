@@ -430,6 +430,15 @@ pub(crate) fn router_plugins(config: &KvRouterConfig) -> anyhow::Result<RouterPl
     }
 }
 
+#[cfg(all(test, feature = "custom-policy"))]
+#[test]
+fn builtin_default_does_not_require_custom_frontend() {
+    let config = KvRouterConfig::default();
+    let registry = dynamo_llm::kv_router::plugins::router_plugin_registry();
+    assert!(registry.resolve(&config).unwrap().is_some());
+    assert!(router_plugins(&config).unwrap().is_empty());
+}
+
 #[cfg(feature = "select-service")]
 pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry {
     #[cfg(feature = "custom-policy")]

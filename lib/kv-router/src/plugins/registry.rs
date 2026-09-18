@@ -116,7 +116,13 @@ impl RouterPluginRegistry {
         config: &KvRouterConfig,
     ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
         Ok(super::RouterPlugins {
-            worker_selection: self.resolve(config)?,
+            // The builtin default does not opt a frontend into custom-plugin restrictions.
+            // Embedded routers still obtain it from the registry when constructing a pool.
+            worker_selection: if config.selected_worker_selection_policy_instance()?.is_some() {
+                self.resolve(config)?
+            } else {
+                None
+            },
             request_classifier: self.resolve_request_classifier(config)?,
         })
     }
