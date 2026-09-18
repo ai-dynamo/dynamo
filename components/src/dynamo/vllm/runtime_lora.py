@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from vllm.lora.request import LoRARequest
@@ -352,9 +353,7 @@ class RuntimeLoRACoordinator:
             )
             state.runtime_load_tasks[metadata.adapter_key] = task
             state.runtime_load_digests[metadata.adapter_key] = metadata.identity_digest
-            task.add_done_callback(
-                lambda done, key=metadata.adapter_key: self._cleanup_task(key, done)
-            )
+            task.add_done_callback(partial(self._cleanup_task, metadata.adapter_key))
         elif (
             state.runtime_load_digests.get(metadata.adapter_key)
             != metadata.identity_digest

@@ -50,8 +50,13 @@ _SAFETENSORS_DTYPE_BYTES = {
 
 
 class RuntimeLoRACacheSettings(Protocol):
-    max_download_bytes: int
-    max_cache_bytes: int
+    @property
+    def max_download_bytes(self) -> int:
+        ...
+
+    @property
+    def max_cache_bytes(self) -> int:
+        ...
 
 
 def _runtime_error(status: int, code: str) -> HttpError:
