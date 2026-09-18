@@ -670,8 +670,17 @@ async def test_shared_cache_does_not_write_invalid_origin_bytes(monkeypatch) -> 
     client.set.assert_not_awaited()
 
 
-async def test_shared_cache_origin_fetch_uses_media_size_limit(monkeypatch) -> None:
-    """A cache fill must cap the response before buffering or storing it."""
+@pytest.mark.parametrize(
+    ("session_scoped_cache", "cache_scope"),
+    [(False, None), (True, "session-a"), (True, None)],
+    ids=["unscoped", "scoped", "missing-scope-cache-bypass"],
+)
+async def test_shared_cache_enabled_origin_fetch_uses_media_size_limit(
+    monkeypatch,
+    session_scoped_cache: bool,
+    cache_scope: str | None,
+) -> None:
+    """Shared-cache configuration must cap even cache-bypassed downloads."""
     _enable_shared_image_cache(monkeypatch)
     monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "7")
     client = AsyncMock()
@@ -682,8 +691,14 @@ async def test_shared_cache_origin_fetch_uses_media_size_limit(monkeypatch) -> N
         patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
         patch(_FETCH_BYTES_PATH, origin_fetch),
     ):
-        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
-        await shared_loader.load_image("https://example.com/img.png")
+        shared_loader = ImageLoader(
+            cache_size=4,
+            url_policy=_permissive_policy(),
+            session_scoped_cache=session_scoped_cache,
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope=cache_scope
+        )
 
     assert origin_fetch.await_args.kwargs["max_bytes"] == 7 * 1024 * 1024
 
