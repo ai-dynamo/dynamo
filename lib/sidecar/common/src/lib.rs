@@ -24,4 +24,4 @@ pub use error::{
     SidecarStartupError, cannot_connect, connection_timeout, engine_shutdown, invalid_argument,
     protocol_error, status_to_dynamo,
 };
-pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool};
+pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain};
