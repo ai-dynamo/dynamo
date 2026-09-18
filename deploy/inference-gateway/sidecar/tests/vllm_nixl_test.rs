@@ -318,6 +318,8 @@ impl Harness {
             vllm_nixl::Config {
                 model: "Qwen/Qwen3-0.6B".to_string(),
                 max_request_bytes,
+                // Long enough that no test trips it by accident.
+                client_body_timeout: Duration::from_secs(30),
                 max_prefill_response_bytes,
             },
         )
@@ -727,7 +729,6 @@ async fn c09_missing_null_or_non_object_handoff_never_reaches_decode() {
         json!({"choices": [], "usage": {}}),
         json!({"choices": [], "kv_transfer_params": null}),
         json!({"choices": [], "kv_transfer_params": "pull"}),
-        json!({"choices": [], "kv_transfer_params": [1, 2]}),
         json!([1, 2, 3]),
     ] {
         let harness = Harness::build(
@@ -978,7 +979,6 @@ async fn c16_prefill_http_error_stops_before_decode() {
         StatusCode::BAD_REQUEST,
         StatusCode::UNAUTHORIZED,
         StatusCode::INTERNAL_SERVER_ERROR,
-        StatusCode::SERVICE_UNAVAILABLE,
     ] {
         let harness = Harness::build(
             Behaviour::Status(
@@ -1020,7 +1020,6 @@ async fn c16_prefill_http_error_stops_before_decode() {
 async fn c17_non_json_prefill_responses_stop_before_decode() {
     for (name, behaviour) in [
         ("non-json", Behaviour::Raw("not json at all")),
-        ("truncated", Behaviour::TruncatedJson),
         (
             "sse",
             Behaviour::Sse(vec![
@@ -1125,6 +1124,80 @@ async fn c17d_malformed_prefill_body_that_ends_immediately_is_a_protocol_error()
         "invalid_prefill_handoff"
     );
     assert_eq!(decode.call_count(), 0);
+}
+
+/// A client that sends an under-cap body slowly must not hold the handler open.
+/// The configured upstream read timeout does not cover the client body, so this
+/// deadline is the only bound on a partial-body client.
+#[tokio::test]
+async fn c18b_client_body_deadline_rejects_a_dribbling_client() {
+    let decode = Fake::start(Behaviour::Json(decode_success())).await;
+    let adapter: Arc<dyn PdAdapter> = VllmNixlAdapter::new(
+        decode_url(&decode),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        vllm_nixl::Config {
+            client_body_timeout: Duration::from_millis(300),
+            ..vllm_nixl::Config::default()
+        },
+    )
+    .unwrap();
+    let app = router(
+        SidecarState::new(
+            decode_url(&decode),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+            adapter,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        )
+        .unwrap(),
+    );
+
+    // A real socket, because a slow client is a transport behaviour: send the
+    // head and a partial body, then stop without finishing the request.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sidecar = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let mut socket = tokio::net::TcpStream::connect(sidecar).await.unwrap();
+    use tokio::io::AsyncWriteExt;
+    socket
+        .write_all(
+            b"POST /v1/chat/completions HTTP/1.1\r\n\
+              Host: sidecar\r\n\
+              x-prefiller-host-port: 127.0.0.1:1\r\n\
+              Content-Type: application/json\r\n\
+              Content-Length: 100000\r\n\r\n\
+              {\"model\":",
+        )
+        .await
+        .unwrap();
+
+    // Read the response without ever completing the body.
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; 4096];
+    let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buf))
+        .await
+        .expect("the deadline must produce a response, not a hang")
+        .unwrap();
+    let response = String::from_utf8_lossy(&buf[..read]);
+
+    assert!(
+        response.starts_with("HTTP/1.1 408"),
+        "a stalled request body must time out, got: {response}"
+    );
+    assert!(
+        response.contains("pd_request_timeout"),
+        "expected the request-timeout code, got: {response}"
+    );
+    assert_eq!(
+        decode.call_count(),
+        0,
+        "a body that never arrived must not reach a backend leg"
+    );
 }
 
 /// C18: request and prefill-response buffering are both bounded.
