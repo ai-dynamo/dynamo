@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EXPERIMENTAL: engine-primary vLLM with the Dynamo native sidecar (DEP #14657).
-# Requires an operator with v1beta1 dynamoSidecar support. Build the Dynamo image
-# from lib/sidecar/Dockerfile and replace <your-registry> before applying.
-#
-# main owns the GPU and engine. The operator injects Dynamo configuration into
-# initContainers[name=dynamo]. Native gRPC probes check aggregate engine health
-# (both vllm.Control and vllm.Inference) on port 50051 with an empty service name.
-# The engine listens on 0.0.0.0 for kubelet probes to the pod IP; the sidecar uses
-# loopback. Keep the unauthenticated engine endpoint on a trusted pod network.
-#
-# Requires the early HTTP/probe behavior from https://github.com/ai-dynamo/dynamo/pull/15051.
-# The operator injects startup/liveness on /live and readiness on /health.
-# Sidecar probes are independent of engine loading; engine gRPC probes gate pod
-# readiness. Raise only the engine startup budget for larger models.
-# Engine restart recovery remains deferred to DEP #14897.
-#
-# NIXL/RDMA resources, capabilities, and UCX settings must match your cluster.
-# VLLM_NIXL_SIDE_CHANNEL_HOST advertises the pod IP for engine-to-engine KV transfer.
-# The default router exercises prefill/decode handoff; KV routing is separate.
+# EXPERIMENTAL: engine-primary vLLM with the Dynamo native sidecar
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -56,9 +38,6 @@ spec:
           - 127.0.0.1:50051
           - --disaggregation-mode
           - prefill
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
           restartPolicy: Always
         containers:
         - name: main
@@ -74,7 +53,8 @@ spec:
               port: 50051
             periodSeconds: 5
             timeoutSeconds: 5
-            failureThreshold: 60
+            # Allow 30 minutes for model startup; increase for larger models.
+            failureThreshold: 360
           readinessProbe:
             grpc:
               port: 50051
@@ -96,9 +76,6 @@ spec:
             value: get_zcopy
           - name: UCX_RNDV_THRESH
             value: '0'
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
           resources:
             limits:
               nvidia.com/gpu: '1'
@@ -140,9 +117,6 @@ spec:
           - 127.0.0.1:50051
           - --disaggregation-mode
           - decode
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
           restartPolicy: Always
         containers:
         - name: main
@@ -158,7 +132,8 @@ spec:
               port: 50051
             periodSeconds: 5
             timeoutSeconds: 5
-            failureThreshold: 60
+            # Allow 30 minutes for model startup; increase for larger models.
+            failureThreshold: 360
           readinessProbe:
             grpc:
               port: 50051
@@ -180,9 +155,6 @@ spec:
             value: get_zcopy
           - name: UCX_RNDV_THRESH
             value: '0'
-          envFrom:
-          - secretRef:
-              name: hf-token-secret
           resources:
             limits:
               nvidia.com/gpu: '1'
