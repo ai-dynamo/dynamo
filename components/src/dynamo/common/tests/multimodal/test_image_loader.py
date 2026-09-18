@@ -87,7 +87,7 @@ def _mock_fetch_bytes(
         side_effect: If set, the mock raises this exception instead of returning.
     """
 
-    async def _fetch(url, timeout, *, policy=None):
+    async def _fetch(url, timeout, *, policy=None, max_bytes=None):
         if delay > 0:
             await asyncio.sleep(delay)
         if side_effect is not None:
@@ -536,6 +536,44 @@ async def test_shared_cache_miss_writes_validated_origin_bytes(monkeypatch) -> N
     _, stored_content = client.set.await_args.args
     assert stored_content == PNG_BYTES
     assert client.set.await_args.kwargs == {"ex": 123}
+
+
+async def test_shared_cache_does_not_write_invalid_origin_bytes(monkeypatch) -> None:
+    """Origin bytes must decode successfully before they enter the shared cache."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes(content=b"not an image")
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        with pytest.raises(HttpStatusError) as exc_info:
+            await shared_loader.load_image("https://example.com/img.png")
+
+    assert exc_info.value.status == 415
+    origin_fetch.assert_awaited_once()
+    client.set.assert_not_awaited()
+
+
+async def test_shared_cache_origin_fetch_uses_media_size_limit(monkeypatch) -> None:
+    """A cache fill must cap the response before buffering or storing it."""
+    _enable_shared_image_cache(monkeypatch)
+    monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "7")
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        await shared_loader.load_image("https://example.com/img.png")
+
+    assert origin_fetch.await_args.kwargs["max_bytes"] == 7 * 1024 * 1024
 
 
 @pytest.mark.parametrize(

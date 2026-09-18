@@ -25,6 +25,7 @@ from ..http import (
     HttpTimeoutError,
     fetch_bytes,
 )
+from ..http.media_reference import max_media_bytes
 from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -239,7 +240,16 @@ class ImageLoader:
 
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 content = await fetch_bytes(
-                    image_url, self._http_timeout, policy=self._url_policy
+                    image_url,
+                    self._http_timeout,
+                    policy=self._url_policy,
+                    # Keep payloads bound before they can occupy the shared
+                    # store. Preserve the legacy unbounded local-only path.
+                    max_bytes=(
+                        max_media_bytes()
+                        if self._shared_image_cache is not None and key is not None
+                        else None
+                    ),
                 )
                 if not content:
                     raise ValueError("Empty response content from image URL")

@@ -79,6 +79,7 @@ Set the following environment variables on every participating worker:
 | `DYN_MM_SHARED_IMAGE_CACHE_TTL_SECS` | `3600` | Positive cache-entry lifetime in seconds. |
 | `DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS` | `0.1` | Positive connection timeout in seconds. |
 | `DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS` | `2.0` | Positive Redis operation timeout in seconds. |
+| `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum encoded image size downloaded and written to the shared cache, in MiB. |
 | `DYN_MM_IMAGE_CACHE_SESSION_SCOPED` | `0` | Set to `1` to partition Dynamo image and image-embedding caches by session affinity. |
 
 Store the full connection URL in a Kubernetes Secret and inject it into each
@@ -113,7 +114,7 @@ use a bounded asynchronous write queue.
 ### Session Scoping
 
 Enable `DYN_MM_IMAGE_CACHE_SESSION_SCOPED=1` when the same URL can resolve to
-different content for different authenticated sessions. Dynamo derives the
+different content for different sessions. Dynamo derives the
 scope from these headers, in precedence order:
 
 1. `x-dynamo-session-id`
@@ -125,6 +126,14 @@ Use `x-dynamo-session-id` to provide an explicit Dynamo session identity.
 Dynamo normalizes it and the recognized agent headers into both an
 `AgentContext` and the session affinity used for routing and image-cache
 scoping.
+
+> [!WARNING]
+> Session scoping partitions cache entries; it is not an authentication
+> boundary. Unless a trusted proxy sets or overwrites `x-dynamo-session-id`,
+> the caller controls the scope. Configure the proxy to derive this header
+> from the authenticated identity on every request, and treat scope identifiers
+> as secrets. A caller that learns another identifier can reuse cached content
+> stored under that scope for the same URL.
 
 When session scoping is enabled, a missing or blank scope bypasses the local
 decoded-image cache, in-flight request deduplication, the shared encoded-image
