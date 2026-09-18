@@ -20,6 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use serde::Serialize;
@@ -36,6 +37,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use crate::protocols::common::preprocessed_mm_identifier;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::generate::{
@@ -300,8 +302,9 @@ fn intersecting_mm_ranges<'a>(
 
 /// Build the routing-only token sequence used by vLLM KV events for multimodal
 /// prompts. The caller-provided `features` object remains opaque to execution;
-/// this projection reads only the hashes and placeholder ranges required to
-/// make request-side KV hashes match worker-side event hashes.
+/// this projection derives content-bound identities from the inline kwargs and
+/// combines them with placeholder ranges so request-side KV hashes match
+/// worker-side event hashes.
 fn generate_mm_routing_info(
     request: &GenerateRequest,
     kv_cache_block_size: u32,
@@ -326,10 +329,15 @@ fn generate_mm_routing_info(
         .get("mm_placeholders")
         .and_then(serde_json::Value::as_object)
         .ok_or("features.mm_placeholders must be a JSON object")?;
+    let kwargs_data = features
+        .get("kwargs_data")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.kwargs_data must be a JSON object")?;
 
     if mm_hashes
         .keys()
         .chain(mm_placeholders.keys())
+        .chain(kwargs_data.keys())
         .any(|modality| modality != "image")
     {
         return Err("exact /generate MM routing currently supports image placeholders only");
@@ -338,28 +346,48 @@ fn generate_mm_routing_info(
         return Err("KV cache block size must be non-zero");
     }
 
-    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
-        (None, None) => return Ok(None),
-        (Some(hashes), Some(placeholders)) => (
+    let (hashes, placeholders, kwargs) = match (
+        mm_hashes.get("image"),
+        mm_placeholders.get("image"),
+        kwargs_data.get("image"),
+    ) {
+        (None, None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders), Some(kwargs)) => (
             hashes
                 .as_array()
                 .ok_or("features.mm_hashes.image must be an array")?,
             placeholders
                 .as_array()
                 .ok_or("features.mm_placeholders.image must be an array")?,
+            kwargs
+                .as_array()
+                .ok_or("features.kwargs_data.image must be an array")?,
         ),
-        _ => return Err("image hashes and placeholders must both be present"),
+        _ => return Err("image hashes, placeholders, and kwargs_data must all be present"),
     };
-    if hashes.len() != placeholders.len() {
-        return Err("image hashes and placeholders must have equal lengths");
+    if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+        return Err("image hashes, placeholders, and kwargs_data must have equal lengths");
     }
 
     let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
-    for (hash, placeholder) in hashes.iter().zip(placeholders) {
-        let hash = hash
+    for ((producer_hash, placeholder), encoded_kwargs) in
+        hashes.iter().zip(placeholders).zip(kwargs)
+    {
+        producer_hash
             .as_str()
-            .and_then(dynamo_kv_router::protocols::hash_mm_identifier)
+            .filter(|hash| !hash.is_empty())
             .ok_or("multimodal hashes must be non-empty strings")?;
+        let raw_kwargs = BASE64_STANDARD
+            .decode(
+                encoded_kwargs
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or("multimodal kwargs_data must contain non-empty base64 strings")?,
+            )
+            .map_err(|_| "multimodal kwargs_data must contain valid base64")?;
+        let identifier = preprocessed_mm_identifier("image", &raw_kwargs);
+        let hash = dynamo_kv_router::protocols::hash_mm_identifier(&identifier)
+            .ok_or("content-derived multimodal identifier must not be empty")?;
         let placeholder = placeholder
             .as_object()
             .ok_or("multimodal placeholders must be JSON objects")?;
@@ -1869,7 +1897,7 @@ pub(crate) mod tests {
                     {"offset": 2, "length": 3},
                     {"offset": 7, "length": 2}
                 ]},
-                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+                "kwargs_data": {"image": ["b3BhcXVlLWE=", "b3BhcXVlLWI="]}
             }
         });
         let request: GenerateRequest =
@@ -1884,8 +1912,18 @@ pub(crate) mod tests {
         )
         .expect("build request");
 
-        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
-        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let hash_a = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image",
+            b"opaque-a",
+        ))
+        .expect("content-derived hash");
+        let hash_b = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image",
+            b"opaque-b",
+        ))
+        .expect("content-derived hash");
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_a);
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_b);
         let mm = preprocessed
             .mm_routing_info
             .as_ref()
@@ -1913,8 +1951,8 @@ pub(crate) mod tests {
                 .as_ref()
                 .and_then(|extra| extra.get("dynamo_mm_routing_hashes")),
             Some(&serde_json::json!([
-                format!("{}{}", "a".repeat(16), "0".repeat(48)),
-                format!("{}{}", "b".repeat(16), "0".repeat(48))
+                crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
+                crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
             ]))
         );
 
@@ -1926,7 +1964,8 @@ pub(crate) mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": [mm_identifier.clone()]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["cm91dGluZy1h"]}
             }
         }))
         .expect("deserialize request");
@@ -2005,15 +2044,18 @@ pub(crate) mod tests {
                     "offset": 1,
                     "length": 3,
                     "is_embed": [true, false, true]
-                }]}
+                }]},
+                "kwargs_data": {"image": ["c3BhcnNl"]}
             }
         }))
         .expect("deserialize request");
         let routing = generate_mm_routing_info(&request, 5)
             .expect("valid sparse MM routing metadata")
             .expect("MM routing projection");
-        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
-            .expect("non-empty identifier");
+        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image", b"sparse",
+        ))
+        .expect("content-derived identifier");
         let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
         assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
 
@@ -2023,7 +2065,8 @@ pub(crate) mod tests {
                 serde_json::json!([10, 99, 42, 99, 20]),
                 serde_json::json!({
                     "mm_hashes": {"image": ["image-0"]},
-                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+                    "kwargs_data": {"image": ["c3BhcnNl"]}
                 }),
                 "mixed multimodal placeholder spans require is_embed",
             ),
@@ -2032,7 +2075,8 @@ pub(crate) mod tests {
                 serde_json::json!([99, 10, 99, 99, 20]),
                 serde_json::json!({
                     "mm_hashes": {"image": ["image-0"]},
-                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]}
+                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]},
+                    "kwargs_data": {"image": ["c3BhcnNl"]}
                 }),
                 "image tokens must be covered by multimodal placeholder ranges",
             ),
@@ -2044,7 +2088,8 @@ pub(crate) mod tests {
                     "mm_placeholders": {"image": [
                         {"offset": 1, "length": 3, "is_embed": [true, false, true]},
                         {"offset": 5, "length": 1}
-                    ]}
+                    ]},
+                    "kwargs_data": {"image": ["c3BhcnNlLWE=", "c3BhcnNlLWI="]}
                 }),
                 "sparse multimodal layout cannot be normalized exactly by worker events",
             ),
@@ -2179,7 +2224,8 @@ pub(crate) mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": ["image-0"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["YmFzZS1pbWFnZQ=="]}
             }
         });
         let base_request: GenerateRequest =
