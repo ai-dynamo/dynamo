@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Nebius H200 GPU Smoke
+
+on:
+  push:
+    branches:
+      - nebius_ci_smoke_test
+
+concurrency:
+  group: nebius-h200-gpu-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gpu-smoke:
+    name: One GPU on Nebius H200
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 20
+    env:
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-nebius-2
+      KUBE_NAMESPACE: dynamo-deploy-test
+      JOB_NAME: nebius-gpu-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      CUDA_IMAGE: nvidia/cuda:13.0.2-base-ubuntu24.04
+      PRIORITY_CLASS: ci-nightly-high-priority
+    steps:
+      - name: Select Nebius cluster
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -r /teleport/kubeconfig.yaml
+          KUBECONFIG_PATH="${RUNNER_TEMP}/kubeconfig-nebius.yaml"
+          cp /teleport/kubeconfig.yaml "${KUBECONFIG_PATH}"
+          chmod 600 "${KUBECONFIG_PATH}"
+
+          export KUBECONFIG="${KUBECONFIG_PATH}"
+          kubectl config use-context "${KUBE_CONTEXT}"
+          echo "KUBECONFIG=${KUBECONFIG}" >> "${GITHUB_ENV}"
+
+          kubectl get resourcequota deploy-test-gpu-quota \
+            --namespace "${KUBE_NAMESPACE}"
+
+      - name: Run one-GPU smoke job
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: ${JOB_NAME}
+            namespace: ${KUBE_NAMESPACE}
+          spec:
+            activeDeadlineSeconds: 900
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                priorityClassName: ${PRIORITY_CLASS}
+                restartPolicy: Never
+                containers:
+                  - name: gpu-smoke
+                    image: ${CUDA_IMAGE}
+                    command: ["/bin/bash", "-ceu"]
+                    args:
+                      - |
+                        nvidia-smi
+                        GPU_COUNT="\$(nvidia-smi --query-gpu=uuid --format=csv,noheader | wc -l | tr -d '[:space:]')"
+                        GPU_NAME="\$(nvidia-smi --query-gpu=name --format=csv,noheader)"
+                        test "\${GPU_COUNT}" = "1"
+                        grep -q "H200" <<< "\${GPU_NAME}"
+                        echo "Nebius one-GPU smoke passed: \${GPU_NAME}"
+                    resources:
+                      requests:
+                        nvidia.com/gpu: "1"
+                      limits:
+                        nvidia.com/gpu: "1"
+          EOF
+
+          POD_NAME=""
+          for _ in $(seq 1 60); do
+            POD_NAME="$(kubectl get pods \
+              --namespace "${KUBE_NAMESPACE}" \
+              -l "job-name=${JOB_NAME}" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+            if [ -n "${POD_NAME}" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "${POD_NAME}" ]; then
+            echo "::error::No pod was created for job ${JOB_NAME}"
+            kubectl describe job "${JOB_NAME}" --namespace "${KUBE_NAMESPACE}" || true
+            exit 1
+          fi
+
+          POD_JSON="$(kubectl get pod "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" -o json)"
+          jq -e '.spec.nodeSelector["nvidia.com/gpu.product"] == "NVIDIA-H200"' <<< "${POD_JSON}"
+          jq -e \
+            --arg priority_class "${PRIORITY_CLASS}" \
+            '.spec.priorityClassName == $priority_class' \
+            <<< "${POD_JSON}"
+          jq -e '
+            any(
+              .spec.tolerations[]?;
+              .key == "nvidia.com/gpu" and
+              .effect == "NoSchedule" and
+              (
+                .operator == "Exists" or
+                (.operator == "Equal" and .value == "true")
+              )
+            )
+          ' <<< "${POD_JSON}"
+          jq -e '
+            any(
+              .spec.containers[];
+              .name == "gpu-smoke" and
+              .resources.requests["nvidia.com/gpu"] == "1" and
+              .resources.limits["nvidia.com/gpu"] == "1"
+            )
+          ' <<< "${POD_JSON}"
+
+          if ! kubectl wait \
+            --namespace "${KUBE_NAMESPACE}" \
+            --for=condition=complete \
+            "job/${JOB_NAME}" \
+            --timeout=15m; then
+            kubectl get pod "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" -o wide || true
+            kubectl describe pod "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" || true
+            kubectl logs "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" --all-containers || true
+            exit 1
+          fi
+
+          kubectl logs "${POD_NAME}" --namespace "${KUBE_NAMESPACE}" --all-containers
+
+      - name: Cleanup smoke job
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${KUBECONFIG:-}" ] || [ ! -f "${KUBECONFIG}" ]; then
+            echo "Kubeconfig was not initialized; nothing to clean up"
+            exit 0
+          fi
+
+          kubectl delete job "${JOB_NAME}" \
+            --namespace "${KUBE_NAMESPACE}" \
+            --ignore-not-found=true \
+            --wait=true \
+            --timeout=2m
