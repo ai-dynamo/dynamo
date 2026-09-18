@@ -6,6 +6,7 @@
 mod args;
 mod endpoint;
 mod error;
+mod run;
 mod transport;
 
 #[cfg(feature = "tonic-v14")]
@@ -25,3 +26,5 @@ pub use error::{
     protocol_error, status_to_dynamo,
 };
 pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain};
+
+pub use run::run;

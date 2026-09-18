@@ -37,6 +37,7 @@ tonic-health-v14 = { workspace = true }
 vllm-proto = { workspace = true }
 
 [dev-dependencies]
+reqwest = { workspace = true }
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 tempfile = { workspace = true }
 tokio-stream = { workspace = true, features = ["net"] }

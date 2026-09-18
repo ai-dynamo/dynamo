@@ -13,10 +13,14 @@ description = "Shared gRPC transport and CLI infrastructure for Dynamo sidecars"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-runtime = { workspace = true }
+
+anyhow = { workspace = true }
 
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true, optional = true }
 tracing = { workspace = true }

@@ -73,6 +73,12 @@ impl TrtllmSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
+    /// Parse CLI arguments before starting the sidecar runtime.
+    pub fn from_cli() -> impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>
+    {
+        std::future::ready(Self::from_parsed(<Args as clap::Parser>::parse()))
+    }
+
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));

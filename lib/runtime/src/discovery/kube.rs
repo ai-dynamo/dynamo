@@ -155,6 +155,15 @@ impl KubeDiscoveryClient {
 
 #[async_trait]
 impl Discovery for KubeDiscoveryClient {
+    async fn check_connection(&self) -> Result<()> {
+        // `list` reads the daemon's cache and cannot detect an API outage.
+        // This uses the same namespace and read permissions as discovery.
+        let api: Api<DynamoWorkerMetadata> =
+            Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+        api.get_opt(&self.pod_info.target.cr_name()).await?;
+        Ok(())
+    }
+
     fn instance_id(&self) -> u64 {
         self.instance_id
     }
