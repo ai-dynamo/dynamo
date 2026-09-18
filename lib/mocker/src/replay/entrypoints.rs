@@ -2331,8 +2331,15 @@ mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
+    use aisimulate_core::replay::{
+        ForwardPassSnapshot, ReplayRequestPool, ReplayScalingDecision, ReplayScalingPolicy,
+        ReplayScalingSnapshot,
+    };
     use rstest::rstest;
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::io::Write;
+    use std::rc::Rc;
     use tempfile::NamedTempFile;
     use uuid::Uuid;
 
@@ -2495,16 +2502,12 @@ mod tests {
         assert!(error.to_string().contains("first_arrival_timestamp_ms"));
     }
 
-    #[rstest]
-    #[case::round_robin(ReplayRouterMode::RoundRobin)]
-    #[case::kv_router(ReplayRouterMode::KvRouter)]
-    fn disagg_attention_dp_resolves_ranks_without_aliasing(#[case] router_mode: ReplayRouterMode) {
-        use aisimulate_core::replay::{PerRequestRoutingRecord, ReplayRequestPool};
-        use std::collections::BTreeSet;
+    const PREFILL_DP_SIZE: u32 = 2;
+    const DECODE_DP_SIZE: u32 = 4;
 
-        const PREFILL_DP_SIZE: u32 = 2;
-        const DECODE_DP_SIZE: u32 = 4;
+    type RankSet = BTreeSet<(usize, u32)>;
 
+    fn attention_dp_disagg_config() -> OfflineDisaggReplayConfig {
         let role_args = |worker_type: WorkerType, dp_size: u32| {
             MockEngineArgs::builder()
                 .worker_type(worker_type)
@@ -2515,27 +2518,74 @@ mod tests {
                 .build()
                 .unwrap()
         };
-        let config = OfflineDisaggReplayConfig {
+        OfflineDisaggReplayConfig {
             prefill_args: role_args(WorkerType::Prefill, PREFILL_DP_SIZE),
             decode_args: role_args(WorkerType::Decode, DECODE_DP_SIZE),
             num_prefill_workers: 1,
             num_decode_workers: 1,
-        };
-        let requests = (0..8u32)
+        }
+    }
+
+    fn attention_dp_requests(count: u32, spacing_ms: f64) -> Vec<DirectRequest> {
+        (0..count)
             .map(|index| DirectRequest {
                 tokens: vec![index; 16],
                 max_output_tokens: 2,
                 uuid: Some(Uuid::from_u128(u128::from(index) + 1)),
-                arrival_timestamp_ms: Some(f64::from(index) * 10.0),
+                arrival_timestamp_ms: Some(f64::from(index) * spacing_ms),
                 ..Default::default()
             })
-            .collect();
+            .collect()
+    }
 
+    /// The (worker, dp_rank) pairs each pool routed to, checking every request has
+    /// exactly one route per pool that resolves to an in-range rank.
+    fn routed_ranks_per_pool(
+        report: &TraceSimulationReport,
+        router_mode: ReplayRouterMode,
+    ) -> (RankSet, RankSet) {
+        let mut prefill = BTreeSet::new();
+        let mut decode = BTreeSet::new();
+        for record in &report.per_request {
+            for (pool, dp_size, seen) in [
+                (ReplayRequestPool::Prefill, PREFILL_DP_SIZE, &mut prefill),
+                (ReplayRequestPool::Decode, DECODE_DP_SIZE, &mut decode),
+            ] {
+                let mut routes = record.routing_history.iter().filter(|r| r.pool == pool);
+                let route = routes.next().expect("one route per pool");
+                assert!(routes.next().is_none(), "{pool:?} routed more than once");
+                let worker = route.logical_worker_id.expect("logical worker id");
+                let dp_rank = route.dp_rank.expect("dp rank");
+                assert!(dp_rank < dp_size, "{pool:?} dp_rank {dp_rank} out of range");
+                if router_mode == ReplayRouterMode::KvRouter {
+                    // KvRouterPlacement hands AISimulate worker * dp_size + dp_rank as
+                    // the scheduler id; the report must round-trip it to the same rank.
+                    assert_eq!(
+                        route.scheduler_id,
+                        Some(worker * dp_size as usize + dp_rank as usize)
+                    );
+                }
+                seen.insert((worker, dp_rank));
+            }
+        }
+        (prefill, decode)
+    }
+
+    fn all_ranks(workers: usize, dp_size: u32) -> RankSet {
+        (0..workers)
+            .flat_map(|worker| (0..dp_size).map(move |rank| (worker, rank)))
+            .collect()
+    }
+
+    #[rstest]
+    #[case::round_robin(ReplayRouterMode::RoundRobin)]
+    #[case::kv_router(ReplayRouterMode::KvRouter)]
+    fn disagg_attention_dp_resolves_ranks_without_aliasing(#[case] router_mode: ReplayRouterMode) {
         let report = simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
-            config,
+            attention_dp_disagg_config(),
             None,
             None,
-            requests,
+            attention_dp_requests(8, 10.0),
             1.0,
             router_mode,
             true,
@@ -2546,47 +2596,88 @@ mod tests {
 
         assert_eq!(report.request_counts.completed_requests, 8);
         assert_eq!(report.per_request.len(), 8);
+        let (prefill, decode) = routed_ranks_per_pool(&report, router_mode);
+        // KV routing breaks load ties by hash order, so only round-robin coverage is
+        // deterministic.
+        if router_mode == ReplayRouterMode::RoundRobin {
+            assert_eq!(prefill, all_ranks(1, PREFILL_DP_SIZE));
+            assert_eq!(decode, all_ranks(1, DECODE_DP_SIZE));
+        }
+    }
 
-        let rank_of = |route: &PerRequestRoutingRecord, dp_size: u32| -> u32 {
-            let worker = route.logical_worker_id.expect("logical worker id");
-            let dp_rank = route.dp_rank.expect("dp rank");
-            assert!(
-                dp_rank < dp_size,
-                "{:?} dp_rank {dp_rank} out of range",
-                route.pool
-            );
-            if router_mode == ReplayRouterMode::KvRouter {
-                // KvRouterPlacement hands AISimulate worker * dp_size + dp_rank as the
-                // scheduler id; the report must round-trip it to the same rank.
-                assert_eq!(
-                    route.scheduler_id,
-                    Some(worker * dp_size as usize + dp_rank as usize)
-                );
-            }
-            dp_rank
-        };
-        let mut prefill_ranks = BTreeSet::new();
-        let mut decode_ranks = BTreeSet::new();
-        for record in &report.per_request {
-            let route_for = |pool| {
-                let mut routes = record.routing_history.iter().filter(|r| r.pool == pool);
-                let route = routes.next().expect("one route per pool");
-                assert!(routes.next().is_none(), "{pool:?} routed more than once");
-                route
-            };
-            prefill_ranks.insert(rank_of(
-                route_for(ReplayRequestPool::Prefill),
-                PREFILL_DP_SIZE,
-            ));
-            decode_ranks.insert(rank_of(
-                route_for(ReplayRequestPool::Decode),
-                DECODE_DP_SIZE,
-            ));
+    #[rstest]
+    #[case::round_robin(ReplayRouterMode::RoundRobin)]
+    #[case::kv_router(ReplayRouterMode::KvRouter)]
+    fn disagg_attention_dp_scale_up_keeps_rank_identity(#[case] router_mode: ReplayRouterMode) {
+        const SCALE_UP_AT_MS: f64 = 50.0;
+        // Idle FPM samples emit once per second, so a recheck more than a second after
+        // scale-up carries every active rank of both workers regardless of traffic.
+        const RECHECK_AT_MS: f64 = 1_100.0;
+
+        /// Scales both pools from one worker to two on its first tick and records which
+        /// (worker, dp_rank) pairs carried an FPM sample on each tick.
+        struct ScaleUpOnce {
+            ticks: Rc<RefCell<Vec<(RankSet, RankSet)>>>,
         }
 
+        impl ReplayScalingPolicy for ScaleUpOnce {
+            fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+                Ok(SCALE_UP_AT_MS)
+            }
+
+            fn on_tick(
+                &mut self,
+                snapshot: ReplayScalingSnapshot,
+            ) -> anyhow::Result<ReplayScalingDecision> {
+                let ranks = |fpm: &[(usize, ForwardPassSnapshot)]| {
+                    fpm.iter().map(|(worker, s)| (*worker, s.dp_rank)).collect()
+                };
+                self.ticks
+                    .borrow_mut()
+                    .push((ranks(&snapshot.prefill_fpm), ranks(&snapshot.decode_fpm)));
+                let is_first = snapshot.tick_ordinal == 0;
+                Ok(ReplayScalingDecision {
+                    target_prefill: is_first.then_some(2),
+                    target_decode: is_first.then_some(2),
+                    next_tick_ms: is_first.then_some(RECHECK_AT_MS),
+                })
+            }
+        }
+
+        let ticks = Rc::new(RefCell::new(Vec::new()));
+        // Arrivals span 0..1125 ms: most route after the scale-up, and the replay
+        // outlives the recheck tick.
+        let report = simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
+            attention_dp_disagg_config(),
+            None,
+            None,
+            attention_dp_requests(16, 75.0),
+            1.0,
+            router_mode,
+            true,
+            SlaThresholds::default(),
+            Some(Box::new(ScaleUpOnce {
+                ticks: Rc::clone(&ticks),
+            })),
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 16);
+        let ticks = ticks.borrow();
+        let [before, after] = ticks.as_slice() else {
+            panic!("expected two scaling ticks, got {}", ticks.len());
+        };
+        assert_eq!(before.0, all_ranks(1, PREFILL_DP_SIZE));
+        assert_eq!(before.1, all_ranks(1, DECODE_DP_SIZE));
+        assert_eq!(after.0, all_ranks(2, PREFILL_DP_SIZE));
+        assert_eq!(after.1, all_ranks(2, DECODE_DP_SIZE));
+
+        let (prefill, decode) = routed_ranks_per_pool(&report, router_mode);
+        assert!(prefill.is_subset(&all_ranks(2, PREFILL_DP_SIZE)));
+        assert!(decode.is_subset(&all_ranks(2, DECODE_DP_SIZE)));
         if router_mode == ReplayRouterMode::RoundRobin {
-            assert_eq!(prefill_ranks, BTreeSet::from([0, 1]));
-            assert_eq!(decode_ranks, BTreeSet::from([0, 1, 2, 3]));
+            assert_eq!(prefill, all_ranks(2, PREFILL_DP_SIZE));
+            assert_eq!(decode, all_ranks(2, DECODE_DP_SIZE));
         }
     }
 
