@@ -20,10 +20,13 @@ support the current version plus 1 version back (N and N-1). The pattern:
    enough surface area to cover what Dynamo actually calls.
 4. Each fallback branch in `_compat.py` MUST have a comment noting which SGLang
    version it supports and when it can be removed, e.g.:
-   `# Fallback for sglang <= 0.5.16. Remove when min supported version is 0.5.18+`
+   `# Fallback for sglang 0.5.19. Remove when min supported version is 0.5.20+`
 5. When a new SGLang version is released and the old N-1 falls outside the support
    window, delete the corresponding fallback branches and polyfills from `_compat.py`.
    If `_compat.py` becomes trivial re-exports, inline the imports and delete the file.
+
+The CUDA support window is 0.5.19/0.5.20. The separately pinned XPU image still
+uses 0.5.11; retain only the older fallbacks it needs until that pin is upgraded.
 
 **When you encounter a new SGLang API breakage**: add the affected imports to
 `_compat.py` following the existing pattern. Do not scatter try/except blocks across
@@ -120,7 +123,7 @@ Worker dispatch (main.py:60-132):
    have `max_running_requests`, `dllm_algorithm_config`, or other LLM-specific fields.
    Use `getattr()` when accessing fields that may not exist on the stub.
 
-The supported SGLang 0.5.18/0.5.19 releases keep raw input on `ServerArgs` and
+The supported SGLang 0.5.19/0.5.20 releases keep raw input on `ServerArgs` and
 publish the resolved configuration separately. Apply Dynamo's post-resolution startup
 overrides through `_compat.override_server_args()`; control-plane updates after engine
 creation should use the tokenizer manager's update API instead of assigning fields on

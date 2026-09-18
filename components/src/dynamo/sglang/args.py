@@ -35,6 +35,7 @@ from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import (
     ConfigArgumentMerger,
+    add_sglang_cli_compat,
     ensure_sglang_tensor_image_size,
     get_sglang_model_config,
     resolved_server_args,
@@ -482,6 +483,7 @@ async def parse_args(args: list[str]) -> Config:
 
     sglang_only_parser = argparse.ArgumentParser(add_help=False)
     ServerArgs.add_cli_args(sglang_only_parser)
+    add_sglang_cli_compat(sglang_only_parser)
 
     # Add "gms" to --load-format choices so it passes argparse validation.
     # The actual loader class is set in main.py when load_format == "gms".
