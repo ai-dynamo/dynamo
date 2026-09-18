@@ -203,6 +203,27 @@ class TestBuildEngineInputs:
         assert inputs.request_type == RequestType.VIDEO_GENERATION
         assert inputs.prompt["prompt"] == "a drone"
         assert inputs.fps > 0
+        assert inputs.response_format is None
+
+    @pytest.mark.parametrize("response_format", ["b64_json", "url"])
+    @pytest.mark.asyncio
+    async def test_video_and_i2v_forward_response_format(self, response_format):
+        """T2V and I2V share _engine_inputs_from_video; b64_json must not be dropped."""
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone",
+            model="test-model",
+            size="832x480",
+            response_format=response_format,
+        )
+        t2v = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        assert t2v.response_format == response_format
+
+        img = Image.new("RGB", (64, 64), color="red")
+        i2v = await handler.build_engine_inputs(
+            req, RequestType.VIDEO_GENERATION, image=img
+        )
+        assert i2v.response_format == response_format
 
     @pytest.mark.asyncio
     async def test_audio_generation_delegates_toaudio(self):
