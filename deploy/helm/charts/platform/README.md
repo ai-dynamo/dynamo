@@ -41,28 +41,57 @@ The Dynamo Platform Helm chart deploys the complete Dynamo Kubernetes Platform i
 
 ## Upgrading
 
-Read the notes for each release between your installed version and the target version, in upgrade
-order. Releases are listed newest first; each entry describes changes introduced in that release.
-Only categories with documented migration requirements are shown. For supported Grove and KAI
-Scheduler versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
+Releases are listed newest first. Read bottom-up through releases newer than your installed version,
+up to your target version. Each entry describes changes introduced in that release. Releases and
+categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
+versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
 ### v1.5.0
+
+#### CRD and admission breaking changes
+
+##### EPP runtime version and configuration
+
+**Change:** Admission now requires a resolvable Dynamo runtime version for standalone EPP DCDs,
+as it already did for EPP components in a DGD. In v1.4.x, standalone DCDs could omit
+`runtimeVersionOverride` even when their image tag had no parseable semantic version, including EPP.
+Standalone non-EPP DCDs retain that exemption.
+
+For EPP images resolving to runtime 1.5.0 or later, admission now rejects `eppConfig`: native Rust EPP
+does not use it. For older EPP runtimes, `eppConfig` remains required.
+
+**Affected:** Standalone EPP DCDs using images without a parseable semantic-version tag, and EPP
+components in either DGDs or standalone DCDs upgrading to a runtime 1.5.0 or later image.
+
+**Action:** Set `runtimeVersionOverride` to the Dynamo runtime actually contained in the image when
+the tag cannot provide it. When upgrading an EPP image to runtime 1.5.0 or later, remove `eppConfig`
+and update any runtime override in the same change. Retain `eppConfig` for older EPP images.
+
+**Existing deployments:** Unchanged pre-existing violations remain admissible during unrelated
+updates. Changing the component type, image, override, or `eppConfig` revalidates the EPP
+configuration requirement.
 
 #### Dependency compatibility
 
 **Affected:** Deployments using Grove or KAI Scheduler, whether bundled with this chart or managed
 separately.
 
-| Dependency | Required compatibility | Bundled change | Operator action |
-|------------|------------------------|----------------|-----------------|
-| Grove | `v0.1.0-alpha.13` or later | Pins `v0.1.0-alpha.13` and enables its CRD installer | Upgrade externally managed Grove and its CRDs with Dynamo. The bundled installer applies Grove CRDs before its operator starts. |
-| KAI Scheduler | `v0.17.0` or later | Pins `v0.17.0` | Upgrade externally managed KAI Scheduler and apply the staleness setting below when using Grove's KAI backend. |
+| Dependency | Bundled version | Operator action |
+|------------|-----------------|-----------------|
+| Grove | `v0.1.0-alpha.13` | Upgrade externally managed Grove and its CRDs with Dynamo. The chart now enables the bundled CRD installer, which applies Grove CRDs before its operator starts. |
+| KAI Scheduler | `v0.17.0` | Upgrade externally managed KAI Scheduler. For both bundled and externally managed installations, apply the staleness setting below when using Grove's KAI backend. |
 
 Grove `v0.1.0-alpha.13` enables its `kai-scheduler` backend by default. When that profile is active,
-Grove owns PodGroup termination timing. Disable KAI's independent stale PodGroup eviction by setting
-`scheduler.args.default-staleness-grace-period` to `"-1s"` in the KAI Scheduler chart. Keep KAI's normal
-cleanup behavior when using KAI without Grove or when an externally managed Grove has that profile
-disabled.
+Grove owns PodGroup termination timing. Disable KAI's independent stale PodGroup eviction:
+
+- For bundled KAI, set `kai-scheduler.scheduler.args.default-staleness-grace-period` to `"-1s"` in
+  the platform chart values. The chart rejects installation of both bundled subcharts without this
+  setting.
+- For externally managed KAI, set `scheduler.args.default-staleness-grace-period` to `"-1s"` in
+  the KAI Scheduler chart values.
+
+Keep KAI's normal cleanup behavior when using KAI without Grove or when an externally managed Grove
+has that profile disabled.
 
 ### v1.4.0
 
@@ -73,14 +102,18 @@ disabled.
 **Change:** Components resolve their Dynamo runtime version from the main container
 image tag or `runtimeVersionOverride`. The override takes precedence when the operator selects
 runtime-specific flags, environment variables, and behavior; it does not change the image reference.
+Admission rejects a new DGD component whose main image has no parseable semantic-version tag unless
+`runtimeVersionOverride` is set. It also rejects a new DGDR whose nonempty `spec.image` has no
+parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. An omitted DGDR image
+does not require an override.
 
 **Affected:** DGD components using digest-only references, custom build tags, or mutable tags such as
-`latest`, and DGDRs that generate components with those images.
+`latest`, and DGDRs specifying those images in `spec.image`.
 
 **Action:** Use a semantic-version image tag such as `:1.4.0`, or set `runtimeVersionOverride` to the
 Dynamo runtime version actually contained in the image before submitting a new component or changing
-its image. For a DGDR, set `spec.runtimeVersionOverride` as the default for generated components;
-an explicit component override takes precedence.
+its image. For a DGDR, set `spec.runtimeVersionOverride` to describe its `spec.image`. This override
+also supplies the default for generated components; an explicit component override takes precedence.
 
 ```yaml
 components:
@@ -94,10 +127,11 @@ components:
 ```
 
 **Existing deployments:** An unchanged non-semantic-version image without an override remains
-admissible during unrelated updates. Changing the image or override revalidates the requirement.
-Standalone non-EPP DCDs may omit the override; EPP components require a resolvable runtime version.
-See the [DCD runtime version reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility)
-for the current rules, including rollout effects when changing the override.
+admissible during unrelated updates. Changing the image or override revalidates the requirement;
+enabling `spec.autoApply` on a DGDR also revalidates it. In v1.4.x, standalone DCDs, including EPP,
+may omit the override. See the v1.5.0 entry for the EPP exception introduced in that release, and the
+[DCD runtime version reference](../../../../docs/fern/pages/reference/kubernetes-api/dynamo-component-deployment.mdx#runtime-version-compatibility)
+for additional guidance, including rollout effects when changing the override.
 
 ##### Main-container image required on admission
 
@@ -125,7 +159,7 @@ removing an existing pod configuration or main image is rejected.
 **Change:** `global.nats.install` now defaults to `false` because Dynamo's default request and event
 planes use TCP and ZMQ, respectively.
 
-**Affected:** Releases relying on the previous implicit `global.nats.install=true` default.
+**Affected:** Releases relying on the previous chart default of `global.nats.install=true`.
 
 **Action:** Before disabling NATS, verify that no deployment uses an explicit NATS-based feature,
 such as `DYN_EVENT_PLANE=nats`, legacy `DYN_REQUEST_PLANE=nats`, or a NATS request-trace sink. To retain
@@ -144,10 +178,9 @@ rolling updates as workloads are reconciled.
 
 #### Dependency compatibility
 
-| Dependency | Required compatibility | Operator action |
-|------------|------------------------|-----------------|
-| Grove | `v0.1.0-alpha.12-rc1` or later | Upgrade Grove with Dynamo. Dynamo 1.4.x expects the `ClusterTopologyBinding` API; Dynamo 1.3.x expects the earlier `ClusterTopology` API and is incompatible with the newer API. |
-| KAI Scheduler | `v0.13.4` or later | Keep externally managed installations at a compatible version. |
+| Dependency | Bundled version | Operator action |
+|------------|-----------------|-----------------|
+| Grove | `v0.1.0-alpha.12-rc1` | Upgrade Grove with Dynamo. Dynamo 1.4.x expects the `ClusterTopologyBinding` API; Dynamo 1.3.x expects the earlier `ClusterTopology` API and is incompatible with the newer API. |
 
 ### v1.0.0
 
