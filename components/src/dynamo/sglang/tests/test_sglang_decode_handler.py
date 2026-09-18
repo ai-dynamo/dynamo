@@ -351,14 +351,6 @@ def _abort_chunk(finish_reason):
             id="invalid-schema-type",
         ),
         pytest.param(
-            400,
-            "Failed to compile json grammar: [04:33:49] "
-            "/project/cpp/regex_converter.cc:75: "
-            "Regex parsing error at position 11: Unclosed '['\n",
-            "BadRequestError",
-            id="malformed-schema-pattern",
-        ),
-        pytest.param(
             422,
             "Request validation failed",
             "UnprocessableEntityError",

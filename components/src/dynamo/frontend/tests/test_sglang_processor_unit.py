@@ -4049,16 +4049,70 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         return asyncio.run(collect())
 
-    def test_routed_engine_is_error_yields_internal_error(self, tokenizer):
-        """is_error() True yields a single internal_error chunk with the comment text."""
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_routed_engine_is_error_yields_error_envelope(self, after_output):
+        """An annotated engine error terminates with a binding-compatible error frame."""
+        prefix = [{"token_ids": [ord("A")]}] if after_output else []
         items = self._run_stream(
-            tokenizer,
-            [FakeRoutedItem(None, is_error=True, comments=["backend disconnected"])],
+            self.ByteTokenizer(),
+            [
+                *prefix,
+                FakeRoutedItem(None, is_error=True, comments=["backend disconnected"]),
+                {"token_ids": [], "finish_reason": "stop"},
+            ],
         )
-        assert len(items) == 1
-        err = items[0]["error"]
-        assert err["type"] == "internal_error"
-        assert "backend disconnected" in err["message"]
+        assert len(items) == len(prefix) + 1
+        if after_output:
+            assert items[0]["choices"][0]["delta"]["content"] == "A"
+            assert items[0]["choices"][0]["finish_reason"] is None
+        assert items[-1] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["backend disconnected"],
+        }
+
+    @pytest.mark.parametrize("after_output", [False, True])
+    def test_routed_validation_exception_preserves_type_and_message(self, after_output):
+        """A typed iterator failure survives before or after an emitted delta."""
+        message = "Failed to compile json grammar: unsupported schema type"
+
+        class FailingEngine:
+            async def generate(self, preprocessed, **kwargs):
+                """Model the routed iterator raising a native validation exception."""
+
+                async def stream():
+                    if after_output:
+                        yield FakeRoutedItem({"token_ids": [ord("A")]})
+                    raise InvalidArgument(message)
+
+                return stream()
+
+        async def check():
+            tokenizer = self.ByteTokenizer()
+            processor = SglangProcessor(
+                tokenizer=tokenizer,
+                routed_engine=FailingEngine(),
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+                eos_token_ids=None,
+            )
+            post = SglangStreamingPostProcessor(
+                tokenizer=tokenizer, tool_call_parser=None, reasoning_parser=None
+            )
+            stream = processor._generate_and_stream(
+                "req-invalid", {"model": "test-model"}, {}, [], post
+            )
+            if after_output:
+                first = await anext(stream)
+                assert first["data"]["choices"][0]["delta"]["content"] == "A"
+                assert first["data"]["choices"][0]["finish_reason"] is None
+            with pytest.raises(InvalidArgument) as error:
+                await anext(stream)
+            assert str(error.value) == message
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+
+        asyncio.run(check())
 
     def test_routed_engine_none_data_is_skipped(self, tokenizer):
         """data() is None (e.g. comment-only event) is skipped, not yielded as error."""
@@ -4080,7 +4134,11 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             [{"status": "error", "message": "kv cache exhausted"}],
         )
         assert len(items) == 1
-        assert "error" in items[0]
+        assert items[0] == {
+            "_dynamo_annotated": True,
+            "event": "error",
+            "comment": ["kv cache exhausted"],
+        }
 
     def test_completed_batches_replace_decode_context(self):
         """Completed batches replace context instead of accumulating history."""
