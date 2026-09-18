@@ -561,6 +561,30 @@ impl PreprocessedEmbeddingRequest {
 mod tests {
     use super::*;
 
+    #[test]
+    fn decoded_multimodal_data_preserves_wire_shape() {
+        let value = serde_json::json!({
+            "Decoded": {
+                "nixl_metadata": "b64:test",
+                "nixl_descriptor": {
+                    "addr": 42,
+                    "size": 1024,
+                    "mem_type": "Dram",
+                    "device_id": 0
+                },
+                "shape": [1, 16, 16, 3],
+                "dtype": "UINT8",
+                "metadata": null,
+                "content_hash": "0123456789abcdef"
+            }
+        });
+
+        let decoded: MultimodalData = serde_json::from_value(value.clone()).unwrap();
+
+        assert!(matches!(decoded, MultimodalData::Decoded(_)));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+    }
+
     fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
             .model("test-model".to_string())

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::super::common::EncodedMediaData;
-use super::super::rdma::DecodedMediaData;
+use super::super::decoded::DecodedMediaData;
 use super::{DecodedMediaMetadata, Decoder};
 use backends::{
     BackendAvailability, BackendDecline, DecodedImage, ImageDecodeBackend, ImageDecodeOutcome,
@@ -232,7 +232,7 @@ impl ImageDecoder {
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::rdma::DataType;
+    use super::super::super::decoded::DataType;
     use super::*;
     use crate::preprocessor::media::jpeg_turbo;
     use image::{DynamicImage, ImageBuffer};
