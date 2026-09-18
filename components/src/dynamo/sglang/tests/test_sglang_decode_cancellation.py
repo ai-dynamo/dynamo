@@ -1068,3 +1068,73 @@ async def test_shutdown_survives_ordered_abort_cleanup(decode_cancellation_case)
 
     with pytest.raises(EngineShutdown):
         await operation
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("exit_kind", ["error", "close", "cancel"])
+async def test_stream_exit_before_monitor_runs_aborts_dispatched_request(
+    decode_cancellation_case, exit_kind
+):
+    """Dropping the handler must not strand a pre-first-output engine request."""
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+    case.dispatched.set()
+    exception = {
+        "error": RuntimeError,
+        "close": GeneratorExit,
+        "cancel": asyncio.CancelledError,
+    }[exit_kind]
+    with pytest.raises(exception):
+        async with case.handler._cancellation_monitor(
+            asyncio.get_running_loop().create_future(),
+            case.context,
+            submitted_request_id=rid,
+        ):
+            # No scheduling point: the stream exits before its monitor can run.
+            raise exception()
+    assert case.abort_calls == [(rid, False)]
+    assert case.aborted.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("registered", [False, True])
+async def test_stream_exit_does_not_abort_before_dispatch(
+    decode_cancellation_case, registered
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    if registered:
+        case.registry[rid] = SimpleNamespace(
+            time_stats=SimpleNamespace(api_server_dispatch_finish_time=0.0)
+        )
+    with pytest.raises(GeneratorExit):
+        async with case.handler._cancellation_monitor(
+            asyncio.get_running_loop().create_future(),
+            case.context,
+            submitted_request_id=rid,
+        ):
+            raise GeneratorExit()
+    assert not case.abort_calls
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancelled_consumer_aborts_before_first_output(decode_cancellation_case):
+    case = decode_cancellation_case
+    case.allow_registration.set()
+    consumer = asyncio.create_task(
+        _collect(case.handler.generate(case.request, case.context))
+    )
+    await asyncio.wait_for(case.dispatched.wait(), timeout=1)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert case.abort_calls == [("internal-request-id", False)]
+    assert case.aborted.is_set()
+    assert not case.handler._abort_tasks

@@ -432,6 +432,31 @@ class CancellationMixin:
             ordered_abort_task = None
             try:
                 if not cancellation_task.done():
+                    # A handler may be dropped before its monitor gets scheduled.
+                    # Abort an already-dispatched request synchronously, before
+                    # cancelling the stream can remove its tokenizer state. Never
+                    # send an early abort for a request still awaiting dispatch.
+                    if (
+                        submitted_request_id is not None
+                        and not request_id_future.done()
+                    ):
+                        tokenizer_manager = getattr(
+                            self.engine, "tokenizer_manager", None
+                        )
+                        registry = self._request_registry(
+                            tokenizer_manager, submitted_request_id
+                        )
+                        state = (
+                            registry.get(submitted_request_id)
+                            if registry is not None
+                            else None
+                        )
+                        if getattr(
+                            getattr(state, "time_stats", None),
+                            "api_server_dispatch_finish_time",
+                            None,
+                        ):
+                            self._abort_requests({submitted_request_id}, context)
                     logging.debug(
                         "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",
                         request_id,
