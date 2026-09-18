@@ -177,8 +177,20 @@ jobs:
             cat "$RUNNER_TEMP/endpoint-nats.log"
             exit 1
           fi
+          # The request-plane TCP server is process-global and runs on the first
+          # test's Tokio runtime. Isolate tests so a later test cannot reuse a
+          # listener whose runtime has already shut down.
           cargo test --locked -p dynamo-runtime --features integration --lib \
-            component::endpoint::integration_tests -- --test-threads=1 --nocapture
+            component::endpoint::integration_tests -- --list > "$RUNNER_TEMP/endpoint-tests.txt"
+          mapfile -t endpoint_tests < <(sed -n 's/: test$//p' "$RUNNER_TEMP/endpoint-tests.txt")
+          if [[ ${#endpoint_tests[@]} -eq 0 ]]; then
+            echo "No endpoint lifecycle tests found"
+            exit 1
+          fi
+          for endpoint_test in "${endpoint_tests[@]}"; do
+            cargo test --locked -p dynamo-runtime --features integration --lib \
+              "$endpoint_test" -- --exact --test-threads=1 --nocapture
+          done
 
   mypy:
     needs: image
