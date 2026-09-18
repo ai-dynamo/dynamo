@@ -21,17 +21,19 @@ blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 
 # 0.38.0 raises its own floor to safetensors>=0.8.0; --no-deps will not pull
 # that in, so the floor below declares it explicitly.
 #
-# Capped at <0.40 rather than <1. The next release after 0.39.0, diffusers
-# 0.40.0, raises its own floor to huggingface-hub>=1.23.0, and this file
-# installs --force-reinstall --no-deps -- so pip will neither pull hub along
-# nor validate that the bundled copy already satisfies the new floor. Whether
-# hub 1.23.0 is in the SGLang image is not knowable from this repo either:
-# container/compliance/base_sboms holds the CUDA base's SBOM, not the sglang
-# image's, and sglang 0.5.19 only floors hub at 1.5.0 (transitively through
-# transformers==5.12.1). Cap at the last release whose hub floor
-# (huggingface-hub>=0.34.0 on 0.39.0) is unambiguously satisfied by any
-# realistic upstream image; drop the cap once hub 1.23.0 is verified present
-# in the SGLang image.
+# Capped at <0.40 rather than <1 as a precaution, not because of a dependency
+# floor. diffusers 0.40.0 floors huggingface-hub>=1.23.0, and the SGLang
+# runtime image carries hub 1.30.0, so that floor is already satisfied. The
+# same <0.40 cap on the TensorRT-LLM side is driven by its own base image
+# sitting below the floors 0.40.0 adds; that reason does not transfer here.
+# Every diffusers import sglang 0.5.19 makes resolves on 0.37.0, 0.39.0 and
+# 0.40.0. No diffusion request has been exercised on 0.40.0, and that is the
+# only reason the ceiling stays.
+#
+# Under --force-reinstall a ceiling is a downgrade instruction, not a no-op.
+# If a later SGLang release bundles diffusers 0.40.0 or newer, this line rolls
+# it back to 0.39.0, and the build stays green while it does. The
+# pillow>=12.3.0,<13 entry below has the same shape.
 diffusers>=0.38.0,<0.40  # bounded: this file installs with --force-reinstall
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
