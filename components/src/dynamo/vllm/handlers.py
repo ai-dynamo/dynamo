@@ -2032,7 +2032,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": "Missing 'weight_version' in body"}
         version = body["weight_version"]
         self._weight_version = version
-        logger.info("[RL] Weight version declared (version=%s)", version)
+        logger.info("[RL] Weight version declared")
         return {"status": "ok", "version": version}
 
     async def update_weights_from_disk(self, body: dict) -> dict:

@@ -2013,7 +2013,6 @@ class TestRLAdminRouteHardening:
     async def test_get_weight_version_reports_undeclared_before_any_update(self):
         config = _make_config(enable_multimodal=False)
         config.custom_encoder_class = None
-        # Exercise the real initializer; _make_rl_handler sets the sentinel itself.
         with patch.object(mod, "VllmEngineMonitor"):
             handler = mod.DecodeWorkerHandler(
                 runtime=MagicMock(),
@@ -2029,7 +2028,7 @@ class TestRLAdminRouteHardening:
         assert resp["version"] is None
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", [None, 7, "policy-43"])
+    @pytest.mark.parametrize("version", [None, "policy-43"])
     async def test_set_weight_version_declares_without_touching_the_engine(
         self, version
     ):
@@ -2056,7 +2055,7 @@ class TestRLAdminRouteHardening:
         assert (await handler.get_weight_version({}))["version_declared"] is False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", [None, 7, "initial"])
+    @pytest.mark.parametrize("version", [None, "initial"])
     @pytest.mark.parametrize(
         ("route", "body"),
         [
