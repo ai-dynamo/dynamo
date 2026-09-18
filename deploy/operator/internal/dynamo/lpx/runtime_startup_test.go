@@ -75,7 +75,6 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				}
 				if startup.command != nil {
 					pod.Containers[1].Env = append(pod.Containers[1].Env,
-						corev1.EnvVar{Name: "GROQ_V2_RESET_ON_OPEN", Value: "template-value"},
 						corev1.EnvVar{Name: "TEMPLATE_SECRET", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
 							LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "value",
 						}}},

@@ -76,22 +76,6 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GROQ_HAL_V2_BACKGROUND_METRICS
-              value: "false"
-            - name: GROQ_PG613_PORT_CONFIG
-              value: EB3
-            - name: GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2
-              value: "false"
-            - name: GROQ_PG613_SKIP_HOST_LINK_PROFILE
-              value: "0"
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_0
-              value: 0000:9a:00.0
-            - name: GROQ_V2_FPGA_BUS_ADDRESS_ID_1
-              value: 0000:7e:00.0
-            - name: GROQ_V2_HEALTH_CHECK_ON_OPEN
-              value: "0"
-            - name: GROQ_V2_RESET_ON_OPEN
-              value: "0"
             - name: LPU_FPGA_AUTOMATIC_JTAG_RECOVERY
               value: "false"
             - name: LPU_FPGA_RECONFIGURE_METHOD
@@ -261,26 +245,6 @@ spec:
             - $(LPX_ALLOCATION)
             - --agent-env-vars
             - BMC_SSH_ENABLED=false
-            - --agent-env-vars
-            - GROQ_FPGA_VSAP_DRAM_WAIT_CYCLES=0
-            - --agent-env-vars
-            - GROQ_FPGA_VSAP_SETUP_MPINGO_KERNELS=false
-            - --agent-env-vars
-            - GROQ_HAL_V2_BACKGROUND_METRICS=false
-            - --agent-env-vars
-            - GROQ_PG613_PORT_CONFIG=EB3
-            - --agent-env-vars
-            - GROQ_PG613_REQUIRE_ALTAIR_PCIE_GEN2=false
-            - --agent-env-vars
-            - GROQ_PG613_SKIP_HOST_LINK_PROFILE=1
-            - --agent-env-vars
-            - GROQ_V2_FPGA_BUS_ADDRESS_ID_0=0000:9a:00.0
-            - --agent-env-vars
-            - GROQ_V2_FPGA_BUS_ADDRESS_ID_1=0000:7e:00.0
-            - --agent-env-vars
-            - GROQ_V2_HEALTH_CHECK_ON_OPEN=0
-            - --agent-env-vars
-            - GROQ_V2_RESET_ON_OPEN=0
             - --agent-env-vars
             - LPU_FPGA_AUTOMATIC_JTAG_RECOVERY=false
             - --agent-env-vars
