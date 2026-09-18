@@ -78,7 +78,6 @@ from .kv_connector_protocols import (
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
-from .runtime_lora import publish_runtime_lora_capability
 from .multimodal_utils.models.nemotron_video_routing import (
     publish_vllm_nemotron_video_processor_contract,
 )
@@ -86,6 +85,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
+from .runtime_lora import publish_runtime_lora_capability
 from .snapshot import prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,

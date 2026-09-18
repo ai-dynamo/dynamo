@@ -26,6 +26,14 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
+
+@pytest.mark.asyncio
+async def test_aclose_without_runtime_lora_coordinator_is_a_noop():
+    handler = BaseOmniHandler.__new__(BaseOmniHandler)
+
+    await handler.aclose()
+
+
 # Keep upstream defaults for unexposed fields and let it derive the sequence size.
 _SKIP_FIELDS = {
     "sequence_parallel_size",

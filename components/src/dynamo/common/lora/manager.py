@@ -8,9 +8,10 @@ Minimal Python wrapper around Rust LoRA core with extension points for custom so
 import asyncio
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Protocol
 
 from dynamo.common.lora.once import OnceLock
 from dynamo.common.utils.env import env_bool
@@ -51,7 +52,7 @@ class LoRAManager:
     sources, and allows registering custom Python sources for other protocols.
     """
 
-    def __init__(self, cache_path: Optional[Path] = None):
+    def __init__(self, cache_path: Path | None = None):
         """
         Initialize LoRA manager.
 
@@ -72,7 +73,7 @@ class LoRAManager:
         ).expanduser()
 
         # Extension point: custom sources
-        self._custom_sources: Dict[str, LoRASourceProtocol] = {}
+        self._custom_sources: dict[str, LoRASourceProtocol] = {}
         self._runtime_resolvers: RuntimeLoRAResolverChain | None = None
 
     def register_custom_source(self, scheme: str, source: LoRASourceProtocol) -> None:
@@ -102,22 +103,7 @@ class LoRAManager:
     def cache_root(self) -> Path:
         return self._cache_root
 
-    async def resolve_runtime_lora(
-        self,
-        *,
-        source_uri: str,
-        context: ResolveContext,
-    ) -> ResolvedLoRA:
-        """Resolve a request-time URI without falling back to explicit-load sources."""
-        if self._runtime_resolvers is None:
-            raise RuntimeLoRAConfigurationError(
-                "runtime LoRA resolver is not configured"
-            )
-
-        resolved = await self._runtime_resolvers.resolve(
-            source_uri=source_uri,
-            context=context,
-        )
+    def _validate_runtime_snapshot_path(self, resolved: ResolvedLoRA) -> ResolvedLoRA:
         raw_local_path = resolved.local_path
         if raw_local_path.is_symlink():
             raise RuntimeLoRAPluginError(
@@ -141,7 +127,28 @@ class LoRAManager:
             metadata=resolved.metadata,
         )
 
-    async def download_lora(self, lora_uri: str) -> Dict[str, Any]:
+    async def resolve_runtime_lora(
+        self,
+        *,
+        source_uri: str,
+        context: ResolveContext,
+    ) -> ResolvedLoRA:
+        """Resolve a request-time URI without falling back to explicit-load sources."""
+        if self._runtime_resolvers is None:
+            raise RuntimeLoRAConfigurationError(
+                "runtime LoRA resolver is not configured"
+            )
+
+        resolved = await self._runtime_resolvers.resolve(
+            source_uri=source_uri,
+            context=context,
+        )
+        return await asyncio.to_thread(
+            self._validate_runtime_snapshot_path,
+            resolved,
+        )
+
+    async def download_lora(self, lora_uri: str) -> dict[str, Any]:
         """
         Download LoRA if needed, return local path.
 
@@ -184,7 +191,7 @@ class LoRAManager:
             return {"status": "success", "local_path": str(local_path)}
         except asyncio.CancelledError:
             raise
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - plugin trust boundary
             return {"status": "error", "message": str(e)}
 
     def is_cached(self, lora_uri: str) -> bool:
@@ -205,6 +212,7 @@ class LoRAInfo:
 
 
 _lora_manager: OnceLock[LoRAManager] = OnceLock()
+_runtime_lora_config_lock = threading.Lock()
 
 
 def _lora_enabled() -> bool:
@@ -227,9 +235,13 @@ def _allowed_runtime_lora_schemes() -> set[str]:
     return schemes
 
 
-def _init_lora_manager() -> LoRAManager:
-    manager = LoRAManager()
-    if runtime_lora_enabled():
+def _configure_runtime_lora(manager: LoRAManager) -> None:
+    """Configure worker-local request-time resolution exactly once on demand."""
+    if manager.runtime_lora_schemes:
+        return
+    with _runtime_lora_config_lock:
+        if manager.runtime_lora_schemes:
+            return
         try:
             manager.cache_root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -252,23 +264,31 @@ def _init_lora_manager() -> LoRAManager:
                 _allowed_runtime_lora_schemes(),
             )
         )
+
+
+def _init_lora_manager() -> LoRAManager:
+    manager = LoRAManager()
     logger.info("LoRAManager initialized successfully")
     return manager
 
 
-def get_lora_manager() -> Optional[LoRAManager]:
+def get_lora_manager(*, configure_runtime: bool = False) -> LoRAManager | None:
     """Return the LoRAManager singleton, or None when DYN_LORA_ENABLED is unset.
 
     Initializes on first call. Initialization errors propagate to the caller —
     OnceLock does not cache failures, so subsequent calls will retry.
     """
-    existing = _lora_manager.get()
-    if existing is not None:
-        return existing
-    if runtime_lora_enabled() and not _lora_enabled():
+    if configure_runtime and runtime_lora_enabled() and not _lora_enabled():
         raise RuntimeLoRAConfigurationError(
             "DYN_LORA_RUNTIME_LOAD_ENABLED requires DYN_LORA_ENABLED=true"
         )
     if not _lora_enabled():
         return None
-    return _lora_manager.get_or_init(_init_lora_manager)
+    manager = _lora_manager.get_or_init(_init_lora_manager)
+    if configure_runtime:
+        if not runtime_lora_enabled():
+            raise RuntimeLoRAConfigurationError(
+                "runtime LoRA resolver requested while runtime loading is disabled"
+            )
+        _configure_runtime_lora(manager)
+    return manager

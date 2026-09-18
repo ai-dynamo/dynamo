@@ -13,6 +13,7 @@ import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.handlers import BaseWorkerHandler
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     SnapshotEngineSetupResult,
@@ -89,6 +90,11 @@ def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
     engine_client.shutdown.assert_called_once_with(timeout=7.0)
 
 
+@pytest.mark.asyncio
+async def test_base_handler_aclose_is_safe_without_runtime_lora_coordinator():
+    await BaseWorkerHandler.aclose(SimpleNamespace())
+
+
 def test_decode_worker_lifecycle_shutdown_engine_when_handler_cleanup_fails():
     handler = Mock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
@@ -131,6 +137,7 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
     factory = _make_factory()
     engine_client = Mock()
     handler = Mock()
+    handler.aclose = AsyncMock()
     handler.cleanup.side_effect = RuntimeError("handler cleanup failed")
     startup_error = ValueError("decode worker startup failed")
 
@@ -150,6 +157,33 @@ async def test_custom_encoder_preserves_primary_error_when_cleanup_fails(caplog)
     assert exc_info.value is startup_error
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
     assert "Failed to clean up decode worker after an earlier failure" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_decode_worker_preserves_primary_error_when_async_drain_fails(caplog):
+    factory = _make_factory()
+    engine_client = Mock()
+    handler = Mock()
+    handler.aclose = AsyncMock(side_effect=RuntimeError("async drain failed"))
+    startup_error = ValueError("decode worker startup failed")
+
+    async def fail_after_resource_creation(*_args, lifecycle, **_kwargs):
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = SimpleNamespace(shutdown_timeout=5.0)
+        lifecycle.handler = handler
+        raise startup_error
+
+    factory._run_decode_worker = fail_after_resource_creation  # type: ignore[method-assign]
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(ValueError, match="decode worker startup failed") as exc_info:
+        await factory._create_decode_worker(
+            Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
+        )
+
+    assert exc_info.value is startup_error
+    engine_client.shutdown.assert_called_once_with(timeout=5.0)
+    assert "Failed to drain decode worker after an earlier failure" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -183,6 +217,7 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
     engine_client = Mock()
     engine_client.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
     handler = Mock()
+    handler.aclose = AsyncMock(side_effect=lambda: calls.append("async-handler"))
     handler.cleanup.side_effect = lambda: calls.append("handler")
 
     async def fail_after_setup(*_args, lifecycle, **_kwargs):
@@ -197,7 +232,7 @@ async def test_decode_failure_withdraws_state_agent_before_engine_cleanup():
             Mock(), SimpleNamespace(custom_encoder_class=None), asyncio.Event(), []
         )
 
-    assert calls == ["state-agent", "handler", "engine"]
+    assert calls == ["state-agent", "async-handler", "handler", "engine"]
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
 
 RUNTIME_LORA_PROTOCOL_VERSION = 2
 _MAX_SOURCE_REVISION_BYTES = 512
@@ -59,14 +58,22 @@ class ResolvedLoRA:
 
 
 class RuntimeLoRAResolverProtocol(Protocol):
+    """Resolve immutable snapshots whose paths remain valid for the worker lifetime.
+
+    Protocol version 2 leaves cache reclamation to worker drain/shutdown. A
+    resolver must not delete or mutate a returned path while the worker runs.
+    """
+
     protocol_version: int
 
     @property
-    def schemes(self) -> frozenset[str]: ...
+    def schemes(self) -> frozenset[str]:
+        ...
 
     async def resolve(
         self, *, source_uri: str, context: ResolveContext
-    ) -> ResolvedLoRA | None: ...
+    ) -> ResolvedLoRA | None:
+        ...
 
 
 def _import_object(reference: str) -> Any:
@@ -104,10 +111,8 @@ def _import_object(reference: str) -> Any:
 
 
 def _normalize_resolver(candidate: Any) -> RuntimeLoRAResolverProtocol:
-    if (
-        inspect.isclass(candidate)
-        or callable(candidate)
-        and not hasattr(candidate, "resolve")
+    if inspect.isclass(candidate) or (
+        callable(candidate) and not hasattr(candidate, "resolve")
     ):
         candidate = candidate()
 
@@ -192,7 +197,7 @@ class RuntimeLoRAResolverChain:
     async def resolve(
         self, *, source_uri: str, context: ResolveContext
     ) -> ResolvedLoRA:
-        scheme = urlsplit(source_uri).scheme.lower()
+        scheme = source_uri.partition(":")[0].lower()
         if scheme not in self.schemes:
             raise RuntimeLoRANotFoundError("runtime LoRA source is not supported")
 
@@ -201,54 +206,70 @@ class RuntimeLoRAResolverChain:
         if remaining <= 0:
             raise TimeoutError("runtime LoRA resolution deadline exceeded")
 
-        async with asyncio.timeout(remaining):
-            for resolver in self._resolvers:
-                if scheme not in resolver.schemes:
-                    continue
-                try:
-                    result = await resolver.resolve(
-                        source_uri=source_uri,
-                        context=context,
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except RuntimeLoRAError:
-                    raise
-                except Exception as exc:
-                    raise RuntimeLoRAPluginError(
-                        "runtime LoRA resolver failed"
-                    ) from exc
-                if result is None:
-                    continue
-                if not isinstance(result, ResolvedLoRA):
-                    raise RuntimeLoRAPluginError(
-                        "runtime LoRA resolver returned an invalid result"
-                    )
-                if not isinstance(result.local_path, Path):
-                    raise RuntimeLoRAPluginError(
-                        "runtime LoRA resolver returned an invalid local_path"
-                    )
-                if (
-                    not isinstance(result.source_revision, str)
-                    or not result.source_revision
-                    or len(result.source_revision.encode("utf-8"))
-                    > _MAX_SOURCE_REVISION_BYTES
-                    or any(
-                        ord(character) < 0x20 or ord(character) == 0x7F
-                        for character in result.source_revision
-                    )
-                ):
-                    raise RuntimeLoRAPluginError(
-                        "runtime LoRA resolver returned an invalid source_revision"
-                    )
-                if result.size_bytes is not None and (
-                    isinstance(result.size_bytes, bool)
-                    or not isinstance(result.size_bytes, int)
-                    or result.size_bytes < 0
-                ):
-                    raise RuntimeLoRAPluginError(
-                        "runtime LoRA resolver returned an invalid size_bytes"
-                    )
-                return result
+        try:
+            return await asyncio.wait_for(
+                self._resolve_before_deadline(
+                    scheme=scheme,
+                    source_uri=source_uri,
+                    context=context,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError("runtime LoRA resolution deadline exceeded") from None
+
+    async def _resolve_before_deadline(
+        self,
+        *,
+        scheme: str,
+        source_uri: str,
+        context: ResolveContext,
+    ) -> ResolvedLoRA:
+        for resolver in self._resolvers:
+            if scheme not in resolver.schemes:
+                continue
+            try:
+                result = await resolver.resolve(
+                    source_uri=source_uri,
+                    context=context,
+                )
+            except asyncio.CancelledError:
+                raise
+            except RuntimeLoRAError:
+                raise
+            except Exception as exc:
+                raise RuntimeLoRAPluginError("runtime LoRA resolver failed") from exc
+            if result is None:
+                continue
+            if not isinstance(result, ResolvedLoRA):
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned an invalid result"
+                )
+            if not isinstance(result.local_path, Path):
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned an invalid local_path"
+                )
+            if (
+                not isinstance(result.source_revision, str)
+                or not result.source_revision
+                or len(result.source_revision.encode("utf-8"))
+                > _MAX_SOURCE_REVISION_BYTES
+                or any(
+                    ord(character) < 0x20 or ord(character) == 0x7F
+                    for character in result.source_revision
+                )
+            ):
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned an invalid source_revision"
+                )
+            if result.size_bytes is not None and (
+                isinstance(result.size_bytes, bool)
+                or not isinstance(result.size_bytes, int)
+                or result.size_bytes < 0
+            ):
+                raise RuntimeLoRAPluginError(
+                    "runtime LoRA resolver returned an invalid size_bytes"
+                )
+            return result
 
         raise RuntimeLoRANotFoundError("runtime LoRA source was not found")

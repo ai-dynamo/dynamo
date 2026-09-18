@@ -46,9 +46,9 @@ def _make_prefill_handler():
         use_kv_events=True,
     )
     handler.engine_client = SimpleNamespace(
-        add_lora=AsyncMock(),
-        remove_lora=AsyncMock(),
-        reset_prefix_cache=AsyncMock(),
+        add_lora=AsyncMock(return_value=True),
+        remove_lora=AsyncMock(return_value=True),
+        reset_prefix_cache=AsyncMock(return_value=True),
         # LoRA MDC registration reads the engine-actual main-attention block
         # size from here (hybrid-attention models inflate it past the CLI's
         # engine_args.block_size=16 above).
@@ -62,6 +62,8 @@ def _make_prefill_handler():
     # Initialize LoRA state
     from dynamo.vllm.lora_state import LoRAState
 
+    handler._lora_capacity = None
+    handler._lora_capacity_guard = asyncio.Lock()
     handler.engine_args = handler.config.engine_args
     handler.dp_range = (0, 1)
     handler._served_model_name = "llama2-7b"
@@ -205,6 +207,7 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
     monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
     monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", register)
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
 
     results = [
         result
@@ -262,17 +265,13 @@ async def test_admin_unload_rejects_resident_request_time_adapter(monkeypatch):
     monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
 
     results = [
-        result
-        async for result in handler.unload_lora({"lora_name": adapter_key})
+        result async for result in handler.unload_lora({"lora_name": adapter_key})
     ]
 
     assert results == [
         {
             "status": "error",
-            "message": (
-                "Request-time LoRA adapters cannot be unloaded through the admin "
-                "endpoint"
-            ),
+            "message": "'dyn-lora-' names are reserved for request-time adapters",
         }
     ]
     assert adapter_key in handler._lora_state.loaded_loras

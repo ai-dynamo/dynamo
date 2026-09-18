@@ -3,17 +3,17 @@
 
 """Unit tests for dynamo.common.lora.manager.get_lora_manager singleton."""
 
+import sys
 import threading
 import time
-import sys
 import types
 
 import pytest
 
 from dynamo.common.lora import manager as manager_module
 from dynamo.common.lora.manager import get_lora_manager
-from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
 from dynamo.common.lora.once import OnceLock
+from dynamo.common.lora.runtime import RuntimeLoRAConfigurationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -82,6 +82,18 @@ class TestGetLoraManagerSingleton:
         assert isinstance(second, FlakyLoRAManager)
         assert attempts == 2
 
+    def test_explicit_manager_ignores_runtime_plugin_configuration(
+        self, fresh_singleton, monkeypatch
+    ):
+        monkeypatch.setenv("DYN_LORA_RUNTIME_LOAD_ENABLED", "true")
+        monkeypatch.setenv("DYN_LORA_ENABLED", "true")
+        monkeypatch.delenv("DYN_LORA_DOWNLOADER_PLUGIN", raising=False)
+
+        manager = get_lora_manager()
+
+        assert manager is not None
+        assert manager.runtime_lora_schemes == frozenset()
+
     def test_runtime_loading_requires_master_lora_switch(
         self, fresh_singleton, monkeypatch
     ):
@@ -92,7 +104,7 @@ class TestGetLoraManagerSingleton:
             RuntimeLoRAConfigurationError,
             match="requires DYN_LORA_ENABLED",
         ):
-            get_lora_manager()
+            get_lora_manager(configure_runtime=True)
 
     def test_runtime_loading_imports_and_registers_plugin(
         self, fresh_singleton, monkeypatch, tmp_path
@@ -117,7 +129,7 @@ class TestGetLoraManagerSingleton:
         monkeypatch.setenv("DYN_LORA_ALLOWED_SCHEMES", "wandb-artifact,s3")
         monkeypatch.setenv("DYN_LORA_PATH", str(tmp_path))
 
-        manager = get_lora_manager()
+        manager = get_lora_manager(configure_runtime=True)
 
         assert manager is not None
         assert manager.runtime_lora_schemes == frozenset({"wandb-artifact"})
