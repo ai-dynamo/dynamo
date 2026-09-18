@@ -62,7 +62,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Declares the Dynamo runtime compatibility version in the component's `main` image, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
+  Declares the Dynamo runtime version in the component's `main` image, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
 </ParamField>
 
 <ParamField path="replicas" type="integer">

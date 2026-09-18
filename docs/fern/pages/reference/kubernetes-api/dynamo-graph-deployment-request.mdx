@@ -24,7 +24,7 @@ Only `model` is unconditionally required by the schema. Other fields are optiona
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Default Dynamo runtime compatibility version for generated DGD components that do not set their own override. An explicit component value in `overrides.dgd` takes precedence. Set this when an effective generated component image has no parseable semantic-version tag or its tag does not identify the intended Dynamo runtime.
+  Default Dynamo runtime version for generated DGD components that do not set their own override. An explicit component value in `overrides.dgd` takes precedence. Set this when an effective generated component image has no parseable semantic-version tag or its tag does not identify the intended Dynamo runtime.
 
   Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change any image. See [Profiler image version compatibility](#profiler-image-version-compatibility).
 </ParamField>
