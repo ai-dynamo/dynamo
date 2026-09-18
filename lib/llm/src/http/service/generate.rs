@@ -622,14 +622,13 @@ fn preprocessed_from_generate_with_tracker(
         .project_output_options()
         .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
-    // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
-    // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
-    // tower/connector LoRA is enabled for an adapter request, fall back to
-    // token-only routing because vLLM scopes the MM identity by that adapter.
-    let mm_routing = if tower_connector_lora_enabled && lora_name.is_some() {
+    // The sidecar protocol does not expose whether tower/connector LoRA is
+    // active, so conservatively treat every adapter's MM identity as scoped.
+    let mm_routing = if lora_name.is_some() {
         tracing::debug!(
             target: "mm_routing",
-            "tower/connector LoRA is active; using token-only multimodal routing"
+            tower_connector_lora_enabled,
+            "LoRA request uses token-only multimodal routing"
         );
         None
     } else {
@@ -1996,7 +1995,7 @@ pub(crate) mod tests {
         );
 
         // A frontend-approved, marker-form hash must produce the same KV hash
-        // on the request and event paths, including ordinary language-only LoRA.
+        // on the request and event paths.
         let mm_identifier = "1234567890abcdef".repeat(4);
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 99, 20],
@@ -2010,30 +2009,20 @@ pub(crate) mod tests {
         .expect("deserialize request");
         let preprocessed = preprocessed_from_generate(
             request,
-            "adapter-a",
+            "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, false, Some("adapter-a")),
+            routing_metadata(4, false, None),
         )
-        .expect("build LoRA request");
+        .expect("build request");
         let routing = preprocessed
             .mm_routing_info
             .as_ref()
-            .expect("language-only LoRA keeps exact MM routing");
-        assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
-        );
+            .expect("base request keeps exact MM routing");
         let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
             &routing.routing_token_ids,
             4,
-            dynamo_kv_router::protocols::BlockHashOptions {
-                lora_name: Some("adapter-a"),
-                ..Default::default()
-            },
+            dynamo_kv_router::protocols::BlockHashOptions::default(),
         );
         let marked_identifier = preprocessed
             .extra_args
@@ -2061,7 +2050,6 @@ pub(crate) mod tests {
             7,
             &[10, 99, 99, 20],
             dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                lora_name: Some("adapter-a"),
                 mm_extra_info: Some(event_mm_info),
                 image_token_id: Some(99),
                 ..Default::default()
@@ -2282,30 +2270,39 @@ pub(crate) mod tests {
             "the worker setting alone does not activate adapter-scoped MM identity"
         );
 
-        let adapter_request: GenerateRequest =
-            serde_json::from_value(raw.clone()).expect("deserialize adapter request");
-        let adapter = preprocessed_from_generate(
-            adapter_request,
-            "adapter-a",
-            None,
-            "resolved-request",
-            routing_metadata(4, true, Some("adapter-a")),
-        )
-        .expect("build adapter request");
-        assert!(adapter.mm_routing_info.is_none());
-        assert_eq!(
-            adapter
-                .routing
+        for tower_connector_lora_enabled in [false, true] {
+            let adapter_request: GenerateRequest =
+                serde_json::from_value(raw.clone()).expect("deserialize adapter request");
+            let adapter = preprocessed_from_generate(
+                adapter_request,
+                "adapter-a",
+                None,
+                "resolved-request",
+                routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
+            )
+            .expect("build adapter request");
+            assert!(adapter.mm_routing_info.is_none());
+            assert_eq!(
+                adapter
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.lora_name.as_deref()),
+                Some("adapter-a")
+            );
+            assert!(
+                adapter
+                    .extra_args
+                    .as_ref()
+                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .is_none()
+            );
+            let envelope = adapter
+                .extra_args
                 .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
-        );
-        let envelope = adapter
-            .extra_args
-            .as_ref()
-            .and_then(|extra| extra.get("vllm_tito"))
-            .expect("vllm_tito envelope");
-        assert_eq!(envelope["features"], raw["features"]);
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope");
+            assert_eq!(envelope["features"], raw["features"]);
+        }
     }
 
     #[test]
