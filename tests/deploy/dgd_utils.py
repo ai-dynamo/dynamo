@@ -1708,7 +1708,7 @@ class ManagedDeployment:
             ) as f:
                 f.write(content)
 
-    async def _delete_deployment(self):
+    async def _delete_deployment(self, *, fail_on_timeout: bool = True):
         """Wait for the CR and its Pods to disappear before releasing the fixture."""
         if not self._deployment_name or self._custom_api is None:
             return
@@ -1775,9 +1775,22 @@ class ManagedDeployment:
             if not exists and not pods.items:
                 return
             if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"Deployment {self._deployment_name} or its Pods were not deleted within 120s"
+                pod_names = [
+                    getattr(getattr(pod, "metadata", None), "name", "<unknown>")
+                    for pod in pods.items
+                ]
+                message = (
+                    f"Deployment {self._deployment_name} or its Pods were not "
+                    f"deleted within 120s; CR present: {exists}; remaining Pods: "
+                    f"{pod_names}"
                 )
+                if fail_on_timeout:
+                    raise TimeoutError(message)
+                self._logger.warning(
+                    "%s; leaving final cleanup to the enclosing test environment",
+                    message,
+                )
+                return
             await asyncio.sleep(1)
 
     def port_forward(
@@ -1917,7 +1930,7 @@ class ManagedDeployment:
                     self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
-            await self._delete_deployment()
+            await self._delete_deployment(fail_on_timeout=False)
 
     async def __aenter__(self):
         try:

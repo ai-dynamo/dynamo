@@ -64,6 +64,23 @@ def test_release_catalog_covers_configured_n_minus_one_and_two():
     )
 
 
+def test_automated_workflows_use_the_guarded_release_line():
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/cross-version-compatibility.yml").read_text(),
+        Loader=yaml.BaseLoader,
+    )
+    triggers = workflow["on"]
+    assert {
+        triggers[event]["inputs"]["release_line"]["default"]
+        for event in ("workflow_dispatch", "workflow_call")
+    } == {DEFAULT_RELEASE_LINE}
+
+    for path in (".github/workflows/pr.yaml", ".github/workflows/nightly-ci.yml"):
+        caller = yaml.load((ROOT / path).read_text(), Loader=yaml.BaseLoader)
+        inputs = caller["jobs"]["cross-version-compatibility"]["with"]
+        assert "release_line" not in inputs
+
+
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])
 def test_example_patching_preserves_command_and_sets_component_versions(scenario):
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
@@ -247,7 +264,7 @@ async def test_cleanup_creates_log_dir_when_deployment_has_no_pods(tmp_path):
 
     assert deployment.cleanup_errors == []
     assert (log_dir / "events.log").read_text() == "test event"
-    deployment._delete_deployment.assert_awaited_once_with()
+    deployment._delete_deployment.assert_awaited_once_with(fail_on_timeout=False)
 
 
 @pytest.mark.parametrize("exit_code,fatal", [(0, False), (1, True)])
@@ -311,6 +328,31 @@ async def test_delete_timeout_is_reported(monkeypatch, tmp_path):
     )
     with pytest.raises(TimeoutError, match="not deleted"):
         await deployment._delete_deployment()
+
+
+async def test_delete_timeout_warns_during_cleanup(monkeypatch, tmp_path, caplog):
+    deployment = ManagedDeployment(
+        str(tmp_path), SimpleNamespace(name="test", api_version="v1beta1"), "test"
+    )
+    deployment._logger = logging.getLogger(__name__)
+    deployment._deployment_name = "test"
+    deployment._custom_api = SimpleNamespace(
+        delete_namespaced_custom_object=AsyncMock(),
+        get_namespaced_custom_object=AsyncMock(return_value={}),
+    )
+    pod = SimpleNamespace(metadata=SimpleNamespace(name="leftover-pod"))
+    deployment._core_api = SimpleNamespace(
+        list_namespaced_pod=AsyncMock(return_value=SimpleNamespace(items=[pod]))
+    )
+    times = iter([0, 121])
+    monkeypatch.setattr(
+        "tests.deploy.dgd_utils.time", SimpleNamespace(monotonic=lambda: next(times))
+    )
+
+    with caplog.at_level(logging.WARNING):
+        await deployment._delete_deployment(fail_on_timeout=False)
+
+    assert "remaining Pods: ['leftover-pod']" in caplog.text
 
 
 async def test_cleanup_failure_stops_session_without_replacing_body_error(
