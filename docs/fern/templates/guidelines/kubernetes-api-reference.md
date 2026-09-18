@@ -39,8 +39,7 @@ maximum, or pattern. Confirm those facts against the regenerated full reference 
 
 ## Generate the Full Reference
 
-The generation pipeline has two stages. `make -C deploy/operator generate-api-docs` runs both;
-`make check` depends on that target before checking for uncommitted changes.
+The generation pipeline has two stages. `make -C deploy/operator generate-api-docs` runs both.
 
 ### Generate both reference files
 
