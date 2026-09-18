@@ -261,14 +261,16 @@ def _directory_socket(backend_name: str) -> str:
     return os.environ.get(f"GMS_{engine}_DAEMON_SOCKET", "").strip()
 
 
-def _promote_content_directory_after_fence(backend_name: str, role: str) -> "set[int]":
-    """Promote this process to directory writer and collect protected HBM slots.
+def _promote_content_directory_after_fence(
+    backend_name: str, role: str
+) -> "tuple[set[int], set[tuple[int, int]] | None]":
+    """Promote the directory writer and collect exact protected HBM leases.
 
     Constructs the content directory from the environment (so it works without
     the caller threading a directory in), promotes the writer -- fencing the
-    crashed one -- and returns the union of HBM-resident slot ids so the
-    post-fence reclaim preserves those blocks (recoverable KV) instead of freeing
-    them and degrading failover to a full recompute.
+    crashed one -- and returns HBM slot ids together with their exact lease
+    generations. Reclaim validates those generations against each rank-local
+    lease ring so stale directory records cannot reserve reused pages.
     """
     from gms_kv_ring.common.content_directory import (
         ContentDirectory,
@@ -277,7 +279,7 @@ def _promote_content_directory_after_fence(backend_name: str, role: str) -> "set
 
     mode = resolve_directory_mode()
     if mode == "off":
-        return set()
+        return set(), set()
     if not os.environ.get("GMS_KV_DIRECTORY_MANIFEST", "").strip():
         message = (
             "GMS KV failover requires GMS_KV_DIRECTORY_MANIFEST so promotion "
@@ -286,14 +288,14 @@ def _promote_content_directory_after_fence(backend_name: str, role: str) -> "set
         if mode == "authoritative":
             raise RuntimeError(message)
         logger.warning("[GMS failover] %s %s", backend_name, message)
-        return set()
+        return set(), set()
     socket_path = _directory_socket(backend_name)
     if not socket_path:
         message = "GMS KV directory enabled without GMS_KV_DIRECTORY_SOCKET"
         if mode == "authoritative":
             raise RuntimeError(message)
         logger.warning("[GMS failover] %s %s", backend_name, message)
-        return set()
+        return set(), set()
     directory = ContentDirectory(
         socket_path,
         engine=_normalize_lease_engine_name(backend_name),
@@ -303,17 +305,21 @@ def _promote_content_directory_after_fence(backend_name: str, role: str) -> "set
     )
     started = time.monotonic()
     protected_blocks: set[int] = set()
+    protected_leases: set[tuple[int, int]] | None = None
     try:
         # ENGINE_ID is stable across process restarts. The external lock now
         # fences the former process, so force a fresh directory epoch even when
         # the writer ID is unchanged. This drops incomplete ACTIVE HBM entries
         # while preserving completion-confirmed READY blocks.
         epoch = directory.promote(force_new_epoch=True)
+        blocks_by_engine, leases_by_engine = directory.hbm_lease_inventory()
         protected_blocks.update(
-            block_id
-            for slot_ids in directory.hbm_inventory().values()
-            for block_id in slot_ids
+            block_id for slot_ids in blocks_by_engine.values() for block_id in slot_ids
         )
+        if leases_by_engine is not None:
+            protected_leases = {
+                lease for leases in leases_by_engine.values() for lease in leases
+            }
         logger.info(
             "[GMS failover] %s %s directory writer promoted epoch=%d "
             "protected_hbm_blocks=%d elapsed_ms=%.2f",
@@ -334,11 +340,14 @@ def _promote_content_directory_after_fence(backend_name: str, role: str) -> "set
         )
     finally:
         directory.close()
-    return protected_blocks
+    return protected_blocks, protected_leases
 
 
 def _reclaim_foreign_kv_leases_after_fence(
-    backend_name: str, role: str, protected_blocks: "set[int] | None" = None
+    backend_name: str,
+    role: str,
+    protected_blocks: "set[int] | None" = None,
+    protected_leases: "set[tuple[int, int]] | None" = None,
 ) -> None:
     """Best-effort orphan lease reclaim after this process owns failover.
 
@@ -347,8 +356,9 @@ def _reclaim_foreign_kv_leases_after_fence(
     foreign owners in the rank-local lease namespace are fenced leftovers from
     the previous primary and can be reclaimed to provide immediate HBM headroom.
 
-    ``protected_blocks`` (directory-advertised READY HBM slots) are preserved for
-    lazy adoption rather than freed.
+    ``protected_leases`` are directory-advertised READY HBM slot generations.
+    Only records whose rank-local generation still matches are preserved for
+    lazy adoption. ``protected_blocks`` remains for diagnostic compatibility.
     """
 
     if not _failover_reclaim_foreign_leases_enabled():
@@ -371,6 +381,7 @@ def _reclaim_foreign_kv_leases_after_fence(
             device,
             max_blocks_per_file=_failover_reclaim_max_blocks_per_file(),
             protected_blocks=protected_blocks,
+            protected_leases=protected_leases,
             namespace_suffix=default_kv_lease_namespace_suffix(engine),
         )
         elapsed_ms = (time.monotonic() - started) * 1000.0
@@ -426,6 +437,7 @@ async def run_gms_failover_post_lock_fence(
         )
         await asyncio.sleep(fence_ms / 1000.0)
     protected_blocks: set[int] = set()
+    protected_leases: set[tuple[int, int]] | None = None
     if os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower() != "off":
         # The lock holder must not release ownership while its blocking promotion
         # thread can still publish a generation. Shield it from task cancellation,
@@ -438,7 +450,7 @@ async def run_gms_failover_post_lock_fence(
         cancelled: asyncio.CancelledError | None = None
         while True:
             try:
-                protected_blocks = await asyncio.shield(promotion)
+                protected_blocks, protected_leases = await asyncio.shield(promotion)
                 break
             except asyncio.CancelledError as exc:
                 if promotion.cancelled():
@@ -450,7 +462,7 @@ async def run_gms_failover_post_lock_fence(
                 if not promotion.done():
                     continue
                 try:
-                    protected_blocks = promotion.result()
+                    protected_blocks, protected_leases = promotion.result()
                 except Exception:
                     logger.exception(
                         "[GMS failover] %s %s directory promotion failed while "
@@ -472,7 +484,10 @@ async def run_gms_failover_post_lock_fence(
         if cancelled is not None:
             raise cancelled
     _reclaim_foreign_kv_leases_after_fence(
-        backend_name, role, protected_blocks=protected_blocks
+        backend_name,
+        role,
+        protected_blocks=protected_blocks,
+        protected_leases=protected_leases,
     )
 
 
