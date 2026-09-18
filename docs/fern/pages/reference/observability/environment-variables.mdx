@@ -95,7 +95,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
 
-  NIXL compares the value case-insensitively, so `Y` and `TRUE` are also accepted. Any other value is an error.
+  NIXL compares the value case-insensitively but does not trim whitespace, so `Y` and `TRUE` are accepted while ` y` and `y ` are errors. Any other value is also an error.
 
   For SGLang operator port declarations, use `y` (case-insensitive). Other literal truthy values retain their existing port declarations to avoid rolling unchanged workloads on operator upgrade. Changing the custom resource value to `y` opts in to the additional rank ports and rolls the workload. Runtime telemetry still accepts all the truthy values listed above.
 
@@ -110,7 +110,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>
 
-<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer">
+<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="9090 (NIXL fallback)">
   Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Each NIXL agent binds its own exporter, so every agent needs a port of its own; two agents pointed at the same port leave the second exporter unable to bind.
 
   Give each worker a non-overlapping value when workers share a network namespace. Because each value is the base of an eight-port range (see below), `19090` for the prefill worker leaves `19098` as the next free base for the decode worker.
