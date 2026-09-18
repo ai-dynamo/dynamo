@@ -243,11 +243,12 @@ class ImageLoader:
                     image_url,
                     self._http_timeout,
                     policy=self._url_policy,
-                    # Keep payloads bound before they can occupy the shared
-                    # store. Preserve the legacy unbounded local-only path.
+                    # Bound downloads whenever shared caching is configured,
+                    # including requests that bypass caches for lack of scope.
+                    # Preserve the legacy unbounded cache-disabled path.
                     max_bytes=(
                         max_media_bytes()
-                        if self._shared_image_cache is not None and key is not None
+                        if self._shared_image_cache is not None
                         else None
                     ),
                 )
