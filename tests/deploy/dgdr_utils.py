@@ -115,8 +115,6 @@ def _deep_merge(target: dict[str, Any], source: dict[str, Any]) -> None:
 
 
 def _deep_setdefault(target: dict[str, Any], defaults: dict[str, Any]) -> None:
-    """Recursively fill missing values without replacing explicit overrides."""
-
     for key, value in defaults.items():
         if key not in target:
             target[key] = copy.deepcopy(value)
@@ -148,7 +146,9 @@ def _set_ci_profiling_job_defaults(spec: dict[str, Any]) -> None:
     if output_volume is None:
         output_volume = {"name": "profiling-output", "emptyDir": {}}
         volumes.append(output_volume)
-    output_volume.setdefault("emptyDir", {}).setdefault("sizeLimit", "1Gi")
+    empty_dir = output_volume.get("emptyDir")
+    if isinstance(empty_dir, dict):
+        empty_dir.setdefault("sizeLimit", "1Gi")
 
 
 def unique_name(config_: DGDRTestConfig, suffix: str) -> str:

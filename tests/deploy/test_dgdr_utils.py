@@ -15,6 +15,7 @@ from tests.deploy.dgdr_utils import (
     DGDRCleanupError,
     DGDRTestConfig,
     ManagedDGDR,
+    build_dgdr,
     parse_final_dgd,
     parse_served_model_ids,
     run_lifecycle,
@@ -158,6 +159,41 @@ def test_manifest_does_not_pass_real_backend_args_to_mocker(backend: str) -> Non
     overrides = dgdr["spec"]["overrides"]
     assert "trustRemoteCode" not in overrides
     assert "dgd" not in overrides
+
+
+def test_build_dgdr_preserves_pvc_backed_profiling_output() -> None:
+    dgdr = build_dgdr(
+        DGDRTestConfig(namespace="test-namespace", image="test"),
+        "test-request",
+        spec_overrides={
+            "overrides": {
+                "profilingJob": {
+                    "template": {
+                        "spec": {
+                            "volumes": [
+                                {
+                                    "name": "profiling-output",
+                                    "persistentVolumeClaim": {
+                                        "claimName": "profiling-pvc"
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    volumes = dgdr["spec"]["overrides"]["profilingJob"]["template"]["spec"]["volumes"]
+    output_volume = next(
+        volume for volume in volumes if volume["name"] == "profiling-output"
+    )
+
+    assert output_volume == {
+        "name": "profiling-output",
+        "persistentVolumeClaim": {"claimName": "profiling-pvc"},
+    }
 
 
 @pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
