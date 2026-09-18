@@ -8,6 +8,8 @@ import os
 
 import pytest
 
+from tests.router.common import _test_frontend_kv_routing
+from tests.router.helper import generate_random_suffix
 from tests.serve.common import (
     WORKSPACE_DIR,
     params_with_model_mark,
@@ -16,6 +18,7 @@ from tests.serve.common import (
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import chat_payload_default
+from tests.utils.payloads import ChatPayload
 from tests.utils.port_utils import reserved_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
@@ -27,6 +30,22 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
 )
+
+
+def _sidecar_worker_gpu_env(backend: str) -> dict[str, str]:
+    devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
+    env = {}
+    for index in range(2):
+        key = f"{backend.upper()}_WORKER{index + 1}_GPU"
+        device = os.environ.get(key)
+        if device is None:
+            assert len(devices) > index and devices[index].strip() not in (
+                "",
+                "-1",
+            ), f"Two visible GPUs are required; CUDA_VISIBLE_DEVICES={devices}"
+            device = devices[index].strip()
+        env[key] = device
+    return env
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -134,3 +153,99 @@ def test_serve_deployment(
             )
     else:
         run_serve_deployment(config, request, ports=dynamo_dynamic_ports)
+
+
+@pytest.mark.router
+@pytest.mark.sidecar
+@pytest.mark.e2e
+@pytest.mark.gpu_2
+@pytest.mark.pre_merge  # Guard native KV-event discovery on every sidecar change.
+@pytest.mark.model("Qwen/Qwen3-0.6B")
+@pytest.mark.timeout(780)
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "backend",
+    [
+        pytest.param(
+            "vllm",
+            marks=[
+                pytest.mark.vllm,
+                pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
+            ],
+        ),
+        pytest.param(
+            "sglang",
+            marks=[pytest.mark.sglang, pytest.mark.requested_sglang_kv_tokens(2048)],
+        ),
+    ],
+)
+def test_sidecar_kv_routing(
+    backend,
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
+    monkeypatch,
+):
+    monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
+    monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+    namespace = f"sidecar-kv-{generate_random_suffix()}"
+    block_size = 64
+    config = EngineConfig(
+        name=f"{backend}_kv_routing",
+        directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
+        script_name="agg_kv_router.sh",
+        script_args=["--disable-cuda-graph"] if backend == "sglang" else [],
+        marks=[],
+        model="Qwen/Qwen3-0.6B",
+        health_check_workers=True,
+        health_check_worker_count=2,
+        request_payloads=[
+            ChatPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Say hello."}],
+                    "max_tokens": 1,
+                    "temperature": 0,
+                },
+                expected_response=[],
+                expected_log=[],
+            )
+        ],
+        env={
+            "PYTHONUNBUFFERED": "1",
+            "DYN_NAMESPACE": namespace,
+            "DYN_COMPONENT": "backend",
+            "DYN_ENDPOINT": "generate",
+            "DYN_ROUTER_USE_KV_EVENTS": "true",
+            "DYN_ROUTER_TEMPERATURE": "0",
+            "DYN_ROUTER_MIN_INITIAL_WORKERS": "2",
+            "DYN_REQUEST_PLANE": "tcp",
+            "MAX_MODEL_LEN": "2048",
+            "VLLM_BLOCK_SIZE": str(block_size),
+            "SGLANG_PAGE_SIZE": str(block_size),
+        },
+    )
+    with reserved_ports(4, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+        engine_env = _sidecar_worker_gpu_env(backend)
+        for worker_index in range(2):
+            prefix = f"{backend.upper()}_WORKER{worker_index + 1}"
+            engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[worker_index * 2])
+            engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[worker_index * 2 + 1])
+            engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
+                dynamo_dynamic_ports.kv_event_ports[worker_index]
+            )
+        run_serve_deployment(
+            config,
+            request,
+            ports=dynamo_dynamic_ports,
+            extra_env=engine_env,
+            post_validation=lambda: _test_frontend_kv_routing(
+                frontend_port=dynamo_dynamic_ports.frontend_port,
+                system_ports=dynamo_dynamic_ports.system_ports,
+                namespace=namespace,
+                model_name=config.model,
+                block_size=block_size,
+            ),
+        )

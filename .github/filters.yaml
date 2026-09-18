@@ -353,6 +353,10 @@ sidecar:
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
   - 'tests/serve/test_sidecar.py'
+  - 'tests/router/common.py'
+  - 'tests/router/helper.py'
+  - 'tests/utils/prometheus.py'
+  - 'tests/utils/router_nvext.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.

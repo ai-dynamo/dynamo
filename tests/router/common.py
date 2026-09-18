@@ -20,11 +20,13 @@ from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
     get_runtime,
+    get_stored_kv_event_counts,
     managed_runtime,
     parse_sse_json_chunks,
     poll_for_worker_instances,
     send_inflight_requests,
     send_request_via_python_kv_router,
+    send_router_chat_request,
     verify_response_timing,
     wait_for_frontend_ready,
     wait_for_indexer_workers_active,
@@ -36,6 +38,7 @@ from tests.utils.router_logs import (
     select_kv_event_diagnostics,
     wait_for_kv_event_diagnostics,
 )
+from tests.utils.router_nvext import require_router_worker_id
 
 if TYPE_CHECKING:
     from tests.conftest import NatsServer
@@ -547,6 +550,133 @@ def _test_router_two_routers(
     finally:
         for kv_router in kv_routers:
             kv_router.__exit__(None, None, None)
+
+
+def _test_frontend_kv_routing(
+    *,
+    frontend_port: int,
+    system_ports: list[int],
+    namespace: str,
+    model_name: str,
+    block_size: int,
+) -> None:
+    """Verify engine events drive HTTP routing to two independently warmed workers."""
+    assert len(system_ports) == 2
+    url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    prompts = [
+        "Amber rabbits explore quiet meadows. " * 96,
+        "Violet submarines navigate distant oceans. " * 96,
+    ]
+
+    async def run_test() -> None:
+        with managed_runtime() as runtime:
+            worker_ids = sorted(
+                await poll_for_worker_instances(
+                    runtime.endpoint(f"{namespace}.backend.generate"), 2
+                )
+            )
+            assert len(worker_ids) == 2, worker_ids
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as session:
+
+                async def send(
+                    prompt: str,
+                    *,
+                    query_only: bool = False,
+                    worker_id: int | None = None,
+                ) -> tuple[int, float | None]:
+                    payload = {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 8,
+                        "temperature": 0,
+                        "stream": True,
+                        "nvext": {
+                            "extra_fields": ["worker_id", "timing"],
+                            "annotations": ["query_instance_id:"] if query_only else [],
+                        },
+                    }
+                    headers = (
+                        {
+                            "x-dynamo-worker-instance-id": str(worker_id),
+                            "x-dynamo-dp-rank": "0",
+                        }
+                        if worker_id is not None
+                        else None
+                    )
+                    nvext, generated = await send_router_chat_request(
+                        session, url, payload, headers
+                    )
+                    selected = require_router_worker_id({"nvext": nvext})
+                    selected_id = selected["decode_worker_id"]
+                    assert selected_id in worker_ids, selected
+                    assert selected["prefill_worker_id"] == selected_id, selected
+                    assert selected["decode_dp_rank"] == 0, selected
+                    hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
+                    if query_only:
+                        assert not generated, nvext
+                        assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
+                    else:
+                        assert generated, "Request completed without generating text"
+                        assert isinstance(hit_rate, (int, float)), nvext
+                        assert 0 <= hit_rate <= 1, nvext
+                    return selected_id, hit_rate
+
+                baselines = {
+                    port: await get_stored_kv_event_counts(session, port)
+                    for port in system_ports
+                }
+                for prompt in prompts:
+                    await send(prompt, query_only=True)
+                for prompt, worker_id in zip(prompts, worker_ids):
+                    selected, _ = await send(prompt, worker_id=worker_id)
+                    assert selected == worker_id, (selected, worker_id)
+
+                deadline = time.monotonic() + 60
+                observed = []
+                counts = {}
+                while time.monotonic() < deadline:
+                    observed = [
+                        await send(prompt, query_only=True) for prompt in prompts
+                    ]
+                    counts = {
+                        port: await get_stored_kv_event_counts(session, port)
+                        for port in system_ports
+                    }
+                    if all(
+                        selected == expected
+                        for (selected, _), expected in zip(observed, worker_ids)
+                    ) and all(
+                        all(
+                            current > baseline
+                            for current, baseline in zip(counts[port], baselines[port])
+                        )
+                        for port in system_ports
+                    ):
+                        break
+                    await asyncio.sleep(0.1)
+                else:
+                    raise AssertionError(
+                        f"KV events did not converge: expected workers={worker_ids}, "
+                        f"routing={observed}, Stored counters={counts}, baselines={baselines}"
+                    )
+
+                for prompt_index in (0, 0, 1, 0, 1, 1):
+                    selected, hit_rate = await send(prompts[prompt_index])
+                    assert selected == worker_ids[prompt_index], (
+                        prompt_index,
+                        selected,
+                        worker_ids,
+                    )
+                    assert hit_rate is not None and hit_rate >= 0.5, (
+                        prompt_index,
+                        selected,
+                        hit_rate,
+                    )
+
+    asyncio.run(run_test())
 
 
 def _test_session_affinity(
