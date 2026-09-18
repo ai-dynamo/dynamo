@@ -55,7 +55,17 @@ def wants_gateway(server_args) -> bool:
     )
 
 
-def build_gateway_engine() -> GatewayEngine:
+def build_gateway_engine():
+    # SGLang with Engine.attach_tokenizer_worker (sgl-project/sglang fix for #15157)
+    # returns a real Engine bound to a TokenizerWorker; older trees get the facade.
+    attach = getattr(sgl.Engine, "attach_tokenizer_worker", None)
+    if attach is not None:
+        engine = attach(int(os.environ[ENV_PARENT_PID]))
+        logging.info(
+            "gateway child pid=%d: attached via Engine.attach_tokenizer_worker",
+            os.getpid(),
+        )
+        return engine
     from sglang.srt.managers.multi_tokenizer_mixin import (
         get_tokenizer_worker_class,
         read_from_shared_memory,
@@ -97,9 +107,13 @@ async def serve_via_gateway_children(
         **engine._scheduler_init_result.scheduler_infos[0],
         "startup_time": engine.tokenizer_manager.startup_time,
     }
-    shm = write_data_for_multi_tokenizer(
-        engine.port_args, engine.server_args, scheduler_info
-    )
+    # An Engine that already published its args (patched SGLang) is left alone.
+    shm = getattr(engine, "_multi_tokenizer_shm", None)
+    owns_shm = shm is None
+    if owns_shm:
+        shm = write_data_for_multi_tokenizer(
+            engine.port_args, engine.server_args, scheduler_info
+        )
     env = {**os.environ, ENV_PARENT_PID: str(os.getpid())}
     argv = sys.argv[1:]
     procs = [
@@ -129,7 +143,8 @@ async def serve_via_gateway_children(
                 p.wait(timeout=60)
             except subprocess.TimeoutExpired:
                 p.kill()
-        try:
-            shm.unlink()
-        except FileNotFoundError:
-            pass
+        if owns_shm:
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
