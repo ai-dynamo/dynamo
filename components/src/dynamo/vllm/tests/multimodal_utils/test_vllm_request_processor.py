@@ -507,6 +507,74 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("standalone_audio_uuid", "video_uuids", "expected_uuids"),
+    [
+        (
+            "audio-key",
+            ["video-key", None],
+            {
+                "video": ["video-key", None],
+                "audio": ["audio-key", "video-key", None],
+            },
+        ),
+        (
+            None,
+            ["video-key", None],
+            {
+                "video": ["video-key", None],
+                "audio": [None, "video-key", None],
+            },
+        ),
+        (
+            "audio-key",
+            None,
+            {"audio": ["audio-key", None, None]},
+        ),
+    ],
+    ids=["all-modalities", "audio-without-uuid", "video-modality-omitted"],
+)
+async def test_audio_in_video_aligns_derived_audio_uuids(
+    standalone_audio_uuid, video_uuids, expected_uuids
+):
+    processor = _processor()
+    video_a, video_b = object(), object()
+    standalone_audio, audio_a, audio_b = object(), object(), object()
+    processor.video_loader.load_video_batch.return_value = [video_a, video_b]
+    processor.audio_loader.load_audio_batch.return_value = [standalone_audio]
+    processor.audio_loader.load_audio.side_effect = [audio_a, audio_b]
+
+    raw_uuids = {"audio_url": [standalone_audio_uuid]}
+    if video_uuids is not None:
+        raw_uuids["video_url"] = video_uuids
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "audio_url": [{"Url": "https://example.com/audio.wav"}],
+                "video_url": [
+                    {"Url": "https://example.com/a.mp4"},
+                    {"Url": "https://example.com/b.mp4"},
+                ],
+            },
+            "multi_modal_uuids": raw_uuids,
+            "mm_processor_kwargs": {"use_audio_in_video": True},
+        },
+        "request-audio-uuid-alignment",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert prepared.prompt["multi_modal_data"] == {
+        "video": [video_a, video_b],
+        "audio": [standalone_audio, audio_a, audio_b],
+    }
+    assert prepared.prompt["multi_modal_uuids"] == expected_uuids
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("video_item", "audio_error", "message"),
     [
         ({"Decoded": {"shape": [2, 4, 4, 3]}}, None, "non-URL video item"),
@@ -644,30 +712,35 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     parse_mm_data.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "unsupported_uuids",
-    [
-        {"video_url": ["video-key"]},
-        {"audio_url": "audio-key"},
-    ],
-)
-def test_build_tokens_prompt_rejects_user_audio_video_uuids(
-    unsupported_uuids: dict[str, object],
-) -> None:
+def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
     processor = _processor(unified_vision_chunk=True)
+    mm_data = {
+        "vision_chunk": [object(), object()],
+        "video": [object()],
+        "audio": [object(), object(), object()],
+    }
 
-    with pytest.raises(ValueError, match="must use the 'image_url' modality key"):
-        processor.build_tokens_prompt(
-            {
-                "token_ids": [1, 2, 3],
-                "multi_modal_uuids": {
-                    "image_url": ["image-key"],
-                    **unsupported_uuids,
-                },
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {
+                "image_url": ["image-key", None],
+                "video_url": ["video-key"],
+                "audio_url": [None, None, None],
             },
-            {"vision_chunk": [None], "video": [None], "audio": [None]},
-            None,
-        )
+        },
+        mm_data,
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": ["image-key", None],
+        "video": ["video-key"],
+    }
+
+
+def test_build_user_mm_uuids_returns_none_for_all_null() -> None:
+    assert mod._build_user_mm_uuids({"image_url": [None, None]}, False) is None
 
 
 @pytest.mark.parametrize(
@@ -675,7 +748,6 @@ def test_build_tokens_prompt_rejects_user_audio_video_uuids(
     [
         ("image-key", "must be an object"),
         ({"image_url": "image-key"}, "must be a list"),
-        ({"image": ["image-key"]}, "must use the 'image_url' modality key"),
         ({"image_url": [""]}, "non-empty strings or null"),
         ({"image_url": [123]}, "non-empty strings or null"),
     ],

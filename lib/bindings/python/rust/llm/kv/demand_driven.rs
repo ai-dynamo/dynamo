@@ -189,7 +189,7 @@ impl<T: 'static> Drop for DemandDrivenOwner<T> {
 
         // Python can release the stream outside Tokio. Keep the final Arc alive
         // until the PyO3 runtime drops it so nested router guards can spawn cleanup.
-        drop(pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+        drop(crate::bridge_runtime().spawn(async move {
             drop(state);
         }));
     }
@@ -218,7 +218,7 @@ impl DemandDrivenResponseStream {
     #[pyo3(name = "__anext__")]
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let source = self.source.state();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             loop {
                 let response = source
                     .next()
@@ -240,7 +240,7 @@ pub(super) fn process_request_to_stream<'p>(
     tracker: Option<Arc<RequestTracker>>,
     dispatch_span: Option<tracing::Span>,
 ) -> PyResult<Bound<'p, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         let stream = match dispatch_span {
             Some(span) => inner.generate(request).instrument(span).await,
             None => inner.generate(request).await,

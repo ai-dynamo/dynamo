@@ -31,6 +31,8 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_prefill_worker,
     init_multimodal_worker,
 )
+from dynamo.sglang.init_rerank import init_rerank
+from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -43,6 +45,10 @@ async def worker(argv: list[str] | None = None):
         argv = sys.argv[1:]
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
+
+    # Must run before any sgl.Engine is constructed: it changes how the engine
+    # launches its scheduler processes, each of which needs its own exporter port.
+    install_per_rank_nixl_prometheus_ports()
 
     if (
         config.server_args.load_format == "gms"
@@ -99,6 +105,10 @@ async def worker(argv: list[str] | None = None):
     elif config.dynamo_args.video_generation_worker:
         await init_video_diffusion(
             runtime, config, shutdown_endpoints, run_deferred_handlers
+        )
+    elif config.dynamo_args.rerank_worker:
+        await init_rerank(
+            runtime, config, shutdown_event, shutdown_endpoints, run_deferred_handlers
         )
     elif config.dynamo_args.embedding_worker:
         await init_embedding(
