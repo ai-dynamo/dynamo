@@ -33,7 +33,6 @@ use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
     WorkerWithDpRank,
 };
-use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, SequenceError, SequencePublisher,
     SequenceRequest,
@@ -362,6 +361,56 @@ impl SchedulerBookingCleanup {
     }
 }
 
+/// A booking whose release this handle owns until `commit` hands it over.
+/// Dropping an armed handle frees the booking through the scheduler's cleanup queue.
+#[doc(hidden)]
+#[must_use]
+pub struct BookingHandle {
+    booking: SchedulerBookingDescriptor,
+    cleanup: SchedulerBookingCleanup,
+    armed: bool,
+}
+
+impl std::fmt::Debug for BookingHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BookingHandle")
+            .field("booking", &self.booking)
+            .field("armed", &self.armed)
+            .finish()
+    }
+}
+
+impl BookingHandle {
+    /// Hand the booking to a longer-lived owner; the handle stops guarding it.
+    #[must_use]
+    pub fn commit(mut self) -> SchedulerBookingDescriptor {
+        self.armed = false;
+        SchedulerBookingDescriptor {
+            request_id: std::mem::take(&mut self.booking.request_id),
+            worker: self.booking.worker,
+            attempt_id: self.booking.attempt_id,
+        }
+    }
+
+    /// Free the booking now and wait for the scheduler to acknowledge it.
+    pub async fn release(mut self) -> Result<(), SequenceError> {
+        self.armed = false;
+        self.cleanup
+            .enqueue_acknowledged(self.booking.clone())
+            .wait()
+            .await
+    }
+}
+
+impl Drop for BookingHandle {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cleanup.enqueue(self.booking.clone());
+        }
+    }
+}
+
 /// Single-owner cleanup lease for one scheduler-tracked request.
 pub(crate) struct RequestLifecycleLease {
     cleanup: Arc<AdmissionCleanup>,
@@ -383,6 +432,20 @@ impl RequestLifecycleLease {
         if let Some(transfer) = self.transfer.take() {
             transfer.disarm();
         }
+    }
+
+    /// Hand the booking to its long-term owner: the lease stops guarding it.
+    #[must_use]
+    pub fn commit(mut self) -> Option<SchedulerBookingDescriptor> {
+        let booking = match self.transfer.as_ref().map(|transfer| transfer.state.lock()) {
+            Some(state) => match &*state {
+                AdmissionLifecycleState::Booking(booking) => Some(booking.clone()),
+                _ => None,
+            },
+            None => None,
+        };
+        self.disarm();
+        booking
     }
 }
 
@@ -414,6 +477,7 @@ struct SchedulerQueueActor<
     pending: PolicyQueue<QueuedRequest>,
     cleanup: Arc<AdmissionCleanup>,
     profile: PolicyProfile,
+    is_queueing_enabled: bool,
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
@@ -449,12 +513,12 @@ pub struct SchedulerQueue<
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
-    slots: Arc<ActiveSequencesMultiWorker<P>>,
-    workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     queueing_enabled: bool,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
-    _marker: PhantomData<fn() -> (Sel, RF)>,
+    #[allow(clippy::type_complexity)]
+    // Covariant type markers, without ownership or auto-trait bounds.
+    _marker: PhantomData<fn() -> (P, C, Sel, RF)>,
 }
 
 impl<
@@ -553,11 +617,12 @@ impl<
             pending,
             cleanup: Arc::clone(&cleanup),
             profile,
+            is_queueing_enabled: queueing_enabled,
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
-            slots: Arc::clone(&slots),
-            workers_with_configs: workers_with_configs.clone(),
+            slots,
+            workers_with_configs,
             start_time: Instant::now(),
             block_size,
             selector,
@@ -575,8 +640,6 @@ impl<
             pending_count,
             pending_isl_tokens,
             class_counters,
-            slots,
-            workers_with_configs,
             queueing_enabled,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
             non_max_overlap_selection_observer,
@@ -592,29 +655,6 @@ impl<
     RF: OverlapScoresRefresh + Send + Sync + 'static,
 > SchedulerQueue<P, C, Sel, RF>
 {
-    /// Register externally-provided workers in the slot tracker.
-    ///
-    /// Looks up DP rank/size from the discovery watch channel; defaults to
-    /// `(0, 1)` for workers not yet known to discovery.
-    pub fn register_workers(&self, worker_ids: &std::collections::HashSet<u64>) {
-        let discovery_workers = self.workers_with_configs.borrow();
-        for &worker_id in worker_ids {
-            let (dp_start, dp_size) = discovery_workers
-                .get(&worker_id)
-                .map(|runtime_config| {
-                    (
-                        runtime_config.data_parallel_start_rank(),
-                        runtime_config.data_parallel_size(),
-                    )
-                })
-                .unwrap_or((0, 1));
-            let range = WorkerDpRange::new(worker_id, dp_start, dp_size);
-            if let Err(error) = self.slots.upsert_worker(range) {
-                tracing::warn!(worker_id, %error, "Invalid externally-provided worker topology");
-            }
-        }
-    }
-
     /// Install the observer for admitted selections that sacrifice KV overlap.
     ///
     /// Returns `false` when an observer is already installed.
@@ -723,6 +763,15 @@ impl<
         }
     }
 
+    /// An armed handle for an existing booking.
+    pub(crate) fn booking_handle(&self, booking: SchedulerBookingDescriptor) -> BookingHandle {
+        BookingHandle {
+            booking,
+            cleanup: self.booking_cleanup(),
+            armed: true,
+        }
+    }
+
     /// Select a worker from current scheduler state without entering admission.
     ///
     /// This is for advisory policy probes that must not wait in the router
@@ -758,7 +807,7 @@ impl<
     pub(crate) async fn mark_prefill_completed_if_booking(
         &self,
         booking: SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
+    ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.admission_tx
             .send(AdmissionCommand::MarkPrefillCompleted { booking, ack_tx })
@@ -767,7 +816,6 @@ impl<
         ack_rx
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?
-            .map(|_| ())
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
@@ -843,10 +891,6 @@ impl<
             pending_isl_tokens: counters.pending_isl_tokens.load(AtomicOrdering::Relaxed),
             pending_cached_tokens: counters.pending_cached_tokens.load(AtomicOrdering::Relaxed),
         })
-    }
-
-    pub fn supports_overlap_refresh(&self) -> bool {
-        self.supports_overlap_refresh
     }
 
     fn prepare_block_hashes_for_refresh(
@@ -979,6 +1023,13 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
     ) -> bool {
         let decay_now = Instant::now();
+        if !self.is_queueing_enabled {
+            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+        }
+        let available = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider(&request));
         // Synthetic and explicit selections avoid cache work. Family classification
         // samples overlap once and reuses it if the request enters queue storage.
         let (class_index, snapshot) = if let Some(class_index) = self
@@ -988,7 +1039,7 @@ impl<
             (class_index, None)
         } else {
             let workers = self.workers_with_configs.borrow();
-            let snapshot = Self::snapshot_for_with(&request, &workers);
+            let snapshot = Self::snapshot_for_with(&request, &workers, available.as_deref());
             let class_index = self
                 .profile
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
@@ -996,13 +1047,20 @@ impl<
         };
         let class = self.profile.class(class_index);
         let should_queue = self.should_queue(class_index, class, || {
-            self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
+            self.all_workers_prefill_busy(
+                class,
+                request
+                    .eligibility()
+                    .with_available_workers(available.as_deref()),
+                decay_now,
+            )
         });
         if !should_queue {
             return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
         }
 
-        let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
+        let snapshot =
+            snapshot.unwrap_or_else(|| self.snapshot_for(&request, available.as_deref()));
         tracing::debug!(policy_class = class.name, "queueing request");
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
@@ -1053,18 +1111,23 @@ impl<
         class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
     }
 
-    fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
+    fn snapshot_for(
+        &self,
+        request: &SchedulingRequest,
+        available: Option<&HashSet<WorkerId>>,
+    ) -> QueueSnapshot {
         let workers = self.workers_with_configs.borrow();
-        Self::snapshot_for_with(request, &workers)
+        Self::snapshot_for_with(request, &workers, available)
     }
 
     fn snapshot_for_with(
         request: &SchedulingRequest,
         workers: &HashMap<WorkerId, C>,
+        available: Option<&HashSet<WorkerId>>,
     ) -> QueueSnapshot {
         // Cache overlap is sampled once and reused for classification, queue
         // limits, ordering, DRR cost, and counters.
-        let context = SchedulingContext::new(request, workers);
+        let context = SchedulingContext::new(request, workers).with_available_workers(available);
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
@@ -1175,13 +1238,20 @@ impl<
 
     fn has_dispatchable_ready_head(&self) -> bool {
         let active_tokens = self.slots.active_tokens(Instant::now());
-        let configs = self.workers_with_configs.borrow();
         self.pending.any_ready_head(|_, class, queued| {
+            let available = self
+                .available_worker_provider
+                .as_ref()
+                .and_then(|provider| provider(&queued.request));
+            let configs = self.workers_with_configs.borrow();
             !Self::all_workers_prefill_busy_with(
                 &active_tokens,
                 &configs,
                 class,
-                queued.request.eligibility(),
+                queued
+                    .request
+                    .eligibility()
+                    .with_available_workers(available.as_deref()),
             )
         })
     }
@@ -1212,8 +1282,11 @@ impl<
             let decay_now = Instant::now();
             let active_tokens = self.slots.active_tokens(decay_now);
             let popped = {
-                let configs = self.workers_with_configs.borrow();
+                let provider = self.available_worker_provider.as_ref();
+                let workers = &self.workers_with_configs;
                 self.pending.pop_next(|_, class, queued| {
+                    let available = provider.and_then(|provider| provider(&queued.request));
+                    let configs = workers.borrow();
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
@@ -1221,7 +1294,10 @@ impl<
                         &active_tokens,
                         &configs,
                         class,
-                        queued.request.eligibility(),
+                        queued
+                            .request
+                            .eligibility()
+                            .with_available_workers(available.as_deref()),
                     )
                 })
             };
@@ -1300,14 +1376,15 @@ impl<
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
 
+        let available_worker_ids = self
+            .available_worker_provider
+            .as_ref()
+            .and_then(|provider| provider(request));
+
         {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
                 .overloaded_worker_provider
-                .as_ref()
-                .and_then(|provider| provider());
-            let available_worker_ids = self
-                .available_worker_provider
                 .as_ref()
                 .and_then(|provider| provider());
             let mut eligibility = request
@@ -1661,6 +1738,7 @@ mod tests {
     use crate::scheduling::OverlapSignals;
     use crate::scheduling::types::{KvSchedulerError, ScheduleMode};
     use crate::scheduling::{RefreshedOverlap, RouterPolicyConfig};
+    use crate::sequences::topology::WorkerDpRange;
     use crate::sequences::{ActiveSequencesMultiWorker, SequencePublisher};
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
     use crate::{DefaultWorkerSelector, WorkerInputs, WorkerSelector};
@@ -1702,6 +1780,82 @@ mod tests {
             panic!("admitted cleanup must carry the exact booking");
         };
         assert_eq!(cleanup, booking);
+    }
+
+    fn book_directly(
+        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        request_id: &str,
+    ) -> SchedulerBookingDescriptor {
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt_id = slots
+            .add_request_admitted(
+                crate::sequences::SequenceRequest {
+                    request_id: request_id.to_string(),
+                    token_sequence: None,
+                    track_prefill_tokens: true,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                },
+                Instant::now(),
+            )
+            .expect("worker 0 is registered");
+        SchedulerBookingDescriptor {
+            request_id: request_id.to_string(),
+            worker,
+            attempt_id,
+        }
+    }
+
+    async fn wait_freed(
+        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        booking: &SchedulerBookingDescriptor,
+    ) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while slots.has_booking(booking) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("booking was freed");
+    }
+
+    /// The handle frees its booking exactly when it is dropped armed; `commit`
+    /// hands the booking over untouched and `release` frees it with an ack.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn booking_handle_frees_only_while_armed() {
+        let (queue, slots) = make_queue(1, 16, 512, Some(0.0));
+
+        let armed = book_directly(&slots, "armed");
+        drop(queue.booking_handle(armed.clone()));
+        wait_freed(&slots, &armed).await;
+
+        let committed = book_directly(&slots, "committed");
+        let handle = queue.booking_handle(committed.clone());
+        let request_id_ptr = handle.booking.request_id.as_ptr();
+        let descriptor = handle.commit();
+        assert_eq!(descriptor, committed);
+        assert_eq!(descriptor.request_id.as_ptr(), request_id_ptr);
+
+        // The cleanup queue drains in order, so an acknowledged release
+        // enqueued after the commit proves the commit enqueued nothing.
+        let released = book_directly(&slots, "released");
+        queue
+            .booking_handle(released.clone())
+            .release()
+            .await
+            .expect("acknowledged release");
+        assert!(
+            !slots.has_booking(&released),
+            "release frees before it returns"
+        );
+        assert!(
+            slots.has_booking(&committed),
+            "a committed handle leaves the booking to its new owner"
+        );
+        slots.free(&committed.request_id, decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
     }
 
     struct DropResponseOnLoadPublisher {
@@ -3144,7 +3298,7 @@ policy_classes:
     #[tokio::test(flavor = "multi_thread")]
     async fn hard_availability_provider_filters_unpinned_and_pinned_selection() {
         let available_worker_provider: WorkerAvailabilityProvider =
-            Arc::new(|| Some(Arc::new(HashSet::from([1]))));
+            Arc::new(|_| Some(Arc::new(HashSet::from([1]))));
         let (queue, slots) =
             make_queue_with_providers(2, 16, 256, None, Some(available_worker_provider));
 
@@ -3167,10 +3321,9 @@ policy_classes:
         ));
     }
 
-    /// Simulates the EPP path: router starts with zero workers (skip_initial_worker_wait),
-    /// then register_workers lazily injects workers before routing.
+    /// A queue starting with zero workers can route after slots and configs arrive.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_register_workers_lazy_epp_path() {
+    async fn test_worker_updates_after_empty_start() {
         let block_size = 16;
         let isl = 512;
 
@@ -3186,10 +3339,10 @@ policy_classes:
                 resp,
                 Err(crate::scheduling::types::KvSchedulerError::NoEndpoints)
             ),
-            "expected NoEndpoints before register_workers, got {resp:?}"
+            "expected NoEndpoints before worker updates, got {resp:?}"
         );
 
-        // Lazily register two workers in the slot tracker (EPP supplies pod list)
+        // Add two workers to the slot tracker, then publish their configs.
         slots.upsert_worker(WorkerDpRange::new(100, 0, 1)).unwrap();
         slots.upsert_worker(WorkerDpRange::new(200, 0, 1)).unwrap();
 
@@ -3228,9 +3381,9 @@ policy_classes:
             .unwrap();
     }
 
-    /// Register_workers is additive: calling with a new set does NOT remove old workers.
+    /// Upserting a new worker preserves existing workers.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_register_workers_additive() {
+    async fn test_worker_updates_are_additive() {
         let block_size = 16;
         let isl = 256;
 

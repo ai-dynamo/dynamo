@@ -315,7 +315,14 @@ def test_engine_generate_capability_registration_gate(
 
 def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     handler = object.__new__(DecodeWorkerHandler)
-    handler.engine = SimpleNamespace()
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            pause_generation=lambda: None,
+            continue_generation=lambda: None,
+            release_memory_occupation=lambda: None,
+            resume_memory_occupation=lambda: None,
+        )
+    )
     handler.generate_endpoint = object()
     handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
 
@@ -340,6 +347,10 @@ def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     assert {path for path, _ in registered_routes} >= {
         "control/start_profile",
         "control/stop_profile",
+        "pause_generation",
+        "continue_generation",
+        "release_memory_occupation",
+        "resume_memory_occupation",
     }
 
 
@@ -1174,6 +1185,7 @@ async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
     ("overrides", "role"),
     [
         ({"embedding_worker": True}, "embedding"),
+        ({"rerank_worker": True}, "rerank"),
         ({"multimodal_encode_worker": True}, "dedicated multimodal"),
         ({"multimodal_worker": True}, "dedicated multimodal"),
         ({"image_diffusion_worker": True}, "image diffusion"),
@@ -1647,6 +1659,7 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["ignore_weights"] is True
     assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data
