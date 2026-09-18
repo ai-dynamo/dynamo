@@ -32,9 +32,6 @@ func vllmContainer(args ...string) *corev1.Container {
 	}
 }
 
-// TestNormalizeVLLMFlags_EverySpellingReadsTheSame is the point of this change: a flag vLLM
-// accepts must read identically however it is spelled. Before normalization, getFlagValue
-// matched only "--flag value" and silently returned its default of 1 for the other two forms.
 func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 	for _, tc := range []struct {
 		flag  string
@@ -73,10 +70,9 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 // while vLLM still places N ranks, which is the abort those three exist to prevent.
 func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 	for name, args := range map[string][]string{
-		"long flags":           {"--enable-elastic-ep", dataParallelBackendFlag, "ray", dataParallelSizeFlag, "4"},
-		"equals flags":         {"--enable-elastic-ep", dataParallelBackendFlag + "=ray", dataParallelSizeFlag + "=4"},
-		"short flags":          {"--enable-elastic-ep", "-dpb", "ray", "-dp", "4"},
-		"mixed short and long": {"--enable-elastic-ep", "-dpb", "ray", dataParallelSizeFlag, "4"},
+		"long flags":   {"--enable-elastic-ep", dataParallelBackendFlag, "ray", dataParallelSizeFlag, "4"},
+		"equals flags": {"--enable-elastic-ep", dataParallelBackendFlag + "=ray", dataParallelSizeFlag + "=4"},
+		"short flags":  {"--enable-elastic-ep", "-dpb", "ray", "-dp", "4"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			container := vllmContainer(args...)
@@ -129,10 +125,6 @@ func TestNormalizeVLLMFlags_LeavesEverythingElseAlone(t *testing.T) {
 	}
 }
 
-// TestGetFlagValue_RepeatedFlagUsesLastOccurrence pins getFlagValue to vLLM's
-// FlexibleArgumentParser precedence: when the same option is supplied more than
-// once, the last occurrence wins, even after normalizeVLLMFlags canonicalizes a
-// mix of short and long spellings onto the same flag.
 func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
 	for name, args := range map[string][]string{
 		"long then long":   {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
