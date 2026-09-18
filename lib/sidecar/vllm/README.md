@@ -120,18 +120,9 @@ to that port to trusted consumers because KV events contain request token IDs.
 
 ### Native Generate compatibility
 
-`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed
-in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421). The sidecar
-therefore does not advertise `vllm_inference_v1_generate`. Aggregated and decode
-requests from v1.4 frontends can still use the legacy
-`extra_args.vllm_tito.sampling_params` envelope for controls already preserved
-in the typed request: `max_tokens`, `min_tokens`, `ignore_eos`, `logprobs`,
-`prompt_logprobs`, and `skip_special_tokens`. Other sampling settings fail
-with an explicit unsupported-request error.
-Use the chat/completions APIs with the supported typed controls instead.
-Prefill and encode still use their canonical one-token request; they do not
-apply decode sampling JSON. Native Generate can be enabled after an upstream
-protocol release includes both the payload and its capability flag.
+`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421), so the sidecar projects typed controls into the gRPC request and advertises `vllm_inference_v1_generate`. During rolling upgrades, v1.4 frontends can supply the legacy `extra_args.vllm_tito.sampling_params` envelope; canonical typed fields take precedence when both are present. Requests that rely on distinctions proto 0.3 cannot represent, such as explicit `top_k=0`, `top_k=-1`, or `min_p=0`, fail explicitly instead of silently changing sampling behavior.
+
+Prefill and encode use their canonical one-token request and do not apply decode sampling controls.
 
 ### Runtime compatibility
 
