@@ -257,19 +257,6 @@ vLLM and SGLang take tensor/pipeline/data parallelism as CLI flags (covered in t
 
 You normally do not need to set the top-level `spec.backendFramework` field — the operator infers the backend from the worker command. Set it explicitly (`vllm`, `sglang`, or `trtllm`) only when a feature needs the framework known up front, such as GMS failover or multinode TensorRT-LLM.
 
-For LPX, set `type: lpx`, `lpx.buildId`, and the required [agent and conductor roles](../../reference/kubernetes-api/dynamo-component-deployment.mdx#spec-reference). For LP20 and LP30, role templates own images, commands or image entrypoints, runtime arguments and environment, init containers, probes, runtime storage, and security contexts.
-
-Configure Nova in the conductor template:
-
-| Pipeline | Model environment bindings | Resolved-partition directory |
-| --- | --- | --- |
-| Single | `NOVA_MODEL_PATH=$(LPX_MODEL_PATH)` | `NOVA_RESOLVED_PARTITIONS_DIR` |
-| `NOVA_PIPELINE_TYPE=SpecDecode` | `NOVA_DRAFT_MODEL_PATH=$(LPX_DRAFT_MODEL_PATH)`, `NOVA_TARGET_MODEL_PATH=$(LPX_TARGET_MODEL_PATH)` | `NOVA_DRAFT_RESOLVED_PARTITIONS_DIR`, `NOVA_TARGET_RESOLVED_PARTITIONS_DIR` |
-
-Dynamo resolves these model paths from each `buildId` and the model-storage mount; templates need no registry or cache-layout paths. Mount the generated `config` volume at `/configs` and set the resolved-partition variables above to `/configs`. Dynamo retains this ConfigMap for selected partition files; it generates no Nova model or datacenter TOML. Nova reads model defaults from the build manifests. Put runtime overrides, such as `NOVA_AGENT_CONNECT_TIMEOUT` and `NOVA_AGENT_SETUP_TIMEOUT`, in the template.
-
-Include `--allocation` and `$(LPX_ALLOCATION)` in Nova's arguments to consume the operator's allocation. All LPX components share one LPX deployment and PodCliqueSet, separate from ordinary components.
-
 For per-backend setup and tuning, see [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md), [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md), and [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md).
 
 > [!NOTE]

@@ -104,7 +104,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Native Pod template for this role. LPX-only; required for every declared role. Each template requires a `main` container with an explicit image. Agent and conductor templates are independent.
 
-    The template owns runtime startup and configuration for LP20 and LP30. See [Deploy with DGD](../../kubernetes/model-deployment/deploy-with-dgd.md) for Nova inputs and the operator's model-path, partition, and allocation bindings.
+    The template owns runtime startup and configuration for LP20 and LP30.
 
     <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
   </ParamField>
