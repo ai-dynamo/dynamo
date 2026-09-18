@@ -7185,6 +7185,22 @@ mod tests {
     }
 
     #[test]
+    fn test_video_fold_preserves_backend_invalid_argument() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("unsupported video control")
+            .build();
+        let response =
+            non_streaming_aggregation_error_response(error, "Failed to fold videos stream");
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(response.1.message, "Invalid request");
+    }
+
+    #[test]
     fn test_cancelled_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 

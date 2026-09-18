@@ -2981,6 +2981,7 @@ dependencies = [
  "log",
  "lru 0.16.4",
  "mio 1.2.2",
+ "nix 0.30.1",
  "notify",
  "nuid",
  "once_cell",

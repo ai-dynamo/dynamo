@@ -2501,6 +2501,7 @@ dependencies = [
  "log",
  "lru",
  "mio 1.2.2",
+ "nix 0.30.1",
  "notify",
  "nuid",
  "once_cell",
@@ -5282,6 +5283,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
