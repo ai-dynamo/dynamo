@@ -4,6 +4,7 @@
 """Unit tests for TRTLLM backend components."""
 
 import asyncio
+import logging
 import os
 import re
 import warnings
@@ -843,8 +844,50 @@ async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, capl
             )
 
     assert exc_info.value.engine_args["max_batch_size"] == 999
-    assert any(
-        "extra_engine_args will replace max_batch_size" in r.message
-        and "999" in r.message
+    matching = [
+        r
         for r in caplog.records
+        if "extra_engine_args will replace max_batch_size" in r.message
+        and "999" in r.message
+    ]
+    assert matching, "expected an extra_engine_args collision record"
+    # Recipe YAMLs legitimately override arg_map defaults, so this path must
+    # log at INFO, not WARNING (caplog.at_level("INFO") captures both).
+    assert all(r.levelno == logging.INFO for r in matching)
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_extra_engine_args_non_mapping_root_keeps_clear_error(
+    tmp_path, monkeypatch
+):
+    """A YAML root that is not a mapping is rejected with the upstream message.
+
+    The collision warner skips non-mapping roots so that
+    update_llm_args_with_extra_options still raises its clear
+    `Configuration file root must be a mapping.` error instead of the
+    AttributeError the warner would otherwise hit.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("- one\n- two\n")
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
     )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+    ):
+        with pytest.raises(ValueError, match="root must be a mapping"):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
