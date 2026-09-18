@@ -158,15 +158,11 @@ class PrefillHandler(HandlerBase):
         ep_disaggregated_params = None
 
         if self.multimodal_processor:
-            # Extract messages from extra_args (set by Rust preprocessor) or fall back to direct field
-            messages = request.get("extra_args", {}).get(
-                "messages", request.get("messages", [])
-            )
             (
                 _,
                 image_urls,
                 embedding_paths,
-            ) = self.multimodal_processor.extract_prompt_and_media(messages)
+            ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
