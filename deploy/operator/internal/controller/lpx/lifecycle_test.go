@@ -1796,6 +1796,7 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 				ResourceClaims: []corev1.PodResourceClaim{{Name: "gpu", ResourceClaimTemplateName: ptr.To("gpu")}},
 				Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "cyborg-runtime",
+					Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}},
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "config", MountPath: "/configs"},
 						{Name: consts.ModelStorageVolumeName, MountPath: "/models"},

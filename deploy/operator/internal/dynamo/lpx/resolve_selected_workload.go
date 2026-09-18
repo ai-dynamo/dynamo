@@ -154,10 +154,19 @@ func validateSelectedConductor(
 		if err != nil {
 			return fmt.Errorf("component %q conductor resources: %w", component.ComponentName, err)
 		}
-		if len(template.Spec.ResourceClaims) == 0 && count <= 0 {
-			return fmt.Errorf("component %q conductor requires resourceClaims or a positive %s request", component.ComponentName, commonconsts.KubeResourceGPUNvidia)
+		if count > 0 {
+			return nil
 		}
-		return nil
+
+		// A Pod claim supplies devices only to containers that reference its local name.
+		for _, claim := range container.Resources.Claims {
+			for _, podClaim := range template.Spec.ResourceClaims {
+				if claim.Name == podClaim.Name {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("component %q conductor main container requires a declared resourceClaim or a positive %s request", component.ComponentName, commonconsts.KubeResourceGPUNvidia)
 	}
 
 	// Only the LPU-only serving template materializes a renamed conductor container.

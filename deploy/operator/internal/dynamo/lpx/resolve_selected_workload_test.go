@@ -64,11 +64,59 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	source := staticBuildSnapshotSource{"build": snapshot}
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
-	require.ErrorContains(t, err, "requires resourceClaims or a positive nvidia.com/gpu request")
+	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
 	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
-	require.ErrorContains(t, err, "requires resourceClaims or a positive nvidia.com/gpu request")
+	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
+
+	t.Log("Validate claim consumption by the Cyborg main container")
+	for _, test := range []struct {
+		name                         string
+		claims                       []corev1.ResourceClaim
+		declared, sidecar, scalarGPU bool
+		wantErr                      bool
+	}{
+		{name: "unused claim", declared: true, wantErr: true},
+		{name: "sidecar-only claim", declared: true, sidecar: true, wantErr: true},
+		{name: "undeclared claim", claims: []corev1.ResourceClaim{{Name: "gpu"}}, wantErr: true},
+		{name: "mismatched claim", declared: true, claims: []corev1.ResourceClaim{{Name: "missing"}}, wantErr: true},
+		{name: "external name is not the alias", declared: true, claims: []corev1.ResourceClaim{{Name: "external-gpu"}}, wantErr: true},
+		{name: "consumed claim", declared: true, claims: []corev1.ResourceClaim{{Name: "gpu"}}},
+		{name: "scalar GPU with unused claim", declared: true, scalarGPU: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author independent Pod and main-container claim references")
+			candidate := dgd.DeepCopy()
+			pod := &candidate.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec
+			pod.Containers[0].Resources.Claims = test.claims
+			if test.declared {
+				pod.ResourceClaims = []corev1.PodResourceClaim{
+					{Name: "other", ResourceClaimName: ptr.To("external-other")},
+					{Name: "gpu", ResourceClaimName: ptr.To("external-gpu")},
+				}
+			}
+			if test.sidecar {
+				pod.Containers = append(pod.Containers, corev1.Container{
+					Name: "sidecar", Image: "sidecar", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}},
+				})
+			}
+			if test.scalarGPU {
+				pod.Containers[0].Resources.Limits = corev1.ResourceList{corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1")}
+			}
+			before := candidate.DeepCopy()
+
+			t.Log("Require scalar GPUs or a claim consumed by main without rewriting the template")
+			_, err := ResolveSelectedWorkload(t.Context(), candidate, source)
+			if test.wantErr {
+				require.ErrorContains(t, err, "conductor main container requires a declared resourceClaim")
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, before, candidate)
+		})
+	}
+
 	conductor.PodTemplate.Spec.Containers[0].Resources.Limits = corev1.ResourceList{
 		corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
 	}
