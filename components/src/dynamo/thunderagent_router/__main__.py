@@ -22,14 +22,8 @@ from typing import Any, Optional
 
 import uvloop
 
-from dynamo.llm import (
-    KvRouter,
-    ModelInput,
-    ModelRuntimeConfig,
-    ModelType,
-    WorkerType,
-    register_model,
-)
+from dynamo._internal import ModelDeploymentCard
+from dynamo.llm import KvRouter, ModelType
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.thunderagent_router.args import (
@@ -44,15 +38,6 @@ from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-
-
-def _publish_sglang_generate_capability(
-    runtime_config: ModelRuntimeConfig,
-) -> None:
-    """Advertise native SGLang generate without importing SGLang by default."""
-    from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
-
-    runtime_config.set_engine_specific(SGLANG_GENERATE_CAPABILITY, "true")
 
 
 def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
@@ -143,6 +128,7 @@ class ThunderAgentRouterHandler:
         self._kv_router: Optional[KvRouter] = None
         self._capacity: Optional[WorkerCapacityProvider] = None
         self._scheduler: Optional[ThunderAgentScheduler] = None
+        self.backend_model_card_json: Optional[str] = None
         self._worker_id_extract_warned = False
         self._unpinned_warned_at = 0.0
         self._stat_requests_total = 0
@@ -166,6 +152,10 @@ class ThunderAgentRouterHandler:
         worker_client = await worker_endpoint.client()
         self._capacity = WorkerCapacityProvider(worker_endpoint, worker_client)
         self._capacity.start()
+        if self._config.model_name:
+            self.backend_model_card_json = (
+                await self._capacity.wait_for_consistent_model_card()
+            )
 
         self._scheduler = ThunderAgentScheduler(
             capacity=self._capacity,
@@ -492,33 +482,15 @@ async def worker(runtime: DistributedRuntime) -> None:
     )
 
     if config.model_name:
-        model_path = config.model_path or config.model_name
-        # Thread the tool_call/reasoning parsers into register_model so the
-        # frontend's response path can translate model-native tool calls (e.g.
-        # MiniMax's <minimax:tool_call> XML, Qwen's hermes) into OpenAI
-        # tool_calls before pi / openhands / other agents see them. These use
-        # the same --dyn-tool-call-parser / --dyn-reasoning-parser flag names
-        # (and DYN_TOOL_CALL_PARSER / DYN_REASONING_PARSER env vars) as the
-        # standalone dynamo.vllm worker.
-        runtime_cfg = ModelRuntimeConfig()
-        if config.tool_call_parser:
-            runtime_cfg.tool_call_parser = config.tool_call_parser
-        if config.reasoning_parser:
-            runtime_cfg.reasoning_parser = config.reasoning_parser
-        if config.publish_sglang_generate:
-            _publish_sglang_generate_capability(runtime_cfg)
-            logger.info("Published SGLang engine-native generate capability")
-        await register_model(
-            model_input=ModelInput.Tokens,
-            model_type=ModelType.Chat | ModelType.Completions,
-            endpoint=generate_endpoint,
-            model_path=model_path,
-            model_name=config.model_name,
-            runtime_config=runtime_cfg,
-            # The router is the serving entry point (front door) exposing the
-            # OpenAI surface; it has no mandatory peer-role dependency.
-            worker_type=WorkerType.Aggregated,
+        if handler.backend_model_card_json is None:
+            raise RuntimeError("Backing workers did not publish a model card")
+        backend_card = ModelDeploymentCard.from_json_str(
+            handler.backend_model_card_json
         )
+        proxy_card = backend_card.for_aggregated_proxy(
+            config.model_name, ModelType.Chat | ModelType.Completions
+        )
+        await proxy_card.register(generate_endpoint)
 
     status_endpoint = runtime.endpoint(f"{config.namespace}.thunderagent_router.status")
     metrics_endpoint = runtime.endpoint(

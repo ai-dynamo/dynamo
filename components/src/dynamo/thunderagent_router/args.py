@@ -9,7 +9,7 @@ import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.configuration.utils import add_argument
 from dynamo.router.args import (
     DynamoRouterArgGroup,
     DynamoRouterConfig,
@@ -33,10 +33,6 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     acting_decay_tau_seconds: float
     scheduler_interval_seconds: float
     model_name: Optional[str] = None
-    model_path: Optional[str] = None
-    tool_call_parser: Optional[str] = None
-    reasoning_parser: Optional[str] = None
-    publish_sglang_generate: bool = False
 
     def to_thunderagent_config(self) -> ThunderAgentConfig:
         return ThunderAgentConfig(
@@ -70,8 +66,6 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             raise ValueError("--scheduler-interval-seconds must be > 0")
         if self.resume_timeout_seconds <= 0:
             raise ValueError("--resume-timeout-seconds must be > 0")
-        if self.publish_sglang_generate and not self.model_name:
-            raise ValueError("--publish-sglang-generate requires --model-name")
 
 
 class ThunderAgentArgGroup(ArgGroup):
@@ -179,56 +173,10 @@ class ThunderAgentArgGroup(ArgGroup):
             env_var="DYN_THUNDERAGENT_MODEL_NAME",
             default=None,
             help="Model name to register at the Dynamo frontend. When set the "
-            "router calls register_model so the frontend dispatches "
-            "requests for this model to the router (which then forwards to "
-            "the worker pointed at by --endpoint). Leave unset to behave as "
-            "a pure utility endpoint with no frontend registration.",
+            "router republishes the backing workers' common model card so the "
+            "frontend dispatches requests to this router. Leave unset to behave "
+            "as a pure utility endpoint with no frontend registration.",
             arg_type=str,
-        )
-        add_argument(
-            g,
-            flag_name="--model-path",
-            env_var="DYN_THUNDERAGENT_MODEL_PATH",
-            default=None,
-            help="Path or HF repo ID to load tokenizer + model card from for "
-            "register_model. Defaults to --model-name; set this when the "
-            "client-facing name differs from the on-disk location (e.g. "
-            "served name 'zai-org/GLM-4.6-FP8' but local cache "
-            "/home/nvidia/hf_cache/models/glm-4.6-fp8).",
-            arg_type=str,
-        )
-        add_argument(
-            g,
-            flag_name="--dyn-tool-call-parser",
-            dest="tool_call_parser",
-            env_var="DYN_TOOL_CALL_PARSER",
-            default=None,
-            help="Tool-call parser forwarded to register_model so the frontend "
-            "translates model-native tool calls (e.g. MiniMax's "
-            "<minimax:tool_call> XML, Qwen hermes) into OpenAI tool_calls "
-            "before agents see them. Use the same value as the worker's "
-            "--dyn-tool-call-parser. Only applies when --model-name is set.",
-            arg_type=str,
-        )
-        add_argument(
-            g,
-            flag_name="--dyn-reasoning-parser",
-            dest="reasoning_parser",
-            env_var="DYN_REASONING_PARSER",
-            default=None,
-            help="Reasoning parser forwarded to register_model, mirroring the "
-            "worker's --dyn-reasoning-parser. Only applies when --model-name "
-            "is set.",
-            arg_type=str,
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--publish-sglang-generate",
-            env_var="DYN_THUNDERAGENT_PUBLISH_SGLANG_GENERATE",
-            default=False,
-            help="Advertise SGLang's native /generate API through the "
-            "ThunderAgent router. Enable only when --endpoint targets a "
-            "Dynamo SGLang worker that publishes native generate support.",
         )
 
 
