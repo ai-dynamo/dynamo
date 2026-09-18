@@ -52,7 +52,7 @@ pub async fn forward(
     Ok(response)
 }
 
-fn target_url(base_url: &Url, request_uri: &axum::http::Uri) -> Url {
+pub(crate) fn target_url(base_url: &Url, request_uri: &axum::http::Uri) -> Url {
     let mut target = base_url.clone();
     let base_path = base_url.path().trim_end_matches('/');
     let request_path = request_uri.path();
@@ -62,7 +62,7 @@ fn target_url(base_url: &Url, request_uri: &axum::http::Uri) -> Url {
     target
 }
 
-fn strip_proxy_headers(headers: &mut HeaderMap) {
+pub(crate) fn strip_proxy_headers(headers: &mut HeaderMap) {
     headers.remove(header::HOST);
     headers.remove(header::CONTENT_LENGTH);
 
