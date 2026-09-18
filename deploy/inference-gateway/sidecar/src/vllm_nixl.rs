@@ -83,6 +83,14 @@ pub const CLIENT_BODY_TIMEOUT_MS_ENV: &str = "DYN_SIDECAR_CLIENT_BODY_TIMEOUT_MS
 /// drain deadline, so a body that cannot be read in time is a client problem.
 pub const DEFAULT_CLIENT_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Environment variable overriding the total prefill leg deadline.
+pub const PREFILL_DEADLINE_MS_ENV: &str = "DYN_SIDECAR_PREFILL_DEADLINE_MS";
+
+/// Default total prefill deadline. The read timeout bounds one gap between
+/// chunks, not the leg, so without this a peer that keeps producing small
+/// chunks can extend the leg indefinitely.
+pub const DEFAULT_PREFILL_DEADLINE: Duration = Duration::from_secs(60);
+
 /// Default prefill response cap: 1 MiB. The response is a one-token completion
 /// plus the handoff, so this is orders of magnitude of headroom.
 pub const DEFAULT_MAX_PREFILL_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -98,6 +106,8 @@ pub mod code {
     pub const PD_REQUEST_TOO_LARGE: &str = "pd_request_too_large";
     /// The request body did not arrive within the configured deadline.
     pub const PD_REQUEST_TIMEOUT: &str = "pd_request_timeout";
+    /// The prefill leg exceeded its total deadline.
+    pub const PREFILL_DEADLINE_EXCEEDED: &str = "prefill_deadline_exceeded";
     /// The prefill worker returned a successful HTTP response without a usable
     /// handoff.
     pub const INVALID_PREFILL_HANDOFF: &str = "invalid_prefill_handoff";
@@ -124,6 +134,8 @@ pub struct Config {
     pub client_body_timeout: Duration,
     /// Maximum accepted prefill response size in bytes.
     pub max_prefill_response_bytes: usize,
+    /// Total time allowed for the prefill leg, across every chunk.
+    pub prefill_deadline: Duration,
 }
 
 impl Default for Config {
@@ -133,6 +145,7 @@ impl Default for Config {
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             client_body_timeout: DEFAULT_CLIENT_BODY_TIMEOUT,
             max_prefill_response_bytes: DEFAULT_MAX_PREFILL_RESPONSE_BYTES,
+            prefill_deadline: DEFAULT_PREFILL_DEADLINE,
         }
     }
 }
@@ -240,8 +253,23 @@ impl PdAdapter for VllmNixlAdapter {
         let prefill_request = prepare_prefill_request(&original)?;
 
         let prefill_url = prefill_url(&prefill_endpoint, &parts.uri)?;
+        // The read timeout bounds one gap between chunks, so a peer that keeps
+        // producing small pieces extends the leg without ever tripping it. This
+        // caps the leg itself, the way the client-body deadline caps ours.
         let prefill_response = tokio::select! {
-            response = self.send_prefill(&prefill_url, &prefill_request, &parts.headers) => response?,
+            response = tokio::time::timeout(
+                self.config.prefill_deadline,
+                self.send_prefill(&prefill_url, &prefill_request, &parts.headers),
+            ) => match response {
+                Ok(result) => result?,
+                Err(_) => {
+                    return Err(SidecarError::adapter(
+                        axum::http::StatusCode::GATEWAY_TIMEOUT,
+                        code::PREFILL_DEADLINE_EXCEEDED,
+                        "The prefill leg exceeded its deadline",
+                    ));
+                }
+            },
             () = cancellation.cancelled() => return Err(SidecarError::Cancelled),
         };
 
