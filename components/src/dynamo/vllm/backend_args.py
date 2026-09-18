@@ -267,7 +267,8 @@ class DynamoVllmArgGroup(ArgGroup):
             default=False,
             help="Serve a ModelType.Realtime bidirectional endpoint through "
             "the OpenAI /v1/realtime protocol. Standard vLLM currently "
-            "supports transcription sessions only. Aggregated workers only.",
+            "supports text-only realtime and transcription sessions. "
+            "Aggregated workers only.",
         )
 
         add_negatable_bool_argument(

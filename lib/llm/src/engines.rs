@@ -23,8 +23,8 @@ use crate::protocols::openai::{
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
 use dynamo_protocols::types::realtime::{
-    EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent, RealtimeResponse,
-    RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,
+    DynamoRealtimeClientEvent, EventType, MaxOutputTokens, RealtimeAPIError, RealtimeClientEvent,
+    RealtimeResponse, RealtimeResponseStatus, RealtimeServerEvent, RealtimeServerEventError,
     RealtimeServerEventResponseAudioDelta, RealtimeServerEventResponseAudioDone,
     RealtimeServerEventResponseCreated, RealtimeServerEventResponseDone,
     RealtimeServerEventSessionUpdated,
@@ -143,12 +143,12 @@ const ECHO_AUDIO_DELTA_CHUNK_LEN: usize = 64;
 pub struct EchoBidirectionalEngine;
 
 #[async_trait]
-impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
+impl AsyncEngine<ManyIn<DynamoRealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEvent>>, Error>
     for EchoBidirectionalEngine
 {
     async fn generate(
         &self,
-        incoming: ManyIn<RealtimeClientEvent>,
+        incoming: ManyIn<DynamoRealtimeClientEvent>,
     ) -> Result<ManyOut<Annotated<RealtimeServerEvent>>, Error> {
         let ctx = incoming.context();
         let session_id = ctx.id().to_string();
@@ -168,7 +168,9 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                 }
 
                 match client_event {
-                    RealtimeClientEvent::SessionUpdate(req) => {
+                    DynamoRealtimeClientEvent::OpenAI(
+                        RealtimeClientEvent::SessionUpdate(req),
+                    ) => {
                         frame += 1;
                         yield annotated_event(
                             frame,
@@ -180,7 +182,9 @@ impl AsyncEngine<ManyIn<RealtimeClientEvent>, ManyOut<Annotated<RealtimeServerEv
                             ),
                         );
                     }
-                    RealtimeClientEvent::InputAudioBufferAppend(req) => {
+                    DynamoRealtimeClientEvent::OpenAI(
+                        RealtimeClientEvent::InputAudioBufferAppend(req),
+                    ) => {
                         let response_id = format!("resp_{session_id}_{frame}");
                         let item_id = format!("item_{session_id}_{frame}");
 
@@ -585,11 +589,11 @@ mod tests {
         }
     }
 
-    fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
+    fn make_input(events: Vec<DynamoRealtimeClientEvent>) -> ManyIn<DynamoRealtimeClientEvent> {
         Context::new(RequestStream::new(Box::pin(stream::iter(events))))
     }
 
-    fn parse_client_event(json: serde_json::Value) -> RealtimeClientEvent {
+    fn parse_client_event(json: serde_json::Value) -> DynamoRealtimeClientEvent {
         serde_json::from_value(json).expect("valid realtime client event")
     }
 

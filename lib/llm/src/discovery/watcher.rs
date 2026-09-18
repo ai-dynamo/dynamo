@@ -57,7 +57,7 @@ use crate::{
         },
         tensor::{NvCreateTensorRequest, NvCreateTensorResponse},
     },
-    types::generic::realtime::{RealtimeClientEvent, RealtimeServerEvent},
+    types::generic::realtime::{DynamoRealtimeClientEvent, RealtimeServerEvent},
     worker_type::WorkerType,
 };
 
@@ -916,7 +916,7 @@ impl ModelWatcher {
             if card.model_type.supports_realtime() {
                 // `Text` is overloaded for Realtime; its I/O passes through.
                 let realtime_router = PushRouter::<
-                    RealtimeClientEvent,
+                    DynamoRealtimeClientEvent,
                     Annotated<RealtimeServerEvent>,
                 >::from_client_with_monitor(
                     client.clone(), router_config.router_mode, None
