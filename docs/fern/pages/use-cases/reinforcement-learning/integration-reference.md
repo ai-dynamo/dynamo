@@ -142,6 +142,34 @@ Check `protocol_version` before reading the worker list. In protocol version `1`
 
 Refresh discovery before each control phase and require the complete capability set for the selected update path. Do not cache membership indefinitely or interpret list position as worker identity.
 
+### Scope Discovery by Namespace
+
+The RL listener reads the set of Dynamo namespaces it searches from its own process environment, and from nothing else. The `--namespace` and `--namespace-prefix` frontend flags scope model discovery only; neither writes its value back into the environment. A frontend started with `--namespace-prefix ns` and no `DYN_NAMESPACE_PREFIX` set therefore gets prefix-scoped model discovery and exact-scoped RL discovery. Set the environment variable, not the flag, to scope RL discovery.
+
+Three variables decide that scope, and the first one that applies wins:
+
+| Variable | Effect when it applies |
+|---|---|
+| `DYN_NAMESPACE_PREFIX` | Match this namespace and the worker generations under it, so `ns` matches `ns` and `ns-abc123` but not the separate deployment `ns2`. The value `dynamo` means every namespace |
+| `DYN_NAMESPACE_WORKER_SUFFIX` | Match the single namespace `{DYN_NAMESPACE}-{DYN_NAMESPACE_WORKER_SUFFIX}` |
+| `DYN_NAMESPACE` | Match this exact namespace. It falls back to `dynamo` only when unset, so setting it to an empty value searches the same empty namespace the workers register under |
+
+The `dynamo` value is the one case where a prefix deliberately reaches past its own deployment: every other deployment's pause, resume, and weight-update endpoints then appear in this listener's `/v1/rl/workers`. On Kubernetes it is opt-in through `globalDynamoNamespace: true`, which makes the operator set `DYN_NAMESPACE_PREFIX=dynamo`. Use it only when one trainer is meant to control every deployment in the cluster.
+
+An empty `DYN_NAMESPACE_PREFIX` or `DYN_NAMESPACE_WORKER_SUFFIX` counts as absent, exactly as an unset one does. An empty `DYN_NAMESPACE` does not: it is the namespace to search. Model discovery agrees with RL discovery on the `dynamo` value but not on the empty one, where it reads an empty `DYN_NAMESPACE_PREFIX` as every namespace rather than as absent.
+
+This ordering matters because a worker that is given `DYN_NAMESPACE_WORKER_SUFFIX` registers under `{DYN_NAMESPACE}-{suffix}`, not under `{DYN_NAMESPACE}`. A listener configured for the bare namespace would find none of those workers.
+
+When the Dynamo Kubernetes Operator manages the deployment, it sets `DYN_NAMESPACE_PREFIX` on the frontend container, so the listener matches every worker generation at once, including the two generations that coexist during a rolling update. For a listener that the operator does not manage, including an unmanaged Kubernetes deployment or a deployment outside Kubernetes, configure the listener's namespace scope explicitly. To reach the workers of one suffixed pool:
+
+```bash
+DYN_ENABLE_RL=true DYN_RL_PORT=8001 \
+  DYN_NAMESPACE=ns DYN_NAMESPACE_WORKER_SUFFIX=abc123 \
+  python -m dynamo.frontend
+```
+
+`DYN_NAMESPACE_PREFIX` is also documented in the [frontend configuration reference](../../reference/components/frontend-configuration.mdx), and `DYN_NAMESPACE_WORKER_SUFFIX` in the [runtime configuration reference](../../reference/components/runtime-configuration.mdx). Those pages describe how the variables scope model discovery; this section describes the RL listener only.
+
 ## Coordinate Policy Refresh
 
 The framework owns the fleet-level lifecycle:
@@ -179,7 +207,7 @@ Even two vLLM deployments can expose different route families because the Python
 |---|---|---|---|
 | [verl](verl.md) | Experimental | Shared Dynamo frontend with colocated vLLM rollout workers | The public recipe owns CUDA IPC updates through Ray/ZMQ control. Choose native Dynamo routing or ThunderAgent as distinct variants. |
 | [NeMo RL](nemo-rl.md) | Experimental | NeMo RL-managed Dynamo/vLLM fleet on Slurm and Ray | Fixed non-colocated fleet with framework-owned NCCL refit; not an external Dynamo deployment. |
-| [SLIME](https://github.com/THUDM/slime) | Integration in progress | Proposed shared SGLang `/generate` path with direct engine control | No merged, maintained Dynamo recipe yet; discovery and update ownership remain unsettled. |
+| [Slime](slime.md) | Experimental fixed worker set | Dynamo sidecars manage stock SGLang engines for [streaming external rollouts](https://github.com/THUDM/slime/pull/2272) | The [fixed-worker-set example](https://github.com/ai-dynamo/dynamo/blob/main/examples/README.md#integration-examples) sends generation through the Dynamo frontend. Slime uses static engine Services for control and weight updates. The example does not support elastic discovery or external-engine recovery. |
 | [Prime-RL](https://github.com/PrimeIntellect-ai/prime-rl) | Router available; full integration in progress | Prime-RL documents the Dynamo router as a drop-in option; a proposed Dynamo/vLLM sidecar adds worker discovery and external updates | Routing can be evaluated today, but the full adapter remains in upstream development and is not a released compatibility surface. |
 | [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Miles](https://github.com/fleet-ai/miles-fleet), [SkyRL](https://github.com/NovaSky-AI/SkyRL), and [Polar](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) | No Dynamo guide | No maintained Dynamo adapter was found in the reviewed public sources | Add a guide only after a maintained integration completes the same generation, update, failure, and ownership checks. |
 

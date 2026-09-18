@@ -529,6 +529,13 @@ pub struct MatchDetailsRequest {
     pub resp: oneshot::Sender<MatchDetails>,
 }
 
+/// A request to test one worker's ownership of an external block hash.
+pub struct ContainsWorkerBlockRequest {
+    pub worker: WorkerWithDpRank,
+    pub block_hash: ExternalSequenceBlockHash,
+    pub resp: oneshot::Sender<bool>,
+}
+
 impl MatchDetailsRequest {
     pub(super) fn new(
         sequence: Vec<LocalBlockHash>,
@@ -642,6 +649,11 @@ pub enum WorkerTask {
     CleanupStaleChildren,
     DumpEvents(oneshot::Sender<anyhow::Result<Vec<RouterEvent>>>),
     Stats(oneshot::Sender<WorkerLookupStats>),
+    ContainsWorkerBlock {
+        worker: WorkerWithDpRank,
+        block_hash: ExternalSequenceBlockHash,
+        resp: oneshot::Sender<bool>,
+    },
     Flush(oneshot::Sender<()>),
     Terminate,
 }
