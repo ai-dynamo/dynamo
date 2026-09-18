@@ -6,11 +6,13 @@ pub mod error;
 pub mod metadata;
 mod proxy;
 pub mod server;
+pub mod vllm_nixl;
 
-pub use config::Config;
+pub use config::{AdapterMode, Config};
 pub use error::SidecarError;
 pub use metadata::{PREFILLER_HOST_PORT, PrefillEndpoint};
 pub use server::{PdAdapter, SidecarState, UnavailablePdAdapter, router};
+pub use vllm_nixl::VllmNixlAdapter;
 
 use std::future::IntoFuture;
 use std::sync::Arc;
