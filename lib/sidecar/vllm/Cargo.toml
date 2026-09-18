@@ -11,10 +11,6 @@ homepage.workspace = true
 repository.workspace = true
 description = "Rust sidecar for vLLM's native gRPC server"
 
-[package.metadata.cargo-machete]
-# LoRA dependencies are used by the next stacked PR.
-ignored = ["dynamo-runtime", "tempfile"]
-
 [[bin]]
 name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
