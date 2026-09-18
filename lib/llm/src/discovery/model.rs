@@ -176,6 +176,13 @@ impl Model {
             .collect()
     }
 
+    /// Whether this catalog model has at least one non-LoRA deployment.
+    pub(crate) fn has_base_deployment(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().card().lora.is_none())
+    }
+
     /// Whether this catalog model can carry request-time LoRA metadata through
     /// frontend preprocessing to a non-LoRA base deployment.
     pub(crate) fn has_runtime_lora_base_deployment(&self) -> bool {
