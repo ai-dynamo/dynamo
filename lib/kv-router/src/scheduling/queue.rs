@@ -3708,6 +3708,37 @@ policy_classes:
         ));
     }
 
+    #[tokio::test]
+    async fn queue_snapshot_excludes_workers_unavailable_to_the_request() {
+        let provider: WorkerAvailabilityProvider = Arc::new(|request| {
+            assert_eq!(request.lora_name.as_deref(), Some("adapter"));
+            Some(Arc::new(HashSet::from([1])))
+        });
+        let (queue, _slots) = make_queue_with_providers(2, 16, 256, None, Some(provider));
+        let (mut request, _response) = make_request("adapter-request", 256);
+        request.lora_name = Some("adapter".to_string());
+        request.overlap.effective_cached_tokens = HashMap::from([
+            (WorkerWithDpRank::from_worker_id(0), 224),
+            (WorkerWithDpRank::from_worker_id(1), 32),
+        ]);
+        assert_eq!(
+            queue
+                .default_queue_metadata(&request)
+                .snapshot
+                .cached_tokens,
+            32
+        );
+
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(0));
+        assert_eq!(
+            queue
+                .default_queue_metadata(&request)
+                .snapshot
+                .cached_tokens,
+            0
+        );
+    }
+
     /// A queue starting with zero workers can route after slots and configs arrive.
     #[tokio::test(flavor = "multi_thread")]
     async fn test_worker_updates_after_empty_start() {

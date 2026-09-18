@@ -418,7 +418,8 @@ impl ErrorReason {
             "transport.connection_timeout"
             | "backend.response_timeout"
             | "backend.connection_timeout"
-            | "request.deadline_exceeded" => Some(ErrorClass::DeadlineExceeded),
+            | "request.deadline_exceeded"
+            | "router.queue_deadline_exceeded" => Some(ErrorClass::DeadlineExceeded),
             "request.cancelled" | "backend.cancelled" => Some(ErrorClass::Cancelled),
             "capacity.pool_exhausted" | "capacity.worker_overloaded" | "capacity.exhausted" => {
                 Some(ErrorClass::CapacityExhausted)

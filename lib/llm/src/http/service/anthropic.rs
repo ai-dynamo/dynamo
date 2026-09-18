@@ -649,9 +649,10 @@ async fn anthropic_messages(
         // keeps the deadline outcome, matching the OpenAI surface: HTTP 429
         // (`rate_limit_error`) with a `Cancelled` metric label and no
         // rejection accounting.
-        if super::metrics::request_deadline_exceeded(e.as_ref()) {
+        if let Some(error) = super::metrics::queue_deadline_error(e.as_ref()) {
+            super::metrics::record_failure(error);
             inflight_guard.mark_error(super::metrics::ErrorType::Cancelled);
-            return anthropic_error(
+            return anthropic_error_unrecorded(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
                 super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE,

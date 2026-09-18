@@ -722,7 +722,8 @@ impl ErrorMessage {
             );
         }
 
-        if super::metrics::request_deadline_exceeded(err.as_ref()) {
+        if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
+            super::metrics::record_failure(error);
             let code = StatusCode::TOO_MANY_REQUESTS;
             return (
                 code,
@@ -6828,6 +6829,9 @@ mod tests {
 
         let error: anyhow::Error = DynamoError::builder()
             .error_type(DynamoErrorType::DeadlineExceeded)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded").unwrap(),
+            )
             .message("internal deadline detail")
             .build()
             .into();

@@ -1282,6 +1282,10 @@ pub(crate) mod tests {
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             Err(dynamo_runtime::error::DynamoError::builder()
                 .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                        .unwrap(),
+                )
                 .message("router deadline exceeded before stream start")
                 .build()
                 .into())

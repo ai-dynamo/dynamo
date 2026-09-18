@@ -87,9 +87,24 @@ pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
 /// before dispatch; shared by every HTTP surface so the wording stays uniform.
 pub(crate) const REQUEST_DEADLINE_EXCEEDED_MESSAGE: &str = "request deadline exceeded";
 
+/// Identify a deadline that expired while waiting in the router's queue.
 pub fn request_deadline_exceeded(err: &(dyn std::error::Error + 'static)) -> bool {
-    const DEADLINE: &[DynamoErrorType] = &[DynamoErrorType::DeadlineExceeded];
-    dynamo_runtime::error::match_error_chain(err, DEADLINE, &[])
+    queue_deadline_error(err).is_some()
+}
+
+pub(super) fn queue_deadline_error<'a>(
+    err: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a DynamoError> {
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<DynamoError>()
+            && error.reason().as_str() == "router.queue_deadline_exceeded"
+        {
+            return Some(error);
+        }
+        current = error.source();
+    }
+    None
 }
 
 /// Check whether an error chain indicates that no backend worker is available

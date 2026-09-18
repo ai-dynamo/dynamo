@@ -215,6 +215,9 @@ async fn anthropic_deadline_exceeded_maps_to_rate_limit_error_with_cancelled_met
     temp_env::async_with_vars(BASE_ENV, async {
         let error = DynamoError::builder()
             .error_type(DynamoErrorType::DeadlineExceeded)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded").unwrap(),
+            )
             .message("internal deadline detail")
             .build();
         let svc = HarnessService::start_with_generate_error(error).await;
