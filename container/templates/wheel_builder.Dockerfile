@@ -635,16 +635,19 @@ COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/side
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# AI Simulate is released separately as an abi3 wheel. Stage the exact published
-# wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
-# Download only this distribution; runtime images own dependency installation
-# through their requirements files and local wheels.
+# AI Simulate is released separately as an abi3 wheel. Its public PyPI artifact
+# is a small resolver sdist because the full wheel is too large for that registry;
+# stage the actual wheel directly from NVIDIA's package index. Download only this
+# distribution; runtime images own dependency installation through their
+# requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
     python -m pip download \
         --only-binary=:all: \
         --no-deps \
+        --no-index \
+        --find-links https://pypi.nvidia.com/aisimulate/ \
         --dest /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}

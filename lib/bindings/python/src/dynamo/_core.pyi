@@ -748,8 +748,13 @@ class SelectionService:
         replica_sync_port: Optional[int] = None,
         replica_sync_peers: Optional[list[str]] = None,
         selection_cache: Optional[SelectionCacheConfig] = None,
+        session_affinity_ttl_secs: Optional[float] = None,
     ) -> None:
-        """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
+        """Create a selection service. `indexer_threads` sizes the KV indexer pool.
+
+        `session_affinity_ttl_secs` enables session affinity with an idle TTL
+        between 1 and 31536000 seconds.
+        """
         ...
 
     def shutdown(self) -> None:
@@ -3299,7 +3304,10 @@ class VirtualConnectorClient:
         ...
 
     async def wait(self) -> None:
-        """Blocks until there is a new decision to fetch using 'get'"""
+        """Wait for an unacknowledged decision, including one already published.
+
+        Use get() to fetch the decision.
+        """
         ...
 
 
@@ -3423,6 +3431,7 @@ class backend:
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
             enable_eagle: bool = False,
+            max_gpu_lora_count: Optional[int] = None,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3444,6 +3453,8 @@ class backend:
         def bootstrap_port(self) -> Optional[int]: ...
         @property
         def enable_eagle(self) -> bool: ...
+        @property
+        def max_gpu_lora_count(self) -> Optional[int]: ...
 
     class EngineConfig:
         def __init__(

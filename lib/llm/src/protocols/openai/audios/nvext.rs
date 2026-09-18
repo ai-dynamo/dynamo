@@ -59,6 +59,15 @@ pub struct NvExt {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub seed: Option<i64>,
+
+    /// Classifier-free guidance scale (Audex only, hence an extension rather
+    /// than a top-level OpenAI field). Unset or 1.0 decodes unguided; higher
+    /// values follow the prompt more closely. Declared here because serde drops
+    /// unknown `nvext` keys, so without the field the client's value never
+    /// reaches the worker and guidance is silently never applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub cfg_scale: Option<f64>,
 }
 
 impl Default for NvExt {

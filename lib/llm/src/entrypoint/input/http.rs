@@ -13,8 +13,8 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::WorkerSelectorFactory,
-    local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
+    kv_router::SelectionPolicySource,
+    local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
     types::openai::{
@@ -23,20 +23,20 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
-    selector::{DefaultWorkerSelector, WorkerSelector},
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    WorkerType,
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
-/// The default frontend uses [`DefaultWorkerSelector`]. A statically linked external crate can
-/// replace only worker selection with [`Self::worker_selection_policy_factory`].
+/// The default frontend resolves worker selection from its configuration. A statically linked
+/// external crate can replace only worker selection with [`Self::worker_selection_policy_factory`].
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    worker_selection_policy_factory: Option<WorkerSelectorFactory<WorkerSelectionPolicy>>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 impl HttpFrontend {
@@ -49,7 +49,7 @@ impl HttpFrontend {
         self
     }
 
-    /// Replace the default worker selector with a statically linked native policy.
+    /// Replace the registry-resolved worker-selection policy with a statically linked native one.
     ///
     /// The factory is called when each decode or prefill worker set is constructed, not per
     /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
@@ -93,33 +93,17 @@ impl HttpFrontend {
 
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        let result = match self.worker_selection_policy_factory {
-            Some(factory) => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    true,
-                    factory,
-                )
-                .await
-            }
-            None => {
-                run_with_worker_selector_factory(
-                    distributed_runtime,
-                    engine_config,
-                    self.frontend_route_extensions,
-                    false,
-                    Arc::new(|config, worker_type, _partition| {
-                        DefaultWorkerSelector::new(
-                            Some(config.clone()),
-                            worker_type.default_selector_label(),
-                        )
-                    }),
-                )
-                .await
-            }
+        let selection_policy = match self.worker_selection_policy_factory {
+            Some(factory) => SelectionPolicySource::Factory(factory),
+            None => SelectionPolicySource::Registry,
         };
+        let result = run_with_selection_policy(
+            distributed_runtime,
+            engine_config,
+            self.frontend_route_extensions,
+            selection_policy,
+        )
+        .await;
 
         active_input.release_and_drain().await;
 
@@ -149,16 +133,12 @@ pub async fn run_with_frontend_route_extensions(
         .await
 }
 
-async fn run_with_worker_selector_factory<Sel>(
+async fn run_with_selection_policy(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-) -> anyhow::Result<()>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    selection_policy: SelectionPolicySource,
+) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (
         local_model.tls_cert_path(),
@@ -261,8 +241,7 @@ where
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
-                require_typed_worker_role,
-                worker_selector_factory.clone(),
+                selection_policy.clone(),
             )
             .await?;
             http_service
@@ -336,7 +315,7 @@ fn enable_in_process_model_endpoints(http_service: &HttpService) -> anyhow::Resu
 /// Spawns a task that watches for new models in store,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 #[allow(clippy::too_many_arguments)]
-async fn run_watcher<Sel>(
+async fn run_watcher(
     runtime: DistributedRuntime,
     model_manager: Arc<ModelManager>,
     router_config: RouterConfig,
@@ -351,12 +330,8 @@ async fn run_watcher<Sel>(
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
-    require_typed_worker_role: bool,
-    worker_selector_factory: WorkerSelectorFactory<Sel>,
-) -> anyhow::Result<()>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    selection_policy: SelectionPolicySource,
+) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
     // (DYN_LORA_ALLOCATION_ENABLED) inside `start_lora_controller`.
@@ -365,7 +340,7 @@ where
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }
 
-    let mut watch_obj = ModelWatcher::new_with_worker_selector_factory(
+    let mut watch_obj = ModelWatcher::new_with_selection_policy(
         runtime.clone(),
         model_manager,
         router_config,
@@ -374,8 +349,7 @@ where
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
-        require_typed_worker_role,
-        worker_selector_factory,
+        selection_policy,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
