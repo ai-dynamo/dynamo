@@ -473,6 +473,39 @@ def test_authoritative_failover_requires_explicit_directory_manifest(monkeypatch
         _promote_content_directory_after_fence("vllm", "shadow")
 
 
+def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
+    from dynamo.common.gms_failover import _promote_content_directory_after_fence
+    from gms_kv_ring.common import content_directory
+
+    calls = []
+
+    class FakeDirectory:
+        def __init__(self, socket_path, **kwargs):
+            calls.append(("init", socket_path, kwargs))
+
+        def promote(self, **kwargs):
+            calls.append(("promote", kwargs))
+            return 9
+
+        def hbm_inventory(self):
+            return {b"ready": (3, 5)}
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model-layout-v7")
+    monkeypatch.setenv("ENGINE_ID", "primary")
+    monkeypatch.setattr(content_directory, "ContentDirectory", FakeDirectory)
+
+    protected = _promote_content_directory_after_fence("vllm", "shadow")
+
+    assert protected == {3, 5}
+    assert ("promote", {"force_new_epoch": True}) in calls
+    assert calls[-1] == ("close",)
+
+
 @pytest.mark.asyncio
 async def test_gms_failover_promotes_directory_before_lease_reclaim(monkeypatch):
     monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "shadow")
