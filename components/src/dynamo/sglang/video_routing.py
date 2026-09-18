@@ -120,6 +120,12 @@ def _resolve_qwen_video_processor_contract(engine: Any) -> Optional[dict[str, An
         return None
 
     processor = getattr(mm_processor, "_processor", None)
+    if processor is None:
+        logger.warning(
+            "Exact SGLang video-aware KV routing disabled because the Qwen "
+            "processor implementation is unavailable"
+        )
+        return None
     processor_impl = getattr(type(processor), "replace_video_token", None)
     mixin_impl = getattr(transformers.ProcessorMixin, "replace_video_token", None)
     placeholder_target = QWEN_VIDEO_TARGET_WRAPPED
@@ -133,8 +139,8 @@ def _resolve_qwen_video_processor_contract(engine: Any) -> Optional[dict[str, An
     return {
         "placeholder_target": placeholder_target,
         "resize_mode": resize_mode,
-        # SGLang KV events do not attach MM metadata to delimiter/timestamp
-        # boundary blocks that contain no video placeholder run.
+        # Compatibility wire field: SGLang publishes canonical pad-valued KV
+        # token blocks and no separate MM metadata for this worker.
         "runless_boundary_hash": QWEN_VIDEO_RUNLESS_BOUNDARY_TOKENS_ONLY,
         "sglang_preprocess": {
             "image_factor": int(sglang_qwen_vl.IMAGE_FACTOR),

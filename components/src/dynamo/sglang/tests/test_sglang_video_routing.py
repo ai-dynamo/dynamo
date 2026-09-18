@@ -109,6 +109,13 @@ def test_processor_override_disables_exact_video_contract(qwen_preprocessor):
     )
 
 
+def test_missing_processor_disables_exact_video_contract(qwen_preprocessor):
+    engine = _engine()
+    engine.tokenizer_manager.mm_processor._processor = None
+
+    assert video_routing._resolve_qwen_video_processor_contract(engine) is None
+
+
 def test_inherited_video_replacement_publishes_wrapped_target(qwen_preprocessor):
     contract = video_routing._resolve_qwen_video_processor_contract(
         _engine(overrides_video_replacement=False)

@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{path::Path, sync::Arc};
+use std::{borrow::Cow, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{
-    QwenVideoPlaceholderTarget, QwenVideoProcessorContract, QwenVideoResizeMode,
+    KvEventMmIdentity, QwenVideoPlaceholderTarget, QwenVideoProcessorContract, QwenVideoResizeMode,
     QwenVideoRunlessBoundaryHash, SglangQwenVideoPreprocessContract, VideoRoutingInput,
     VideoRoutingReplacement,
     config::{read_json, read_model_config, required_token_id, required_usize},
@@ -46,12 +46,12 @@ pub(super) struct Qwen3VideoRoutingSpec {
     tokenizer: Arc<dyn Tokenizer>,
 }
 
-struct PreparedVideoInput {
+struct PreparedVideoInput<'a> {
     frame_count: usize,
     width: u32,
     height: u32,
     source_fps: f64,
-    sampled_timestamps: Vec<f64>,
+    sampled_timestamps: Cow<'a, [f64]>,
 }
 
 impl SglangQwenVideoPreprocessContract {
@@ -73,6 +73,13 @@ impl SglangQwenVideoPreprocessContract {
 }
 
 impl Qwen3VideoRoutingSpec {
+    pub(super) fn kv_event_mm_identity(&self) -> KvEventMmIdentity {
+        match self.runless_boundary_hash {
+            QwenVideoRunlessBoundaryHash::MmMetadata => KvEventMmIdentity::MmMetadata,
+            QwenVideoRunlessBoundaryHash::TokensOnly => KvEventMmIdentity::PadValueTokens,
+        }
+    }
+
     pub(super) fn from_model_dir(
         model_id: &str,
         expected_model_type: &str,
@@ -80,6 +87,9 @@ impl Qwen3VideoRoutingSpec {
         tokenizer: Arc<dyn Tokenizer>,
         processor_contract: QwenVideoProcessorContract,
     ) -> Result<Self> {
+        if let Some(contract) = processor_contract.sglang_preprocess {
+            contract.validate()?;
+        }
         let expected_architecture = expected_architecture(expected_model_type)
             .context("mm-routing: Qwen video model_type has no registered architecture")?;
         let model_config = read_model_config(
@@ -174,7 +184,7 @@ impl Qwen3VideoRoutingSpec {
             width: prepared.width,
             height: prepared.height,
             source_fps: prepared.source_fps,
-            sampled_timestamps: &prepared.sampled_timestamps,
+            sampled_timestamps: prepared.sampled_timestamps.as_ref(),
         };
         let (grid_t, grid_h, grid_w) = self.video_grid(&prepared_input)?;
         let merge_area = self
@@ -224,25 +234,20 @@ impl Qwen3VideoRoutingSpec {
             event_video_token_id: Some(self.video_token_id),
             target_tokens,
             replacement_tokens,
-            runless_boundary_uses_mm_metadata: matches!(
-                self.runless_boundary_hash,
-                QwenVideoRunlessBoundaryHash::MmMetadata
-            ),
         })
     }
 
-    fn prepare_input(&self, input: &VideoRoutingInput<'_>) -> Result<PreparedVideoInput> {
+    fn prepare_input<'a>(&self, input: &VideoRoutingInput<'a>) -> Result<PreparedVideoInput<'a>> {
         let Some(contract) = self.sglang_preprocess else {
             return Ok(PreparedVideoInput {
                 frame_count: input.frame_count,
                 width: input.width,
                 height: input.height,
                 source_fps: input.source_fps,
-                sampled_timestamps: input.sampled_timestamps.to_vec(),
+                sampled_timestamps: Cow::Borrowed(input.sampled_timestamps),
             });
         };
 
-        contract.validate()?;
         anyhow::ensure!(
             input.frame_count >= contract.frame_factor,
             "mm-routing: SGLang Qwen video frame count is below frame_factor"
@@ -271,11 +276,10 @@ impl Qwen3VideoRoutingSpec {
             contract.max_frames.min(input.frame_count),
             contract.frame_factor,
         )?;
-        anyhow::ensure!(
-            max_frames >= min_frames,
-            "mm-routing: SGLang Qwen frontend supplied too few frames"
-        );
         let requested_frames = input.frame_count as f64 / effective_fps * contract.fps;
+        // Match SGLang's min(max(requested, min_frames), max_frames) order.
+        // For a 2-3 frame clip, max_frames can be below the configured
+        // minimum and SGLang intentionally collapses the result to 2.
         let requested_frames = requested_frames
             .max(min_frames as f64)
             .min(max_frames as f64)
@@ -322,7 +326,7 @@ impl Qwen3VideoRoutingSpec {
             height: u32::try_from(height)
                 .context("mm-routing: resized video height exceeds u32")?,
             source_fps: effective_fps,
-            sampled_timestamps,
+            sampled_timestamps: Cow::Owned(sampled_timestamps),
         })
     }
 
@@ -490,6 +494,7 @@ fn ensure_matching_value(config: &Value, field: &str, expected: usize) -> Result
 }
 
 fn ceil_to_factor(value: usize, factor: usize) -> Result<usize> {
+    anyhow::ensure!(factor > 0, "mm-routing: SGLang Qwen frame_factor is zero");
     value
         .checked_add(factor - 1)
         .map(|value| value / factor * factor)
@@ -617,6 +622,101 @@ mod tests {
             sglang_preprocess: None,
             tokenizer: Arc::new(TimestampTokenizer),
         }
+    }
+
+    fn sglang_preprocess_contract() -> SglangQwenVideoPreprocessContract {
+        SglangQwenVideoPreprocessContract {
+            image_factor: 28,
+            video_min_pixels: 100_352,
+            video_max_pixels: 602_112,
+            video_total_pixels: 90_316_800,
+            frame_factor: 2,
+            fps: 2.0,
+            min_frames: 4,
+            max_frames: 768,
+        }
+    }
+
+    #[test]
+    fn vllm_input_path_borrows_timestamps() {
+        let timestamps = [0.0, 1.0];
+        let input = VideoRoutingInput {
+            frame_count: 2,
+            width: 224,
+            height: 224,
+            source_fps: 1.0,
+            sampled_timestamps: &timestamps,
+        };
+
+        let prepared = production_geometry_spec(QwenVideoResizeMode::LegacyCeil)
+            .prepare_input(&input)
+            .unwrap();
+
+        assert!(matches!(prepared.sampled_timestamps, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn sglang_short_clips_clamp_to_available_frame_factor() {
+        let mut spec = production_geometry_spec(QwenVideoResizeMode::LegacyCeil);
+        spec.sglang_preprocess = Some(sglang_preprocess_contract());
+
+        for frame_count in [2, 3] {
+            let timestamps: Vec<_> = (0..frame_count).map(|index| index as f64 / 30.0).collect();
+            let input = VideoRoutingInput {
+                frame_count,
+                width: 320,
+                height: 240,
+                source_fps: 30.0,
+                sampled_timestamps: &timestamps,
+            };
+
+            assert_eq!(spec.prepare_input(&input).unwrap().frame_count, 2);
+        }
+    }
+
+    #[test]
+    fn sglang_rejects_frames_below_frame_factor() {
+        let timestamps = [0.0];
+        let input = VideoRoutingInput {
+            frame_count: 1,
+            width: 320,
+            height: 240,
+            source_fps: 30.0,
+            sampled_timestamps: &timestamps,
+        };
+        let mut spec = production_geometry_spec(QwenVideoResizeMode::LegacyCeil);
+        spec.sglang_preprocess = Some(sglang_preprocess_contract());
+
+        assert!(spec.prepare_input(&input).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_sglang_contract_during_spec_creation() {
+        let mut invalid = sglang_preprocess_contract();
+        invalid.frame_factor = 0;
+        let contract = QwenVideoProcessorContract {
+            placeholder_target: QwenVideoPlaceholderTarget::BareVideoToken,
+            resize_mode: QwenVideoResizeMode::LegacyCeil,
+            runless_boundary_hash: QwenVideoRunlessBoundaryHash::TokensOnly,
+            sglang_preprocess: Some(invalid),
+        };
+
+        let error = Qwen3VideoRoutingSpec::from_model_dir(
+            "Qwen/Qwen3-VL-2B-Instruct",
+            "qwen3_vl",
+            tempfile::tempdir().unwrap().path(),
+            Arc::new(TimestampTokenizer),
+            contract,
+        )
+        .err()
+        .expect("invalid SGLang contract must disable exact routing at startup");
+
+        assert!(error.to_string().contains("invalid SGLang Qwen"));
+    }
+
+    #[test]
+    fn ceil_to_factor_rejects_zero_factor() {
+        assert!(ceil_to_factor(4, 0).is_err());
     }
 
     #[test]
