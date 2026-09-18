@@ -32,7 +32,6 @@ metadata:
   namespace: inference-engine
 ---
 data:
-  gas_dir: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
   nodes_per_partition: |-
     1
     1
@@ -167,7 +166,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-lpu-5448f938d5d52c69
+  name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
   namespace: inference-engine
 ---
 metadata:
@@ -189,7 +188,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 5448f938d5d52c694963453bff4e63367aa296f1c0aa36ea0960da60cad289b6
+        nvidia.com/extra-resources-hash: e586b76cc8ccd9a1ed2e1b0297032eb1da420881dcfdcb632a4f00f4971308ff
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:cc75fd5ce4533f15c01b89d239027e6d9be0917011a7624ae79b6b66f1638398
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d62a2d499f40ba8487c2405eaccf330b5ea52a18efea2fc010c9ac0d63ff71d9
@@ -276,16 +275,15 @@ spec:
             - name: ETCD_ENDPOINTS
               value: etcd-address
             - name: GAS_DIR
-              valueFrom:
-                configMapKeyRef:
-                  key: gas_dir
-                  name: dgd-lpx-v2-vllm-94cd-lpu-5448f938d5d52c69
+              value: $(LPX_MODEL_PATH)
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: NATS_SERVER
               value: nats-address
             - name: NIC_NAME
@@ -394,7 +392,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-lpu-5448f938d5d52c69
+              name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
             name: config
         replicas: 17
         roleName: agt

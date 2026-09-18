@@ -87,49 +87,6 @@ func TestLPURuntimeBuildRef(t *testing.T) {
 	}
 }
 
-func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Construct a V2 hybrid projection with an image-owned runtime build")
-	projection := &ModelProjection{
-		model:           "default",
-		pipeline:        PipelineLPX,
-		runtimeBuildRef: "model-build",
-		configuredBuild: Build{
-			Path:   "file:///snapshot-build",
-			Family: BuildFamilyXT,
-		},
-	}
-
-	t.Log("Render the hybrid ConfigMap from the selected pipeline")
-	configMap, err := renderLPUConfigMap(
-		"test-namespace",
-		"test-dgd",
-		"/models",
-		[]*ModelProjection{projection},
-	)
-
-	t.Log("Keep gas_dir rooted at the selected image-owned build")
-	require.NoError(t, err)
-	require.NotContains(t, configMap.Data, "model_config.toml")
-	require.NotContains(t, configMap.Data, "datacenter.toml")
-	require.Equal(t, "/models/model-build", configMap.Data["gas_dir"])
-	require.True(t, *configMap.Immutable)
-	require.Equal(t, LPUConfigMapName("test-dgd", LPUConfigMapHash(configMap)), configMap.Name)
-
-	t.Log("Render the preserved runtime with an invalid snapshot build reference")
-	projection.configuredBuild.Path = "relative-build"
-	_, err = renderLPUConfigMap(
-		"test-namespace",
-		"test-dgd",
-		"/models",
-		[]*ModelProjection{projection},
-	)
-
-	t.Log("Return the model-path error before projecting gas_dir")
-	require.ErrorContains(t, err, "resolve gas_dir: parse build path \"relative-build\": ref \"relative-build\" must be an absolute path or URL")
-}
-
 func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testing.T) {
 	t.Parallel()
 
@@ -159,32 +116,28 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 	}, data)
 }
 
-func TestConductorConfigMapContainsOnlyPartitions(t *testing.T) {
-	t.Parallel()
-
-	for _, family := range []string{"v2", "v3"} {
-		t.Run(family, func(t *testing.T) {
-			t.Log("Project a compiler build with a template-owned runtime configuration")
-			var path string
-			if family == "v2" {
-				path = writeV2CompilerFixture(t)
-			} else {
-				path = writeV3CompilerFixture(t)
+func TestLPUConfigVolumeRejectsAuthoredSourceMismatch(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source corev1.VolumeSource
+	}{
+		{name: "other ConfigMap", source: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "other-config"},
+		}}},
+		{name: "other volume source", source: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Keep an authored runtime mount with a conflicting generated-volume source")
+			spec := corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "main", VolumeMounts: []corev1.VolumeMount{{Name: "config", MountPath: "/runtime/partitions", ReadOnly: true}}}},
+				Volumes:    []corev1.Volume{{Name: "config", VolumeSource: test.source}},
 			}
-			projections, err := appendModelProjections(nil, ModelProjectionInput{
-				Pipeline: PipelineSingle, Models: []string{"default"},
-				BuildSnapshot: normalizeTestSnapshot(t, acquireTestSnapshot(t, path)),
-			})
-			require.NoError(t, err)
+			before := spec.DeepCopy()
 
-			t.Log("Retain only the resolved partition files in the immutable ConfigMap")
-			configMap, err := renderLPUConfigMap("test", "test-dgd", "/models", projections)
-			require.NoError(t, err)
-			require.Equal(t, resolvedPartitionData(projections), configMap.Data)
-			require.NotContains(t, configMap.Data, "model_config.toml")
-			require.NotContains(t, configMap.Data, "datacenter.toml")
-			require.NotEmpty(t, configMap.Data["partition_paths"])
-			require.NotEmpty(t, configMap.Data["topologies"])
+			t.Log("Reject the source mismatch before changing the HX template")
+			err := withLPUConfigVolume(&spec, "generated-config", false)
+			require.ErrorContains(t, err, `volume "config" is reserved for ConfigMap "generated-config"`)
+			require.Equal(t, *before, spec)
 		})
 	}
 }

@@ -1122,12 +1122,9 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, "mlx5_0", runtimeEnv["NIC_NAME"])
 	require.Equal(t, "19878", runtimeEnv["READINESS_PORT"])
 	require.Equal(t, "metadata.annotations['"+lpxv1alpha1.PodModelAnnotation+"']", envValueSource(main.Env, "LPU_MODEL_NAME").FieldRef.FieldPath)
-	gasDirSource := envValueSource(main.Env, "GAS_DIR")
-	require.NotNil(t, gasDirSource)
-	require.NotNil(t, gasDirSource.ConfigMapKeyRef)
+	require.Equal(t, "/nfs/node-local-v2-cpu-embeddings", runtimeEnv["LPX_MODEL_PATH"])
+	require.Equal(t, "$(LPX_MODEL_PATH)", runtimeEnv["GAS_DIR"])
 	lpuConfigName := lpx.LPUConfigMapName(plan.PodCliqueSetName, agent.Annotations[commonconsts.AnnotationExtraResourcesHash])
-	require.Equal(t, lpuConfigName, gasDirSource.ConfigMapKeyRef.Name)
-	require.Equal(t, "gas_dir", gasDirSource.ConfigMapKeyRef.Key)
 	require.NotContains(t, runtimeEnv, "TOPOLOGIES")
 	podIPSource := envValueSource(main.Env, "POD_IP")
 	require.NotNil(t, podIPSource)
@@ -1198,7 +1195,6 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	t.Log("Keep partition zero as the collapsed runtime root for all three physical partitions")
 	lpuConfig := getResource[*corev1.ConfigMap](t, extraResources, lpuConfigName)
 	require.Equal(t, "0", lpuConfig.Data["partition_ids"])
-	require.Equal(t, "/nfs/node-local-v2-cpu-embeddings", lpuConfig.Data["gas_dir"])
 
 	t.Log("Verify generated Cyborg and LPU config resource order and contents")
 	decodeConfig := getResource[*corev1.ConfigMap](t, extraResources, decodeConfigName)
@@ -1236,13 +1232,12 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 		file            string
 		hybrid          bool
 		conductorConfig bool
-		hx              bool
 	}{
 		{name: "Single V2", file: "single_v2.input.yaml", conductorConfig: true},
 		{name: "V2 LPU-only", file: "node-local-v2-lpu-only.input.yaml", conductorConfig: true},
 		{name: "V2 hybrid", file: "node-local-v2-hybrid.input.yaml", hybrid: true, conductorConfig: true},
-		{name: "HX LPU-only", file: "node-local-v3-hx-lpu-only.input.yaml", conductorConfig: true, hx: true},
-		{name: "HX hybrid", file: "node-local-v3-hx-hybrid.input.yaml", hybrid: true, hx: true},
+		{name: "HX LPU-only", file: "node-local-v3-hx-lpu-only.input.yaml", conductorConfig: true},
+		{name: "HX hybrid", file: "node-local-v3-hx-hybrid.input.yaml", hybrid: true},
 	}
 	intents := []struct {
 		name              string
@@ -1259,9 +1254,9 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 		{name: "image entrypoint and image command"},
 		{name: "custom pod settings and exec health probes", command: []string{"/opt/custom-runtime"}, customPodSettings: true},
 		{name: "default startup without config mount", configPath: ptr.To(""), configRole: 1},
-		{name: "default startup with misplaced config mount", configPath: ptr.To("/custom"), configRole: 1},
+		{name: "default startup with custom read-only config mount", configPath: ptr.To("/custom"), configRole: 1},
 		{name: "default Agent without config mount", configPath: ptr.To("")},
-		{name: "default Agent with misplaced config mount", configPath: ptr.To("/custom")},
+		{name: "default Agent with custom read-only config mount", configPath: ptr.To("/custom")},
 		{name: "default Agent without config mount and unrelated EnvFrom", configPath: ptr.To(""), envFrom: true},
 		{name: "image entrypoint with user arguments", args: []string{"serve"}},
 		{name: "explicit executable with image arguments", command: []string{"/opt/custom-runtime"}},
@@ -1415,6 +1410,7 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 								main.VolumeMounts = slices.Delete(main.VolumeMounts, configIndex, configIndex+1)
 							} else {
 								main.VolumeMounts[configIndex].MountPath = *intent.configPath
+								main.VolumeMounts[configIndex].ReadOnly = true
 							}
 						}
 					}
@@ -1433,10 +1429,6 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 						newLPXRenderDeployment(t, dgd),
 					)
 					require.Equal(t, before, dgd)
-					if mode.hx && intent.configPath != nil && *intent.configPath != "" {
-						require.ErrorContains(t, err, `reserves volume "config" at "/configs"`)
-						return
-					}
 					require.NoError(t, err)
 
 					t.Log("Verify shared defaults remain overridable while runtime-specific omissions stay empty")
@@ -1496,13 +1488,7 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 						actualVolumes := slices.DeleteFunc(slices.Clone(pod.Volumes), func(volume corev1.Volume) bool { return volume.Name != commonconsts.KubeValueNameSharedMemory })
 						expectedVolumes := slices.DeleteFunc(slices.Clone(authoredPod.Volumes), func(volume corev1.Volume) bool { return volume.Name != commonconsts.KubeValueNameSharedMemory })
 						require.ElementsMatch(t, expectedVolumes, actualVolumes, "%s shared memory volumes", clique.Name)
-						actualMounts := slices.DeleteFunc(slices.Clone(main.VolumeMounts), func(mount corev1.VolumeMount) bool {
-							return mount.MountPath != commonconsts.DefaultSharedMemoryMountPath
-						})
-						expectedMounts := slices.DeleteFunc(slices.Clone(authored.VolumeMounts), func(mount corev1.VolumeMount) bool {
-							return mount.MountPath != commonconsts.DefaultSharedMemoryMountPath
-						})
-						require.ElementsMatch(t, expectedMounts, actualMounts, "%s shared memory mounts", clique.Name)
+						require.ElementsMatch(t, authored.VolumeMounts, main.VolumeMounts, "%s mounts", clique.Name)
 						switch clique.Annotations[lpxv1alpha1.PodRoleAnnotation] {
 						case lpxv1alpha1.PodRoleAgent:
 							agents++

@@ -139,7 +139,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
 					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/custom"})
 				require.Contains(t, conductor.Spec.PodSpec.Containers[0].VolumeMounts,
-					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath})
+					corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: "/configs"})
 			} else {
 				cyborg := namedClique(t, rendered, "cond").Spec.PodSpec.Containers[0]
 				require.Contains(t, cyborg.VolumeMounts, corev1.VolumeMount{Name: "model-storage", MountPath: "/model-cache"})
@@ -346,7 +346,7 @@ func renderTestPCS(hybrid bool) *grovev1alpha1.PodCliqueSet {
 				Containers: []corev1.Container{{Name: "main", Image: "cyborg", Env: []corev1.EnvVar{
 					{Name: "SERVER_HOSTS_FILE", Value: "/tmp/lpu_servers"},
 				}, VolumeMounts: []corev1.VolumeMount{
-					{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
+					{Name: lpuConfigVolumeName, MountPath: "/configs"},
 					{Name: "model-storage", MountPath: "/models"},
 				}}},
 				ResourceClaims: []corev1.PodResourceClaim{{
@@ -376,7 +376,7 @@ func renderTestPodSpec() corev1.PodSpec {
 			Name: "main", Image: "runtime",
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: "model-storage", MountPath: "/models"},
-				{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath},
+				{Name: lpuConfigVolumeName, MountPath: "/configs"},
 				{Name: "single-v2-ssh-key", MountPath: "/tmp/dynamo-lpu-ssh"},
 				{Name: "ssh-secret", MountPath: "/ssh-pk", ReadOnly: true},
 			},

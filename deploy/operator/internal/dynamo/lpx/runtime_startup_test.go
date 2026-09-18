@@ -22,14 +22,11 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 		name      string
 		family    BuildFamily
 		conductor bool
-		direct    bool
 	}{
 		{name: "XT conductor", family: BuildFamilyXT, conductor: true},
 		{name: "HX conductor", family: BuildFamilyHX, conductor: true},
 		{name: "XT worker", family: BuildFamilyXT},
 		{name: "HX worker", family: BuildFamilyHX},
-		{name: "XT direct hybrid", family: BuildFamilyXT, direct: true},
-		{name: "HX direct hybrid", family: BuildFamilyHX, direct: true},
 	} {
 		for _, startup := range []struct {
 			name    string
@@ -98,12 +95,9 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 
 				t.Log("Apply runtime bindings for the selected family and role")
 				configureAgentScheduling(&pod, role.family)
-				switch {
-				case role.conductor:
+				if role.conductor {
 					configureNodeLocalConductorRuntime(&pod, "allocation")
-				case role.direct:
-					configureDirectHybridAgentRuntime(&pod, "config")
-				default:
+				} else {
 					configureAgentIdentity(&pod)
 				}
 
@@ -122,12 +116,8 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				require.Equal(t, authored.SecurityContext, container.SecurityContext)
 
 				t.Log("Keep static environment values template-owned, including intentional omission")
-				dynamicEnv := map[string]bool{
-					"LPX_ALLOCATION": role.conductor,
-					"GAS_DIR":        role.direct,
-				}
-				container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool { return dynamicEnv[variable.Name] })
 				if role.conductor {
+					container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool { return variable.Name == "LPX_ALLOCATION" })
 					authored.Env = slices.DeleteFunc(slices.Clone(authored.Env), func(variable corev1.EnvVar) bool { return variable.Name == "LPX_ALLOCATION" })
 				}
 				require.Equal(t, authored.Env, container.Env)
@@ -145,7 +135,7 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 	}
 }
 
-func TestConductorModelPathsPrecedeAuthoredReferences(t *testing.T) {
+func TestModelPathsPrecedeAuthoredReferences(t *testing.T) {
 	for _, test := range []struct {
 		name     string
 		family   BuildFamily
@@ -154,11 +144,13 @@ func TestConductorModelPathsPrecedeAuthoredReferences(t *testing.T) {
 	}{
 		{name: "XT Single GCS", family: BuildFamilyXT, pipeline: PipelineSingle},
 		{name: "HX Single local", family: BuildFamilyHX, pipeline: PipelineSingle, local: true},
+		{name: "XT hybrid local", family: BuildFamilyXT, pipeline: PipelineLPX, local: true},
+		{name: "HX hybrid GCS", family: BuildFamilyHX, pipeline: PipelineLPX},
 		{name: "XT multiple drafts local", family: BuildFamilyXT, pipeline: PipelineSpecDecode, local: true},
 		{name: "HX multiple drafts GCS", family: BuildFamilyHX, pipeline: PipelineSpecDecode},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Resolve each model from the registry reference and the conductor's custom mount")
+			t.Log("Resolve each model from the registry reference and the runtime's custom mount")
 			count := 1
 			names := []string{"LPX_MODEL_PATH"}
 			if test.pipeline == PipelineSpecDecode {
@@ -187,8 +179,12 @@ func TestConductorModelPathsPrecedeAuthoredReferences(t *testing.T) {
 			}
 
 			t.Log("Author dependent values before duplicate forged bindings")
+			runtimeVariable := "A_RUNTIME_MODEL"
+			if test.pipeline == PipelineLPX {
+				runtimeVariable = "GAS_DIR"
+			}
 			authored := []corev1.EnvVar{
-				{Name: "A_RUNTIME_MODEL", Value: "$(" + names[0] + ")"},
+				{Name: runtimeVariable, Value: "$(" + names[0] + ")"},
 				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 			}
 			container := corev1.Container{Command: []string{"custom-runtime"}, Args: []string{"--unchanged"}, Env: slices.Clone(authored)}
@@ -199,25 +195,26 @@ func TestConductorModelPathsPrecedeAuthoredReferences(t *testing.T) {
 			wantContainer.Env = append(want, authored...)
 
 			t.Log("Publish only the first draft and final target once, before all authored references")
-			require.NoError(t, applyConductorModelPaths(&container, projections, "/custom/models"))
+			require.NoError(t, applyModelPaths(&container, projections, "/custom/models"))
 			require.Equal(t, *wantContainer, container)
 
 			t.Log("Repeated rendering keeps environment order, startup and authoritative values unchanged")
-			require.NoError(t, applyConductorModelPaths(&container, projections, "/custom/models"))
+			require.NoError(t, applyModelPaths(&container, projections, "/custom/models"))
 			require.Equal(t, *wantContainer, container)
 		})
 	}
 }
 
-func TestConductorModelPathsRejectInvalidReferences(t *testing.T) {
+func TestModelPathsRejectInvalidReferences(t *testing.T) {
 	for _, test := range []struct {
 		pipeline Pipeline
 		name     string
 	}{
 		{pipeline: PipelineSingle, name: "LPX_MODEL_PATH"},
+		{pipeline: PipelineLPX, name: "LPX_MODEL_PATH"},
 		{pipeline: PipelineSpecDecode, name: "LPX_TARGET_MODEL_PATH"},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(string(test.pipeline)+"/"+test.name, func(t *testing.T) {
 			t.Log("Keep the target reference invalid after a valid speculative draft")
 			projections := []*ModelProjection{{pipeline: test.pipeline, configuredBuild: Build{Path: "gs://registry/model"}}}
 			if test.pipeline == PipelineSpecDecode {
@@ -228,7 +225,7 @@ func TestConductorModelPathsRejectInvalidReferences(t *testing.T) {
 			before := container.DeepCopy()
 
 			t.Log("Report the failing binding without publishing a partial environment")
-			err := applyConductorModelPaths(&container, projections, "/custom/models")
+			err := applyModelPaths(&container, projections, "/custom/models")
 			require.ErrorContains(t, err, "resolve "+test.name)
 			require.ErrorContains(t, err, "bad path segment")
 			require.Equal(t, *before, container)

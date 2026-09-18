@@ -22,33 +22,12 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const (
-	lpuConfigVolumeName = "config"
-	lpuConfigMountPath  = "/configs"
-)
+const lpuConfigVolumeName = "config"
 
 // LPUConfigMapName names the immutable runtime table using its Pod-template content hash.
 // The root is the PCS identity carried by Grove's part-of Pod label.
 func LPUConfigMapName(root, configHash string) string {
 	return fmt.Sprintf("%s-lpu-%.16s", root, configHash)
-}
-
-func renderLPUConfigMap(
-	namespace string,
-	materializationName string,
-	modelStoragePath string,
-	projections []*ModelProjection,
-) (*corev1.ConfigMap, error) {
-	data := resolvedPartitionData(projections)
-	if projections[0].pipeline == PipelineLPX {
-		// Direct agents consume the build directory and partition table.
-		modelPath, err := buildRuntimePath(lpuRuntimeBuildRef(projections[0], modelStoragePath), modelStoragePath)
-		if err != nil {
-			return nil, fmt.Errorf("resolve gas_dir: %w", err)
-		}
-		data["gas_dir"] = modelPath
-	}
-	return renderRuntimeConfigMap(namespace, materializationName+"-lpu", data)
 }
 
 func renderRuntimeConfigMap(namespace, namePrefix string, data map[string]string) (*corev1.ConfigMap, error) {
@@ -212,17 +191,6 @@ func withLPUConfigVolume(spec *corev1.PodSpec, configMapName string, allowOverri
 				LocalObjectReference: corev1.LocalObjectReference{Name: configMapName},
 			}},
 		})
-	}
-	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
-	found = false
-	configMount := corev1.VolumeMount{Name: lpuConfigVolumeName, MountPath: lpuConfigMountPath}
-	for _, mount := range container.VolumeMounts {
-		if mount.Name == lpuConfigVolumeName || mount.MountPath == lpuConfigMountPath {
-			if !allowOverrides && (found || mount != configMount) {
-				return fmt.Errorf("selected LPX main container reserves volume %q at %q", lpuConfigVolumeName, lpuConfigMountPath)
-			}
-			found = true
-		}
 	}
 	return nil
 }

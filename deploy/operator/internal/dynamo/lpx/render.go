@@ -90,7 +90,7 @@ func RenderSelectedNodeLocal(
 	if err != nil {
 		return nil, err
 	}
-	configMap, err := renderLPUConfigMap(namespace, plan.PodCliqueSetName, modelStoragePath, projections)
+	configMap, err := renderRuntimeConfigMap(namespace, plan.PodCliqueSetName+"-lpu", resolvedPartitionData(projections))
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func RenderSelectedNodeLocal(
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
 	if conductorTemplateName != "" {
 		container := common.FindContainerByName(conductorTemplate.Spec.Containers, commonconsts.MainContainerName)
-		if err := applyConductorModelPaths(container, projections, modelStoragePath); err != nil {
+		if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
 			return nil, err
 		}
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
@@ -148,6 +148,14 @@ func RenderSelectedNodeLocal(
 			}
 			if storagePath != modelStoragePath {
 				return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
+			}
+
+			// Publish the model path before template-owned hybrid Agent bindings.
+			if hybrid {
+				container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
+				if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
+					return nil, fmt.Errorf("stage %s: %w", stage, err)
+				}
 			}
 			var conductorSpec *corev1.PodSpec
 			if stage == conductorStage && conductor != nil {
@@ -252,15 +260,9 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 		if err := withLPUConfigVolume(conductorPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
 			return err
 		}
+		configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
 	}
-	if workload.Pipeline() == PipelineLPX {
-		configureDirectHybridAgentRuntime(agentPodSpec, configMapName)
-	} else {
-		if conductorPodSpec != nil {
-			configureNodeLocalConductorRuntime(conductorPodSpec, allocation)
-		}
-		configureAgentIdentity(agentPodSpec)
-	}
+	configureAgentIdentity(agentPodSpec)
 
 	return nil
 }

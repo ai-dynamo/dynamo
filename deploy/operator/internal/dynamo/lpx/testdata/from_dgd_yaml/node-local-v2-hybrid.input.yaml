@@ -122,6 +122,8 @@ spec:
                 successThreshold: 1
                 timeoutSeconds: 1
               env:
+              - name: GAS_DIR
+                value: $(LPX_MODEL_PATH)
               - name: GLUE_RDMA_PATH_MTU
                 value: '1024'
               - name: NIC_NAME

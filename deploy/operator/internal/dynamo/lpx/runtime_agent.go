@@ -15,25 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// configureDirectHybridAgentRuntime lowers an LPX-scheduled PodSpec into the
-// direct agent runtime used by conductorless hybrid workloads.
-func configureDirectHybridAgentRuntime(
-	agentPodSpec *corev1.PodSpec,
-	lpuConfigMapName string,
-) {
-	agent := configureAgentIdentity(agentPodSpec)
-
-	agent.Env = append(agent.Env,
-		corev1.EnvVar{
-			Name: "GAS_DIR",
-			ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: lpuConfigMapName},
-				Key:                  "gas_dir",
-			}},
-		},
-	)
-}
-
 // configureNodeLocalConductorRuntime consumes a fresh conductor PodSpec with a validated main container.
 func configureNodeLocalConductorRuntime(
 	conductorPodSpec *corev1.PodSpec,
@@ -46,8 +27,8 @@ func configureNodeLocalConductorRuntime(
 	retargetMainContainerReferences(conductorPodSpec, conductor)
 }
 
-// applyConductorModelPaths binds nonempty canonical projections into the fresh conductor container.
-func applyConductorModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+// applyModelPaths binds nonempty canonical projections into a fresh runtime container.
+func applyModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
 	type modelPathBinding struct {
 		name       string
 		projection *ModelProjection
@@ -78,11 +59,10 @@ func applyConductorModelPaths(container *corev1.Container, projections []*ModelP
 
 // configureAgentIdentity names the main runtime and retargets its container references.
 // agentPodSpec must be non-nil and contain the validated main container.
-func configureAgentIdentity(agentPodSpec *corev1.PodSpec) *corev1.Container {
+func configureAgentIdentity(agentPodSpec *corev1.PodSpec) {
 	agent := common.FindContainerByName(agentPodSpec.Containers, commonconsts.MainContainerName)
 	agent.Name = lpuAgentContainerName
 	retargetMainContainerReferences(agentPodSpec, agent)
-	return agent
 }
 
 // retargetMainContainerReferences requires its non-nil target to point into the non-nil PodSpec's Containers.
