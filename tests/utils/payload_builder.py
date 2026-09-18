@@ -638,19 +638,23 @@ def make_chat_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
+        # Let ManagedProcess log the actual health-check failure.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # raise_for_status() omits the response body.
+        if not resp.ok:
+            raise RuntimeError(
+                f"chat health check got HTTP {resp.status_code} from {resp.url}: "
+                f"{resp.text[:500]!r}"
             )
-            # Validate structure only; expected_response is empty
-            _ = payload.response_handler(resp)
-            return True
-        except Exception:
-            return False
+        # Validate structure only; expected_response is empty
+        payload.response_handler(resp)
+        return True
 
     return _check_chat_endpoint
 
@@ -665,20 +669,26 @@ def make_completions_health_check(port: int, model: str):
             stream=False,
         ).with_model(model)
         payload.port = port
-        try:
-            resp = send_request(
-                payload.url(),
-                payload.body,
-                timeout=min(max(1.0, remaining_timeout), 5.0),
-                method=payload.method,
-                log_level=10,
+        # See make_chat_health_check: no try/except, so ManagedProcess._check_func's
+        # own exception logging can surface the real failure reason.
+        resp = send_request(
+            payload.url(),
+            payload.body,
+            timeout=min(max(1.0, remaining_timeout), 5.0),
+            method=payload.method,
+            log_level=10,
+        )
+        # See make_chat_health_check: surface the response body, since
+        # raise_for_status() alone only reports the status line.
+        if not resp.ok:
+            raise RuntimeError(
+                f"completions health check got HTTP {resp.status_code} from "
+                f"{resp.url}: {resp.text[:500]!r}"
             )
-            out = payload.response_handler(resp)
-            if not out:
-                raise ValueError("")
-            return True
-        except Exception:
-            return False
+        out = payload.response_handler(resp)
+        if not out:
+            raise ValueError(f"completions health check got empty response: {out!r}")
+        return True
 
     return _check_completions_endpoint
 
