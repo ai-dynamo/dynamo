@@ -65,8 +65,12 @@ class _Directory:
         return True
 
     def publish_deferred(self, items):
-        self.published.extend(items)
-        return len(items)
+        # The fake commits immediately so enqueue failures and compensation
+        # remain observable without a background thread.
+        return self.publish(items)
+
+    def flush_deferred(self, timeout=None):
+        return True
 
     def publish(self, items):
         if self.publish_error is not None:
@@ -92,6 +96,15 @@ class _Directory:
 
     def lookup_authoritative(self, hashes):
         return [self.live.get(content_hash) for content_hash in hashes]
+
+    def may_have_hbm_candidate(self, _hashes):
+        entries = self.entries or self.live.values()
+        return any(
+            entry is not None
+            and entry.get("tier") == "hbm"
+            and entry.get("state") in ("ready", "active")
+            for entry in entries
+        )
 
     def lookup_and_claim(self, _hashes):
         return list(self.entries), "claim"
@@ -186,6 +199,9 @@ def test_uses_native_unified_tree_and_hashes(monkeypatch):
     cache, _allocator = _cache(monkeypatch)
     key = _key(1, 2, 3, 4)
     inserted = cache.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
+    cache._gms_tp.agree = lambda *_args: pytest.fail(
+        "native prefix hits must not enter TP consensus"
+    )
 
     result = cache.match_prefix(MatchPrefixParams(key=key))
 
@@ -214,7 +230,11 @@ def test_tp_logical_layout_agrees_with_rank_local_generations(monkeypatch, opera
     for rank, generation in enumerate([5, 19]):
         cache, allocator = _cache(monkeypatch)
         cohort = adapter.TPConsistency(world_size=2)
+        monkeypatch.setattr(cohort, "leader_true", lambda *_args: True)
         cohort._gather = lambda value, rank=rank: gather(rank, value)
+        cohort._gather_digest = lambda stage, ok, agreement, rank=rank: gather(
+            rank, (ok, sha256(stage.encode("utf-8") + b"\0" + agreement).digest())
+        )
         cache._gms_tp = cohort
         cache._gms_directory = _Directory(
             [
@@ -259,6 +279,26 @@ def test_tp_logical_layout_agrees_with_rank_local_generations(monkeypatch, opera
     with ThreadPoolExecutor(max_workers=2) as executor:
         generations = list(executor.map(execute, caches))
     assert generations == ([[5], [19]] if operation == "publish" else [[6], [20]])
+
+
+def test_layout_digest_ignores_local_generation_but_fences_page_identity():
+    base = {
+        "content_hash": b"h" * 32,
+        "engine_id": "engine",
+        "slot_ids": [4],
+        "generations": [1],
+        "tier": "hbm",
+        "active": False,
+    }
+    peer = dict(base, generations=[99])
+    divergent = dict(base, slot_ids=[5])
+
+    assert adapter._logical_layout_digest([base]) == adapter._logical_layout_digest(
+        [peer]
+    )
+    assert adapter._logical_layout_digest([base]) != adapter._logical_layout_digest(
+        [divergent]
+    )
 
 
 def test_publication_preserves_native_physical_page_order(monkeypatch):
@@ -408,11 +448,12 @@ def test_tp_stale_empty_peer_turns_directory_hit_into_common_miss(monkeypatch):
     )
     cache._gms_directory = directory
     cohort = adapter.TPConsistency(world_size=2)
+    monkeypatch.setattr(cohort, "leader_true", lambda *_args: True)
 
     def gather(value):
-        stage, _payload = value
-        if stage == "adopt:prefix":
-            return [value, (stage, [])]
+        stage = value[0]
+        if stage == "adopt:lookup":
+            return [value, (stage, True, [])]
         return [value, value]
 
     monkeypatch.setattr(cohort, "_gather", gather)
@@ -450,9 +491,10 @@ def test_tp_peer_adoption_failure_is_fatal_before_native_insert(monkeypatch):
         lambda _allocator, value: rolled_back.extend(value),
     )
     cohort = adapter.TPConsistency(world_size=2)
+    monkeypatch.setattr(cohort, "leader_true", lambda *_args: True)
 
     def gather(value):
-        stage, _payload = value
+        stage = value[0]
         if stage == "adopt:leases":
             return [value, (stage, False)]
         return [value, value]

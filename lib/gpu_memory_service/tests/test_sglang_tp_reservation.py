@@ -59,6 +59,7 @@ class _Ring:
 def _cohort_allocators(
     monkeypatch, rings, owner, before_acquire=None, after_acquire=None
 ):
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "1")
     votes = _Votes()
     allocators = []
     for rank, ring in enumerate(rings):
@@ -97,6 +98,79 @@ def _cohort_allocators(
 
 def _reserve(allocator):
     return hooks._reserve_pages(allocator, [1], local_free=4, operation="test")
+
+
+@pytest.mark.parametrize("retained_ranks", [1, 2])
+def test_window_refill_skips_retained_native_free_prefix(monkeypatch, retained_ranks):
+    rings = [_Ring(0), _Ring(7)]
+    allocators = _cohort_allocators(monkeypatch, rings, "test")
+    for allocator, ring in zip(allocators[:retained_ranks], rings[:retained_ranks]):
+        lease = ring.acquire("test", 1, [1], True)[0]
+        state = hooks._STATE[id(allocator)]
+        state["leases_by_page"][1] = lease
+        state["retained_pages"].add(1)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(_reserve, allocators))
+    assert [[lease.block_id for lease in result] for result in results] == [[2], [2]]
+    assert [allocator.free_pages[0].item() for allocator in allocators] == [2, 2]
+
+
+def test_full_retained_window_reclaims_actual_demand(monkeypatch):
+    rings = [_Ring(0), _Ring(7)]
+    allocators = _cohort_allocators(monkeypatch, rings, "test")
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4096")
+    for allocator, ring in zip(allocators, rings):
+        state = hooks._STATE[id(allocator)]
+        leases = ring.acquire("test", 4, [1, 2, 3, 4], True)
+        state["leases_by_page"].update({lease.block_id: lease for lease in leases})
+        state["retained_pages"].update([1, 2, 3, 4])
+
+    def reclaim(allocator, count):
+        assert count == 1, "speculation must not evict the whole prefix cache"
+        state = hooks._STATE[id(allocator)]
+        hooks._release_tracked_leases(state, [state["leases_by_page"][1]])
+        state["retained_pages"].remove(1)
+        return 1
+
+    monkeypatch.setattr(hooks, "_ensure_directory_capacity", reclaim)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(_reserve, allocators))
+    assert [[lease.block_id for lease in result] for result in results] == [[1], [1]]
+    assert all(hooks._STATE[id(a)]["retained_pages"] == {2, 3, 4} for a in allocators)
+
+
+def test_window_contention_falls_back_to_request_size(monkeypatch):
+    rings = [_Ring(0), _Ring(7)]
+    rings[1].acquire("competitor", 1, [1], True)
+    allocators = _cohort_allocators(monkeypatch, rings, "test")
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(_reserve, allocators))
+    assert all(result is not None for result in results)
+    assert [[lease.block_id for lease in result] for result in results] == [[2], [2]]
+
+
+@pytest.mark.parametrize("rollback", ["allocation", "adoption", "queued-release"])
+def test_rollback_realigns_remaining_window(monkeypatch, rollback):
+    rings = [_Ring(0), _Ring(7)]
+    allocator = _cohort_allocators(monkeypatch, rings, "test")[0]
+    state = hooks._STATE[id(allocator)]
+    leases = rings[0].acquire("test", 3, [1, 2, 3], True)
+    state["leases_by_page"].update({lease.block_id: lease for lease in leases})
+    state["tp_reserved_pages"] = [2, 3]
+    state["tp_reservation_aligned"] = True
+    if rollback == "allocation":
+        hooks._rollback_reserved_pages(state, leases[:1])
+    elif rollback == "queued-release":
+        state["tp_reserved_pages"] = [1, 2, 3]
+        hooks._release_tracked_leases(state, leases[:1])
+    else:
+        allocator.free_pages = torch.tensor([2, 3, 4])
+        allocator.need_sort = False
+        hooks.rollback_adopted_hbm_pages(allocator, leases[:1])
+    next_leases = hooks._consume_tp_reservation(allocator, 1)
+    assert [lease.block_id for lease in next_leases] == [2]
+    assert allocator.free_pages[0].item() == 2
 
 
 def test_opposite_primary_shadow_rank_order_keeps_one_layout_per_cohort(monkeypatch):
