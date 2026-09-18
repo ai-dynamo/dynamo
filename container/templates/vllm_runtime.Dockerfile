@@ -270,6 +270,9 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+# This experiment image uses native text-only vLLM request handling.
+ENV VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
