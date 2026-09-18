@@ -72,4 +72,13 @@ jobs:
           # follow-up PR once one observed run logs that it would update the
           # existing "Dynamo v1.6.0" release rather than create one, and
           # LINEAR_ACCESS_KEY is confirmed to be a pipeline access key.
+          #
+          # Flipping this also publishes the tracker release URL. The action
+          # runs the CLI with --json and echoes the result unconditionally
+          # (run.sh line 95 at the pinned SHA), and on the real path that
+          # result carries the release URL. Dry run returns null, so nothing
+          # is disclosed today. The log_level input does not suppress it,
+          # because that echo sits outside the CLI's own logging. This
+          # repository is public, so its job logs are public. The flip pull
+          # request has to accept that disclosure explicitly.
           dry_run: true
