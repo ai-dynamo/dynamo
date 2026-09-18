@@ -1522,111 +1522,6 @@ func IsWorkerComponent(componentType string) bool {
 		componentType == commonconsts.ComponentTypeDecode
 }
 
-// AddStandardEnvVars adds the standard environment variables that are common to
-// both SnapshotJob capture Pods and generated worker Pods.
-func AddStandardEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
-	standardEnvVars := []corev1.EnvVar{}
-	if operatorConfig.Infrastructure.NATSAddress != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "NATS_SERVER",
-			Value: operatorConfig.Infrastructure.NATSAddress,
-		})
-	}
-
-	if operatorConfig.Infrastructure.ETCDAddress != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "ETCD_ENDPOINTS",
-			Value: operatorConfig.Infrastructure.ETCDAddress,
-		})
-	}
-
-	if operatorConfig.Infrastructure.ModelExpressURL != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "MODEL_EXPRESS_URL",
-			Value: operatorConfig.Infrastructure.ModelExpressURL,
-		})
-	}
-	if operatorConfig.Infrastructure.PrometheusEndpoint != "" {
-		standardEnvVars = append(standardEnvVars, corev1.EnvVar{
-			Name:  "PROMETHEUS_ENDPOINT",
-			Value: operatorConfig.Infrastructure.PrometheusEndpoint,
-		})
-	}
-	// merge the env vars to allow users to override the standard env vars
-	container.Env = MergeEnvs(standardEnvVars, container.Env)
-}
-
-// AddTransportTLSEnvVars injects DYN_TCP_TLS_* and NATS_TLS_* certificate path
-// environment variables from InfrastructureConfiguration. Unlike
-// AddStandardEnvVars, this is scoped to DGD workload pods only — not the
-// DGDR profiler Job — because the profiler does not run the TCP/NATS
-// transport and does not inherit DGD podTemplate certificate mounts.
-func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv1alpha1.OperatorConfiguration) {
-	tlsEnvVars := []corev1.EnvVar{}
-	// Inject TLS certificate paths for inter-component encryption (DYN_TCP_TLS_* / NATS_TLS_*).
-	if operatorConfig.Infrastructure.NATSTLSCAPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "NATS_TLS_CA_CERT_PATH",
-			Value: operatorConfig.Infrastructure.NATSTLSCAPath,
-		})
-	}
-	if operatorConfig.Infrastructure.NATSTLSClientCertPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "NATS_TLS_CLIENT_CERT_PATH",
-			Value: operatorConfig.Infrastructure.NATSTLSClientCertPath,
-		})
-	}
-	if operatorConfig.Infrastructure.NATSTLSClientKeyPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "NATS_TLS_CLIENT_KEY_PATH",
-			Value: operatorConfig.Infrastructure.NATSTLSClientKeyPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSCertPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSCertPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSKeyPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_KEY_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSKeyPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSCAPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CA_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSCAPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSClientCertPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CLIENT_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSClientCertPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSClientKeyPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CLIENT_KEY_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSClientKeyPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSClientCAPath != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
-			Value: operatorConfig.Infrastructure.TCPTLSClientCAPath,
-		})
-	}
-	if operatorConfig.Infrastructure.TCPTLSServerName != "" {
-		tlsEnvVars = append(tlsEnvVars, corev1.EnvVar{
-			Name:  "DYN_TCP_TLS_SERVER_NAME",
-			Value: operatorConfig.Infrastructure.TCPTLSServerName,
-		})
-	}
-	container.Env = MergeEnvs(tlsEnvVars, container.Env)
-}
-
 // usesMultinodeTopologyAliases keeps environment and command-line injection on
 // the same per-DGD compatibility boundary.
 func usesMultinodeTopologyAliases(annotations map[string]string) bool {
@@ -1803,7 +1698,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	annotations := GetPodTemplateAnnotations(component)
-	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations))
+	componentContext, err := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, NewDiscoveryContext(operatorConfig.Discovery.Backend, annotations), operatorConfig.Infrastructure)
 	if err != nil {
 		return nil, err
 	}
@@ -1852,11 +1747,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		return nil, err
 	}
 
-	// Infrastructure and transport defaults belong to the Dynamo runtime.
-	if component.DynamoSidecar == nil {
-		AddStandardEnvVars(&container, operatorConfig)
-		AddTransportTLSEnvVars(&container, operatorConfig)
-	}
+	// Preserve legacy environment rendering before backend-specific additions.
+	container.Env = MergeEnvsForOrigin(annotations, nil, container.Env)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -1925,13 +1817,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 
 	// Merge runtime defaults only into the selected restartable init container.
 	if component.DynamoSidecar != nil {
-		if err := mergeDynamoSidecarDefaults(&podSpec, *component.DynamoSidecar, componentContext, operatorConfig); err != nil {
+		if err := mergeDynamoSidecarDefaults(&podSpec, *component.DynamoSidecar, componentContext); err != nil {
 			return nil, err
 		}
 	}
 
 	if component.FrontendSidecar != nil {
-		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, operatorConfig, frontendSidecarMounts); err != nil {
+		if err := mergeFrontendSidecarDefaults(&podSpec, *component.FrontendSidecar, componentContext, frontendSidecarMounts, annotations); err != nil {
 			return nil, err
 		}
 	}
@@ -2168,7 +2060,7 @@ func appendMissingPVCVolumesForMounts(volumes []corev1.Volume, mounts []corev1.V
 	return ordered
 }
 
-func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration, parentMounts []corev1.VolumeMount) error {
+func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, parentContext ComponentContext, parentMounts []corev1.VolumeMount, annotations map[string]string) error {
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
@@ -2176,12 +2068,14 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 
 		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
+			Annotations: parentContext.Annotations,
 			numberOfNodes:                  1,
 			RuntimeContainerName:           sidecarName,
 			ComponentType:                  commonconsts.ComponentTypeFrontend,
 			ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
+			Infrastructure:                 parentContext.Infrastructure,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 		}
 
@@ -2196,9 +2090,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
-		base.Env = MergeEnvs(baseEnv, user.Env)
-		AddStandardEnvVars(&base, operatorConfig)
-		AddTransportTLSEnvVars(&base, operatorConfig)
+		base.Env = MergeEnvsForOrigin(annotations, baseEnv, user.Env)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)
 		podSpec.Containers[i] = base
 		return nil
@@ -2235,7 +2127,7 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1beta1.D
 	labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
 }
 
-func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext) (ComponentContext, error) {
+func generateComponentContext(component *v1beta1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discovery DiscoveryContext, infrastructure configv1alpha1.InfrastructureConfiguration) (ComponentContext, error) {
 	dynamoNamespace := v1beta1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
 	var workerHashSuffix string
 	labels := GetPodTemplateLabels(component)
@@ -2256,12 +2148,14 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 
 	// Main hosts the runtime unless the component selects a native Dynamo sidecar.
 	componentContext := ComponentContext{
+		Annotations: GetPodTemplateAnnotations(component),
 		numberOfNodes:                  numberOfNodes,
 		RuntimeContainerName:           commonconsts.MainContainerName,
 		ComponentType:                  string(component.ComponentType),
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
 		Discovery:                      discovery,
+		Infrastructure:                 infrastructure,
 		DynamoNamespace:                dynamoNamespace,
 		EPPConfig:                      component.EPPConfig,
 		WorkerHashSuffix:               workerHashSuffix,
