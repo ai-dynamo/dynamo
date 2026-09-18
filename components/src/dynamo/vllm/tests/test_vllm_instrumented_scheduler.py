@@ -5223,6 +5223,7 @@ def _kvwarm_planner_stub(usable_blocks, groups=1, block_size=16):
     meta = {"warm_eligible": True, "skip_reason": None}
     stub._kvwarm_meta_init = lambda: meta
     stub._kvwarm_warm_eligible = lambda: True
+    stub._bench_synchronizer = None
     stub._bench_negotiated_capacity = None
     stub.max_model_len = 8192
     stub.cache_config = SimpleNamespace(block_size=block_size)
