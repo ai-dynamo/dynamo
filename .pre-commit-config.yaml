@@ -206,7 +206,7 @@ repos:
       pass_filenames: false
     - id: pynvvideocodec-spec
       name: Check the PyNvVideoCodec spec is consistent
-      entry: python3 tests/dependencies/test_pynvvideocodec_floor.py
+      entry: python3 tests/dependencies/test_pynvvideocodec_spec.py
       language: python
       additional_dependencies: [packaging, pytest]
       pass_filenames: false

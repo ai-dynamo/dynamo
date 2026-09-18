@@ -397,35 +397,20 @@ RUN set -eu; \
 
 {% if device == "cuda" %}
 # Delete the base image's PyNvVideoCodec before the install below replaces it.
-# vllm/vllm-openai:v0.28.0-ubuntu2404 ships 2.0.4, which bundles a complete
-# FFmpeg 8.1.1 -- libavcodec.so.62 plus libavdevice/libavfilter/libswscale/
-# libswresample -- and the codec gate denies a wheel-vendored libavcodec on
-# presence.
+# The vllm-openai base ships 2.0.4, which bundles a complete FFmpeg including a
+# libavcodec the codec gate denies on presence.
 #
-# Uninstall FIRST, then rm what is left. The order matters and the obvious
-# shortcut is wrong: the wheel's RECORD is the only complete list of what it
-# installed, and it reaches further than the package directory -- top-level
-# `samples/` and `benchmarks/` trees (41 entries in 2.0.4) and an FFmpeg source
-# tarball written outside site-packages through a
-# `../../../external/ffmpeg/src/ffmpeg-<version>.tar.xz` entry. Deleting the
-# dist-info first destroys that list, so a bare `rm -rf` of the package
-# directory would leave those trees behind as orphans no later install owns.
-# The rm is still here, after the uninstall, because it is the part that does
-# not depend on the installer honouring its own metadata, and because it is what
-# makes the intent legible at the point of use.
+# Uninstall first, then rm. The wheel's RECORD is the only complete list of what
+# it wrote -- it reaches top-level `samples/` and `benchmarks/` trees and an
+# FFmpeg source tarball outside site-packages -- so deleting the dist-info first
+# would orphan those. The rm covers what does not depend on the installer
+# honouring its own metadata; `pynvvideocodec*` takes the dist-info and the stray
+# `pynvvideocodec.` directory beside it.
 #
-# `pynvvideocodec*` takes both the version-stamped dist-info and the stray
-# `pynvvideocodec.` directory the wheel installs beside it (it holds a vendored
-# libcudart, not a codec).
+# find_spec, not an import: PyNvVideoCodec's __init__ dlopens libnvidia-encode,
+# which no builder has, so an import raises whether or not the wheel is there.
 #
-# Fails when the base stops shipping the package rather than quietly removing
-# nothing: a no-op rm is indistinguishable from one whose paths went stale, and
-# either way this block is what has to be revisited.
-#
-# The presence test is find_spec, not an import: PyNvVideoCodec's __init__ dlopens
-# libnvidia-encode.so.1, which no builder has, so `import PyNvVideoCodec` raises
-# whether or not the wheel is installed and could never fail this build -- the
-# same reason the non-CUDA branch below uses find_spec.
+# Fails if the base stops shipping it, rather than quietly removing nothing.
 RUN set -eu; \
     purelib="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
     data="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["data"])')"; \
@@ -476,18 +461,13 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --no-deps --requirement /tmp/requirements.vllm.txt && \
     rm -rf /opt/uv/cache
 
-# Assert what the removal and the install together left on disk. The floor in
-# requirements.vllm.txt is a lower bound, so it cannot state "exactly one copy"
-# or "no libavcodec" -- and those are the two properties the codec gate depends
-# on. Checked here, beside the install, so a regression names its cause instead
-# of surfacing as an unexplained scan violation several stages later.
-#
-# Reads the dist-info directories rather than importlib.metadata: a surviving
-# base copy beside the new one is exactly the failure being looked for, and the
-# metadata API answers with whichever one it resolves first. FLOOR is duplicated
-# from requirements.vllm.txt on purpose -- this stage must not parse the file it
-# is checking; tests/dependencies/test_pynvvideocodec_floor.py asserts the two
-# agree, and covers the sglang and trtllm copies in the same way.
+# Assert what the removal and install left. A requirements specifier constrains
+# what pip installs; it cannot say "exactly one copy on disk" or "no libavcodec",
+# and those are the properties the codec gate depends on. Checked beside the
+# install so a regression names its cause instead of surfacing as a scan
+# violation later.
+# PINNED is duplicated from the requirements file deliberately -- this stage
+# must not parse the file it is checking; a test asserts the two agree.
 RUN python3 - <<'PYEOF'
 import csv
 import glob
@@ -496,7 +476,7 @@ import re
 import sys
 from importlib.metadata import distributions
 
-FLOOR = "2.2.3"
+PINNED = "2.2.3"
 NAME = "pynvvideocodec"
 # Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
 # families rather than the four this package happens to have shed, so a future
@@ -519,16 +499,6 @@ def canonical(name):
     return re.sub(r"[-_.]+", "-", name or "").lower()
 
 
-def parse(version):
-    """Compare on the numeric release only, and never raise.
-
-    A version this cannot split (a release candidate, a dev build) must not kill
-    the build with a traceback where this block has its own message to print.
-    """
-    parts = [int(x) for x in re.findall(r"\d+", version)[:3]]
-    return tuple(parts + [0] * (3 - len(parts)))
-
-
 # Enumerated over sys.path rather than one scheme directory: these images carry
 # both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
 # and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
@@ -540,8 +510,9 @@ versions = sorted(d.version for d in installed)
 print("PyNvVideoCodec distributions on sys.path:", versions)
 if len(installed) != 1:
     sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
-if parse(versions[0]) < parse(FLOOR):
-    sys.exit(f"ERROR: PyNvVideoCodec {versions[0]} is below the {FLOOR} floor")
+if versions[0] != PINNED:
+    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
+             f"pins {PINNED}")
 
 site = os.path.normpath(str(installed[0].locate_file("")))
 pkg = os.path.join(site, "PyNvVideoCodec")

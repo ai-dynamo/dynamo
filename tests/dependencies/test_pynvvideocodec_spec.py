@@ -3,8 +3,8 @@
 
 """Keep the PyNvVideoCodec spec identical everywhere it is written down.
 
-The spec is written in three requirements files, and its lower bound is repeated
-as a guard constant in each of the three runtime templates. The templates cannot
+The spec is written in three requirements files, and the pinned version is
+repeated as a guard constant in each of the three runtime templates. The templates cannot
 parse the requirements file they are checking, since the point of those guards is
 to fail when the installed version and the declared one disagree, so the
 duplication is deliberate and needs a test rather than a comment.
@@ -41,13 +41,13 @@ pytestmark = [
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# The spec every image installs. The lower bound is the version the multimodal
-# suite was validated against; the upper bound is what stops the next major being
-# taken silently at build time.
-EXPECTED_SPEC = ">=2.2.3,<3"
-# The lower bound on its own -- this is what the template guards compare against,
-# since a shell `sort -V` test cannot express a range.
-EXPECTED_FLOOR = "2.2.3"
+# The spec every image installs: pinned exactly, so the declared version is the
+# version, and `container/deps/README.md`'s "every installed version should be
+# explicitly tested" holds without an audit.
+EXPECTED_SPEC = "==2.2.3"
+# The bare version, which is what the shell guards in the templates compare
+# against -- they check an installed version string, not a specifier.
+EXPECTED_VERSION = "2.2.3"
 
 DISTRIBUTION = "pynvvideocodec"
 
@@ -153,7 +153,7 @@ def _requirement(path: str) -> Requirement:
     return found[0]
 
 
-def _template_floor_versions(path: str) -> set[str]:
+def _template_pinned_versions(path: str) -> set[str]:
     """Every version literal the PyNvVideoCodec instructions in `path` compare against.
 
     Every semver on a comparing or installing line inside an instruction that names
@@ -204,7 +204,7 @@ def test_the_spec_is_bounded_above() -> None:
     """`container/deps/README.md`: "Never use `>=`" -- it stops pinning anything.
 
     Distinct from the exact-spec cases above, which move with EXPECTED_SPEC: this
-    one survives an edit that drops the cap and updates that constant to match.
+    one survives an edit that loosens the pin and updates that constant to match.
     """
     specifier = _requirement(REQUIREMENTS[0]).specifier
     assert any(
@@ -217,10 +217,9 @@ def test_templates_install_the_same_spec() -> None:
 
     The TRT-LLM image installs a system-site copy of its own, beside the venv copy
     `requirements.trtllm.txt` provides, and its comment says the two specifiers
-    must stay identical. Nothing enforced that: the floor scan below reads lower
-    bounds only, so a template left at `>=2.2.3` while the requirements file moved
-    to `>=2.2.3,<3` would pass, and a 3.x release would then land in system site
-    while the venv stayed on 2.x.
+    must stay identical. Nothing enforced that, and the two did drift once: the
+    requirements file was capped while the template's inline install was left
+    unbounded, so one image would have carried two different versions.
 
     One test over all templates rather than one per template: only TRT-LLM carries
     an inline specifier today, so a per-template parametrization would report two
@@ -242,19 +241,19 @@ def test_templates_install_the_same_spec() -> None:
 
 
 @pytest.mark.parametrize("path", TEMPLATES)
-def test_templates_guard_on_the_same_floor(path: str) -> None:
-    """Every floor constant in a template must equal the declared lower bound.
+def test_templates_guard_on_the_same_version(path: str) -> None:
+    """Every version constant in a template must equal the declared pin.
 
-    Deliberately an assertion over the whole set, not "the floor appears
+    Deliberately an assertion over the whole set, not "the version appears
     somewhere": a guard still comparing against a superseded version passes that
     weaker check while letting through exactly the drift this file exists to catch.
     """
     template = ROOT / path
     if not template.is_file():
         pytest.skip(f"{path} is not staged in this component image (.dockerignore)")
-    versions = _template_floor_versions(path)
-    assert versions, f"no PyNvVideoCodec floor constant found in {path}"
-    assert versions == {EXPECTED_FLOOR}, f"{path} guards on {sorted(versions)}"
+    versions = _template_pinned_versions(path)
+    assert versions, f"no PyNvVideoCodec version constant found in {path}"
+    assert versions == {EXPECTED_VERSION}, f"{path} guards on {sorted(versions)}"
 
 
 def main() -> int:
@@ -285,7 +284,9 @@ def main() -> int:
         if not (ROOT / path).is_file():
             failures.append(f"template {path}: file not found")
             continue
-        check(f"template floor {path}", test_templates_guard_on_the_same_floor, path)
+        check(
+            f"template version {path}", test_templates_guard_on_the_same_version, path
+        )
 
     for failure in failures:
         print(f"ERROR: {failure}")

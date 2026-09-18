@@ -36,22 +36,15 @@ msgspec>=0.19.0
 # the current patch line.
 pillow>=12.3.0
 # NVDEC hardware decode for H.264/H.265 video input (dynamo common.multimodal.
-# nvdec_decoder). Pin >=2.2.3: it bundles only libavutil + libavformat (FFmpeg
-# 9.0.1, container demux, no software codec); everything below 2.2.0 -- 2.1.0
-# included, not just the 2.0.x line -- bundles a full FFmpeg whose libavcodec
-# the codec gate rejects on presence. Links libnvcuvid at runtime. Requires
-# NVIDIA_DRIVER_CAPABILITIES to include "video" (set in
-# trtllm_runtime.Dockerfile) or it cannot import.
-#
-# This image carries two copies: the /opt/dynamo/venv one this file installs, and
-# a system-site one trtllm_runtime.Dockerfile installs over the base image's.
-# Their specifiers must stay identical, or the two diverge inside one image.
-#
-# Bounded above -- see the note in requirements.vllm.txt. Keep the whole
-# specifier identical to the ones in requirements.{vllm,sglang}.txt and to the
-# system-site install, and its lower bound identical to the guard constants in
-# the three runtime templates; a test asserts they all agree.
-PyNvVideoCodec>=2.2.3,<3
+# nvdec_decoder). The TRT-LLM base ships 2.1.0, which bundles a full FFmpeg
+# including a libavcodec the codec gate rejects. This image carries two copies --
+# the /opt/dynamo/venv one this file installs and the system-site one
+# trtllm_runtime.Dockerfile installs over the base image's -- and their
+# specifiers must stay identical. Requires NVIDIA_DRIVER_CAPABILITIES to include
+# "video". Pinned exactly -- see the note in requirements.vllm.txt. Keep the
+# specifier in step with requirements.{vllm,sglang}.txt;
+# tests/dependencies/test_pynvvideocodec_spec.py enforces that.
+PyNvVideoCodec==2.2.3
 soupsieve>=2.8.4  # JupyterLab stack; see note above jupyter-server
 tornado>=6.5.6  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime (companion to msgspec above).

@@ -191,22 +191,11 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
-# Assert that exactly one PyNvVideoCodec ended up in the image, at or above the
-# floor, carrying none of the libraries the codec gate denies.
-#
-# The lmsysorg/sglang base ships no PyNvVideoCodec today, so unlike the vLLM and
-# TRT-LLM images there is no base copy to delete first -- but that is a property
-# of the current base, not a guarantee, and --force-reinstall above would replace
-# a base copy in place rather than leave two. What a base copy could still leave
-# behind is a second version-stamped FFmpeg source tarball under
-# <data>/external/ffmpeg, which the wheel installs outside site-packages through
-# a `../../../external/ffmpeg/src/ffmpeg-<version>.tar.xz` RECORD entry. Checking
-# the result is what keeps that honest; a comment claiming the base is clean
-# would not.
-#
-# FLOOR is duplicated from requirements.sglang.txt on purpose -- this stage must
-# not parse the file it is checking; tests/dependencies/test_pynvvideocodec_floor.py
-# asserts the two agree.
+# Assert what the install left. The upstream SGLang image ships no
+# PyNvVideoCodec, so nothing is removed first -- but that is a property of the
+# current base rather than a guarantee, and checking the result is what keeps it
+# honest. PINNED is duplicated from the requirements file deliberately: this stage
+# must not parse the file it is checking; a test asserts the two agree.
 RUN python3 - <<'PYEOF'
 import csv
 import glob
@@ -215,7 +204,7 @@ import re
 import sys
 from importlib.metadata import distributions
 
-FLOOR = "2.2.3"
+PINNED = "2.2.3"
 NAME = "pynvvideocodec"
 # Mirrors the deny globs in container/compliance/policy/codec_policy.yaml. Kept as
 # families rather than the four this package happens to have shed, so a future
@@ -238,16 +227,6 @@ def canonical(name):
     return re.sub(r"[-_.]+", "-", name or "").lower()
 
 
-def parse(version):
-    """Compare on the numeric release only, and never raise.
-
-    A version this cannot split (a release candidate, a dev build) must not kill
-    the build with a traceback where this block has its own message to print.
-    """
-    parts = [int(x) for x in re.findall(r"\d+", version)[:3]]
-    return tuple(parts + [0] * (3 - len(parts)))
-
-
 # Enumerated over sys.path rather than one scheme directory: these images carry
 # both /usr/local/lib/python3.12/dist-packages and /usr/lib/python3/dist-packages,
 # and the wheel declares Root-Is-Purelib: false, so neither purelib nor platlib
@@ -259,8 +238,9 @@ versions = sorted(d.version for d in installed)
 print("PyNvVideoCodec distributions on sys.path:", versions)
 if len(installed) != 1:
     sys.exit(f"ERROR: expected exactly one PyNvVideoCodec, found {versions}")
-if parse(versions[0]) < parse(FLOOR):
-    sys.exit(f"ERROR: PyNvVideoCodec {versions[0]} is below the {FLOOR} floor")
+if versions[0] != PINNED:
+    sys.exit(f"ERROR: PyNvVideoCodec is {versions[0]}, but the requirements file "
+             f"pins {PINNED}")
 
 site = os.path.normpath(str(installed[0].locate_file("")))
 pkg = os.path.join(site, "PyNvVideoCodec")
