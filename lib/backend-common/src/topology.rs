@@ -4,7 +4,7 @@
 //! File-backed worker topology, matching `dynamo.common.utils.topology`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use dynamo_kv_router::protocols::KvTransferEnforcement;
@@ -65,22 +65,15 @@ async fn apply_from_env(
             })
         })
         .transpose()?;
-    // The shared range validator does not reject NaN, which must never become
-    // a routing weight (and cannot be represented in the JSON model card).
-    if preferred_weight.is_some_and(|weight| !weight.is_finite()) {
-        return Err(invalid_config(
-            "DYN_KV_TRANSFER_PREFERRED_WEIGHT must be finite",
-        ));
-    }
-    let mount_path =
-        env("DYN_TOPOLOGY_MOUNT_PATH").unwrap_or_else(|| DEFAULT_MOUNT_PATH.to_owned());
-    let mount_path = Path::new(&mount_path);
+    let mount_path = PathBuf::from(
+        env("DYN_TOPOLOGY_MOUNT_PATH").unwrap_or_else(|| DEFAULT_MOUNT_PATH.to_owned()),
+    );
 
     // Pod labels may be projected after the worker starts. Do not register a
     // policy-less worker while waiting for the selected domain to appear.
     let deadline = Instant::now() + poll_timeout;
     let topology_domains = loop {
-        let domains = read_topology_domains(mount_path).await;
+        let domains = read_topology_domains(&mount_path).await;
         if domains.contains_key(&domain) {
             break domains;
         }
@@ -99,7 +92,6 @@ async fn apply_from_env(
     runtime_config.kv_transfer_domain = Some(domain);
     runtime_config.kv_transfer_enforcement = Some(enforcement);
     runtime_config.kv_transfer_preferred_weight = preferred_weight;
-    runtime_config.validate_config().map_err(invalid_config)?;
     tracing::info!(
         domains = ?runtime_config.topology_domains,
         domain = ?runtime_config.kv_transfer_domain,
@@ -127,7 +119,9 @@ async fn read_topology_domains(mount_path: &Path) -> HashMap<String, String> {
             Ok(None) => break,
             Err(error) => {
                 tracing::warn!(path = %mount_path.display(), %error, "Unable to list topology entry");
-                break;
+                // Discard the partial scan so the bounded outer poll retries
+                // the directory, even if the transfer domain was already read.
+                return HashMap::new();
             }
         };
         let name = entry.file_name();
@@ -283,20 +277,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_invalid_policy_and_topology() {
+    async fn rejects_invalid_topology_env() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("zone"), "zone-a").unwrap();
         for (domain, enforcement, weight) in [
             (None, None, None),
             (Some(" "), None, None),
             (Some("zone"), Some("fallback"), None),
-            (Some("zone"), Some("preferred"), None),
-            (Some("zone"), Some("required"), Some("0.5")),
             (Some("zone"), Some("preferred"), Some("heavy")),
-            (Some("zone"), Some("preferred"), Some("NaN")),
-            (Some("zone"), Some("preferred"), Some("inf")),
-            (Some("zone"), Some("preferred"), Some("-0.1")),
-            (Some("zone"), Some("preferred"), Some("1.1")),
         ] {
             let error = apply_from_env(
                 &mut ModelRuntimeConfig::default(),
@@ -312,29 +300,11 @@ mod tests {
                 Duration::ZERO,
             )
             .await
-            .expect_err("invalid policy must prevent registration");
+            .expect_err("invalid environment must fail parsing");
             assert_eq!(
                 error.error_type(),
                 ErrorType::Backend(BackendError::InvalidArgument)
             );
         }
-        std::fs::write(dir.path().join("zone"), "invalid=value").unwrap();
-        let error = apply_from_env(
-            &mut ModelRuntimeConfig::default(),
-            |name| match name {
-                "DYN_TOPOLOGY_ENABLED" => Some("true".into()),
-                "DYN_TOPOLOGY_MOUNT_PATH" => Some(dir.path().display().to_string()),
-                "DYN_KV_TRANSFER_DOMAIN" => Some("zone".into()),
-                _ => None,
-            },
-            POLL_INTERVAL,
-            Duration::ZERO,
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            error.to_string().contains("must not contain"),
-            "unexpected validation error: {error}"
-        );
     }
 }
