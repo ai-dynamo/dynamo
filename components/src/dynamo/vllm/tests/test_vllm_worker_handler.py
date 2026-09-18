@@ -2187,6 +2187,28 @@ class TestRLAdminRouteHardening:
         assert handler._rl_maintenance_lease is None
 
     @pytest.mark.asyncio
+    async def test_rejected_non_finish_update_keeps_maintenance_lease(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        handler.engine_client.collective_rpc.reset_mock()
+
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "update_weights_from_path", "allow_unpaused": "true"}
+        )
+
+        assert resp["status"] == "error"
+        assert "'allow_unpaused' must be a boolean" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.runtime.end_health_check_maintenance.assert_not_called()
+        assert handler._rl_maintenance_lease == 1
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "paused, options, error",
         [
