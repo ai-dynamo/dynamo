@@ -90,6 +90,13 @@ fn get_cached_model_path_at_revision(
     required_files: Option<&[String]>,
     cache_dir: PathBuf,
 ) -> Option<PathBuf> {
+    // This revision reaches the join below from another worker's card over etcd, and a
+    // `..` segment in it would walk out of the cache directory. The HF cache only ever
+    // names a snapshot directory after a commit SHA, so anything else is a miss.
+    if huggingface::validate_hf_commit_sha(revision).is_err() {
+        return None;
+    }
+
     // HF cache layout: models--{org}--{model}/snapshots/{sha}/
     let model_key = model_name.replace('/', "--");
     let snapshot_dir = cache_dir
@@ -590,6 +597,33 @@ pub(crate) mod tests {
         );
 
         assert!(result.is_none(), "wrong SHA should return None");
+    }
+
+    #[test]
+    fn test_get_cached_model_path_at_revision_rejects_traversal_out_of_the_cache() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/my-model";
+        // The escape target is a complete snapshot, so only the revision check can
+        // reject it: reaching the join at all would return a path outside the cache.
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("config.json"), "{}").unwrap();
+        std::fs::write(outside.join("tokenizer.json"), "{}").unwrap();
+        build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+
+        for revision in ["../../outside", "..", ""] {
+            assert!(
+                get_cached_model_path_at_revision(
+                    model,
+                    revision,
+                    true,
+                    None,
+                    temp.path().to_path_buf(),
+                )
+                .is_none(),
+                "revision {revision:?} must not resolve a path",
+            );
+        }
     }
 
     #[test]

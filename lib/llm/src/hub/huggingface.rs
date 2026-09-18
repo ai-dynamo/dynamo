@@ -85,7 +85,7 @@ fn validate_hf_repo_file(filename: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_hf_commit_sha(sha: &str) -> anyhow::Result<()> {
+pub(super) fn validate_hf_commit_sha(sha: &str) -> anyhow::Result<()> {
     if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         anyhow::bail!("invalid Hugging Face commit SHA: {sha:?}");
     }
