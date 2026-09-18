@@ -3251,6 +3251,130 @@ policy_classes:
         assert_eq!(queue.pending_count(), 2);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn class_local_uncached_limit_rejects_by_pending_compute() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: compute-capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: compute-capped
+    policy_family: compute-capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    uncached_token_queue_limit_per_worker: 100
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (first, _first_rx) = make_request("first", 64);
+        queue.enqueue(first).await;
+
+        let (second, _second_rx) = make_request("second", 64);
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        let (rejected, rejected_rx) = make_request("rejected", 64);
+        queue.enqueue(rejected).await;
+        let error = rejected_rx.await.unwrap().unwrap_err();
+        let KvSchedulerError::QueueRejected(rejection) = &error else {
+            panic!("expected queue rejection, got {error:?}");
+        };
+        assert_eq!(rejection.policy_class, "compute-capped");
+        assert_eq!(
+            rejection.limit_kind,
+            super::super::QueueLimitKind::UncachedTokens
+        );
+        assert_eq!(rejection.current, 128);
+        assert_eq!(rejection.limit, 100);
+        assert!(!error.is_overload());
+        assert_eq!(
+            rejection.to_string(),
+            "router policy class \"compute-capped\" queue uncached_tokens limit reached \
+             (current=128, limit=100)"
+        );
+
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 0,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn class_local_uncached_limit_accounts_cached_overlap() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: compute-capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: compute-capped
+    policy_family: compute-capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    uncached_token_queue_limit_per_worker: 100
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (active, active_rx) = make_request("active", 100);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // Two queued requests with 100 ISL but 50 cached tokens each: only
+        // 50 uncached tokens per request are charged. Under raw-ISL
+        // accounting the second enqueue would already be rejected.
+        let half_overlap = OverlapSignals {
+            effective_cached_tokens: HashMap::from([(WorkerWithDpRank::new(0, 0), 50)]),
+            ..OverlapSignals::default()
+        };
+        let (mut first, _first_rx) = make_request("first", 100);
+        first.overlap = half_overlap.clone();
+        queue.enqueue(first).await;
+
+        let (mut second, _second_rx) = make_request("second", 100);
+        second.overlap = half_overlap;
+        queue.enqueue(second).await;
+        assert_eq!(queue.pending_count(), 2);
+
+        let (rejected, rejected_rx) = make_request("rejected", 100);
+        queue.enqueue(rejected).await;
+        let error = rejected_rx.await.unwrap().unwrap_err();
+        let KvSchedulerError::QueueRejected(rejection) = &error else {
+            panic!("expected queue rejection, got {error:?}");
+        };
+        assert_eq!(
+            rejection.limit_kind,
+            super::super::QueueLimitKind::UncachedTokens
+        );
+        // 100 queued uncached tokens (2 x 50), not the 200 raw ISL tokens.
+        assert_eq!(rejection.current, 100);
+        assert_eq!(rejection.limit, 100);
+
+        // Raw and cached gauges still charge the full prompt picture.
+        assert_eq!(
+            queue.class_queue_stats(0),
+            Some(ClassQueueStats {
+                pending_count: 2,
+                pending_isl_tokens: 200,
+                pending_cached_tokens: 100,
+            })
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn test_queue_update_uses_decayed_oldest_prefill_load() {
         let estimator: Arc<dyn PrefillLoadEstimator> = Arc::new(FixedPrefillLoadEstimator {

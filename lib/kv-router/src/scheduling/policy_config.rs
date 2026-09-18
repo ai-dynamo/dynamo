@@ -42,6 +42,7 @@ pub struct PolicyClassConfig {
     pub request_queue_limit_per_worker: Option<usize>,
     pub raw_isl_token_queue_limit_per_worker: Option<usize>,
     pub cached_token_queue_limit_per_worker: Option<usize>,
+    pub uncached_token_queue_limit_per_worker: Option<usize>,
 }
 
 impl PolicyClassConfig {
@@ -123,6 +124,7 @@ impl PolicyProfile {
             request_queue_limit_per_worker: None,
             raw_isl_token_queue_limit_per_worker: None,
             cached_token_queue_limit_per_worker: None,
+            uncached_token_queue_limit_per_worker: None,
         };
         Self {
             classes: vec![class],
@@ -316,6 +318,7 @@ struct RawPolicyClassConfig {
     request_queue_limit_per_worker: Option<usize>,
     raw_isl_token_queue_limit_per_worker: Option<usize>,
     cached_token_queue_limit_per_worker: Option<usize>,
+    uncached_token_queue_limit_per_worker: Option<usize>,
 }
 
 fn resolve_profile(
@@ -504,6 +507,7 @@ fn resolve_policy_class(
             request_queue_limit_per_worker: raw.request_queue_limit_per_worker,
             raw_isl_token_queue_limit_per_worker: raw.raw_isl_token_queue_limit_per_worker,
             cached_token_queue_limit_per_worker: raw.cached_token_queue_limit_per_worker,
+            uncached_token_queue_limit_per_worker: raw.uncached_token_queue_limit_per_worker,
         },
         binding,
     })
@@ -772,6 +776,53 @@ models:
         assert_eq!(unmatched.default_class().name, "root-default");
         assert_eq!(unmatched.default_class().prefill_busy_threshold, Some(100));
         assert_eq!(unmatched.default_class().prefill_busy_threshold_frac, None);
+    }
+
+    #[test]
+    fn uncached_token_queue_limit_parses_and_defaults_to_none() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+default_policy_family: standard
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: standard
+    cache_bucket: all
+    quantum: 1
+    uncached_token_queue_limit_per_worker: 666667
+  - name: uncapped
+    policy_family: uncapped
+    cache_bucket: all
+    quantum: 1
+"#,
+        )
+        .unwrap();
+
+        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
+        assert_eq!(
+            profile
+                .class(profile.resolve_class_index(Some("capped"), usize::MAX))
+                .uncached_token_queue_limit_per_worker,
+            Some(666667)
+        );
+        // Classes that omit the knob keep the disabled-by-default contract and
+        // existing YAML stays accepted without the field.
+        assert_eq!(
+            profile
+                .class(profile.resolve_class_index(Some("uncapped"), usize::MAX))
+                .uncached_token_queue_limit_per_worker,
+            None
+        );
+
+        let synthetic = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        assert_eq!(
+            synthetic
+                .default_class()
+                .uncached_token_queue_limit_per_worker,
+            None
+        );
     }
 
     #[test]

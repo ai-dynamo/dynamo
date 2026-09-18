@@ -201,17 +201,21 @@ every eligible worker is busy for that class, but a new arrival cannot bypass
 an existing backlog in the same class.
 
 Queue limits are configured per discovered worker endpoint with
-`request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`, and
-`cached_token_queue_limit_per_worker`. The effective class-local limit is the
-configured value multiplied by the current number of discovered endpoints.
+`request_queue_limit_per_worker`, `raw_isl_token_queue_limit_per_worker`,
+`cached_token_queue_limit_per_worker`, and
+`uncached_token_queue_limit_per_worker`. The effective class-local limit is
+each configured value multiplied by the current number of discovered endpoints.
 Limits are checked against current usage before adding the incoming request,
 so the request that crosses a limit is accepted and the next queued request is
-rejected with HTTP 529 and the effective total. Worker removal does not evict
+rejected with HTTP 503 and the effective total. Worker removal does not evict
 queued requests; new arrivals reject until usage drains or capacity returns.
-DRR charges the uncached-token snapshot captured at enqueue, while raw, cached,
-and uncached snapshots remain unchanged for limits, WSPT, counters, and later
-dispatch. For the ring cursor, deficit charging, weighted bursts, and bounded
-bulk-credit behavior, see
+The uncached-token limit counts only the queued ISL portion that still needs
+prefill compute (raw ISL minus the best cached tokens across eligible
+workers), so cache-heavy requests do not consume the queue budget that
+protects prefill capacity. DRR charges the uncached-token snapshot captured
+at enqueue, while raw, cached, and uncached snapshots remain unchanged for
+limits, WSPT, counters, and later dispatch. For the ring cursor, deficit
+charging, weighted bursts, and bounded bulk-credit behavior, see
 [Deficit Round Robin Queue Scheduling](deficit-round-robin.md).
 
 Every matrix class must identify both `policy_family` and `cache_bucket`; a
