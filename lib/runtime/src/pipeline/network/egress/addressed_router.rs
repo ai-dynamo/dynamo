@@ -439,15 +439,18 @@ where
 
     // The task exits on stream end, context kill/stop, send error (worker
     // dropped its receiver), or local serialize failure. On any exit
-    // `request_sender` drops and triggers transport shutdown (see server.rs for details)
-    // which closes the upstream mpsc, triggering the server-side handler to emit
-    // `Sentinel`, which signals the worker's reader to end cleanly.
+    // `request_sender` drops and closes the upstream mpsc. The transport chooses
+    // the appropriate closing frame (Sentinel, Stop or Kill; see server.rs).
     tokio::spawn(async move {
+        // Reuse cancellation futures across both source and send waits.
+        let killed = engine_ctx.killed();
+        let stopped = engine_ctx.stopped();
+        tokio::pin!(killed, stopped);
         loop {
             let item = tokio::select! {
                 biased;
-                _ = engine_ctx.killed() => break,
-                _ = engine_ctx.stopped() => break,
+                _ = &mut killed => break,
+                _ = &mut stopped => break,
                 item = input_stream.next() => match item {
                     Some(item) => item,
                     None => break,
@@ -469,7 +472,13 @@ where
                     break;
                 }
             };
-            if request_sender.send(bytes.into()).await.is_err() {
+            let result = tokio::select! {
+                biased;
+                _ = &mut killed => break,
+                _ = &mut stopped => break,
+                result = request_sender.send(bytes.into()) => result,
+            };
+            if result.is_err() {
                 tracing::debug!("worker request-stream receiver dropped; forwarder exiting");
                 break;
             }
@@ -1379,5 +1388,155 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), raw_tx.closed())
             .await
             .expect("dropping the caller stream did not close the upstream tail");
+    }
+
+    #[derive(Serialize)]
+    struct ForwarderTestItem {
+        sequence: usize,
+        #[serde(skip)]
+        _drop_signal: DropSignal,
+    }
+
+    struct ForwarderTestInput {
+        next: usize,
+        second_polled: Option<oneshot::Sender<()>>,
+        pending_item_drop: Option<oneshot::Sender<()>>,
+        _drop_signal: DropSignal,
+    }
+
+    impl futures::Stream for ForwarderTestInput {
+        type Item = ForwarderTestItem;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            if self.next == 2 {
+                return std::task::Poll::Ready(None);
+            }
+            let sequence = self.next;
+            self.next += 1;
+            let drop_signal = if sequence == 1 {
+                let _ = self.second_polled.take().unwrap().send(());
+                self.pending_item_drop.take()
+            } else {
+                None
+            };
+            std::task::Poll::Ready(Some(ForwarderTestItem {
+                sequence,
+                _drop_signal: DropSignal(drop_signal),
+            }))
+        }
+    }
+
+    async fn blocked_request_forwarder(
+        controller: Arc<crate::pipeline::context::Controller>,
+    ) -> (
+        tokio::sync::mpsc::Receiver<super::TwoPartMessage>,
+        oneshot::Receiver<()>,
+        oneshot::Receiver<()>,
+    ) {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (provider_tx, provider_rx) = oneshot::channel();
+        assert!(
+            provider_tx
+                .send(Ok(super::StreamSender { tx, prologue: None }))
+                .is_ok()
+        );
+        let (second_polled_tx, second_polled_rx) = oneshot::channel();
+        let (source_drop_tx, source_drop_rx) = oneshot::channel();
+        let (item_drop_tx, item_drop_rx) = oneshot::channel();
+        let source = ForwarderTestInput {
+            next: 0,
+            second_polled: Some(second_polled_tx),
+            pending_item_drop: Some(item_drop_tx),
+            _drop_signal: DropSignal(Some(source_drop_tx)),
+        };
+        super::spawn_request_stream_forwarder(
+            Some(provider_rx),
+            Box::pin(source),
+            controller,
+            RequestPlanePayloadCodec::Json,
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), second_polled_rx)
+            .await
+            .expect("forwarder did not poll its second item")
+            .unwrap();
+        // The first item fills the queue. The second is now held by send(),
+        // and this test retains the receiver without reading from it.
+        assert_eq!(rx.len(), 1);
+        (rx, source_drop_rx, item_drop_rx)
+    }
+
+    #[tokio::test]
+    async fn test_request_forwarder_cancels_blocked_send() {
+        use crate::engine::AsyncEngineContext;
+
+        let mut observations = Vec::new();
+        for kill in [false, true] {
+            let controller = Arc::new(crate::pipeline::context::Controller::default());
+            let (rx, mut source_dropped, mut item_dropped) =
+                blocked_request_forwarder(controller.clone()).await;
+            if kill {
+                controller.kill();
+            } else {
+                controller.stop();
+            }
+            let source_released = tokio::time::timeout(Duration::from_secs(1), &mut source_dropped)
+                .await
+                .is_ok();
+            let item_released = matches!(item_dropped.try_recv(), Ok(()));
+            let sender_closed = rx.is_closed();
+            // A canceled pending send must not enqueue its item, and the
+            // already accepted first item remains owned by the receiver.
+            assert_eq!(rx.len(), 1);
+            observations.push((kill, source_released, item_released, sender_closed));
+
+            // Clean up even on the unfixed baseline, before reporting failure.
+            drop(rx);
+            if !source_released {
+                tokio::time::timeout(Duration::from_secs(2), source_dropped)
+                    .await
+                    .expect("forwarder did not exit after receiver drop")
+                    .unwrap();
+            }
+            if !item_released {
+                tokio::time::timeout(Duration::from_secs(2), item_dropped)
+                    .await
+                    .expect("pending item was not released")
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            observations,
+            vec![(false, true, true, true), (true, true, true, true)],
+            "stop and kill must release the source, pending item and sender while the receiver is retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_request_forwarder_preserves_order_after_backpressure() {
+        let controller = Arc::new(crate::pipeline::context::Controller::default());
+        let (mut rx, source_dropped, item_dropped) = blocked_request_forwarder(controller).await;
+        for sequence in [0, 1] {
+            let message = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("forwarder did not resume after backpressure")
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(message.data().unwrap()).unwrap(),
+                serde_json::json!({ "sequence": sequence })
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        source_dropped.await.unwrap();
+        item_dropped.await.unwrap();
     }
 }
