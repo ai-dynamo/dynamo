@@ -13,7 +13,7 @@ This page documents the `nvidia.com/v1beta1` API — the served, storage version
 
 ## Spec reference
 
-Only `model` is unconditionally required by the schema. Other fields are optional, but generated component images without a parseable semantic-version tag require a runtime version override as described below.
+Only `model` is unconditionally required by the schema. Admission rejects a new DGDR whose supplied `spec.image` has no parseable semantic-version tag unless `spec.runtimeVersionOverride` is set. When `spec.image` is omitted, the operator supplies a versioned default as described below.
 
 <ParamField path="model" type="string" required={true}>
   Model to deploy — a HuggingFace ID (for example `Qwen/Qwen3-0.6B`, `meta-llama/Llama-3-70b`) or a private model name. Must be non-empty.
@@ -24,7 +24,7 @@ Only `model` is unconditionally required by the schema. Other fields are optiona
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Default Dynamo runtime version for generated DGD components that do not set their own override. An explicit component value in `overrides.dgd` takes precedence. Set this when an effective generated component image has no parseable semantic-version tag or its tag does not identify the intended Dynamo runtime.
+  Required when `spec.image` is set and has no parseable semantic-version tag, such as `latest`, a custom build tag, or a digest-only reference. Also supplies the default Dynamo runtime version for generated DGD components that do not set their own override. An explicit component value in `overrides.dgd` takes precedence. Set this when an effective generated component image has no parseable semantic-version tag or its tag does not identify the intended Dynamo runtime.
 
   Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change any image. See [Profiler image version compatibility](#profiler-image-version-compatibility).
 </ParamField>
