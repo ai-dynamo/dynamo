@@ -91,6 +91,7 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
+use dynamo_protocols::types::ChatCompletionStreamOptions;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
 use dynamo_protocols::types::responses::{
@@ -1030,7 +1031,8 @@ async fn handler_completions(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateCompletionRequest = parse_json_request("completions", &body)?;
+    let mut request: NvCreateCompletionRequest =
+        parse_completion_json_request("completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2317,7 +2319,8 @@ async fn handler_chat_completions(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let body = read_json_request_body(&headers, body).await?;
-    let mut request: NvCreateChatCompletionRequest = parse_json_request("chat completions", &body)?;
+    let mut request: NvCreateChatCompletionRequest =
+        parse_completion_json_request("chat completions", &body)?;
     if *FORCE_INCLUDE_USAGE && request.inner.stream.unwrap_or(false) {
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
@@ -2394,6 +2397,56 @@ async fn handler_chat_completions(
     connection_handle.disarm();
 
     response
+}
+
+#[derive(Deserialize)]
+struct CompletionRequestWithNullableStreamOptions<T> {
+    #[serde(flatten)]
+    request: T,
+    stream_options: Option<NullableStreamOptions>,
+}
+
+#[derive(Deserialize)]
+struct NullableStreamOptions {
+    include_usage: Option<bool>,
+    continuous_usage_stats: Option<bool>,
+}
+
+trait SetStreamOptions {
+    fn set_stream_options(&mut self, stream_options: Option<ChatCompletionStreamOptions>);
+}
+
+impl SetStreamOptions for NvCreateChatCompletionRequest {
+    fn set_stream_options(&mut self, stream_options: Option<ChatCompletionStreamOptions>) {
+        self.inner.stream_options = stream_options;
+    }
+}
+
+impl SetStreamOptions for NvCreateCompletionRequest {
+    fn set_stream_options(&mut self, stream_options: Option<ChatCompletionStreamOptions>) {
+        self.inner.stream_options = stream_options;
+    }
+}
+
+// The protocol crate requires include_usage and uses non-nullable booleans,
+// while clients may omit stream_options flags or serialize them as null.
+fn parse_completion_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
+where
+    T: DeserializeOwned + SetStreamOptions,
+{
+    let mut parsed: CompletionRequestWithNullableStreamOptions<T> =
+        parse_json_request(endpoint, body)?;
+    parsed
+        .request
+        .set_stream_options(
+            parsed
+                .stream_options
+                .map(|options| ChatCompletionStreamOptions {
+                    include_usage: options.include_usage.unwrap_or(false),
+                    continuous_usage_stats: options.continuous_usage_stats.unwrap_or(false),
+                }),
+        );
+    Ok(parsed.request)
 }
 
 fn parse_json_request<T>(endpoint: &'static str, body: &[u8]) -> Result<T, ErrorResponse>
@@ -5877,11 +5930,122 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_completion_stream_options_null_flags() {
+        for (options, expected) in [
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), Some((false, false))),
+            (
+                serde_json::json!({"continuous_usage_stats": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+            (
+                serde_json::json!({"include_usage": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": true, "continuous_usage_stats": null}),
+                Some((true, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": null, "continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "model": "test-model", "stream": true, "stream_options": options,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let chat: NvCreateChatCompletionRequest = parse_completion_json_request(
+                "chat completions",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            payload.as_object_mut().unwrap().remove("messages");
+            payload["prompt"] = serde_json::json!("hello");
+            let completion: NvCreateCompletionRequest = parse_completion_json_request(
+                "completions",
+                &serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            crate::engines::ValidateRequest::validate(&chat).unwrap();
+            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
+                assert_eq!(
+                    parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_rejects_invalid_types() {
+        for options in [
+            serde_json::json!(false),
+            serde_json::json!({"include_usage": "true", "continuous_usage_stats": null}),
+            serde_json::json!({"include_usage": null, "continuous_usage_stats": 0}),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hello"}],
+                "prompt": "hello", "stream_options": options,
+            }))
+            .unwrap();
+            assert_eq!(
+                parse_completion_json_request::<NvCreateChatCompletionRequest>(
+                    "chat completions",
+                    &body
+                )
+                .unwrap_err()
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                parse_completion_json_request::<NvCreateCompletionRequest>("completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body =
+            br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
+        assert_eq!(
+            parse_completion_json_request::<NvCreateChatCompletionRequest>(
+                "chat completions",
+                body
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_preserves_duplicate_field_errors() {
+        let chat_body = br#"{
+            "model":"first-model",
+            "model":"second-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "stream_options":{"include_usage":null}
+        }"#;
+        let chat_error = parse_completion_json_request::<NvCreateChatCompletionRequest>(
+            "chat completions",
+            chat_body,
+        )
+        .unwrap_err();
+        assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
+        assert!(chat_error.1.message.contains("duplicate field `model`"));
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
 
         let message = request
             .inner
@@ -5902,7 +6066,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"raw \xff data\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
 
         let message = request
             .inner
@@ -5923,7 +6087,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"slash \\\nnext\"}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
 
         let message = request
             .inner
@@ -5943,11 +6107,13 @@ mod tests {
     fn test_parse_chat_completion_request_keeps_schema_errors() {
         let body = br#"{"model":"test-model","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"working"}]}]}"#;
 
-        let err =
-            match parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body) {
-                Ok(_) => panic!("schema should still fail"),
-                Err(err) => err,
-            };
+        let err = match parse_completion_json_request::<NvCreateChatCompletionRequest>(
+            "chat completions",
+            body,
+        ) {
+            Ok(_) => panic!("schema should still fail"),
+            Err(err) => err,
+        };
 
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(
@@ -5964,7 +6130,7 @@ mod tests {
         let body = br#"{"model":"test-model","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":""},"uuid":"image-42"}]}]}"#;
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(request["messages"][0]["content"][0]["uuid"], "image-42");
         assert_eq!(
@@ -5984,7 +6150,7 @@ mod tests {
             );
 
             let request: NvCreateChatCompletionRequest =
-                parse_json_request("chat completions", body.as_bytes())
+                parse_completion_json_request("chat completions", body.as_bytes())
                     .expect("request should parse");
             let request = serde_json::to_value(request).expect("request should serialize");
             assert_eq!(request["messages"][0]["content"][0]["uuid"], uuid);
@@ -6000,7 +6166,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"raw \xff \x1b data\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"\"},\"uuid\":\"image-42\"}]}]}";
 
         let request: NvCreateChatCompletionRequest =
-            parse_json_request("chat completions", body).expect("request should parse");
+            parse_completion_json_request("chat completions", body).expect("request should parse");
         let request = serde_json::to_value(request).expect("request should serialize");
         assert_eq!(
             request["messages"][0]["content"][0]["text"],
@@ -6019,7 +6185,7 @@ mod tests {
             b"{\"model\":\"test-model\",\"prompt\":\"log \x1b[33mPK\x03\x04\",\"max_tokens\":1}";
 
         let request: NvCreateCompletionRequest =
-            parse_json_request("completions", body).expect("request should parse");
+            parse_completion_json_request("completions", body).expect("request should parse");
 
         let Prompt::String(prompt) = &request.inner.prompt else {
             panic!("expected string prompt");
@@ -6032,7 +6198,7 @@ mod tests {
         let body = b"{\"model\":\"test-model\",\"prompt\":\"raw \xff data\",\"max_tokens\":1}";
 
         let request: NvCreateCompletionRequest =
-            parse_json_request("completions", body).expect("request should parse");
+            parse_completion_json_request("completions", body).expect("request should parse");
 
         let Prompt::String(prompt) = &request.inner.prompt else {
             panic!("expected string prompt");
