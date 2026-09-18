@@ -442,7 +442,6 @@ where
     // `request_sender` drops and closes the upstream mpsc. The transport chooses
     // the appropriate closing frame (Sentinel, Stop or Kill; see server.rs).
     tokio::spawn(async move {
-        // Reuse cancellation futures across both source and send waits.
         let killed = engine_ctx.killed();
         let stopped = engine_ctx.stopped();
         tokio::pin!(killed, stopped);
