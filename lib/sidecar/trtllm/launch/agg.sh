@@ -17,6 +17,8 @@ export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
 source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
 source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+# shellcheck disable=SC1091 # Resolved relative to this script at runtime.
+source "$SCRIPT_DIR/common.sh"    # trtllm_ensure_openengine_bindings, trtllm_resolve_context_length
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -70,47 +72,9 @@ TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-# Keep the engine and the sidecar on one number. Started without `--max_seq_len`,
-# TensorRT-LLM leaves `max_context_length` unset and the sidecar has no window
-# to register, so pass the same value to both. When the caller
-# supplies `--max_seq_len`, theirs wins and the sidecar adopts the engine's
-# `Control.GetModelInfo` report rather than overriding it with a default it was
-# never told about.
-TRTLLM_MAX_SEQ_LEN_ARGS=()
-TRTLLM_CONTEXT_LENGTH_ARGS=()
-trtllm_max_seq_len_supplied=0
-for arg in "${EXTRA_ARGS[@]}"; do
-    case "$arg" in
-        --max_seq_len|--max_seq_len=*) trtllm_max_seq_len_supplied=1 ;;
-    esac
-done
-if [[ "$trtllm_max_seq_len_supplied" -eq 0 ]]; then
-    TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
-    TRTLLM_MAX_SEQ_LEN_ARGS=(--max_seq_len "$TRTLLM_CONTEXT_LENGTH")
-fi
-if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
-    TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
-fi
+trtllm_resolve_context_length "${EXTRA_ARGS[@]}"
 
-# `--grpc-protocol openengine` needs the OpenEngine bindings, which resolve only
-# from a custom index. Both packages are pinned to BSR module commit
-# 768a93c7b44e, the same revision the vendored protos in `proto/` were generated
-# from (see `proto/README.md`), so the engine and the sidecar speak the same
-# contract revision.
-#
-# The protobuf package is pinned by *gencode* version as well: buf publishes one
-# build per protoc release, and a gencode newer than the runtime in the
-# TensorRT-LLM image fails at import with "Detected incompatible Protobuf
-# Gencode/Runtime versions". 33.5 matches the protobuf 6.33.x runtime those
-# images ship. Raise it only together with the image's protobuf.
-OPENENGINE_PROTOBUF_VERSION="33.5.0.1.20260730172104+768a93c7b44e"
-OPENENGINE_GRPC_VERSION="1.78.1.1.20260730172104+768a93c7b44e"
-if ! "$TRTLLM_PYTHON" -c "import openengine.v1.openengine_pb2" >/dev/null 2>&1; then
-    "$TRTLLM_PYTHON" -m pip install --no-cache-dir \
-        --extra-index-url https://buf.build/gen/python \
-        "openengine-openengine-grpc-python==${OPENENGINE_GRPC_VERSION}" \
-        "openengine-openengine-protocolbuffers-python==${OPENENGINE_PROTOBUF_VERSION}"
-fi
+trtllm_ensure_openengine_bindings "$TRTLLM_PYTHON"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_trtllm_override_args_with_mem)
