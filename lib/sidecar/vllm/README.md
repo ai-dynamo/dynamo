@@ -284,10 +284,13 @@ command.
 The manifests require an operator with the `v1beta1` `dynamoSidecar` field from
 [DEP #14657](https://github.com/ai-dynamo/dynamo/issues/14657). The engine runs in
 `containers[name=main]`; `initContainers[name=dynamo]` is the restartable Dynamo
-sidecar and receives the operator's runtime defaults. Engine exec probes use
-`grpc_health_probe` to check both `vllm.Control` and `vllm.Inference` on loopback.
-A setup init container downloads the pinned probe binary and verifies its checksum;
-offline deployments must supply that binary through an image or volume instead.
+sidecar and receives the operator's runtime defaults. Engine startup and readiness
+use Kubernetes-native `grpc` probes on port 50051. The omitted `service` selects
+vLLM's aggregate health, which covers both `vllm.Control` and `vllm.Inference`.
+No probe executable or installer init container is required. The engine binds to
+`0.0.0.0` because kubelet probes connect to the pod IP; the colocated sidecar still
+connects to `127.0.0.1:50051`. Keep this unauthenticated engine endpoint on a trusted
+pod network and restrict access with your cluster's network controls.
 The engine image must include a `vllm-rs` build compatible with the pinned
 `vllm-proto` crate.
 
@@ -299,8 +302,8 @@ readiness probe on `/health`; no probe overrides are needed. The HTTP listener
 starts before runtime connections or engine metadata discovery. `/live` stays
 independent of both, while `/health` checks runtime initialization, required
 runtime connectivity, and shutdown. Engine loading does not hold either probe
-unready. The engine's separate exec probes keep the pod unready until both gRPC
-services are serving. Increase only the engine startup budget for larger models.
+unready. The engine's separate gRPC probes keep the pod unready until aggregate engine
+health is serving. Increase only the engine startup budget for larger models.
 
 Continuous engine-health reconciliation, engine restart recovery, and changes to
 engine drain/grace behavior remain deferred to the rest of DEP #14897.
