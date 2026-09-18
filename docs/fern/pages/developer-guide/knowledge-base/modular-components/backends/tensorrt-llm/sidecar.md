@@ -21,8 +21,8 @@ architecture.
 
 | Deployment path | Aggregated | Disaggregated |
 |---|---|---|
-| Local launcher | Validated on one GPU | Validated on one GPU; no launcher script yet |
-| Kubernetes example | Validated | No manifest yet |
+| Local launcher | Validated on one GPU | Validated on one GPU, both engines co-located; the launcher defaults to two |
+| Kubernetes example | Validated | Validated, prefill and decode on separate pods |
 
 This table covers launch topology only. The
 [TensorRT-LLM feature matrix](overview.md#feature-support-matrix) describes the
@@ -36,42 +36,37 @@ for other protocol limitations.
 
 ## Launch Locally
 
-From a Dynamo source checkout, build or install Dynamo so
-`dynamo-trtllm-sidecar` is on `PATH`. You need a TensorRT-LLM build that
-serves `--grpc --grpc-protocol openengine`; no published release ships it yet.
-The launcher installs the pinned OpenEngine Python bindings itself.
-
-Start Dynamo's local discovery services, then run the aggregated launcher:
+Build or install Dynamo from a source checkout so `dynamo-trtllm-sidecar` is on
+`PATH`. The engine must serve `--grpc --grpc-protocol openengine`, which means
+`nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer; the
+launchers install the pinned OpenEngine Python bindings, which those releases do
+not ship.
 
 ```bash
-docker compose -f dev/docker-compose.yml up -d
+docker compose -f dev/docker-compose.yml up -d          # local discovery services
 ./lib/sidecar/trtllm/launch/agg.sh --model Qwen/Qwen3-0.6B
 ```
 
-The launcher starts the Dynamo frontend, TensorRT-LLM engine, and sidecar. It
-binds TensorRT-LLM's OpenEngine gRPC endpoint to loopback, which is
-unauthenticated and plaintext.
-
-Verify the frontend:
+Each launcher starts the Dynamo frontend, the engine, and the sidecar, and binds
+the engine's gRPC endpoint to loopback — it is unauthenticated and plaintext.
+`launch/disagg.sh` is the same on two GPUs, with a NIXL cache transceiver on both
+engines for the KV handoff. Either way the frontend serves the usual endpoint:
 
 ```bash
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "max_tokens": 32
-  }'
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}'
 ```
 
 ## Deploy on Kubernetes
 
-No published sidecar image is available yet. Follow the
-[Kubernetes quick start](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#deploy-on-kubernetes-quick-start)
-to build `dynamo-sidecar`, which contains all three engine-specific sidecar
-executables. The TensorRT-LLM manifest runs `dynamo-trtllm-sidecar` as the
-container command and pairs it with a TensorRT-LLM image that serves
-OpenEngine gRPC. No published TensorRT-LLM release ships that yet, so the engine
-image has to be built; the manifest's comments list what it must provide. The
-source tree includes an
-[aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml).
+The source tree ships two
+[deployment manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/trtllm/deploy):
+`agg.yaml`, and `disagg.yaml`, which runs prefill and decode as separate worker
+pods. Both need two images you build yourself: `dynamo-sidecar`, which carries
+all three engine-specific executables, and a TensorRT-LLM image with the pinned
+OpenEngine bindings layered on — the release ships the servicer but not the
+bindings that it and the manifests' health probes import.
+
+Read the disaggregated manifest's header before applying it: it requests
+`rdma/ib` on both engines, which you drop if your fabric does not expose it. The
+[README](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/README.md#deploy-on-kubernetes) has the full walkthrough.

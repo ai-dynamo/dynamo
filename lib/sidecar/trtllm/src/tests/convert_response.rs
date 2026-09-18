@@ -209,8 +209,10 @@ fn cached_prompt_tokens_reach_the_client_on_both_paths() {
     );
 }
 
-/// The router sheds and migrates on an overload. Flattening it to a generic
-/// engine error turns a retryable condition into an opaque 500.
+/// `Cancelled` must survive as itself; `Overloaded` must not become
+/// `WorkerOverloaded`. The only server site that emits `Overloaded` is the
+/// consumer-stall watchdog, so migrating on it would re-dispatch to a second
+/// worker that stalls the same way.
 #[test]
 fn engine_error_codes_the_router_acts_on_are_preserved() {
     let overloaded = engine_error(pb::EngineError {
@@ -218,7 +220,7 @@ fn engine_error_codes_the_router_acts_on_are_preserved() {
         message: "at capacity".to_string(),
         retryable: true,
     });
-    assert!(matches!(
+    assert!(!matches!(
         overloaded.error_type(),
         ErrorType::WorkerOverloaded
     ));
@@ -229,6 +231,56 @@ fn engine_error_codes_the_router_acts_on_are_preserved() {
         retryable: false,
     });
     assert!(matches!(cancelled.error_type(), ErrorType::Cancelled));
+}
+
+/// A role mismatch means the frontend routed to a worker whose engine is in
+/// the other disaggregation role, so every request to it fails identically.
+/// An opaque 500 gives the operator nothing to search for, and the class must
+/// stay client-side: retrying elsewhere cannot fix a misconfigured deployment.
+#[test]
+fn a_role_mismatch_names_the_misconfiguration() {
+    let error = engine_error(pb::EngineError {
+        code: pb::ErrorCode::RoleMismatch as i32,
+        message: "generation_only request on a context engine".to_string(),
+        retryable: false,
+    });
+    assert!(
+        matches!(
+            error.error_type(),
+            ErrorType::Backend(dynamo_backend_common::BackendError::InvalidArgument)
+        ),
+        "a deployment mistake is a client error, not an opaque engine failure"
+    );
+    assert!(
+        error.to_string().contains("--disaggregation-mode"),
+        "the error must name the flag the operator has to check: {error}"
+    );
+}
+
+/// A handoff the decode engine cannot resolve is not migratable: the retry
+/// would replay the same dead session and fail the same way on the next
+/// worker. It still has to say what to look at, which is why these two codes
+/// no longer fall into the catch-all.
+#[test]
+fn an_unresolvable_handoff_is_named_but_not_migratable() {
+    for code in [
+        pb::ErrorCode::KvSessionNotFound,
+        pb::ErrorCode::KvTransferFailed,
+    ] {
+        let error = engine_error(pb::EngineError {
+            code: code as i32,
+            message: "session 12345 is gone".to_string(),
+            retryable: false,
+        });
+        assert!(
+            !matches!(error.error_type(), ErrorType::WorkerOverloaded),
+            "{code:?} must not be migratable"
+        );
+        assert!(
+            error.to_string().contains("cache transceiver"),
+            "{code:?} must point at the transceiver: {error}"
+        );
+    }
 }
 
 /// The OpenEngine contract requires an explicit output index. Defaulting an

@@ -90,13 +90,13 @@ pub(crate) fn build_generate_request(
         }),
         stopping: Some(pb::StoppingOptions {
             max_tokens: Some(max_tokens),
-            // A prefill worker stops after the context phase; a minimum would
-            // force it to decode.
-            min_tokens: if mode.is_prefill() {
-                None
-            } else {
-                stop.min_tokens
-            },
+            // Forwarded on a context-only request too. The minimum only masks
+            // EOS until the sequence reaches it, so it cannot extend a context
+            // phase that `max_tokens` already caps at one token. Dropping it
+            // would let the prefill worker sample EOS on that token, finish with
+            // `Stop` instead of `PrefillReady`, and leave the frontend treating
+            // a request that never met its minimum as complete.
+            min_tokens: stop.min_tokens,
             conditions: stop_conditions(request),
             ignore_eos: stop.ignore_eos,
             // `include_stop_in_output` retains matched stop *strings*; the
@@ -170,10 +170,23 @@ fn max_tokens(
     // The window is input + output, so on a short prompt the remainder can
     // exceed what the engine will actually generate and it would reject the
     // request we derived.
-    Ok(match limits.max_output_tokens {
+    let derived = match limits.max_output_tokens {
         Some(cap) => remaining.min(cap),
         None => remaining,
-    })
+    };
+    // Both the cap and the `.max(1)` floor can land under an explicit minimum.
+    // Sending `min_tokens` above `max_tokens` is a request no engine can honour,
+    // and TensorRT-LLM does not cross-validate the pair, so say which two values
+    // conflict instead of letting it resolve them silently.
+    if let Some(min_tokens) = request.stop_conditions.min_tokens
+        && min_tokens > derived
+    {
+        return Err(client::invalid_argument(format!(
+            "min_tokens ({min_tokens}) exceeds the {derived} tokens left for this request; \
+             the {context_length}-token window already holds a {prompt_len}-token prompt"
+        )));
+    }
+    Ok(derived)
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
@@ -384,6 +397,23 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
+    if request
+        .routing
+        .as_ref()
+        .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
+    {
+        // The same server branch that rejects `openengine-priority` also rejects
+        // `openengine-target-dp-rank` (`grpc/openengine/request_mapping.py`,
+        // `_trace_headers`), and the servicer turns that into UNIMPLEMENTED --
+        // measured against TensorRT-LLM main at 8bbaf66bd5, rank 0 included.
+        // Sending it anyway failed the whole request with a non-migratable
+        // 5xx; rejecting here names the unsupported feature in a 4xx instead.
+        // `nvext.dp_rank` and the `x-dynamo-dp-rank` header both reach this
+        // field, so it is reachable without a KV router.
+        return Err(client::invalid_argument(
+            "data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     if request.stop_conditions.max_thinking_tokens.is_some() {
         // A reasoning-token budget the sidecar can neither forward nor enforce.
         return Err(client::invalid_argument(
@@ -438,7 +468,7 @@ enum Phase {
     /// are held back because the decode leg replays them. They only reach the
     /// client through a context request that ends without a handoff, which has
     /// no decode leg to do the replaying.
-    Prefill { held: Vec<u32> },
+    Prefill { held: Vec<pb::TokenInfo> },
 }
 
 /// What a decode leg knows about the context phase that preceded it.
@@ -549,7 +579,10 @@ impl ResponseState {
     ) -> Result<Option<LLMEngineOutput>, DynamoError> {
         check_output_index(token.output_index)?;
         if let Phase::Prefill { held } = &mut self.phase {
-            held.extend(token.tokens.iter().map(|info| info.token_id));
+            // Whole `TokenInfo`s, not just the IDs: a context request that ends
+            // without a handoff returns these to the client, and by then the
+            // logprobs it asked for are gone if only the IDs were kept.
+            held.extend(token.tokens);
             self.completion_tokens = held.len() as u32;
             return Ok(None);
         }
@@ -641,8 +674,16 @@ impl ResponseState {
             Phase::Stream { .. } => Vec::new(),
         };
 
+        let (token_ids, log_probs, top_logprobs) = if held.is_empty() {
+            (Vec::new(), None, None)
+        } else {
+            self.map_tokens(held)?
+        };
+
         let mut terminal = LLMEngineOutput {
-            token_ids: held,
+            token_ids,
+            log_probs,
+            top_logprobs,
             index: Some(0),
             finish_reason: Some(finish_reason),
             completion_usage: Some(CompletionUsage {
@@ -770,10 +811,35 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         pb::ErrorCode::InvalidArgument | pb::ErrorCode::UnsupportedFeature => {
             client::invalid_argument(message)
         }
-        // The router sheds and migrates on an overload; flattening it to a
-        // generic engine error costs that and surfaces an opaque 500 instead.
-        pb::ErrorCode::Overloaded => client::worker_overloaded(message),
+        // Not `worker_overloaded`, despite the name. The only site in the
+        // TensorRT-LLM servicer that emits this code is the 30-second
+        // consumer-stall watchdog (`grpc/openengine/servicer.py`, "response
+        // consumer stalled"), which fires when *this* sidecar stopped draining
+        // the stream -- the engine has capacity. Marking it migratable would
+        // re-dispatch to a second worker and stall there too, spending two
+        // workers' GPU time and recording local backpressure as worker
+        // capacity. Revisit if a server starts emitting it for real admission
+        // pressure.
+        pb::ErrorCode::Overloaded => client::engine_error(message),
         pb::ErrorCode::Cancelled => client::cancelled(message),
+        // A decode request reached a worker whose engine is not in that role,
+        // so every request to it fails the same way. That is a deployment
+        // mistake, and an opaque 500 gives the operator nothing to search for.
+        pb::ErrorCode::RoleMismatch => client::invalid_argument(format!(
+            "{message} (the engine rejected this request's disaggregation role: check that the \
+             sidecar's --disaggregation-mode matches how its engine was started)"
+        )),
+        // The handoff named a context worker this engine could not reach or
+        // whose session is gone. Deliberately not migratable: a retry would
+        // replay the same dead handoff and fail identically on the next worker.
+        // Recovering properly means re-running prefill, which the frontend
+        // cannot be asked for from here.
+        pb::ErrorCode::KvSessionNotFound | pb::ErrorCode::KvTransferFailed => {
+            client::engine_error(format!(
+                "{message} (the prefill handoff could not be resolved: check that both engines \
+                 were started with a cache transceiver and can reach each other)"
+            ))
+        }
         _ => client::engine_error(message),
     }
 }

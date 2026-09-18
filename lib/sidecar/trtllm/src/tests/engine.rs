@@ -77,62 +77,51 @@ async fn cancellation_yields_a_cancelled_terminal() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
-/// `dp_rank` names the decode worker and `prefill_dp_rank` the prefill one, so
-/// which of them routes a request depends on the leg. Forwarding the prefill
-/// rank to a decode engine points the request at the wrong shard.
+/// The server answers `openengine-target-dp-rank` with UNIMPLEMENTED, so a
+/// rank hint has to be refused before dispatch: sending it anyway fails the
+/// whole request with a non-migratable 5xx. `nvext.dp_rank` and the
+/// `x-dynamo-dp-rank` header both land in these fields, so this is reachable
+/// without a KV router.
 #[tokio::test]
-async fn each_leg_forwards_its_own_data_parallel_rank() {
+async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
-    let hints = dynamo_backend_common::engine::RoutingHints {
-        dp_rank: Some(3),
-        prefill_dp_rank: Some(7),
-        ..Default::default()
-    };
 
-    for (mode, expected) in [
-        (DisaggregationMode::Prefill, "7"),
-        (DisaggregationMode::Decode, "3"),
-        (AGG, "3"),
+    for (mode, hints) in [
+        (
+            DisaggregationMode::Prefill,
+            dynamo_backend_common::engine::RoutingHints {
+                prefill_dp_rank: Some(7),
+                ..Default::default()
+            },
+        ),
+        (
+            DisaggregationMode::Decode,
+            dynamo_backend_common::engine::RoutingHints {
+                dp_rank: Some(3),
+                ..Default::default()
+            },
+        ),
+        (
+            AGG,
+            dynamo_backend_common::engine::RoutingHints {
+                dp_rank: Some(3),
+                ..Default::default()
+            },
+        ),
     ] {
         let engine = engine_in_mode(&server.endpoint, 1, mode);
         engine.start(0).await.expect("start");
         let mut req = request();
-        req.routing = Some(hints.clone());
-        collect(&engine, req).await;
-        assert_eq!(
-            server
-                .service
-                .dp_ranks
-                .lock()
-                .await
-                .last()
-                .unwrap()
-                .as_deref(),
-            Some(expected),
-            "{mode:?} must route by its own rank"
-        );
+        req.routing = Some(hints);
+        let context = dynamo_backend_common::testing::mock_context();
+        let result = engine
+            .generate(req, GenerateContext::new(context, None))
+            .await;
+        assert!(result.is_err(), "{mode:?} must refuse a rank hint");
     }
-
-    // A decode leg with only the prefill worker's rank has no decode target;
-    // inventing one from the prefill hint would misroute the request.
-    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
-    engine.start(0).await.expect("start");
-    let mut req = request();
-    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
-        prefill_dp_rank: Some(7),
-        ..Default::default()
-    });
-    collect(&engine, req).await;
-    assert_eq!(
-        server
-            .service
-            .dp_ranks
-            .lock()
-            .await
-            .last()
-            .unwrap()
-            .as_deref(),
-        None
+    assert!(
+        server.service.requests.lock().await.is_empty(),
+        "nothing may reach the engine"
     );
 }
 
@@ -234,17 +223,14 @@ async fn pool_uses_each_configured_connection() {
 
     for index in 0..4 {
         let mut stream = client
-            .generate(
-                pb::GenerateRequest {
-                    request_id: format!("request-{index}"),
-                    model: "model-source".to_string(),
-                    input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-                        ids: vec![1, 2],
-                    })),
-                    ..Default::default()
-                },
-                None,
-            )
+            .generate(pb::GenerateRequest {
+                request_id: format!("request-{index}"),
+                model: "model-source".to_string(),
+                input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                    ids: vec![1, 2],
+                })),
+                ..Default::default()
+            })
             .await
             .expect("start stream");
         while stream.message().await.expect("message").is_some() {}
@@ -262,43 +248,29 @@ async fn pool_uses_each_configured_connection() {
 }
 
 /// A server with no Control service leaves the window unknown. Registering
-/// anyway is still useful -- requests that carry their own `max_tokens` are
-/// served -- so this warns rather than refusing to start, and only the requests
-/// that omit `max_tokens` are rejected.
+/// anyway would advertise capacity and then reject, with a non-migratable 4xx,
+/// every request that omits `max_tokens` -- most chat traffic. Fail at startup
+/// instead, naming the flag that fixes it.
 #[tokio::test]
-async fn start_without_a_context_length_registers_a_window_less_worker() {
+async fn start_without_a_context_length_fails() {
     let service = FakeTrtllm::default();
     service.no_control.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
-    let config = engine.start(0).await.expect("start is not blocked");
-    assert_eq!(
-        config.llm.expect("llm registration").context_length,
-        None,
-        "an unknown window must not be registered as a real one"
-    );
-
-    let mut request = request();
-    request.stop_conditions.max_tokens = None;
-    let Err(error) = engine
-        .generate(
-            request,
-            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
-        )
+    let error = engine
+        .start(0)
         .await
-    else {
-        panic!("a request that omits max_tokens has no budget to derive");
-    };
+        .expect_err("a worker with no window must not register");
     assert!(
-        error.to_string().contains("specify max_tokens explicitly"),
-        "unexpected error: {error}"
+        error.to_string().contains("--context-length"),
+        "the error must name the flag that supplies a window: {error}"
     );
 }
 
-/// A server that answers GetModelInfo but reports no context length is not
-/// ready yet -- TensorRT-LLM binds its port before the model finishes loading
-/// -- so the sidecar keeps asking until the operator's startup deadline.
+/// A server that answers GetModelInfo but reports no context length is still
+/// loading, so the sidecar keeps asking until the operator's startup deadline
+/// and only then gives up.
 #[tokio::test]
 async fn start_retries_until_the_deadline_when_the_server_reports_no_context_length() {
     let service = FakeTrtllm::default();
@@ -306,8 +278,10 @@ async fn start_retries_until_the_deadline_when_the_server_reports_no_context_len
     let server = FakeServer::start(service).await;
     let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
-    let config = engine.start(0).await.expect("start is not blocked");
-    assert_eq!(config.llm.expect("llm registration").context_length, None);
+    engine
+        .start(0)
+        .await
+        .expect_err("a window is required to register");
     assert!(
         server.service.model_info_calls.load(Ordering::SeqCst) > 1,
         "a server that is still loading must be asked more than once"
@@ -335,10 +309,9 @@ async fn start_waits_for_a_server_that_is_still_loading_its_model() {
     );
 }
 
-/// `--context-length` wins over what the engine reports -- TensorRT-LLM falls
-/// back to `max_input_len` and reads as a 1024-token window when `max_seq_len`
-/// is unset. The engine is still asked, so the disagreement can be logged and
-/// its output cap picked up, but its answer does not decide the window.
+/// `--context-length` wins over what the engine reports. The engine is still
+/// asked, so the disagreement can be logged and its output cap picked up, but
+/// its answer does not decide the window.
 #[tokio::test]
 async fn a_configured_context_length_outranks_the_servers() {
     let server = FakeServer::start(FakeTrtllm::default()).await;
@@ -406,15 +379,21 @@ async fn cleanup_terminates_an_in_flight_request() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
-/// Cancellation before the request reaches the engine has nothing to strand, so
-/// the decode leg's deferral must not apply to it: the caller would otherwise
-/// wait out a dispatch it has already given up on.
+/// A decode leg's cancellation deferral has to cover the dispatch itself, not
+/// just the streaming loop. `generate` sends the request and then awaits
+/// response headers, so a cancellation that wins that race abandons a request
+/// the engine has already accepted and begun pulling KV for -- stranding the
+/// prefill worker's blocks with no leg left to claim them. Shutdown still wins.
 #[tokio::test]
-async fn a_decode_request_cancelled_before_dispatch_stops_immediately() {
+async fn a_cancelled_decode_dispatch_is_not_abandoned_mid_flight() {
     let service = FakeTrtllm::default();
     service.hang_before_stream.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine_in_mode(&server.endpoint, 1, DisaggregationMode::Decode);
+    let engine = Arc::new(engine_in_mode(
+        &server.endpoint,
+        1,
+        DisaggregationMode::Decode,
+    ));
     engine.start(0).await.expect("start");
 
     let mut decode_request = request();
@@ -423,19 +402,36 @@ async fn a_decode_request_cancelled_before_dispatch_stops_immediately() {
         prompt_tokens_details: None,
     });
     let context = dynamo_backend_common::testing::mock_context();
-    let cancelling = context.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        cancelling.stop_generating();
+    let mut dispatch = tokio::spawn({
+        let engine = Arc::clone(&engine);
+        let context = context.clone();
+        async move {
+            engine
+                .generate(decode_request, GenerateContext::new(context, None))
+                .await
+        }
     });
 
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(5),
-        engine.generate(decode_request, GenerateContext::new(context, None)),
-    )
-    .await
-    .expect("cancellation must not wait for the dispatch")
-    .expect("generate");
+    // The fake records the request before it withholds response headers, which
+    // is exactly the window this test is about: the engine has the request and
+    // the sidecar does not know it yet.
+    while server.service.requests.lock().await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    context.stop_generating();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut dispatch)
+            .await
+            .is_err(),
+        "the dispatch must outlive the client's cancellation"
+    );
+
+    engine.cleanup().await.expect("cleanup");
+    let mut stream = tokio::time::timeout(Duration::from_secs(5), dispatch)
+        .await
+        .expect("shutdown must release the dispatch")
+        .expect("dispatch task")
+        .expect("generate");
     let terminal = stream
         .next()
         .await

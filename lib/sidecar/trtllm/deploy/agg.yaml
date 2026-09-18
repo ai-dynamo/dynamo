@@ -45,13 +45,11 @@ spec:
         # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          # Build your own: no published TensorRT-LLM release ships OpenEngine
-          # gRPC yet. The image must serve `--grpc-protocol openengine`, expose
-          # the Control service (the sidecar needs GetModelInfo to start, and
-          # the probes below call Health), and have the OpenEngine Python
-          # bindings installed for those probes -- see the README's Run section
-          # for the pinned package versions, which the image must match.
-          image: <trtllm-image-with-openengine>
+          # Layer the OpenEngine Python bindings onto this release and push the
+          # result: the release ships the servicer, but both it and the probes
+          # below import `openengine.v1`, which it does not install. See the
+          # README's Run section for the pinned versions.
+          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
           restartPolicy: Always
           # Readiness via the OpenEngine Control.Health RPC, which reports the
           # engine's own state (grpc + model, plus kv_connector when configured)
@@ -75,6 +73,30 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
+          env:
+          # TensorRT-LLM would otherwise start its TP=1 worker by spawning an
+          # MPI process, and that spawn fails inside a pod: PRTE reaches
+          # `VM READY` and then terminates its daemons with no diagnostic.
+          # Measured on release:1.3.0rc27. This worker runs one GPU, which is
+          # exactly the case the switch covers
+          # (`enable_worker_single_process_for_tp1`), so the worker runs
+          # in-process and never spawns.
+          # Not free: the engine logs "Using single process worker for TP1,
+          # this may hurt streaming generation performance"
+          # (`executor/executor.py`), because the worker now shares the server's
+          # process instead of gathering over IPC. `stream_interval` in the
+          # ConfigMap above is the lever that buys that back -- see the README's
+          # Tuning section. Revisit both together if the engine needs TP > 1,
+          # which this switch does not cover.
+          - name: TLLM_WORKER_USE_SINGLE_PROCESS
+            value: "1"
+          # The release image runs as uid 0 and PRTE refuses to run as root
+          # unless told twice. Harmless with the switch above, and it keeps the
+          # engine from dying at startup if the spawn path is ever re-entered.
+          - name: PRTE_ALLOW_RUN_AS_ROOT
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -97,6 +119,18 @@ spec:
           - 127.0.0.1
           - --port
           - "50051"
+          # Workaround, not a requirement: `GetModelInfo` reads the unresolved
+          # `llm.args.max_seq_len`, which stays `None` on the PyTorch path even
+          # though the executor has already resolved the real window from the
+          # model config. Measured on release:1.3.0rc27.dev202609170000 with
+          # TinyLlama-1.1B: the executor runs at `max_seq_len=2048` while
+          # `GetModelInfo` answers UNSET. Stating it here is what stops the
+          # sidecar polling for its whole startup deadline and then registering
+          # a worker that rejects every request omitting max_tokens. Drop this
+          # and the sidecar's --context-length once the servicer reports the
+          # resolved window.
+          - --max_seq_len
+          - "4096"
           # Engine tuning from the ConfigMap above.
           - --extra_llm_api_options
           - /config/config.yaml
@@ -117,6 +151,9 @@ spec:
           - 127.0.0.1:50051
           - --model-path
           - Qwen/Qwen3-0.6B
+          # Matches the engine's --max_seq_len above.
+          - --context-length
+          - "4096"
           envFrom:
           - secretRef:
               name: hf-token-secret

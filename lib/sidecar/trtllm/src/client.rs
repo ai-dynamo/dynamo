@@ -15,7 +15,7 @@ use dynamo_sidecar_common::{
 use tonic::transport::Channel;
 
 pub(crate) use dynamo_sidecar_common::{
-    cancelled, engine_shutdown, invalid_argument, status_to_dynamo, worker_overloaded,
+    cancelled, engine_shutdown, invalid_argument, status_to_dynamo,
 };
 
 use crate::proto as pb;
@@ -24,7 +24,7 @@ use crate::proto::inference_client::InferenceClient;
 
 /// Deadline for the one-shot `Control.Abort`, so a connected-but-unresponsive
 /// server cannot hang cancellation. Startup is bounded by the operator's
-/// `--grpc-startup-deadline` instead.
+/// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The engine's limits, resolved at startup from `--context-length` and
@@ -49,7 +49,10 @@ impl TrtllmClient {
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
-        let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport).await?;
+        // bootstrap=false: TrtllmClient::connect's only call site is
+        // LLMEngine::start (lib/sidecar/trtllm/src/engine.rs), after the
+        // tracing subscriber is installed. See GrpcChannelPool::connect.
+        let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport, false).await?;
         Ok(Self { pool })
     }
 
@@ -69,31 +72,28 @@ impl TrtllmClient {
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
+    /// No routing metadata is attached: the server rejects both
+    /// `openengine-target-dp-rank` and `openengine-priority` with UNIMPLEMENTED,
+    /// so `convert::validate_request` refuses those requests up front rather
+    /// than letting the engine fail them. `KvSessionRef.dp_rank` still carries a
+    /// disaggregated session's KV affinity, inside the request body.
     pub(crate) async fn generate(
         &self,
         request: pb::GenerateRequest,
-        target_dp_rank: Option<u32>,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
-        let mut request = tonic::Request::new(request);
-        // The protocol carries the routing target in metadata rather than the
-        // request body; `KvSessionRef.dp_rank` stays authoritative for a
-        // session's KV affinity.
-        if let Some(rank) = target_dp_rank {
-            request
-                .metadata_mut()
-                .insert("openengine-target-dp-rank", rank.into());
-        }
         self.inference()
-            .generate(request)
+            .generate(tonic::Request::new(request))
             .await
             .map(tonic::Response::into_inner)
-            .map_err(generate_status)
+            .map_err(|status| status_to_dynamo("Generate", status))
     }
 
-    /// A report with no usable context length is `None` rather than an error:
-    /// TensorRT-LLM substitutes `max_input_len` when the engine was started
-    /// without `--max_seq_len`, and that value is discarded here rather than
-    /// registered as a real context window.
+    /// Reads the server's advertised limits, keeping positive values.
+    ///
+    /// An engine started without `--max_seq_len` leaves `max_context_length`
+    /// unset rather than substituting its `max_input_len` default (measured
+    /// against TensorRT-LLM main at 8bbaf66bd5), so `None` here means "the
+    /// server did not say", and `--context-length` supplies it instead.
     async fn get_model_info(&self, model: &str) -> Result<ModelLimits, tonic::Status> {
         let info = self
             .control()
@@ -158,7 +158,7 @@ impl TrtllmClient {
         }
         Err(connection_timeout(format!(
             "TensorRT-LLM did not report a model context length before the gRPC startup \
-             deadline ({last}). Raise --grpc-startup-deadline if the engine is still \
+             deadline ({last}). Raise --grpc-startup-deadline-secs if the engine is still \
              loading, or pin the window with --context-length."
         )))
     }
@@ -194,21 +194,6 @@ fn answers_the_request_is_wrong(status: &tonic::Status) -> bool {
         status.code(),
         tonic::Code::InvalidArgument | tonic::Code::NotFound | tonic::Code::Unimplemented
     )
-}
-
-/// TensorRT-LLM answers a request it cannot admit with `RESOURCE_EXHAUSTED`.
-/// That is worker-scoped backpressure, so the router should shed it to another
-/// worker rather than failing the request; every other status keeps the shared
-/// mapping. This lives here rather than in `status_to_dynamo` because the
-/// meaning of the code is a property of this server, not of gRPC.
-fn generate_status(status: tonic::Status) -> DynamoError {
-    if status.code() == tonic::Code::ResourceExhausted {
-        return worker_overloaded(format!(
-            "Generate: {} (ResourceExhausted)",
-            status.message()
-        ));
-    }
-    status_to_dynamo("Generate", status)
 }
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {

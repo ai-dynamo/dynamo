@@ -7,7 +7,7 @@ mod args;
 mod client;
 mod convert;
 mod engine;
-mod json;
+mod lora;
 mod model;
 
 #[doc(hidden)]
