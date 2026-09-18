@@ -130,8 +130,9 @@ def response_created_event(
     *,
     output_modalities: list[str],
     max_output_tokens: int | str = "inf",
+    metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    event: dict[str, Any] = {
         "type": "response.created",
         "event_id": event_id(),
         "response": {
@@ -143,6 +144,9 @@ def response_created_event(
             "status": "in_progress",
         },
     }
+    if metadata is not None:
+        event["response"]["metadata"] = metadata
+    return event
 
 
 def response_done_event(
@@ -154,6 +158,7 @@ def response_done_event(
     max_output_tokens: int | str = "inf",
     output: list[dict[str, Any]] | None = None,
     usage: dict[str, Any] | None = None,
+    metadata: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     response: dict[str, Any] = {
         "id": response_id,
@@ -167,6 +172,8 @@ def response_done_event(
         response["status_details"] = status_details
     if usage is not None:
         response["usage"] = usage
+    if metadata is not None:
+        response["metadata"] = metadata
     return {
         "type": "response.done",
         "event_id": event_id(),

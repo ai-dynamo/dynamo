@@ -190,6 +190,7 @@ class _TextTurn(RealtimeTurn):
         items: list[dict[str, Any]],
         conversation_messages: list[dict[str, str]],
         prefill_task: asyncio.Task[None] | None = None,
+        metadata: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.response_id = f"resp_{uuid.uuid4().hex}"
@@ -201,6 +202,7 @@ class _TextTurn(RealtimeTurn):
         self.items = items
         self.conversation_messages = conversation_messages
         self.prefill_task = prefill_task
+        self.metadata = metadata
         self.previous_item_id = items[-1]["id"] if items else None
         self.text = ""
         self.finished = False
@@ -212,6 +214,7 @@ class _TextTurn(RealtimeTurn):
                 self.response_id,
                 output_modalities=["text"],
                 max_output_tokens=self.wire_max_output_tokens,
+                metadata=self.metadata,
             ),
             response_output_item_added_event(self.response_id, pending_item),
         ]
@@ -275,6 +278,7 @@ class _TextTurn(RealtimeTurn):
                 status=status,
                 status_details=status_details,
                 usage=_realtime_usage(usage),
+                metadata=self.metadata,
             )
         )
         return events
@@ -395,7 +399,7 @@ class RealtimeTextHandler:
 
     def _response_options(
         self, value: Any, session: dict[str, Any]
-    ) -> tuple[int | None, int | str, str, bool, bool]:
+    ) -> tuple[int | None, int | str, str, bool, bool, dict[str, str] | None]:
         response = {} if value is None else value
         if not isinstance(response, dict):
             raise ValueError("response must be an object")
@@ -403,12 +407,23 @@ class RealtimeTextHandler:
             raise ValueError("only text output is supported")
         if response.get("tools") not in (None, []):
             raise ValueError("tools are not supported")
+        if response.get("tool_choice") not in (None, "none"):
+            raise ValueError("tool_choice is not supported")
         if response.get("input") not in (None, []):
             raise ValueError("response.input items are not supported")
         if response.get("conversation") not in (None, "auto", "none"):
             raise ValueError("response.conversation must be 'auto' or 'none'")
         if any(response.get(field) is not None for field in ("prompt", "reasoning")):
             raise ValueError("prompt and reasoning configuration are not supported")
+        metadata = response.get("metadata")
+        if metadata is not None and (
+            not isinstance(metadata, dict)
+            or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in metadata.items()
+            )
+        ):
+            raise ValueError("response.metadata must be an object with string values")
 
         instructions = response.get("instructions", session["instructions"])
         if not isinstance(instructions, str):
@@ -421,6 +436,7 @@ class RealtimeTextHandler:
             instructions,
             response.get("conversation") != "none",
             response.get("input") != [],
+            metadata,
         )
 
     async def _run_turn(self, turn: _TextTurn, context: Context) -> None:
@@ -699,6 +715,7 @@ class RealtimeTextHandler:
                         instructions,
                         add_to_conversation,
                         use_conversation,
+                        metadata,
                     ) = self._response_options(event.get("response"), session)
                     prompt = list(messages) if use_conversation else []
                     if instructions:
@@ -725,6 +742,7 @@ class RealtimeTextHandler:
                         items=items,
                         conversation_messages=messages,
                         prefill_task=prefill_task,
+                        metadata=metadata,
                     )
                 )
                 committed_prefill = None

@@ -175,6 +175,27 @@ def _text_item(text: str, *, item_id: str = "user_1") -> dict:
     }
 
 
+def _text_response(**updates) -> dict:
+    # Supply a complete response object accepted by the frontend's typed decoder.
+    return {
+        "type": "response.create",
+        "response": {
+            "audio": {
+                "output": {
+                    "format": {"type": "audio/pcm", "rate": 24000},
+                    "voice": "alloy",
+                }
+            },
+            "conversation": "none",
+            "input": [],
+            "instructions": "Fallback instruction",
+            "max_output_tokens": 32,
+            "output_modalities": ["text"],
+            **updates,
+        },
+    }
+
+
 def test_text_turn_finalization_is_idempotent():
     items = []
     messages = []
@@ -550,28 +571,18 @@ def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message)
     [
         {"prompt": {"id": "pmpt_required", "variables": {"context": "required"}}},
         {"reasoning": {"effort": "high"}},
+        {"tool_choice": "auto"},
+        {"tool_choice": "required"},
+        {"tool_choice": {"type": "function", "name": "lookup"}},
+        {"tool_choice": {"type": "mcp", "server_label": "remote", "name": "lookup"}},
+        {"metadata": []},
+        {"metadata": {"topic": 1}},
     ],
 )
-def test_response_rejects_unsupported_prompt_and_reasoning(option):
+def test_response_rejects_unsupported_options(option):
     async def unused_chat_completion(messages, max_output_tokens):
         raise AssertionError((messages, max_output_tokens))
 
-    # Supply a complete response object accepted by the frontend's typed decoder.
-    response = {
-        "audio": {
-            "output": {
-                "format": {"type": "audio/pcm", "rate": 24000},
-                "voice": "alloy",
-            }
-        },
-        "conversation": "none",
-        "input": [],
-        "instructions": "Fallback instruction",
-        "max_output_tokens": 32,
-        "metadata": {},
-        "output_modalities": ["text"],
-        **option,
-    }
     result = asyncio.run(
         _drive(
             RealtimeTextHandler(
@@ -580,12 +591,55 @@ def test_response_rejects_unsupported_prompt_and_reasoning(option):
             ),
             [
                 {"type": "session.update", "session": _text_session()},
-                {"type": "response.create", "response": response},
+                _text_response(**option),
             ],
         )
     )
     assert [event["type"] for event in result] == ["session.updated", "error"]
     assert result[-1]["error"]["code"] == "invalid_response"
+
+
+@pytest.mark.parametrize("metadata", [None, {}, {"topic": "classification"}])
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_out_of_band_response_preserves_metadata(metadata, finish_reason):
+    async def chat_completion(messages, max_output_tokens):
+        async def frames():
+            yield f'data: {{"choices":[{{"delta":{{"content":"support"}},"finish_reason":"{finish_reason}"}}]}}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return frames()
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=chat_completion,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                _text_response(metadata=metadata, tool_choice="none"),
+            ],
+        )
+    )
+
+    responses = [
+        event["response"]
+        for event in result
+        if event["type"] in ("response.created", "response.done")
+    ]
+    assert len(responses) == 2
+    for response in responses:
+        if metadata is None:
+            assert "metadata" not in response
+        else:
+            assert response["metadata"] == metadata
+    assert responses[-1]["status"] == (
+        "completed" if finish_reason == "stop" else "incomplete"
+    )
+    assert responses[-1]["output"][0]["content"] == [
+        {"type": "output_text", "text": "support"}
+    ]
+    assert not any(event["type"].startswith("conversation.") for event in result)
 
 
 @pytest.mark.parametrize(
@@ -647,6 +701,8 @@ def test_text_session_rejects_unsupported_options(session_update, item, code):
 
 @pytest.mark.parametrize("after_first_delta", [False, True])
 def test_response_cancel_aborts_generation(after_first_delta):
+    metadata = {"request_id": "cancelled-turn"}
+
     async def scenario():
         started = asyncio.Event()
 
@@ -669,7 +725,7 @@ def test_response_cancel_aborts_generation(after_first_delta):
         async def request_stream():
             yield {"type": "session.update", "session": _text_session()}
             yield _text_item("Wait")
-            yield {"type": "response.create"}
+            yield _text_response(conversation="auto", metadata=metadata)
             if after_first_delta:
                 await started.wait()
             yield {"type": "response.cancel"}
@@ -680,6 +736,7 @@ def test_response_cancel_aborts_generation(after_first_delta):
 
     done = [event for event in result if event["type"] == "response.done"]
     assert len(done) == 1
+    assert done[0]["response"]["metadata"] == metadata
     assert done[0]["response"]["status"] == "cancelled"
     assert done[0]["response"]["status_details"] == {
         "type": "cancelled",
@@ -799,6 +856,8 @@ def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
 
 
 def test_generation_failure_closes_announced_response_item():
+    metadata = {"request_id": "failed-turn"}
+
     async def failed_chat_completion(messages, max_output_tokens):
         del messages, max_output_tokens
         raise RuntimeError("engine unavailable")
@@ -812,7 +871,7 @@ def test_generation_failure_closes_announced_response_item():
             [
                 {"type": "session.update", "session": _text_session()},
                 _text_item("Hello"),
-                {"type": "response.create"},
+                _text_response(conversation="auto", metadata=metadata),
             ],
         )
     )
@@ -830,6 +889,7 @@ def test_generation_failure_closes_announced_response_item():
         "response.done",
     ]
     assert result[-1]["response"]["status"] == "failed"
+    assert result[-1]["response"]["metadata"] == metadata
 
 
 def test_text_session_starts_next_turn_immediately_after_response_done():
