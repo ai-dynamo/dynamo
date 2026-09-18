@@ -203,6 +203,15 @@ async fn connect_until_ready(
     }
 }
 
+/// The instant by which startup work -- connecting, waiting for the engine to
+/// answer, discovering the model -- must be done. Every sidecar bounds its whole
+/// startup path by this one deadline rather than by per-RPC constants, so
+/// `--grpc-startup-deadline-secs` actually governs how long a slow-loading engine is
+/// given.
+pub fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
+    checked_instant_add(Instant::now(), duration, "gRPC startup deadline")
+}
+
 fn checked_instant_add(
     instant: Instant,
     duration: Duration,

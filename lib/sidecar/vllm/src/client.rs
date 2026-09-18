@@ -17,7 +17,7 @@ use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
 pub(crate) use dynamo_sidecar_common::v14::status_to_dynamo;
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument};
+pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, startup_deadline};
 
 use crate::proto as pb;
 
@@ -225,14 +225,6 @@ impl VllmClient {
             .await
             .map(|response| response.adapters)
     }
-}
-
-pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
-    Instant::now().checked_add(duration).ok_or_else(|| {
-        invalid_argument(format!(
-            "gRPC startup deadline {duration:?} exceeds the supported monotonic clock range"
-        ))
-    })
 }
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
