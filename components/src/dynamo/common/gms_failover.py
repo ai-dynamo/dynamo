@@ -304,7 +304,11 @@ def _promote_content_directory_after_fence(backend_name: str, role: str) -> "set
     started = time.monotonic()
     protected_blocks: set[int] = set()
     try:
-        epoch = directory.promote()
+        # ENGINE_ID is stable across process restarts. The external lock now
+        # fences the former process, so force a fresh directory epoch even when
+        # the writer ID is unchanged. This drops incomplete ACTIVE HBM entries
+        # while preserving completion-confirmed READY blocks.
+        epoch = directory.promote(force_new_epoch=True)
         protected_blocks.update(
             block_id
             for slot_ids in directory.hbm_inventory().values()
