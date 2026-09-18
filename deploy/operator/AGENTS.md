@@ -13,9 +13,9 @@ SPDX-License-Identifier: Apache-2.0
 
 - `make generate-api-docs` generates
   `docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md`
-  (relative to the repository root) from Go API types and comments. `make check`
-  then runs `docs/fern/scripts/gen_kubernetes_api.py` to render
-  `full-api-reference.mdx` before checking for uncommitted changes. Regenerate
+  (relative to the repository root) from Go API types and comments, then runs
+  `docs/fern/scripts/gen_kubernetes_api.py` to render `full-api-reference.mdx`.
+  `make check` depends on this target and checks for uncommitted changes. Regenerate
   and commit both generated files when their source changes; do not edit them by hand.
 - The sibling `dynamo-graph-deployment.mdx`,
   `dynamo-graph-deployment-request.mdx`, and `dynamo-component-deployment.mdx`
