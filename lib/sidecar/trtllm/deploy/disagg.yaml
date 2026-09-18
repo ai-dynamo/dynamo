@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EXPERIMENTAL. Disaggregated TensorRT-LLM deployment using the Rust sidecar.
+#
+# Prefill and decode run as separate worker pods. Each pod = two containers:
+#   - main: Dynamo worker (dynamo-trtllm-sidecar), no GPU; talks to its engine
+#     over gRPC on 127.0.0.1. Its --disaggregation-mode (prefill|decode) also
+#     picks the component it registers under. Must be named "main" (operator
+#     injects env + probes).
+#   - trtllm-engine: TRT-LLM image with OpenEngine gRPC support, holds the GPU,
+#     runs the OpenEngine gRPC server as a native sidecar (see initContainers).
+#
+# The frontend routes to a prefill worker, gets back a `KvSessionRef` handoff,
+# then routes to a decode worker carrying it. The KV cache itself moves
+# engine-to-engine over the cache transceiver, never through the sidecars, so
+# both engines need `cache_transceiver_config` (the ConfigMaps below).
+#
+# This sidecar publishes no KV events, so use the default router (not
+# --router-mode kv).
+#
+# The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
+# The cache transceiver binds a separate port on the pod IP, which is what the
+# peer engine dials.
+#
+# PREREQUISITES / CAVEATS:
+#   - The prefill -> decode flow was validated with both engines co-located on
+#     one node, NIXL over TCP/CUDA-IPC without rdma/ib. The rdma/ib requests
+#     below target a real RDMA fabric; drop them (and the securityContext) if
+#     yours does not need them.
+#   - No published sidecar image yet — build from lib/sidecar/Dockerfile and set
+#     <your-registry>.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-prefill-engine-config
+data:
+  config.yaml: |
+    # Without a transceiver the engines cannot complete the handoff. NIXL picks
+    # its own underlying transport (UCX where there is no RDMA fabric).
+    cache_transceiver_config:
+      backend: NIXL
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trtllm-decode-engine-config
+data:
+  config.yaml: |
+    cache_transceiver_config:
+      backend: NIXL
+    # One gRPC chunk per N decode steps, not per token: N>1 cuts per-token gRPC
+    # serialization for a throughput win, at the cost of bursty delivery. Only
+    # the decode engine streams, so only it is tuned here.
+    stream_interval: 5
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: trtllm-sidecar-disagg
+spec:
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        # Dynamo frontend; operator adds the command.
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.3.0
+
+  - name: TRTLLMPrefillWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: engine-config
+          configMap:
+            name: trtllm-prefill-engine-config
+        # UCX shared-memory transports need more than the default 64 MiB.
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        # trtllm-engine as a native sidecar (initContainer + restartPolicy: Always):
+        # starts before `main`, stops after.
+        initContainers:
+        - name: trtllm-engine
+          # Layer the OpenEngine Python bindings onto this release and push the
+          # result: the release ships the servicer, but both it and the probes
+          # below import `openengine.v1`, which it does not install. See the
+          # README's Run section for the pinned versions.
+          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
+          restartPolicy: Always
+          # RDMA needs pinned memory + privileged caps. Drop this block if your
+          # fabric does not use rdma/ib.
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          # Readiness via the OpenEngine Control.Health RPC, which reports the
+          # engine's own state rather than just a connectable socket.
+          # startupProbe gates `main`; readinessProbe drops dead workers.
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+            periodSeconds: 5
+            timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
+            failureThreshold: 60   # ~5 min for model load; raise for big models
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              # Increase for larger models.
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: engine-config
+            mountPath: /config
+          - name: dshm
+            mountPath: /dev/shm
+          command:
+          - python3
+          - -m
+          - tensorrt_llm.commands.serve
+          args:
+          - Qwen/Qwen3-0.6B
+          - --grpc
+          - --grpc-protocol
+          - openengine
+          - --host
+          - 127.0.0.1
+          - --port
+          - "50051"
+          # Workaround, not a requirement: `GetModelInfo` reads the unresolved
+          # `llm.args.max_seq_len`, which stays `None` on the PyTorch path even
+          # though the executor has already resolved the real window from the
+          # model config. Stating it here is what stops the sidecar polling for
+          # its whole startup deadline and then registering a worker that
+          # rejects every request omitting max_tokens. Drop this and the
+          # sidecar's --context-length once the servicer reports the resolved
+          # window.
+          - --max_seq_len
+          - "4096"
+          - --extra_llm_api_options
+          - /config/config.yaml
+        containers:
+        # Sidecar worker. No published image yet — build from
+        # lib/sidecar/Dockerfile, set <your-registry> (see README), add
+        # imagePullSecrets if private. Must be named "main" (operator injects
+        # discovery env + probes by name).
+        - name: main
+          image: <your-registry>/dynamo-sidecar:1.3.0
+          command:
+          - dynamo-trtllm-sidecar
+          args:
+          - --disaggregation-mode
+          - prefill
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          # Matches the engine's --max_seq_len above.
+          - --context-length
+          - "4096"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+
+  - name: TRTLLMDecodeWorker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        volumes:
+        - name: engine-config
+          configMap:
+            name: trtllm-decode-engine-config
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 10Gi
+        initContainers:
+        - name: trtllm-engine
+          image: <your-registry>/tensorrt-llm-openengine:1.3.0rc27.dev202609170000
+          restartPolicy: Always
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          startupProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+              - python3
+              - -c
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 3
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+            requests:
+              nvidia.com/gpu: "1"
+              rdma/ib: "1"
+              ephemeral-storage: 2Gi
+          volumeMounts:
+          - name: engine-config
+            mountPath: /config
+          - name: dshm
+            mountPath: /dev/shm
+          command:
+          - python3
+          - -m
+          - tensorrt_llm.commands.serve
+          args:
+          - Qwen/Qwen3-0.6B
+          - --grpc
+          - --grpc-protocol
+          - openengine
+          - --host
+          - 127.0.0.1
+          - --port
+          - "50051"
+          - --max_seq_len
+          - "4096"
+          - --extra_llm_api_options
+          - /config/config.yaml
+        containers:
+        - name: main
+          image: <your-registry>/dynamo-sidecar:1.3.0
+          command:
+          - dynamo-trtllm-sidecar
+          args:
+          - --disaggregation-mode
+          - decode
+          - --grpc-endpoint
+          - 127.0.0.1:50051
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --context-length
+          - "4096"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
