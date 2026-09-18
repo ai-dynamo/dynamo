@@ -118,7 +118,10 @@ def main() -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 1
 
-    print(f"checked {len(targets)} style component(s): literals intact")
+    print(
+        "style component validation passed: "
+        f"{len(targets)} style component(s) checked; enum usage valid"
+    )
     return 0
 
 
