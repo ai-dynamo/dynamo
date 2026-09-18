@@ -302,7 +302,6 @@ class TestInstall:
     def test_invalid_config_is_rejected_before_importing_sglang(
         self, telemetry_env, env_name, value
     ):
-        """Worker startup should identify invalid NIXL config before spawning."""
         telemetry_env.setenv(env_name, value)
         telemetry_env.setitem(sys.modules, "sglang", _LazyProxyModule())
 
