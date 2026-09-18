@@ -2187,10 +2187,24 @@ class TestRLAdminRouteHardening:
         assert handler._rl_maintenance_lease is None
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("paused", [True, False])
-    async def test_finish_weight_update_closes_maintenance_window(self, paused):
-        """finish_weight_update ends the transaction for controllers that never
-        call destroy, including a finish rejected because the worker is unpaused."""
+    @pytest.mark.parametrize(
+        "paused, options, error",
+        [
+            (True, {}, None),
+            (False, {}, "must be paused"),
+            (True, {"allow_unpaused": "true"}, "'allow_unpaused' must be a boolean"),
+            (
+                True,
+                {"reset_prefix_cache": "false"},
+                "'reset_prefix_cache' must be a boolean",
+            ),
+            (True, {"allow_unpaused": True}, "cannot reset the prefix cache"),
+        ],
+    )
+    async def test_finish_weight_update_closes_maintenance_window(
+        self, paused, options, error
+    ):
+        """A rejected finish must release the lease without an engine RPC."""
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler._paused = paused
@@ -2203,17 +2217,17 @@ class TestRLAdminRouteHardening:
         )
         handler.engine_client.collective_rpc.reset_mock()
         resp = await handler.update_weights_from_distributed(
-            {"engine_rpc": "finish_weight_update"}
+            {"engine_rpc": "finish_weight_update", **options}
         )
 
-        if paused:
+        if error is None:
             assert resp["status"] == "ok"
             handler.engine_client.collective_rpc.assert_awaited_once_with(
                 "finish_weight_update", kwargs={}
             )
         else:
             assert resp["status"] == "error"
-            assert "must be paused" in resp["message"]
+            assert error in resp["message"]
             handler.engine_client.collective_rpc.assert_not_awaited()
             handler.engine_client.reset_prefix_cache.assert_not_awaited()
         handler.runtime.end_health_check_maintenance.assert_called_once_with(1)

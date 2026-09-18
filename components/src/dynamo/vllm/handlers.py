@@ -2101,48 +2101,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        allow_unpaused = body.get("allow_unpaused", False)
-        reset_prefix_cache = body.get("reset_prefix_cache", True)
-        if not isinstance(allow_unpaused, bool):
-            return {
-                "status": "error",
-                "message": "'allow_unpaused' must be a boolean",
-            }
-        if not isinstance(reset_prefix_cache, bool):
-            return {
-                "status": "error",
-                "message": "'reset_prefix_cache' must be a boolean",
-            }
-        if allow_unpaused and reset_prefix_cache:
-            return {
-                "status": "error",
-                "message": (
-                    "Unpaused weight updates cannot reset the prefix cache. "
-                    "Set 'reset_prefix_cache' to false or pause generation first."
-                ),
-            }
         rpc = body.get("engine_rpc", "update_weights_from_path")
         async with self._pause_lock:
-            if not self._paused and not allow_unpaused:
-                if rpc == "finish_weight_update":
-                    # A rejected finish still terminates its transfer. Do not
-                    # leave the canary timeout extended until the lease expires.
-                    self._end_rl_maintenance()
-                return {
-                    "status": "error",
-                    "message": (
-                        "Worker must be paused via pause_generation() before "
-                        "updating weights. Call pause_generation() first, then "
-                        "update, then resume_generation()."
-                    ),
-                }
-            version = body.get("weight_version", "unknown")
-            rpc_kwargs = {
-                k: v
-                for k, v in body.items()
-                if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
-            }
             try:
+                allow_unpaused = body.get("allow_unpaused", False)
+                reset_prefix_cache = body.get("reset_prefix_cache", True)
+                if not isinstance(allow_unpaused, bool):
+                    return {
+                        "status": "error",
+                        "message": "'allow_unpaused' must be a boolean",
+                    }
+                if not isinstance(reset_prefix_cache, bool):
+                    return {
+                        "status": "error",
+                        "message": "'reset_prefix_cache' must be a boolean",
+                    }
+                if allow_unpaused and reset_prefix_cache:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Unpaused weight updates cannot reset the prefix cache. "
+                            "Set 'reset_prefix_cache' to false or pause generation first."
+                        ),
+                    }
+                if not self._paused and not allow_unpaused:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Worker must be paused via pause_generation() before "
+                            "updating weights. Call pause_generation() first, then "
+                            "update, then resume_generation()."
+                        ),
+                    }
+                version = body.get("weight_version", "unknown")
+                rpc_kwargs = {
+                    k: v
+                    for k, v in body.items()
+                    if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
+                }
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
                 if reset_prefix_cache:
                     # Weights changed: stale prefix/KV cache must be invalidated
@@ -2161,9 +2157,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 return {"status": "error", "message": str(e)}
             finally:
                 if rpc == "finish_weight_update":
-                    # The other terminator of a weight-transfer transaction: a
-                    # controller may end here and never call destroy. A finish
-                    # that failed still ends it and restores the normal timeout.
+                    # Finish ends the lease even when validation or the RPC fails.
                     self._end_rl_maintenance()
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
