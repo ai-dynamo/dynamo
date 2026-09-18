@@ -91,6 +91,7 @@ pub struct ProbedRegistration(u64);
 
 /// Identifies one health-check registration for later release.
 #[derive(Debug)]
+#[must_use = "an unreleased health-check registration keeps the target active"]
 pub struct HealthCheckRegistration {
     subject: String,
     registration: u64,
@@ -569,7 +570,7 @@ mod tests {
     #[test]
     fn registered_target_makes_the_worker_ready_with_canary_off() {
         let health = system_health(false);
-        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let _ = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
         health.set_endpoint_registered(ENDPOINT);
 
         let (healthy, endpoints) = health.get_health_status();
@@ -703,7 +704,7 @@ mod tests {
     #[test]
     fn canary_enabled_withholds_ready_until_verified() {
         let health = system_health(true);
-        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let _ = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
         health.set_endpoint_registered(ENDPOINT);
 
         assert!(
@@ -721,7 +722,7 @@ mod tests {
     #[test]
     fn re_registration_installs_the_restarts_target_and_withholds_ready() {
         let health = system_health(true);
-        health.register_health_check_target(
+        let _ = health.register_health_check_target(
             ENDPOINT,
             instance(),
             serde_json::json!({"generation": "first"}),
@@ -731,7 +732,7 @@ mod tests {
 
         let mut restarted = instance();
         restarted.instance_id = 2;
-        health.register_health_check_target(
+        let _ = health.register_health_check_target(
             ENDPOINT,
             restarted,
             serde_json::json!({"generation": "second"}),
@@ -755,8 +756,8 @@ mod tests {
             .take_new_endpoint_receiver()
             .expect("the receiver is available before the manager takes it");
 
-        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
-        health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let _ = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
+        let _ = health.register_health_check_target(ENDPOINT, instance(), serde_json::json!({}));
 
         assert_eq!(rx.try_recv().ok().as_deref(), Some(ENDPOINT));
         assert_eq!(
@@ -807,7 +808,7 @@ mod tests {
         );
         let mut live_instance = instance();
         live_instance.instance_id = 2;
-        health.register_health_check_target(
+        let _ = health.register_health_check_target(
             ENDPOINT,
             live_instance,
             serde_json::json!({"generation": "second"}),
@@ -946,7 +947,7 @@ mod tests {
         let id = registration.registration;
         health.release_health_check_target(registration);
 
-        health.register_health_check_target(
+        let _ = health.register_health_check_target(
             ENDPOINT,
             instance(),
             serde_json::json!({"generation": "restart"}),

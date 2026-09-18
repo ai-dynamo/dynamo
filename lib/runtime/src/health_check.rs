@@ -509,7 +509,7 @@ mod push_handler_notify_tests {
             "prompt": "health",
             "_health_check": true
         });
-        drt.system_health().lock().register_health_check_target(
+        let _ = drt.system_health().lock().register_health_check_target(
             endpoint_name,
             Instance {
                 component: "test_component".to_string(),
@@ -761,7 +761,7 @@ mod integration_tests {
             "_health_check": true
         });
 
-        drt.system_health().lock().register_health_check_target(
+        let _ = drt.system_health().lock().register_health_check_target(
             endpoint,
             crate::component::Instance {
                 component: "test_component".to_string(),
@@ -798,7 +798,7 @@ mod integration_tests {
                 "prompt": format!("test{}", i),
                 "_health_check": true
             });
-            drt.system_health().lock().register_health_check_target(
+            let _ = drt.system_health().lock().register_health_check_target(
                 &endpoint,
                 crate::component::Instance {
                     component: "test_component".to_string(),
@@ -843,7 +843,7 @@ mod integration_tests {
         });
 
         // Register the endpoint
-        drt.system_health().lock().register_health_check_target(
+        let _ = drt.system_health().lock().register_health_check_target(
             endpoint,
             crate::component::Instance {
                 component: "test_component".to_string(),
