@@ -350,12 +350,16 @@ impl Runtime {
     /// A [`CancellationToken`] that is cancelled once the shutdown phases started by
     /// [`Runtime::shutdown`] have completed, that is once phase 3 has cancelled the
     /// primary token. It stays un-cancelled if `shutdown` was never called.
+    /// For externally owned runtimes, the caller must keep the executor running until
+    /// completion, as described in [`Runtime::shutdown`].
     pub fn shutdown_complete_token(&self) -> CancellationToken {
         self.shutdown_state.complete.child_token()
     }
 
     /// Resolves once the shutdown phases started by [`Runtime::shutdown`] have completed.
     /// Never resolves if `shutdown` was never called.
+    /// For externally owned runtimes, the caller must keep the executor running until
+    /// completion, as described in [`Runtime::shutdown`].
     pub async fn shutdown_complete(&self) {
         self.shutdown_state.complete.cancelled().await
     }
@@ -380,6 +384,11 @@ impl Runtime {
     /// await [`Runtime::shutdown_complete`] or observe
     /// [`Runtime::shutdown_complete_token`]. Externally owned runtimes are never torn
     /// down here.
+    ///
+    /// For [`Runtime::from_current`] and [`Runtime::from_handle`], the caller must keep
+    /// the external Tokio runtime alive and running until shutdown completion. Stopping
+    /// it earlier can discard the coordinator before phase 3, leaving the primary and
+    /// completion tokens un-cancelled and completion waiters pending indefinitely.
     ///
     /// After the coordinator finishes normally, the teardown thread drops the owned
     /// executors without a timeout. Tasks that never yield or blocking tasks that never
