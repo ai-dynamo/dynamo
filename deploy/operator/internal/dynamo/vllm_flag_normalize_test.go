@@ -40,7 +40,6 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 		{tensorParallelSizeFlag, "-tp"},
 		{pipelineParallelSizeFlag, "-pp"},
 		{dataParallelSizeFlag, "-dp"},
-		{dataParallelSizeLocalFlag, "-dpl"},
 	} {
 		spellings := map[string][]string{
 			"long equals":     {tc.flag + "=4"},

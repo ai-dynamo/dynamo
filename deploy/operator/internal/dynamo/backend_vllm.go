@@ -614,19 +614,6 @@ var vllmNormalizedFlags = map[string]bool{
 // single format: "--long-flag" followed by a separate "value" token. It
 // expands short aliases (e.g., "-dp" to "--data-parallel-size") and splits
 // combined pairs (e.g., "--flag=value") for the flags this package reads.
-//
-// Motivation:
-// vLLM accepts multiple flag formats ("--flag 4", "--flag=4", "-f 4").
-// Previously, our internal parsers handled these inconsistently. `hasArg`
-// matched all forms, but `getFlagValue` only recognized space-separated long
-// flags. This caused different readers to disagree on the same command line,
-// silently defaulting to 1 and causing critical downstream bugs.
-//
-// Normalizing early at the tokenizer ensures all downstream readers receive
-// a single, predictable format, eliminating parser drift. Everything else,
-// including equals-form options this package does not read, is passed
-// through untouched -- splitting every token on "=" would risk turning an
-// unrelated option's value into an apparent flag.
 func normalizeVLLMFlags(expanded []string) []string {
 	normalized := make([]string, 0, len(expanded))
 	for _, arg := range expanded {
