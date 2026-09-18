@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+mod deepseek_v41;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
@@ -1629,6 +1630,7 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
+    order_deepseek_v41_media: bool,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
@@ -2358,6 +2360,8 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
+        let order_deepseek_v41_media =
+            deepseek_v41::matches_model(&model_info.model_type(), &mdc.display_name);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -2681,6 +2685,7 @@ impl OpenAIPreprocessor {
             tokenizer,
             embedding_tokenizers,
             model_info,
+            order_deepseek_v41_media,
             mdcsum,
             lora_name,
             runtime_config,
@@ -3378,7 +3383,15 @@ impl OpenAIPreprocessor {
         };
         let has_media_loader = self.media_loader.is_some();
 
-        for message in messages.iter() {
+        // V4.1 sorts tool results in its prompt. Collect their media in the same
+        // order, including UUID-only slots, so image identities cannot swap.
+        let message_order = (self.order_deepseek_v41_media
+            && messages
+                .iter()
+                .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_))))
+        .then(|| deepseek_v41::media_message_order(messages));
+        for index in 0..messages.len() {
+            let message = &messages[message_order.as_ref().map_or(index, |order| order[index])];
             let Some(content_parts) = multimodal_content_parts(message) else {
                 continue;
             };
@@ -7597,6 +7610,68 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_display_name_fallback_orders_tool_media() {
+        use crate::common::checked_file::CheckedFile;
+        use crate::model_card::ModelInfoType;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"architectures":[],"model_type":"","eos_token_id":128009}"#,
+        )
+        .unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&config).unwrap(),
+        ));
+        mdc.display_name = "DeepSeek-V4.1-Flash".into();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let first = inline_data_url().replacen("image/png", "image/png;name=a", 1);
+        let second = inline_data_url().replacen("image/png", "image/png;name=b", 1);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":second}}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":first}}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequestBuilder::default();
+        builder
+            .model("alias".into())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+        preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let result = builder.build().unwrap();
+        let media = &result.multi_modal_data.unwrap()["image_url"];
+        let urls: Vec<_> = media
+            .iter()
+            .map(|image| match image {
+                MultimodalData::Url(url) => url.as_str(),
+                other => panic!("expected URL, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(urls, [first.as_str(), second.as_str()]);
     }
 
     #[tokio::test]
