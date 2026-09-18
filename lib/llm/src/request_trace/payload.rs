@@ -79,7 +79,7 @@ impl RequestPayloadHandle {
     /// Pass a `drop_reason` for a missing or partial response.
     pub fn emit(
         self,
-        response: Option<Arc<NvCreateChatCompletionResponse>>,
+        mut response: Option<Arc<NvCreateChatCompletionResponse>>,
         drop_reason: Option<String>,
     ) {
         let payload_complete = response.is_some() && drop_reason.is_none();
@@ -88,6 +88,9 @@ impl RequestPayloadHandle {
             (false, Some(reason)) => Some(reason),
             (false, None) => Some(DROP_UNSPECIFIED.to_string()),
         };
+        if let Some(response) = response.as_mut() {
+            Arc::make_mut(response).inner.model = self.model.clone();
+        }
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,

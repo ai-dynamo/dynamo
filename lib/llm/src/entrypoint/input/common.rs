@@ -9,7 +9,7 @@ use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher, RuntimeConfigWatch},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
@@ -158,6 +158,7 @@ fn preprocessed_backend_engine(
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
     load_context: Arc<RoutingLoadContext>,
+    runtime_configs: Option<RuntimeConfigWatch>,
 ) -> anyhow::Result<Arc<RoutingHost>> {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
@@ -184,11 +185,12 @@ fn preprocessed_backend_engine(
             let lora = model_manager
                 .lora_filter_for(endpoint_id)
                 .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
-            Arc::new(RoutingHost::new_builtin_with_capabilities(
+            Arc::new(RoutingHost::new_builtin_with_runtime_configs(
                 router,
                 load_context,
                 affinity,
                 lora,
+                runtime_configs,
             )?)
         }
     };
@@ -249,6 +251,15 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
 
     wait_for_min_initial_workers(&router_client, min_initial_workers).await?;
     let endpoint_id = router_client.endpoint.id();
+    let runtime_configs = if model_manager.lora_enabled() && !router_mode.is_kv_routing() {
+        Some(
+            model_manager
+                .get_or_create_runtime_config_watcher(&router_client.endpoint)
+                .await?,
+        )
+    } else {
+        None
+    };
 
     let ttl = session_affinity_ttl_secs.map(Duration::from_secs);
     let affinity = match (ttl, chooser.as_ref()) {
@@ -303,6 +314,7 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         &endpoint_id,
         affinity,
         load_context,
+        runtime_configs,
     )?;
     if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
         prefill_router
