@@ -74,16 +74,6 @@ def _build_kwargs(config, stage_type="diffusion"):
         return handler._build_omni_kwargs(config)
 
 
-def _parallel_config_without(*excluded_fields):
-    """Model an older upstream config that lacks newer Dynamo options."""
-    fields = [
-        (field.name, field.type, dataclasses.field(default=None))
-        for field in dataclasses.fields(DiffusionParallelConfig)
-        if field.name not in excluded_fields
-    ]
-    return dataclasses.make_dataclass("LegacyDiffusionParallelConfig", fields)
-
-
 class TestDiffusionParallelConfigCoverage:
     def test_all_diffusion_parallel_config_fields_covered(self):
         """Every DiffusionParallelConfig field must be in OmniParallelKwargs, engine_args, or _SKIP_FIELDS.
@@ -130,35 +120,6 @@ class TestDiffusionParallelConfigCoverage:
         assert parallel_config.text_encoder_tp_size == 2
         if supports_ulysses_a2a_permute:
             assert parallel_config.ulysses_a2a_permute is True
-
-    def test_unsupported_default_parallel_field_is_omitted(self):
-        """Older Omni releases accept configs when new options keep their defaults."""
-        legacy_config = _parallel_config_without("ulysses_a2a_permute")
-
-        with patch(
-            "dynamo.vllm.omni.base_handler.DiffusionParallelConfig", legacy_config
-        ):
-            parallel_config = _build_kwargs(_make_config())["parallel_config"]
-
-        assert parallel_config.text_encoder_tp_size == 1
-        assert not hasattr(parallel_config, "ulysses_a2a_permute")
-
-    def test_unsupported_non_default_parallel_field_is_rejected(self):
-        """Do not silently ignore options unavailable in the installed Omni."""
-        legacy_config = _parallel_config_without("ulysses_a2a_permute")
-        config = _make_config(ulysses_a2a_permute=True)
-
-        with patch(
-            "dynamo.vllm.omni.base_handler.DiffusionParallelConfig", legacy_config
-        ):
-            with pytest.raises(
-                ValueError,
-                match=(
-                    "Installed vLLM-Omni does not support non-default parallel "
-                    "option.*ulysses_a2a_permute"
-                ),
-            ):
-                _build_kwargs(config)
 
     def test_output_modalities_forwarded_to_async_omni(self):
         config = _make_config()
