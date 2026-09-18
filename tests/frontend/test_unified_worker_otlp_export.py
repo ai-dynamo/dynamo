@@ -326,21 +326,14 @@ def test_python_routers_preserve_trace_and_worker_cancellation(
     while time.monotonic() < deadline:
         spans = collector.spans_for_trace_id(trace_id)
         roots = [span for span in spans if span.name == "http-request"]
-        dispatches = [
-            span
-            for span in spans
-            if span.name == "client_request"
-            and get_span_attribute(span, "operation")
-            == "kv_router.generate_from_request"
-        ]
+        kv_routes = [span for span in spans if span.name == "kv_router.route_request"]
         if (
             sum(span.name == "router.route_request" for span in spans) == 2
-            and sum(span.name == "kv_router.route_request" for span in spans) == 1
+            and len(kv_routes) == 1
             and sum(span.name == "handle_payload" for span in spans) == 3
             and len(roots) == 1
-            and len(dispatches) == 1
             and has_complete_span_chain(
-                spans, span_id=dispatches[0].span_id, ancestor_id=roots[0].span_id
+                spans, span_id=kv_routes[0].span_id, ancestor_id=roots[0].span_id
             )
         ):
             break
@@ -355,21 +348,17 @@ def test_python_routers_preserve_trace_and_worker_cancellation(
     assert (
         len(handlers) == 3
     ), f"expected global/local/worker handler spans, got {handlers}"
-    assert len(dispatches) == 1, "missing real PyO3 KvRouter dispatch span"
     root = roots[0]
-    dispatch = dispatches[0]
     assert root.parent_span_id == bytes.fromhex(inbound_span_id)
 
-    # Follow exported parent IDs, rather than assuming that matching trace IDs
-    # or mocked context identity proves the Python boundary preserved parentage.
-    assert has_complete_span_chain(
-        spans, span_id=dispatch.span_id, ancestor_id=root.span_id
-    ), "PyO3 dispatch is not a descendant of the inbound HTTP span"
-
+    # Validate the existing route/worker boundary before checking any span
+    # introduced by this fix. A baseline must fail on broken propagation, not
+    # merely because it lacks the new PyO3 dispatch span.
     route = kv_routes[0]
-    assert (
-        route.parent_span_id == dispatch.span_id
-    ), "KV route is not a child of the PyO3 dispatch"
+    assert has_complete_span_chain(
+        spans, span_id=route.span_id, ancestor_id=root.span_id
+    ), "KV route is not a descendant of the inbound HTTP span"
+
     assert route.kind == trace_pb2.Span.SPAN_KIND_CLIENT
     workers = [span for span in handlers if span.parent_span_id == route.span_id]
     assert len(workers) == 1, "worker is not a child of the Python route"
@@ -377,14 +366,28 @@ def test_python_routers_preserve_trace_and_worker_cancellation(
     outcome = "cancelled" if cancel else "success"
     assert get_span_attribute(root, "request.outcome") == outcome
     assert get_span_attribute(route, "request.outcome") == outcome
-    assert get_span_attribute(dispatch, "request_id") == get_span_attribute(
-        root, "request_id"
-    )
-    assert get_span_attribute(dispatch, "x_request_id") == request_id
+    for span in [*routes, route, *handlers]:
+        assert get_span_attribute(span, "request_id") == get_span_attribute(
+            root, "request_id"
+        ), f"{span.name} did not preserve the inbound request ID"
     if cancel:
         assert any(
             event.name == "request cancellation received" for event in worker.events
         ), "cancellation did not reach the downstream worker through Python routers"
+
+    dispatches = [
+        span
+        for span in spans
+        if span.name == "client_request"
+        and get_span_attribute(span, "operation") == "kv_router.generate_from_request"
+    ]
+    assert len(dispatches) == 1, "missing real PyO3 KvRouter dispatch span"
+    dispatch = dispatches[0]
+    assert route.parent_span_id == dispatch.span_id
+    assert get_span_attribute(dispatch, "request_id") == get_span_attribute(
+        root, "request_id"
+    )
+    assert get_span_attribute(dispatch, "x_request_id") == request_id
 
 
 def test_unsampled_traceparent_does_not_export_spans_over_otlp(
