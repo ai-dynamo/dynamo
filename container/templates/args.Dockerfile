@@ -99,7 +99,7 @@ ARG PLANNER_RUNTIME_IMAGE_TAG={{ context.dynamo.planner_runtime_image_tag }}
 {% if framework == "vllm" -%}
 ARG MAX_JOBS={{ context.vllm.max_jobs }}
 ARG TRANSFORMERS_VERSION={{ context.vllm.transformers_version }}
-ARG VLLM_OMNI_REF={{ context.vllm.vllm_omni_ref }}
+ARG VLLM_OMNI_REF={{ context.vllm[device_key].get("vllm_omni_ref", context.vllm.vllm_omni_ref) }}
 
 {% if device == "cuda" -%}
 # If left blank, then we will fallback to vLLM defaults
