@@ -257,7 +257,15 @@ fn local_data_parallel_range(
         ));
     }
     let local_size = match local_size {
-        0 if start == 0 => global_size,
+        0 if start == 0 => {
+            if global_size > 1 {
+                tracing::warn!(
+                    global_size,
+                    "vLLM omits data_parallel_size_local; assuming this frontend hosts the entire DP group. Hybrid deployments require a vLLM build that reports local DP size to avoid registering unhosted ranks and underestimating per-rank KV capacity"
+                );
+            }
+            global_size
+        }
         0 => {
             return Err(client::protocol_error(format!(
                 "vLLM reports data_parallel_rank {start} without data_parallel_size_local; hybrid rank ownership requires the local-size Control field"
