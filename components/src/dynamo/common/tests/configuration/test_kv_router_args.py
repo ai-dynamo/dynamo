@@ -7,9 +7,9 @@ from pathlib import Path
 import pytest
 
 from dynamo.common.configuration.groups import kv_router_args
-from dynamo.common.configuration.groups.aic_perf_args import (
-    AicPerfArgGroup,
-    AicPerfConfigBase,
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
@@ -32,9 +32,9 @@ def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
-def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
+def test_ais_perf_moe_cli_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
-    AicPerfArgGroup().add_arguments(parser)
+    AisPerfArgGroup().add_arguments(parser)
 
     args = parser.parse_args(
         [
@@ -55,45 +55,40 @@ def test_aic_perf_moe_cli_flows_to_binding_kwargs() -> None:
         ]
     )
 
-    config = AicPerfConfigBase.from_cli_args(args)
+    config = AisPerfConfigBase.from_cli_args(args)
 
-    assert config.aic_perf_kwargs() == {
-        "aic_backend": "vllm",
-        "aic_system": "h200_sxm",
-        "aic_backend_version": None,
-        "aic_tp_size": 2,
-        "aic_model_path": "moonshotai/Kimi-K2-Instruct",
-        "aic_moe_tp_size": 2,
-        "aic_moe_ep_size": 1,
-        "aic_attention_dp_size": 1,
-        "aic_nextn": None,
-        "aic_nextn_accept_rates": None,
-    }
+    payload = config.ais_perf_kwargs()["config"]
+    assert payload["backend"] == "vllm"
+    assert payload["model"] == "moonshotai/Kimi-K2-Instruct"
+    assert payload["tp"] == 2
+    assert payload["moe_tp_size"] == 2
+    assert payload["moe_ep_size"] == 1
+    assert payload["attention_dp"] == 1
 
 
-def test_aic_perf_moe_env_flows_to_binding_kwargs(monkeypatch) -> None:
-    monkeypatch.setenv("DYN_AIC_BACKEND", "vllm")
-    monkeypatch.setenv("DYN_AIC_SYSTEM", "h200_sxm")
-    monkeypatch.setenv("DYN_AIC_MODEL_PATH", "moonshotai/Kimi-K2-Instruct")
-    monkeypatch.setenv("DYN_AIC_TP_SIZE", "2")
-    monkeypatch.setenv("DYN_AIC_MOE_TP_SIZE", "2")
-    monkeypatch.setenv("DYN_AIC_MOE_EP_SIZE", "1")
-    monkeypatch.setenv("DYN_AIC_ATTENTION_DP_SIZE", "1")
+def test_ais_perf_moe_env_flows_to_binding_kwargs(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_AIS_BACKEND", "vllm")
+    monkeypatch.setenv("DYN_AIS_SYSTEM", "h200_sxm")
+    monkeypatch.setenv("DYN_AIS_MODEL_PATH", "moonshotai/Kimi-K2-Instruct")
+    monkeypatch.setenv("DYN_AIS_TP_SIZE", "2")
+    monkeypatch.setenv("DYN_AIS_MOE_TP_SIZE", "2")
+    monkeypatch.setenv("DYN_AIS_MOE_EP_SIZE", "1")
+    monkeypatch.setenv("DYN_AIS_ATTENTION_DP_SIZE", "1")
 
     parser = argparse.ArgumentParser()
-    AicPerfArgGroup().add_arguments(parser)
+    AisPerfArgGroup().add_arguments(parser)
     args = parser.parse_args([])
 
-    config = AicPerfConfigBase.from_cli_args(args)
+    config = AisPerfConfigBase.from_cli_args(args)
 
-    assert config.aic_perf_kwargs()["aic_moe_tp_size"] == 2
-    assert config.aic_perf_kwargs()["aic_moe_ep_size"] == 1
-    assert config.aic_perf_kwargs()["aic_attention_dp_size"] == 1
+    assert config.ais_perf_kwargs()["config"]["moe_tp_size"] == 2
+    assert config.ais_perf_kwargs()["config"]["moe_ep_size"] == 1
+    assert config.ais_perf_kwargs()["config"]["attention_dp"] == 1
 
 
-def test_aic_mtp_cli_documents_conditional_rates_and_seed() -> None:
+def test_ais_mtp_cli_documents_conditional_rates_and_seed() -> None:
     parser = argparse.ArgumentParser()
-    AicPerfArgGroup().add_arguments(parser)
+    AisPerfArgGroup().add_arguments(parser)
     args = parser.parse_args(
         [
             "--aic-nextn",
@@ -105,10 +100,10 @@ def test_aic_mtp_cli_documents_conditional_rates_and_seed() -> None:
         ]
     )
 
-    config = AicPerfConfigBase.from_cli_args(args)
-    assert config.aic_nextn == 3
-    assert config.aic_nextn_accept_rates == "1,0.5"
-    assert config.aic_mtp_seed == 99
+    config = AisPerfConfigBase.from_cli_args(args)
+    assert config.ais_nextn == 3
+    assert config.ais_nextn_accept_rates == "1,0.5"
+    assert config.ais_mtp_seed == 99
     assert "all earlier drafts were accepted" in " ".join(parser.format_help().split())
 
 

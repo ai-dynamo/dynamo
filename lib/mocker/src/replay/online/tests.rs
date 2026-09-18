@@ -249,7 +249,7 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
     let args = MockEngineArgs::builder()
         .speedup_ratio(1000.0)
         .block_size(64)
-        .aic_tp_size(Some(2))
+        .ais_tp_size(Some(2))
         .build()
         .unwrap();
     let report = simulate_trace_workload(
@@ -398,7 +398,7 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
         &args,
         Some(KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }),
         Some(Arc::new(FixedPrefillLoadEstimator {

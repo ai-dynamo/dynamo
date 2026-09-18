@@ -154,14 +154,11 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model not in (
-            "ais",
-            "aic",
-        ):
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
             raise ValueError(
                 "--ais-perf-config requires --router-prefill-load-model=ais"
             )
-        if self.router_prefill_load_model in ("ais", "aic"):
+        if self.router_prefill_load_model == "ais":
             if self.router_mode != "kv":
                 raise ValueError(
                     "--router-prefill-load-model=ais requires --router-mode=kv"
@@ -172,7 +169,6 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AisPerfConfigBase):
                     "--dyn-chat-processor=dynamo"
                 )
             self.ais_perf_kwargs()
-            self.router_prefill_load_model = "ais"
             if not self.router_track_prefill_tokens:
                 raise ValueError(
                     "--router-prefill-load-model=ais requires "

@@ -97,7 +97,7 @@ pub(crate) fn engine_components(
             },
             None,
         ),
-        PerfModel::Interpolated { .. } | PerfModel::Aiconfigurator { .. } => (
+        PerfModel::Interpolated { .. } | PerfModel::Ais { .. } => (
             TimingModelConfig::External {
                 provider: "dynamo_perf_model".to_string(),
                 config: Value::Null,
@@ -120,9 +120,9 @@ pub(crate) fn engine_components(
         prefill_decode_interval: args.prefill_decode_interval,
         speedup_ratio: args.speedup_ratio,
         decode_speedup_ratio: args.decode_speedup_ratio,
-        aic_nextn: args.aic_nextn,
-        aic_nextn_accept_rates: args.aic_nextn_accept_rates.clone(),
-        aic_mtp_seed: args.aic_mtp_seed,
+        aic_nextn: args.ais_nextn,
+        aic_nextn_accept_rates: args.ais_nextn_accept_rates.clone(),
+        aic_mtp_seed: args.ais_mtp_seed,
         worker_type,
         preemption_mode,
         emit_kv_events,
@@ -149,7 +149,7 @@ pub(crate) fn engine_factory(
 }
 
 fn replay_tensor_parallel_size(args: &MockEngineArgs) -> Result<u32> {
-    u32::try_from(args.aic_tp_size.unwrap_or(1))
+    u32::try_from(args.ais_tp_size.unwrap_or(1))
         .context("Mocker tensor-parallel size exceeds the Replay contract")
 }
 
@@ -250,7 +250,7 @@ mod tests {
     use ndarray_interp::InterpolateError;
 
     use super::*;
-    use crate::common::perf_model::{AicCallback, DecodeInterpolator, PrefillInterpolator};
+    use crate::common::perf_model::{AisCallback, DecodeInterpolator, PrefillInterpolator};
     use crate::common::protocols::{SglangArgs, TrtllmArgs};
 
     struct EchoPrefill;
@@ -269,9 +269,9 @@ mod tests {
         }
     }
 
-    struct EchoAic;
+    struct EchoAis;
 
-    impl AicCallback for EchoAic {
+    impl AisCallback for EchoAis {
         fn predict_prefill(
             &self,
             batch_size: usize,
@@ -385,13 +385,13 @@ mod tests {
     }
 
     #[test]
-    fn npz_and_aic_models_use_the_external_timing_adapter() {
+    fn npz_and_ais_models_use_the_external_timing_adapter() {
         let models = [
             PerfModel::Interpolated {
                 prefill_interp: Arc::new(EchoPrefill),
                 decode_interp: Arc::new(EchoDecode),
             },
-            PerfModel::from_aic_callback(Arc::new(EchoAic)),
+            PerfModel::from_ais_callback(Arc::new(EchoAis)),
         ];
 
         for model in models {
@@ -417,7 +417,7 @@ mod tests {
     fn disaggregated_roles_resolve_builtin_and_external_timing_independently() {
         let prefill_args = MockEngineArgs::builder().build().unwrap();
         let mut decode_args = MockEngineArgs::builder().build().unwrap();
-        decode_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(EchoAic)));
+        decode_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(EchoAis)));
 
         let (config, factory) = disaggregated_replay_setup(&prefill_args, &decode_args).unwrap();
         let prefill = config.prefill.as_ref().unwrap();

@@ -361,7 +361,3 @@ def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
         if new_entries:
             pod_spec["tolerations"] = list(existing) + new_entries
     return result
-
-
-# Compatibility import; generated perf-model configuration uses AIS naming.
-needs_mocker_aic_perf_model = needs_mocker_ais_perf_model

@@ -470,7 +470,7 @@ async def async_main():
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
-    if config.router_prefill_load_model in ("ais", "aic"):
+    if config.router_prefill_load_model == "ais":
         kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)

@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Published AISimulate wheel staged into planner and framework runtime wheelhouses.
-aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@d9f1580aa4385e6f2199e1f189b64cf7528009d5#subdirectory=python/aisimulate
+aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@fbd465d9ac14d37a6e73371ba4736a9364371eb5#subdirectory=python/aisimulate

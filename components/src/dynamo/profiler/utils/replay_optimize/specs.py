@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from dynamo.profiler.utils.dgdr_v1beta1_types import BackendType, GPUSKUType
 
 from .constants import (
-    AIC_BACKEND_VERSIONS,
+    AIS_BACKEND_VERSIONS,
     DEFAULT_MAX_PARALLEL_EVALS,
     DEFAULT_OVERLAP_SCORE_CREDITS,
     DEFAULT_PREFILL_LOAD_SCALES,
@@ -112,9 +112,9 @@ class EngineSpec(BaseModel):
         # Guardrail #6: DGDR's BackendType allows Auto / Trtllm which AIC
         # doesn't support in replay_optimize; reject at spec-construction time
         # instead of crashing mid-search.
-        if backend.value not in AIC_BACKEND_VERSIONS:
+        if backend.value not in AIS_BACKEND_VERSIONS:
             raise ValueError(
-                f"backend must be one of {sorted(AIC_BACKEND_VERSIONS)}, "
+                f"backend must be one of {sorted(AIS_BACKEND_VERSIONS)}, "
                 f"got {backend.value!r}"
             )
         return backend

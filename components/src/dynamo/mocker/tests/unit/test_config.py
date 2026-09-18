@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import importlib
 import importlib.util
 import json
@@ -61,17 +60,17 @@ def make_args(**overrides):
         "sglang_schedule_conservativeness": None,
         "sglang_generate": False,
         "trtllm_capacity_scheduler_policy": None,
-        "aic_perf_model": False,
-        "aic_system": None,
-        "aic_backend": None,
-        "aic_backend_version": None,
-        "aic_tp_size": None,
-        "aic_moe_tp_size": None,
-        "aic_moe_ep_size": None,
-        "aic_attention_dp_size": None,
-        "aic_nextn": None,
-        "aic_nextn_accept_rates": None,
-        "aic_mtp_seed": 42,
+        "ais_perf_model": False,
+        "ais_system": None,
+        "ais_backend": None,
+        "ais_backend_version": None,
+        "ais_tp_size": None,
+        "ais_moe_tp_size": None,
+        "ais_moe_ep_size": None,
+        "ais_attention_dp_size": None,
+        "ais_nextn": None,
+        "ais_nextn_accept_rates": None,
+        "ais_mtp_seed": 42,
         "gpu_memory_utilization": None,
         "mem_fraction_static": None,
         "free_gpu_memory_fraction": None,
@@ -159,11 +158,11 @@ def test_build_mocker_engine_args_accepts_mtp(engine_type):
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(
             engine_type=engine_type,
-            aic_nextn=1,
+            ais_nextn=1,
         )
     )
 
-    assert engine_args.aic_nextn == 1
+    assert engine_args.ais_nextn == 1
 
 
 def test_build_mocker_engine_args_trtllm_rejects_unsupported_policy():
@@ -247,7 +246,7 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         decode_itl=np.array([[1.0, 1.5], [2.0, 2.5]]),
     )
 
-    args = argparse.Namespace(
+    args = make_args(
         engine_type="sglang",
         num_gpu_blocks=2048,
         block_size=128,
@@ -280,10 +279,11 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
         sglang_chunked_prefill_size=2048,
         sglang_clip_max_new_tokens=1024,
         sglang_schedule_conservativeness=0.8,
-        aic_perf_model=True,
-        aic_system="h200_sxm",
-        aic_backend_version="0.5.6.post2",
-        aic_tp_size=8,
+        ais_perf_model=True,
+        ais_system="h200_sxm",
+        ais_backend_version="0.5.6.post2",
+        ais_tp_size=8,
+        ais_attention_dp_size=4,
         model_path="/models/mock",
         gpu_memory_utilization=None,
         mem_fraction_static=None,
@@ -300,59 +300,60 @@ def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     assert engine_args.worker_type == "prefill"
     assert engine_args.gpu_memory_utilization is None
     assert engine_args.mem_fraction_static is None
-    assert engine_args.aic_backend == "sglang"
-    assert engine_args.aic_system == "h200_sxm"
-    assert engine_args.aic_backend_version == "0.5.6.post2"
-    assert engine_args.aic_tp_size == 8
-    assert engine_args.aic_model_path == "/models/mock"
-    assert engine_args.aic_moe_tp_size is None
-    assert engine_args.aic_moe_ep_size is None
-    assert engine_args.aic_attention_dp_size is None
+    assert engine_args.ais_perf_config["backend"] == "sglang"
+    assert engine_args.ais_perf_config["system"] == "h200_sxm"
+    assert engine_args.ais_perf_config["backend_version"] == "0.5.6.post2"
+    assert engine_args.ais_perf_config["tp"] == 8
+    assert engine_args.ais_perf_config["model"] == "/models/mock"
+    assert engine_args.ais_perf_config["moe_tp_size"] is None
+    assert engine_args.ais_perf_config["moe_ep_size"] is None
+    assert engine_args.ais_perf_config["attention_dp"] == 4
     assert engine_args.bootstrap_port is None
     assert engine_args.kv_transfer_timing_mode == "destination_missing"
 
 
-def test_aic_backend_override_decouples_from_engine_type():
+def test_ais_backend_override_decouples_from_engine_type():
     args = make_args(
         engine_type="vllm",
-        aic_perf_model=True,
-        aic_system="h200_sxm",
-        aic_backend="trtllm",
-        aic_tp_size=4,
+        ais_perf_model=True,
+        ais_system="h200_sxm",
+        ais_backend="trtllm",
+        model_path="/models/mock",
+        ais_tp_size=4,
         num_gpu_blocks=16384,
     )
 
     engine_args = CONFIG.build_mocker_engine_args(args)
 
-    assert engine_args.aic_backend == "trtllm"
+    assert engine_args.ais_perf_config["backend"] == "trtllm"
 
 
 def test_build_mocker_engine_args_propagates_mtp_configuration():
     engine_args = CONFIG.build_mocker_engine_args(
         make_args(
-            aic_perf_model=True,
-            aic_system="h200_sxm",
+            ais_perf_model=True,
+            ais_system="h200_sxm",
             model_path="/models/mock",
             num_gpu_blocks=128,
-            aic_nextn=3,
-            aic_nextn_accept_rates="1,0.5",
-            aic_mtp_seed=99,
+            ais_nextn=3,
+            ais_nextn_accept_rates="1,0.5",
+            ais_mtp_seed=99,
         )
     )
 
-    assert engine_args.aic_nextn == 3
-    assert engine_args.aic_nextn_accept_rates == "1,0.5,0"
-    assert engine_args.aic_mtp_seed == 99
+    assert engine_args.ais_nextn == 3
+    assert engine_args.ais_nextn_accept_rates == "1,0.5,0"
+    assert engine_args.ais_mtp_seed == 99
 
 
 def test_worker_override_offsets_mtp_seed():
     engine_args = CONFIG.build_mocker_engine_args(
-        make_args(aic_nextn=1, aic_mtp_seed=2**64 - 1)
+        make_args(ais_nextn=1, ais_mtp_seed=2**64 - 1)
     )
 
-    worker_args = CONFIG.apply_worker_engine_args_overrides(engine_args, aic_mtp_seed=0)
+    worker_args = CONFIG.apply_worker_engine_args_overrides(engine_args, ais_mtp_seed=0)
 
-    assert worker_args.aic_mtp_seed == 0
+    assert worker_args.ais_mtp_seed == 0
 
 
 def test_mocker_cli_accepts_mtp_configuration():
@@ -367,9 +368,9 @@ def test_mocker_cli_accepts_mtp_configuration():
         ]
     )
 
-    assert args.aic_nextn == 3
-    assert args.aic_nextn_accept_rates == "1,0.5"
-    assert args.aic_mtp_seed == 99
+    assert args.ais_nextn == 3
+    assert args.ais_nextn_accept_rates == "1,0.5"
+    assert args.ais_mtp_seed == 99
 
 
 def test_mocker_cli_accepts_max_model_len():
@@ -416,7 +417,6 @@ def test_replay_engine_args_keeps_max_model_len_explicit_only():
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
-                "aic_model_path": "/models/mock",
             }
         )
     )
@@ -433,7 +433,6 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
             {
                 "num_gpu_blocks": 4096,
                 "max_model_len": 32768,
-                "aic_model_path": "/models/mock",
             }
         )
     )
@@ -441,53 +440,19 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
     assert engine_args.max_model_len == 32768
 
 
-@pytest.mark.planner
-def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
-    replay_main = _load_replay_main()
-
-    engine_args = replay_main.load_engine_args(
-        json.dumps(
-            {
-                "num_gpu_blocks": 4096,
-                "aic_attention_dp_size": 4,
-            }
-        )
-    )
-
-    assert engine_args.num_gpu_blocks == 4096
-    assert engine_args.dp_size == 4
-
-
-@pytest.mark.planner
-def test_replay_rejects_mismatched_dp_topology():
-    replay_main = _load_replay_main()
-
-    with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main.load_engine_args(
-            json.dumps(
-                {
-                    "num_gpu_blocks": 4096,
-                    "dp_size": 2,
-                    "aic_attention_dp_size": 4,
-                }
-            )
-        )
-
-
-@pytest.mark.planner
-def test_replay_rejects_dp_topology_without_aic_attention_dp():
-    replay_main = _load_replay_main()
-
-    with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main.load_engine_args(
-            json.dumps(
-                {
-                    "num_gpu_blocks": 4096,
-                    "dp_size": 2,
-                    "aic_backend": "vllm",
-                }
-            )
-        )
+def test_canonical_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
+    config = {
+        "model": "example/model",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "aggregated",
+        "attention_dp": 4,
+    }
+    args = MockEngineArgs(ais_perf_config=config, num_gpu_blocks=4096)
+    assert args.dp_size == 4
+    assert args.num_gpu_blocks == 4096
+    with pytest.raises(Exception, match="dp_size|attention_dp"):
+        MockEngineArgs(ais_perf_config=config, dp_size=2, num_gpu_blocks=4096)
 
 
 def test_get_kv_cache_dtype_bytes_supports_int8():
@@ -657,157 +622,74 @@ def test_compute_kv_bytes_propagates_unexpected_errors(monkeypatch):
         kv_cache.compute_kv_bytes_per_token("org/model")
 
 
-def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
+def test_build_mocker_engine_args_estimates_canonical_capacity(monkeypatch):
     calls = []
 
-    def fake_estimate_num_gpu_blocks(**kwargs):
-        calls.append(kwargs)
+    def estimate(config, **kwargs):
+        calls.append((config, kwargs))
         return 46000
 
-    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
-
-    engine_args = CONFIG.build_mocker_engine_args(
+    monkeypatch.setattr(CONFIG, "estimate_canonical_num_gpu_blocks", estimate)
+    args = CONFIG.build_mocker_engine_args(
         make_args(
-            aic_perf_model=True,
+            ais_perf_model=True,
             model_path="/models/mock",
-            aic_system="h200_sxm",
-            aic_tp_size=4,
-            max_num_batched_tokens=4096,
-            gpu_memory_utilization=0.8,
-            mem_fraction_static=0.7,
-        )
-    )
-
-    assert engine_args.num_gpu_blocks == 46000
-    assert engine_args.gpu_memory_utilization == 0.8
-    assert engine_args.mem_fraction_static == 0.7
-    assert calls == [
-        {
-            "backend_name": "vllm",
-            "system": "h200_sxm",
-            "model_path": "/models/mock",
-            "tp_size": 4,
-            "block_size": 64,
-            "max_num_batched_tokens": 4096,
-            "gpu_memory_utilization": 0.8,
-            "mem_fraction_static": 0.7,
-            "free_gpu_memory_fraction": None,
-            "backend_version": None,
-            "moe_tp_size": None,
-            "moe_ep_size": None,
-            "attention_dp_size": None,
-        }
-    ]
-
-
-def test_build_mocker_engine_args_propagates_aic_estimator_error(monkeypatch):
-    def invalid_capacity(**_kwargs):
-        raise ValueError("invalid capacity request")
-
-    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", invalid_capacity)
-
-    with pytest.raises(ValueError, match="invalid capacity request"):
-        CONFIG.build_mocker_engine_args(
-            make_args(aic_perf_model=True, model_path="/models/mock")
-        )
-
-
-def test_aic_capacity_estimation_preserves_explicit_zero_inputs(monkeypatch):
-    calls = []
-
-    def fake_estimate_num_gpu_blocks(**kwargs):
-        calls.append(kwargs)
-        return 46000
-
-    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
-
-    blocks = CONFIG._estimate_aic_num_gpu_blocks(
-        engine_type="sglang",
-        block_size=0,
-        max_num_batched_tokens=0,
-        aic_backend="sglang",
-        aic_system=None,
-        aic_backend_version=None,
-        aic_tp_size=0,
-        aic_model_path="/models/mock",
-        aic_moe_tp_size=None,
-        aic_moe_ep_size=None,
-        aic_attention_dp_size=None,
-        gpu_memory_utilization=0.0,
-        mem_fraction_static=0.0,
-        free_gpu_memory_fraction=0.0,
-        sglang_page_size=0,
-    )
-
-    assert blocks == 46000
-    assert calls[0]["tp_size"] == 0
-    assert calls[0]["block_size"] == 0
-    assert calls[0]["max_num_batched_tokens"] == 0
-    assert calls[0]["gpu_memory_utilization"] == 0.0
-    assert calls[0]["mem_fraction_static"] == 0.0
-    assert calls[0]["free_gpu_memory_fraction"] == 0.0
-
-
-def test_build_mocker_engine_args_estimates_sglang_blocks_with_static_fraction(
-    monkeypatch,
-):
-    calls = []
-
-    def fake_estimate_num_gpu_blocks(**kwargs):
-        calls.append(kwargs)
-        return 32000
-
-    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
-
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
+            ais_tp_size=4,
             engine_type="sglang",
-            aic_perf_model=True,
-            model_path="/models/mock",
             sglang_page_size=128,
+            max_num_batched_tokens=4096,
+            max_num_seqs=64,
             mem_fraction_static=0.77,
         )
     )
+    assert args.num_gpu_blocks == 46000
+    config, limits = calls[0]
+    assert config["backend"] == "sglang"
+    assert config["model"] == "/models/mock"
+    assert config["tp"] == 4
+    assert limits == {
+        "block_size": 128,
+        "max_num_batched_tokens": 4096,
+        "max_num_seqs": 64,
+        "mem_fraction_static": 0.77,
+    }
 
-    assert engine_args.num_gpu_blocks == 32000
-    assert calls[0]["backend_name"] == "sglang"
-    assert calls[0]["block_size"] == 128
-    assert calls[0]["mem_fraction_static"] == 0.77
 
+def test_capacity_errors_propagate_and_explicit_blocks_skip_estimation(monkeypatch):
+    def fail(config, **kwargs):
+        raise ValueError("invalid capacity request")
 
-def test_build_mocker_engine_args_explicit_blocks_skip_aic_estimate(monkeypatch):
-    def fail_estimate_num_gpu_blocks(**_kwargs):
-        raise AssertionError("estimator should not be called")
-
-    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fail_estimate_num_gpu_blocks)
-
-    engine_args = CONFIG.build_mocker_engine_args(
-        make_args(
-            aic_perf_model=True,
-            num_gpu_blocks=12345,
-            model_path="/models/mock",
+    monkeypatch.setattr(CONFIG, "estimate_canonical_num_gpu_blocks", fail)
+    with pytest.raises(ValueError, match="invalid capacity request"):
+        CONFIG.build_mocker_engine_args(
+            make_args(ais_perf_model=True, model_path="/models/mock")
         )
+    args = CONFIG.build_mocker_engine_args(
+        make_args(ais_perf_model=True, model_path="/models/mock", num_gpu_blocks=12345)
     )
+    assert args.num_gpu_blocks == 12345
 
-    assert engine_args.num_gpu_blocks == 12345
 
+def test_load_mocker_engine_args_estimates_canonical_json_capacity(
+    tmp_path, monkeypatch
+):
+    canonical = {
+        "model": "example/model",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "aggregated",
+    }
 
-def test_load_mocker_engine_args_estimates_json_aic_blocks(tmp_path, monkeypatch):
-    def fake_estimate_num_gpu_blocks(**kwargs):
-        assert kwargs["model_path"] == "/models/from-cli"
+    def estimate(config, **kwargs):
+        assert config == canonical
         assert kwargs["block_size"] == 64
         return 47000
 
-    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", fake_estimate_num_gpu_blocks)
-
-    config_path = tmp_path / "engine_args.json"
-    config_path.write_text(json.dumps({"aic_backend": "vllm"}))
-
-    engine_args = CONFIG.load_mocker_engine_args(
-        make_args(extra_engine_args=config_path, model_path="/models/from-cli")
-    )
-
-    assert engine_args.num_gpu_blocks == 47000
+    monkeypatch.setattr(CONFIG, "estimate_canonical_num_gpu_blocks", estimate)
+    path = tmp_path / "engine.json"
+    path.write_text(json.dumps({"ais_perf_config": canonical}))
+    args = CONFIG.load_mocker_engine_args(make_args(extra_engine_args=path))
+    assert args.num_gpu_blocks == 47000
 
 
 def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
@@ -865,8 +747,7 @@ def test_canonical_ais_config_preserves_role_controls_and_roots(tmp_path):
     assert args.ais_perf_config["worker_type"] == "prefill"
     assert args.ais_perf_config["systems_paths"] == canonical["systems_paths"]
     assert args.ais_perf_config["estimator_config"] == canonical["estimator_config"]
-    assert args.ais_backend == "vllm"
-    assert args.aic_backend == args.ais_backend
+    assert args.ais_perf_config["backend"] == "vllm"
 
 
 def test_canonical_ais_config_rejects_role_and_legacy_conflicts():
@@ -880,12 +761,12 @@ def test_canonical_ais_config_rejects_role_and_legacy_conflicts():
         CONFIG.build_mocker_engine_args(make_args(ais_perf_config=canonical))
     with pytest.raises(ValueError, match="cannot be combined"):
         CONFIG.build_mocker_engine_args(
-            make_args(ais_perf_config=canonical, aic_tp_size=1)
+            make_args(ais_perf_config=canonical, ais_tp_size=1)
         )
 
 
-def test_ais_sdk_accepts_full_config_and_legacy_constructor():
-    from dynamo.llm import AicPerfConfig, AisPerfConfig
+def test_ais_sdk_accepts_only_canonical_identity():
+    from dynamo.llm import AisPerfConfig
 
     payload = {
         "model": "example/model",
@@ -897,32 +778,14 @@ def test_ais_sdk_accepts_full_config_and_legacy_constructor():
     }
     config = AisPerfConfig(payload)
     assert config.to_dict()["estimator_config"] == payload["estimator_config"]
-    legacy = AicPerfConfig("vllm", "h200_sxm", "example/model")
-    assert legacy.to_dict()["worker_type"] == "aggregated"
-    assert legacy.to_dict()["estimation_mode"] == "auto"
-    with pytest.raises(ValueError, match="cannot be combined"):
+    with pytest.raises(TypeError):
         AisPerfConfig(payload, aic_tp_size=1)
-    with pytest.raises(TypeError, match="unexpected keyword"):
+    with pytest.raises((TypeError, ValueError)):
         AisPerfConfig({**payload, "typo": True})
-
-
-def test_mocker_sdk_flat_ais_input_aliases_and_conflicts():
-    args = MockEngineArgs(
-        ais_backend="vllm",
-        ais_system="h200_sxm",
-        ais_model_path="example/model",
-        ais_tp_size=2,
-        ais_moe_tp_size=2,
-        ais_moe_ep_size=1,
-        ais_attention_dp_size=1,
-        ais_mtp_seed=17,
-    )
-    assert args.ais_backend == args.aic_backend == "vllm"
-    assert args.ais_tp_size == args.aic_tp_size == 2
-    assert args.ais_mtp_seed == args.aic_mtp_seed == 17
-    with pytest.raises(ValueError, match="cannot be combined"):
-        MockEngineArgs(ais_backend="vllm", aic_backend="vllm")
-    with pytest.raises(ValueError, match="cannot be combined"):
-        MockEngineArgs(ais_mtp_seed=42, aic_mtp_seed=42)
-    with pytest.raises(TypeError, match="unexpected AIS option"):
-        MockEngineArgs(ais_backend_typo="vllm")
+    args = MockEngineArgs(ais_perf_config=payload, ais_mtp_seed=17)
+    assert args.ais_perf_config["model"] == payload["model"]
+    assert args.ais_mtp_seed == 17
+    with pytest.raises(TypeError):
+        MockEngineArgs(aic_backend="vllm")
+    with pytest.raises(TypeError):
+        MockEngineArgs(ais_backend="vllm")

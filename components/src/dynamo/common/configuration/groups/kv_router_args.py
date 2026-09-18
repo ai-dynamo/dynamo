@@ -503,7 +503,8 @@ class KvRouterArgGroup(ArgGroup):
             flag_name="--router-prefill-load-model",
             env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
             default="none",
-            choices=["none", "ais", "aic"],
+            choices=["none", "ais"],
+            arg_type=lambda value: "ais" if value == "aic" else value,
             help=(
                 "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
                 "'none' keeps static prompt load accounting. "

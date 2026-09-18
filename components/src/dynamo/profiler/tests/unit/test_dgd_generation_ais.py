@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the AIC-spec integration in profiler DGD generation."""
+"""Unit tests for AISimulate and AIConfigurator interpolation in profiler DGD generation."""
 
 from pathlib import Path
 
@@ -378,7 +378,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
-    def test_aic_perf_model_threads_into_planner_config(self, monkeypatch):
+    def test_ais_perf_model_threads_into_planner_config(self, monkeypatch):
         resolved_versions = []
 
         def resolve_backend_version(*, system, backend):
@@ -424,7 +424,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.ais_perf_model.roles["decode"]["tp"] == decode_pick.tp
         assert resolved_versions == [("h200_sxm", "vllm")]
 
-    def test_aic_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
+    def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
         monkeypatch.setattr(
             "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
             lambda **_: None,
@@ -446,7 +446,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
 
         assert spec is None
 
-    def test_aic_perf_model_falls_back_when_sdk_is_unavailable(
+    def test_ais_perf_model_falls_back_when_sdk_is_unavailable(
         self, monkeypatch, caplog
     ):
         monkeypatch.setattr(
@@ -481,7 +481,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
             ("disagg", PickedParallelConfig(tp=1), None),
         ],
     )
-    def test_aic_perf_model_skips_mode_missing_required_pick(
+    def test_ais_perf_model_skips_mode_missing_required_pick(
         self, mode, prefill_pick, decode_pick
     ):
         planner = PlannerConfig(
@@ -728,3 +728,87 @@ class TestEnableVllmBenchmarkMode:
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]
         assert _benchmark_mode(component) == "prefill"
+
+
+def test_profiler_preserves_explicit_estimator_config(tmp_path):
+    planner = PlannerConfig(
+        mode="decode",
+        optimization_target="sla",
+        ais_perf_model={
+            "roles": {
+                "decode": {
+                    "model": "Qwen/Qwen3-32B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "estimation_mode": "fpm_regression",
+                    "systems_paths": [str(tmp_path)],
+                    "estimator_config": {"fpm_regression": {"min_observations": 30}},
+                }
+            }
+        },
+    )
+    dgdr = _dgdr(planner=planner)
+    pick = PickedParallelConfig(tp=1)
+    generated = build_ais_perf_model_spec(
+        dgdr,
+        best_prefill_pick=None,
+        best_decode_pick=pick,
+        resolved_backend="vllm",
+        system="h200_sxm",
+    )
+    result = _build_planner_config(dgdr, None, pick, ais_perf_model=generated)
+    reloaded = PlannerConfig.model_validate(result.model_dump(mode="json"))
+    assert reloaded.ais_perf_model == planner.ais_perf_model
+    assert generated is not planner.ais_perf_model
+
+
+@pytest.mark.parametrize(
+    "configured, pick, backend, system, conflict",
+    [
+        (
+            {"model": "different-model"},
+            PickedParallelConfig(),
+            "vllm",
+            "h200_sxm",
+            "model",
+        ),
+        ({}, PickedParallelConfig(tp=4), "vllm", "h200_sxm", "tp"),
+        ({}, PickedParallelConfig(), "sglang", "h200_sxm", "backend"),
+        ({}, PickedParallelConfig(), "vllm", "b200_sxm", "system"),
+        ({}, PickedParallelConfig(pp=2), "vllm", "h200_sxm", "pp"),
+        ({}, PickedParallelConfig(dp=2), "vllm", "h200_sxm", "attention_dp"),
+        (
+            {"tp": 2, "moe_tp_size": 2, "moe_ep_size": 1},
+            PickedParallelConfig(tp=2, moe_tp=1, moe_ep=2),
+            "vllm",
+            "h200_sxm",
+            "moe_tp_size",
+        ),
+    ],
+)
+def test_profiler_rejects_estimator_identity_that_disagrees_with_deployment(
+    configured, pick, backend, system, conflict
+):
+    planner = PlannerConfig(
+        mode="decode",
+        optimization_target="sla",
+        ais_perf_model={
+            "roles": {
+                "decode": {
+                    "model": "Qwen/Qwen3-32B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "estimation_mode": "fpm_regression",
+                    **configured,
+                }
+            }
+        },
+    )
+    with pytest.raises(ValueError, match=rf"roles\.decode\.{conflict}=.*conflicts"):
+        build_ais_perf_model_spec(
+            _dgdr(planner=planner),
+            best_prefill_pick=None,
+            best_decode_pick=pick,
+            resolved_backend=backend,
+            system=system,
+        )

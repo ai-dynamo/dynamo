@@ -471,9 +471,7 @@ areas:
   - benchmarks/frontend/
   - benchmarks/incluster/
   - benchmarks/mocker/README.md
-  - benchmarks/mocker/bench_aic_concurrency.py
   - benchmarks/mocker/bench_ais_concurrency.py
-  - benchmarks/mocker/bench_aic_rust_callback.py
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml

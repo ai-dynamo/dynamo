@@ -92,10 +92,10 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
     assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
-    assert features["aic-forward-pass"] == ["ais-forward-pass"]
+    assert "aic-forward-pass" not in features
     assert dependencies["aisimulate-core"] == {
         "git": "https://github.com/ai-dynamo/aisimulate.git",
-        "rev": "d9f1580aa4385e6f2199e1f189b64cf7528009d5",
+        "rev": "fbd465d9ac14d37a6e73371ba4736a9364371eb5",
         "optional": True,
         "features": ["python"],
     }

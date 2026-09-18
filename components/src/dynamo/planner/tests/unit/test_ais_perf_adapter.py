@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Planner's AIC core performance-model adapter."""
+"""Unit tests for Planner's AISimulate performance-model adapter."""
 
 import pytest
 
@@ -14,7 +14,6 @@ try:
 except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 
-from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model import ais_adapter
 from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
@@ -107,14 +106,17 @@ def _config(
     min_observations: int = 5,
     speculative_nextn: int = 0,
 ) -> PlannerConfig:
-    pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
         ais_perf_model=AISPerfModelSpec(
-            hf_id="Qwen/Qwen3-0.6B",
-            system="h200_sxm",
-            backend="vllm",
-            prefill_pick=pick,
-            decode_pick=pick,
+            roles={
+                role: {
+                    "model": "Qwen/Qwen3-0.6B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "attention_dp": dp,
+                }
+                for role in ("prefill", "decode", "aggregated")
+            },
         ),
         max_num_fpm_samples=16,
         load_min_observations=min_observations,
@@ -174,7 +176,7 @@ def _decode_fpm(
     )
 
 
-def test_aic_diagnostics_gate_sufficient_data(fake_engine_factory):
+def test_ais_diagnostics_gate_sufficient_data(fake_engine_factory):
     fake = _FakeEngineModel(
         diagnostics={
             "source": "fallback_regression",
@@ -229,7 +231,7 @@ def test_missing_capability_fields_use_engine_query_defaults(fake_engine_factory
         (None, 4, "4"),
     ],
 )
-def test_aic_config_requests_raw_spec_decode_iteration_time(
+def test_ais_config_requests_raw_spec_decode_iteration_time(
     fake_engine_factory,
     capability_nextn,
     config_nextn,
@@ -253,11 +255,11 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
     )
 
     assert fake_engine_factory.last_kwargs is not None
-    aic_config = fake_engine_factory.last_kwargs["ais_config"]
-    assert aic_config["nextn"] == int(expected_nextn)
+    ais_config = fake_engine_factory.last_kwargs["ais_config"]
+    assert ais_config["nextn"] == int(expected_nextn)
 
 
-def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(
+def test_capability_nextn_update_rebuilds_ais_model_and_replays_fpms(
     fake_engine_factory,
 ):
     first = _FakeEngineModel(
@@ -293,8 +295,8 @@ def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(
     model.update_capabilities(_caps(speculative_nextn=3))
 
     assert fake_engine_factory.last_kwargs is not None
-    aic_config = fake_engine_factory.last_kwargs["ais_config"]
-    assert aic_config["nextn"] == 3
+    ais_config = fake_engine_factory.last_kwargs["ais_config"]
+    assert ais_config["nextn"] == 3
     assert second.tuned_iterations == [[fpm]]
 
 
@@ -358,7 +360,7 @@ def test_partial_replay_failure_waits_for_fresh_model_before_full_retry(
     assert model._pending_iterations == []
 
 
-def test_aic_none_result_remains_unavailable(fake_engine_factory):
+def test_ais_none_result_remains_unavailable(fake_engine_factory):
     fake = _FakeEngineModel(
         diagnostics={
             "source": "aic",

@@ -750,13 +750,46 @@ def build_ais_perf_model_spec(
         or planner.optimization_target != "sla"
     ):
         return None
+    mode = planner.mode
+    picks = {}
+    if mode in ("prefill", "disagg"):
+        picks["prefill"] = best_prefill_pick
+    if mode in ("decode", "agg", "disagg"):
+        picks["aggregated" if mode == "agg" else "decode"] = best_decode_pick
+
+    if planner.ais_perf_model is not None:
+        for role, pick in picks.items():
+            if pick is None:
+                raise ValueError(
+                    f"cannot validate ais_perf_model.roles.{role} without a selected deployment"
+                )
+            configured = planner.ais_perf_model.roles[role]
+            expected = {
+                "model": dgdr.model,
+                "system": system,
+                "backend": resolved_backend,
+                "worker_type": role,
+                "tp": pick.tp,
+                "pp": pick.pp,
+                "attention_dp": pick.dp,
+                "moe_tp_size": pick.moe_tp,
+                "moe_ep_size": pick.moe_ep,
+            }
+            for field, selected in expected.items():
+                authored = configured[field]
+                if field in ("moe_tp_size", "moe_ep_size") and authored is None:
+                    authored = 1
+                if authored != selected:
+                    raise ValueError(
+                        f"ais_perf_model.roles.{role}.{field}={authored!r} "
+                        f"conflicts with selected deployment {field}={selected!r}"
+                    )
+        return planner.ais_perf_model.model_copy(deep=True)
+
     if resolved_backend not in ("trtllm", "vllm", "sglang"):
         return None
-
-    mode = planner.mode
-    if mode in ("prefill", "disagg") and best_prefill_pick is None:
-        return None
-    if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
+    selected_picks = {role: pick for role, pick in picks.items() if pick is not None}
+    if len(selected_picks) != len(picks):
         return None
 
     if get_latest_database_version is None:
@@ -780,14 +813,7 @@ def build_ais_perf_model_spec(
         return None
 
     roles = {}
-    for role, pick in (
-        ("prefill", best_prefill_pick),
-        ("aggregated" if mode == "agg" else "decode", best_decode_pick),
-    ):
-        if pick is None or (role == "prefill" and mode not in ("prefill", "disagg")):
-            continue
-        if role == "decode" and mode not in ("decode", "disagg"):
-            continue
+    for role, pick in selected_picks.items():
         roles[role] = {
             "model": dgdr.model,
             "system": system,
@@ -805,10 +831,6 @@ def build_ais_perf_model_spec(
             else None,
         }
     return AISPerfModelSpec(roles=roles)
-
-
-# Compatibility import for older profiler integrations.
-build_aic_perf_model_spec = build_ais_perf_model_spec
 
 
 def build_aic_interpolation_spec(
@@ -928,7 +950,3 @@ def _load_profiling_data(output_dir: str) -> dict:
         pass
 
     return result
-
-
-# Compatibility imports for existing profiler consumers.
-_inject_mocker_aic_args = _inject_mocker_ais_args

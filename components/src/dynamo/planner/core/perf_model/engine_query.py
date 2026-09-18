@@ -855,7 +855,3 @@ def _ceil_u32(value: float, name: str) -> int:
     if rounded > _U32_MAX:
         raise ValueError(f"{name} exceeds u32::MAX")
     return rounded
-
-
-# Compatibility import for integrations using the previous Dynamo name.
-AicCoreEnginePerfModel = AISCoreEnginePerfModel

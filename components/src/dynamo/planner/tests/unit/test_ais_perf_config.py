@@ -89,32 +89,13 @@ def test_invalid_canonical_fields_rejected_at_config_boundary(changes):
         _planner(_role_config(**changes))
 
 
-def test_duplicate_old_and_new_names_are_rejected():
-    with pytest.raises(ValidationError, match="compatibility alias"):
-        _planner(_role_config(), aic_perf_model=None)
-
-
-def test_legacy_input_serializes_only_canonical_identity():
-    config = PlannerConfig(
-        namespace="test-legacy",
-        mode="decode",
-        optimization_target="sla",
-        aic_perf_model={
-            "hf_id": "test",
-            "system": "h200_sxm",
-            "backend": "vllm",
-            "decode_pick": {"tp": 2, "dp": 2},
-        },
-    )
-    payload = config.model_dump(mode="json")
-    assert "aic_perf_model" not in payload
-    assert "hf_id" not in payload["ais_perf_model"]
-    role = payload["ais_perf_model"]["roles"]["decode"]
-    assert (role["tp"], role["attention_dp"], role["worker_type"]) == (2, 2, "decode")
-    assert (role["estimation_mode"], role["fallback_policy"]) == (
-        "op_level",
-        "regression",
-    )
+@pytest.mark.parametrize("canonical", [False, True])
+def test_retired_perf_model_field_is_rejected(canonical):
+    values = {"aic_perf_model": None}
+    if canonical:
+        values["ais_perf_model"] = {"roles": {"decode": _role_config()}}
+    with pytest.raises(ValidationError, match="aic_perf_model is no longer supported"):
+        PlannerConfig(mode="decode", **values)
 
 
 def test_runtime_options_preserve_explicit_controls_and_cache_identity():
@@ -182,18 +163,13 @@ def test_spec_rejects_unknown_role():
         AISPerfModelSpec(roles={"agg": _role_config()})
 
 
-@pytest.mark.parametrize(
-    "legacy",
-    [
-        {"hf_id": "test", "decode_pick": {}},
-        {
-            "hf_id": "test",
-            "system": "h200_sxm",
-            "backend": "vllm",
-            "decode_pick": {"tensor_paralell": 8},
-        },
-    ],
-)
-def test_legacy_config_rejects_missing_identity_and_unknown_pick_fields(legacy):
-    with pytest.raises(ValidationError):
-        AISPerfModelSpec.model_validate(legacy)
+def test_legacy_identity_shape_is_rejected():
+    with pytest.raises(ValidationError, match="hf_id"):
+        AISPerfModelSpec.model_validate(
+            {
+                "hf_id": "test",
+                "system": "h200_sxm",
+                "backend": "vllm",
+                "decode_pick": {"tp": 2, "dp": 2},
+            }
+        )

@@ -55,16 +55,12 @@ class DynamoRouterConfig(KvRouterConfigBase, AisPerfConfigBase):
             raise ValueError(
                 "--serve-indexer and --use-remote-indexer are mutually exclusive"
             )
-        if self.ais_perf_config is not None and self.router_prefill_load_model not in (
-            "ais",
-            "aic",
-        ):
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
             raise ValueError(
                 "--ais-perf-config requires --router-prefill-load-model=ais"
             )
-        if self.router_prefill_load_model in ("ais", "aic"):
+        if self.router_prefill_load_model == "ais":
             self.ais_perf_kwargs()
-            self.router_prefill_load_model = "ais"
             if not self.router_track_prefill_tokens:
                 raise ValueError(
                     "--router-prefill-load-model=ais requires "
@@ -131,7 +127,7 @@ def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
 def build_ais_perf_config(
     router_config: DynamoRouterConfig,
 ) -> AisPerfConfig | None:
-    if router_config.router_prefill_load_model not in ("ais", "aic"):
+    if router_config.router_prefill_load_model != "ais":
         return None
     return AisPerfConfig(**router_config.ais_perf_kwargs())
 
@@ -153,7 +149,3 @@ def parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig:
     config = DynamoRouterConfig.from_cli_args(args)
     config.validate()
     return config
-
-
-# Deprecated helper name.
-build_aic_perf_config = build_ais_perf_config

@@ -150,7 +150,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         kv_router_config=KvRouterConfig(**config.kv_router_kwargs()),
         ais_perf_config=(
             AisPerfConfig(**config.ais_perf_kwargs())
-            if config.router_prefill_load_model in ("ais", "aic")
+            if config.router_prefill_load_model == "ais"
             else None
         ),
         default_block_size=config.default_block_size,

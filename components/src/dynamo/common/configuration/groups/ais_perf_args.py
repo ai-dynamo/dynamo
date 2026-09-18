@@ -59,25 +59,17 @@ class _UniqueAlias(argparse.Action):
 
 
 def _env(name, convert, default):
-    new, old = "DYN_AIS_" + name.upper(), "DYN_AIC_" + name.upper()
-    if new in os.environ and old in os.environ:
-        raise ValueError(f"{new} and {old} cannot be combined")
-    value = os.environ.get(new, os.environ.get(old))
+    value = os.environ.get("DYN_AIS_" + name.upper())
     return default if value is None else convert(value)
 
 
 class AisPerfConfigBase(ConfigBase):
     ais_perf_config = None
 
-    def __getattr__(self, name):
-        if name.startswith("aic_") and name[4:] in _FIELDS:
-            return getattr(self, "ais_" + name[4:], None)
-        raise AttributeError(name)
-
     def ais_perf_kwargs(self) -> dict:
         authored = getattr(self, "ais_perf_config", None)
         shorthand = {
-            key: getattr(self, "ais_" + name, getattr(self, "aic_" + name, None))
+            key: getattr(self, "ais_" + name, None)
             for name, (_, _, key) in _FIELDS.items()
             if key is not None
         }
@@ -109,19 +101,6 @@ class AisPerfConfigBase(ConfigBase):
             _pad_nextn_accept_rates(rates)
         return {"config": ForwardPassPerfModelConfig(**config).to_dict()}
 
-    def aic_perf_kwargs(self) -> dict:
-        """Deprecated constructor-keyword adapter for existing callers."""
-        if getattr(self, "ais_perf_config", None) is not None:
-            return self.ais_perf_kwargs()
-        result = {
-            "aic_" + name: getattr(self, "ais_" + name, None)
-            for name in _FIELDS
-            if name != "mtp_seed"
-        }
-        if result["aic_tp_size"] is None:
-            result["aic_tp_size"] = 1
-        return result
-
 
 class AisPerfArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
@@ -147,8 +126,3 @@ class AisPerfArgGroup(ArgGroup):
                     else f"AISimulate {flag}; DYN_AIS_{name.upper()}. Legacy aic spelling accepted."
                 ),
             )
-
-
-# Existing imports and authored objects are accepted at the input boundary.
-AicPerfConfigBase = AisPerfConfigBase
-AicPerfArgGroup = AisPerfArgGroup

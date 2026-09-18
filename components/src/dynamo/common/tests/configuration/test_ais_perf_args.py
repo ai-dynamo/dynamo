@@ -73,12 +73,12 @@ def test_conflicting_aliases_and_config_are_rejected():
         ).ais_perf_kwargs()
 
 
-def test_legacy_environment_and_conflict(monkeypatch):
+def test_only_ais_environment_is_read(monkeypatch):
+    monkeypatch.delenv("DYN_AIS_BACKEND", raising=False)
     monkeypatch.setenv("DYN_AIC_BACKEND", "vllm")
-    assert _parse([]).ais_backend == "vllm"
-    monkeypatch.setenv("DYN_AIS_BACKEND", "vllm")
-    with pytest.raises(ValueError, match="cannot be combined"):
-        _parse([])
+    assert _parse([]).ais_backend is None
+    monkeypatch.setenv("DYN_AIS_BACKEND", "sglang")
+    assert _parse([]).ais_backend == "sglang"
 
 
 def test_unknown_canonical_field_rejected():
@@ -89,3 +89,16 @@ def test_unknown_canonical_field_rejected():
                 '{"model":"m","system":"s","backend":"vllm","worker_type":"prefill","typo":true}',
             ]
         ).ais_perf_kwargs()
+
+
+def test_legacy_router_selector_normalizes_at_cli_boundary():
+    from dynamo.common.configuration.groups.kv_router_args import KvRouterArgGroup
+
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    assert (
+        parser.parse_args(
+            ["--router-prefill-load-model", "aic"]
+        ).router_prefill_load_model
+        == "ais"
+    )

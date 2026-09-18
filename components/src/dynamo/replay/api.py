@@ -36,7 +36,6 @@ class _CommonReplayOptions(TypedDict, total=False):
     decode_engine_args: Any
     router_config: Any
     ais_perf_config: Any
-    aic_perf_config: Any
     num_workers: int
     num_prefill_workers: int
     num_decode_workers: int
@@ -139,7 +138,6 @@ def run_trace_replay(
     decode_engine_args=None,
     router_config=None,
     ais_perf_config=None,
-    aic_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -174,16 +172,12 @@ def run_trace_replay(
     ):
         raise TypeError("agentic_lanes must be an integer or None")
     trace_files = _normalize_trace_files(trace_files)
-    if ais_perf_config is not None and aic_perf_config is not None:
-        raise ValueError("cannot combine ais_perf_config with aic_perf_config")
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "ais_perf_config": ais_perf_config
-        if ais_perf_config is not None
-        else aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
@@ -312,7 +306,6 @@ def run_synthetic_trace_replay(
     decode_engine_args=None,
     router_config=None,
     ais_perf_config=None,
-    aic_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -338,16 +331,12 @@ def run_synthetic_trace_replay(
     capture_planner_details=True,
 ) -> ReplayReport | dict[str, Any]:
     """Run synthetic replay with the same timing boundary as trace replay."""
-    if ais_perf_config is not None and aic_perf_config is not None:
-        raise ValueError("cannot combine ais_perf_config with aic_perf_config")
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "ais_perf_config": ais_perf_config
-        if ais_perf_config is not None
-        else aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,

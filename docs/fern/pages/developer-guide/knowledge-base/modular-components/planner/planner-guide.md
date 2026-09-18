@@ -113,10 +113,8 @@ Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
 `[4, 4]` grid; regression and correction may use separate grids. Unknown fields
 and conflicting worker identities are rejected.
 
-The old `aic_perf_model` field and its `hf_id` / parallel-pick shape remain
-compatibility inputs. New saved configurations use `ais_perf_model.roles` only;
-supplying both field names is an error. Legacy native-to-regression fallback is
-preserved when converting an old configuration.
+Configure model identity and estimator controls through `ais_perf_model.roles`.
+The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
 
 At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
 

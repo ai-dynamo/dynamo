@@ -18,6 +18,8 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
     ForwardPassMetrics,
@@ -236,8 +238,6 @@ class PlannerEnginePerfModel:
         }
 
     def _build_ais_config(self) -> dict[str, Any]:
-        from aisimulate_core.sdk import ForwardPassPerfModelConfig
-
         spec = self._config.ais_perf_model
         if spec is None:
             config = asdict(
@@ -264,9 +264,16 @@ class PlannerEnginePerfModel:
                 config["kv_block_size"] = block_size
         nextn = self._effective_speculative_nextn()
         if self._worker_type != "prefill" and nextn > 0:
-            if config.get("nextn", 0) not in (0, nextn):
-                raise ValueError("AIS nextn conflicts with worker capabilities")
-            config["nextn"] = nextn
+            speculation = config.get("speculation")
+            if speculation is not None:
+                if speculation["params"]["num_speculative_tokens"] != nextn:
+                    raise ValueError(
+                        "AIS speculation depth conflicts with worker capabilities"
+                    )
+            else:
+                if config.get("nextn", 0) not in (0, nextn):
+                    raise ValueError("AIS nextn conflicts with worker capabilities")
+                config["nextn"] = nextn
 
         # Reuse upstream's legacy-options migration, including bucket_count's
         # square-root mapping (16 total buckets means a 4 by 4 grid).

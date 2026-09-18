@@ -375,11 +375,6 @@ def test_direct_predict_resolves_kv_capacity_fraction(monkeypatch) -> None:
 
 def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> None:
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(
-        simulation,
-        "resolve_ais_num_gpu_blocks",
-        lambda payload: payload,
-    )
     engine_args = simulation.DynamoReplayRunner._engine_args(
         {
             "engine_type": "vllm",
@@ -389,6 +384,7 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
             "aic_model_path": "example/model",
             "aic_attention_dp_size": 2,
             "aic_pp_size": 1,
+            "num_gpu_blocks": 4096,
             "timing_model": {
                 "type": "fixed",
                 "prefill_ms": 1.0,
@@ -487,4 +483,110 @@ def test_planner_bootstrap_preserves_each_canonical_role_identity():
     for config in (prefill, decode):
         args = SimpleNamespace(ais_perf_config=config)
         assert _ais_session_kwargs(None, args) == {"config": config}
-        assert _ais_session_kwargs(config, SimpleNamespace()) == {"config": config}
+        assert _ais_session_kwargs(
+            config,
+            SimpleNamespace(ais_perf_config=None, worker_type=config["worker_type"]),
+        ) == {"config": config}
+
+
+def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
+    from pathlib import Path
+
+    import yaml
+    from aisimulate.compiler import prediction_to_replay_spec
+    from aisimulate.config.cli import CorePredictionConfig
+
+    from dynamo.replay.planner import _ais_session_kwargs
+
+    path = (
+        Path(__file__).parent
+        / "e2e/configs/unified_cli/predict/dynamo/08-synthetic-throughput-planner.yaml"
+    )
+    raw = yaml.safe_load(path.read_text())
+    raw.pop("planner")
+    raw["engine"].update(estimation_mode="op_level", database_mode="SOL")
+    raw["engine"]["workers"]["aggregated"]["timing"] = {"type": "default"}
+    deployment = prediction_to_replay_spec(
+        CorePredictionConfig.model_validate(raw)
+    ).backend_deployment
+    args = simulation.DynamoReplayRunner._engine_args(deployment.agg_engine_args)
+    metadata = deployment.performance_model_metadata["aggregated"]["config"]
+    assert "model_path" in metadata
+    config = _ais_session_kwargs(metadata, args)["config"]
+    assert config == args.ais_perf_config
+    assert config["database_mode"] == "SOL"
+    assert config["estimation_mode"] == "op_level"
+    assert config["systems_paths"]
+
+
+@pytest.mark.parametrize(
+    "timing",
+    [
+        {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+        {"type": "polynomial"},
+    ],
+)
+def test_custom_timing_without_capacity_does_not_resolve_unused_model(
+    monkeypatch, timing
+):
+    import aisimulate.aic
+
+    def unexpected_capacity_lookup(**kwargs):
+        raise AssertionError("custom timing must not look up an unused model")
+
+    monkeypatch.setattr(
+        aisimulate.aic, "estimate_num_gpu_blocks", unexpected_capacity_lookup
+    )
+    args = simulation.DynamoReplayRunner._engine_args(
+        {
+            "engine_type": "vllm",
+            "aic_backend": "vllm",
+            "aic_model_path": "/unused/model",
+            "aic_system": "unused-gpu",
+            "aic_tp_size": 2,
+            "aic_attention_dp_size": 2,
+            "timing_model": timing,
+        }
+    )
+    assert args.num_gpu_blocks == 16384
+    assert args.dp_size == 2
+    assert args.ais_tp_size == 2
+    assert args.ais_perf_config is None
+
+
+@pytest.mark.parametrize(
+    "timing",
+    [
+        {"type": "fixed", "prefill_ms": 1.0, "decode_ms": 1.0},
+        {"type": "polynomial"},
+    ],
+)
+def test_compiled_custom_timing_consumes_capacity_only_fields(timing):
+    from pathlib import Path
+
+    import yaml
+    from aisimulate.compiler import prediction_to_replay_spec
+    from aisimulate.config.cli import CorePredictionConfig
+
+    path = (
+        Path(__file__).parent
+        / "e2e/configs/unified_cli/predict/dynamo/07-synthetic-ais-router.yaml"
+    )
+    raw = yaml.safe_load(path.read_text())
+    raw.pop("router")
+    raw["engine"]["backend_version"] = "current"
+    worker = raw["engine"]["workers"]["aggregated"]
+    worker["timing"] = timing
+    worker["kv_cache"]["capacity"] = {
+        "type": "default",
+        "cuda_graph_reserved_bytes": 4096,
+    }
+    spec = prediction_to_replay_spec(CorePredictionConfig.model_validate(raw))
+    payload = spec.backend_deployment.agg_engine_args
+    assert payload["cuda_graph_reserved_bytes"] == 4096
+    assert payload["num_gpu_blocks"] > 0
+    args = simulation.DynamoReplayRunner._engine_args(payload)
+    assert args.num_gpu_blocks == payload["num_gpu_blocks"]
+    assert args.ais_perf_config is None
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+    assert report.metrics["completed_requests"] == raw["traffic"]["stop"]["requests"]

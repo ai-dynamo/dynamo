@@ -1309,7 +1309,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
     /// for engines that batch or overlap multiple prefills.
     ///
     /// `Err(MissingExpectedDuration)` is expected for workers with any active
-    /// prefill that lacks an AIC prediction, including the default no-AIC path or
+    /// prefill that lacks an AIS prediction, including the default no-AIS path or
     /// failed predictions. Replica-synced remote values are receive-time anchored
     /// advisory reads, not producer-time truth.
     #[allow(dead_code)]

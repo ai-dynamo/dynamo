@@ -56,7 +56,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d9f1580aa4385e6f2199e1f189b64cf7528009d5" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "fbd465d9ac14d37a6e73371ba4736a9364371eb5" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }

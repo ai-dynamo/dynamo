@@ -91,7 +91,7 @@ SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel
 
 各角色可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段及角色身份冲突会报错。
 
-旧 `aic_perf_model` 及其 `hf_id` / parallel-pick 格式只作为兼容输入，旧 native-to-regression 回退语义保持不变。新序列化输出只使用 `ais_perf_model.roles`，同时提供新旧字段会报错。
+通过 `ais_perf_model.roles` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
 
 启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AIC 可用或在线 FPM 足够之前报告 `model_not_ready`。
 

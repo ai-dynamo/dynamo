@@ -179,7 +179,7 @@ def test_public_router_validation_is_owned_by_dynamo_adapter() -> None:
         adapter.compile_recommendation(
             {
                 "policy": "round_robin",
-                "prefill_load_model": {"type": "aic"},
+                "prefill_load_model": {"type": "ais"},
             },
             recommendation_context,
         )
@@ -246,11 +246,11 @@ def test_public_router_prediction_materializes_runtime_hook() -> None:
     }
 
 
-def test_public_router_aic_load_model_reaches_runtime_config() -> None:
+def test_public_router_ais_load_model_reaches_runtime_config() -> None:
     replay_spec = create_provider().compile_prediction(
         {
             "policy": "kv_router",
-            "prefill_load_model": {"type": "aic"},
+            "prefill_load_model": {"type": "ais"},
         },
         PredictionAdapterContext(
             engine={
@@ -325,7 +325,7 @@ def test_round_robin_load_model_error_names_the_conflict() -> None:
         create_provider().compile_recommendation(
             {
                 "policy": "round_robin",
-                "prefill_load_model": {"type": "aic"},
+                "prefill_load_model": {"type": "ais"},
             },
             RecommendationAdapterContext(
                 engine={},
@@ -399,7 +399,7 @@ def test_candidate_ais_materialization_preserves_independent_router_controls(
     plan = adapter.compile_recommendation(
         {
             "policy": "kv_router",
-            "prefill_load_model": {"type": "aic"},
+            "prefill_load_model": {"type": "ais"},
         },
         RecommendationAdapterContext(
             engine={},

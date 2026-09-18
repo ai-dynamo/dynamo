@@ -473,15 +473,15 @@ impl fmt::Display for RouterQueuePolicy {
 pub enum RouterPrefillLoadModel {
     #[default]
     None,
-    #[serde(rename = "ais", alias = "aic")]
-    Aic,
+    #[serde(rename = "ais")]
+    Ais,
 }
 
 impl fmt::Display for RouterPrefillLoadModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("none"),
-            Self::Aic => f.write_str("ais"),
+            Self::Ais => f.write_str("ais"),
         }
     }
 }
@@ -492,7 +492,7 @@ impl FromStr for RouterPrefillLoadModel {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
-            "ais" | "aic" => Ok(Self::Aic),
+            "ais" => Ok(Self::Ais),
             _ => Err(format!(
                 "unknown prefill load model: {s:?}, expected 'none' or 'ais'"
             )),
@@ -1642,7 +1642,7 @@ mod tests {
             ("DYN_SHARED_CACHE_TYPE", "hicache"),
             ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
             ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
-            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "aic"),
+            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "ais"),
             (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
             (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
             (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
@@ -1681,7 +1681,7 @@ mod tests {
         assert_eq!(config.disk_cache_hit_weight, 0.3);
         assert_eq!(
             config.router_prefill_load_model,
-            RouterPrefillLoadModel::Aic
+            RouterPrefillLoadModel::Ais
         );
         assert_eq!(
             config.router_approximate_cache_policy,
@@ -2339,7 +2339,7 @@ worker_selection:
     #[test]
     fn policy_config_uses_fast_recheck_with_prefill_load_model() {
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_policy_config: Some("/tmp/policy.yaml".to_string()),
             router_queue_threshold: None,
             ..Default::default()
@@ -2367,7 +2367,7 @@ worker_selection:
         )
         .unwrap();
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
@@ -2382,7 +2382,7 @@ worker_selection:
     #[test]
     fn prefill_load_model_allows_wspt_policy_classes() {
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_queue_policy: RouterQueuePolicy::Wspt,
             ..Default::default()
         };

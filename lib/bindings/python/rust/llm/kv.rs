@@ -57,7 +57,7 @@ use llm_rs::session_affinity::{
 };
 
 use super::ais_callback::create_ais_prefill_load_estimator;
-use super::entrypoint::AicPerfConfig;
+use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
 
@@ -2215,24 +2215,17 @@ impl KvRouter {
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard", ais_perf_config=None))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, ais_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
-        aic_perf_config: Option<&AicPerfConfig>,
+        ais_perf_config: Option<&AisPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
-        ais_perf_config: Option<&AicPerfConfig>,
     ) -> PyResult<Self> {
-        if aic_perf_config.is_some() && ais_perf_config.is_some() {
-            return Err(PyValueError::new_err(
-                "ais_perf_config and aic_perf_config cannot be combined",
-            ));
-        }
-        let aic_perf_config = ais_perf_config.or(aic_perf_config);
         check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         let session_affinity_mode = session_affinity_mode
             .parse::<RsSessionAffinityMode>()
@@ -2243,7 +2236,7 @@ impl KvRouter {
             .unwrap_or_default();
         let worker_selection_policy_factory =
             crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
-        let prefill_load_estimator = aic_perf_config
+        let prefill_load_estimator = ais_perf_config
             .map(|config| {
                 Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
             })

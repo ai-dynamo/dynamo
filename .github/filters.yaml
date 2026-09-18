@@ -418,7 +418,7 @@ frontend:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
-  - 'tests/frontend/router_aic_image_smoke.py'
+  - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its

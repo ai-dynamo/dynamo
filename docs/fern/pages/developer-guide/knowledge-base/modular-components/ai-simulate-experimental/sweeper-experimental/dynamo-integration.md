@@ -27,7 +27,7 @@ Dynamo bindings:
 ```bash
 python3 -m pip install pip "maturin[patchelf]"
 cd lib/bindings/python
-maturin develop --uv --release --features aic-forward-pass
+maturin develop --uv --release --features ais-forward-pass
 cd ../../..
 python3 -m pip install --no-deps -e .
 python3 -m pip install "aisimulate==0.12.0"

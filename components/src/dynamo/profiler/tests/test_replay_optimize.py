@@ -41,8 +41,8 @@ pytestmark = [
     pytest.mark.parallel,
 ]
 
-_AIC_MODEL = "Qwen/Qwen3-32B"
-_AIC_SYSTEM = "h200_sxm"
+_AIS_MODEL = "Qwen/Qwen3-32B"
+_AIS_SYSTEM = "h200_sxm"
 
 
 def _base_prefill_args() -> dict[str, Any]:
@@ -282,12 +282,12 @@ def _disagg_spec(
 ) -> ReplayOptimizeSpec:
     return ReplayOptimizeSpec(
         engine=EngineSpec(
-            model=_AIC_MODEL,
+            model=_AIS_MODEL,
             backend="vllm",
             basePrefillEngineArgs=_base_prefill_args(),
             baseDecodeEngineArgs=_base_decode_args(),
         ),
-        hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=total_gpus),
+        hardware=HardwareSpec(gpuSku=_AIS_SYSTEM, totalGpus=total_gpus),
         workload=workload if workload is not None else _synthetic_workload(),
         sla=sla if sla is not None else SLASpec(),
         router=RouterSpec(
@@ -314,11 +314,11 @@ def _agg_spec(
 ) -> ReplayOptimizeSpec:
     return ReplayOptimizeSpec(
         engine=EngineSpec(
-            model=_AIC_MODEL,
+            model=_AIS_MODEL,
             backend="vllm",
             baseEngineArgs=_base_agg_args(),
         ),
-        hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=total_gpus),
+        hardware=HardwareSpec(gpuSku=_AIS_SYSTEM, totalGpus=total_gpus),
         workload=workload if workload is not None else _synthetic_workload(),
         sla=sla if sla is not None else SLASpec(),
         router=RouterSpec(
@@ -460,24 +460,37 @@ def test_candidate_engine_args_do_not_synthesize_base_only_fields(monkeypatch) -
         tp_size=4,
         worker_type="prefill",
         backend="vllm",
-        system=_AIC_SYSTEM,
-        model=_AIC_MODEL,
+        system=_AIS_SYSTEM,
+        model=_AIS_MODEL,
     )
 
     assert "num_gpu_blocks" not in captured_payloads[0]
     assert "enable_prefix_caching" not in captured_payloads[0]
-    assert captured_payloads[0]["aic_tp_size"] == 4
+    assert captured_payloads[0]["ais_perf_config"]["tp"] == 4
 
     replay_optimize._build_candidate_engine_args(
-        base_args={"block_size": 64, "enable_prefix_caching": False},
+        base_args={
+            "block_size": 64,
+            "enable_prefix_caching": False,
+            "ais_perf_config": {
+                "estimation_mode": "op_level",
+                "database_mode": "SOL",
+                "estimator_config": {"correction": {"enabled": False}},
+            },
+        },
         tp_size=4,
         worker_type="prefill",
         backend="vllm",
-        system=_AIC_SYSTEM,
-        model=_AIC_MODEL,
+        system=_AIS_SYSTEM,
+        model=_AIS_MODEL,
     )
 
     assert captured_payloads[1]["enable_prefix_caching"] is False
+    config = captured_payloads[1]["ais_perf_config"]
+    assert config["worker_type"] == "prefill"
+    assert config["estimation_mode"] == "op_level"
+    assert config["database_mode"] == "SOL"
+    assert config["estimator_config"] == {"correction": {"enabled": False}}
 
 
 def test_replay_optimize_spec_pickles_without_rust_bound_args() -> None:
@@ -490,7 +503,7 @@ def test_replay_optimize_spec_pickles_without_rust_bound_args() -> None:
 def test_replay_optimize_spec_rejects_rust_bound_config_objects() -> None:
     with pytest.raises(ValueError):
         EngineSpec(
-            model=_AIC_MODEL,
+            model=_AIS_MODEL,
             backend="vllm",
             baseEngineArgs=MockEngineArgs.from_json(json.dumps(_base_agg_args())),
         )
@@ -881,12 +894,12 @@ def test_disagg_optimizer_rejects_invalid_objective() -> None:
     with pytest.raises(ValueError):
         ReplayOptimizeSpec(
             engine=EngineSpec(
-                model=_AIC_MODEL,
+                model=_AIS_MODEL,
                 backend="vllm",
                 basePrefillEngineArgs=_base_prefill_args(),
                 baseDecodeEngineArgs=_base_decode_args(),
             ),
-            hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=4),
+            hardware=HardwareSpec(gpuSku=_AIS_SYSTEM, totalGpus=4),
             workload=_synthetic_workload(),
             objective="bad_objective",
         )
@@ -1058,13 +1071,13 @@ def test_compare_agg_and_disagg_with_replay_picks_expected_mode(monkeypatch) -> 
     # the actual engine-args assertions).
     spec = ReplayOptimizeSpec(
         engine=EngineSpec(
-            model=_AIC_MODEL,
+            model=_AIS_MODEL,
             backend="vllm",
             baseEngineArgs=_base_agg_args(),
             basePrefillEngineArgs=_base_prefill_args(),
             baseDecodeEngineArgs=_base_decode_args(),
         ),
-        hardware=HardwareSpec(gpuSku=_AIC_SYSTEM, totalGpus=8),
+        hardware=HardwareSpec(gpuSku=_AIS_SYSTEM, totalGpus=8),
         workload=_synthetic_workload(),
         sla=_sla(mean_e2e_latency_ms=500.0),
     )

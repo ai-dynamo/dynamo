@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for Planner-owned engine queries over AIC forward-pass estimates."""
+"""Unit tests for Planner-owned engine queries over AISimulate forward-pass estimates."""
 
 from __future__ import annotations
 
@@ -88,7 +88,7 @@ def _sum_prefill_ms(metrics_by_rank: list[dict[str, Any]]) -> float:
     )
 
 
-def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
+def test_best_available_uses_ais_core_wheel_facade(monkeypatch):
     sentinel = _FakeForwardPassModel(lambda _metrics: 1.0)
 
     class _FakeAicFacade:

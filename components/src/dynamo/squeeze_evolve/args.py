@@ -75,9 +75,8 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
 
     def validate(self) -> None:  # type: ignore[override]
         self.apply_load_aware_preset()  # shared KvRouter preset (KvRouterConfigBase)
-        if self.router_prefill_load_model in ("ais", "aic"):
+        if self.router_prefill_load_model == "ais":
             self.ais_perf_kwargs()
-            self.router_prefill_load_model = "ais"
         elif self.ais_perf_config is not None:
             raise ValueError(
                 "--ais-perf-config requires --router-prefill-load-model=ais"
@@ -227,7 +226,7 @@ class SqueezeEvolveArgGroup(ArgGroup):
             arg_type=int,
             help="KvRouter block size for tiers that omit block_size (default: 64).",
         )
-        # Shared per-tier KvRouter knobs (--router-*) + AIC perf model flags.
+        # Shared per-tier KvRouter knobs (--router-*) + AIS perf model flags.
         KvRouterArgGroup().add_arguments(parser)
         AisPerfArgGroup().add_arguments(parser)
 

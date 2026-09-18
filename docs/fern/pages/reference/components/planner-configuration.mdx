@@ -120,8 +120,9 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
-  interpolation sweep. The old `aic_perf_model` name and `hf_id` / pick shape are
-  compatibility inputs; serialized output uses `ais_perf_model` only.
+  interpolation sweep. Configure model identity and estimator controls through
+  `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
+  are rejected.
 </ParamField>
 
 <Indent>
@@ -482,7 +483,7 @@ Nested object types referenced above, broken out to keep the field lists shallow
 
 ### PickedParallelConfig
 
-A parallelism pick emitted by AIConfigurator. Referenced by `AICInterpolationSpec` and accepted when migrating legacy `aic_perf_model` inputs.
+A parallelism pick emitted by AIConfigurator. Referenced by `AICInterpolationSpec`.
 
 <ParamField path="tp" type="integer" default="1">
   Tensor-parallel size.
@@ -651,7 +652,7 @@ The Planner enforces these cross-field rules at startup and rejects a config tha
 - `global_planner_namespace` is required when `environment` is `global-planner`.
 - Under `optimization_target: load`, prefill modes require `prefill_scale_up_queue_tokens` > `prefill_scale_down_queue_tokens`, and decode modes require `decode_scale_up_kv_rate` > `decode_scale_down_kv_rate`.
 - At least one scaling mode must be enabled. Under any `optimization_target` other than `sla`, the Planner forces load scaling on and throughput scaling off and ignores `ttft_ms` / `itl_ms`.
-- When `ais_perf_model` is set, its `roles` must cover the deployment: `prefill` and `decode` for `disagg`, the matching role for `prefill`/`decode`, or `aggregated` for `agg`. Role keys must agree with `worker_type`. Unknown canonical fields and simultaneous `ais_perf_model` / `aic_perf_model` inputs are rejected.
+- When `ais_perf_model` is set, its `roles` must cover the deployment: `prefill` and `decode` for `disagg`, the matching role for `prefill`/`decode`, or `aggregated` for `agg`. Role keys must agree with `worker_type`. Unknown canonical fields and the retired `aic_perf_model` input are rejected.
 - `scheduling.scale_interval_seconds` must evenly divide `load_adjustment_interval_seconds` and, when throughput scaling is enabled, `throughput_adjustment_interval_seconds`.
 - When both scaling modes are enabled, `load_adjustment_interval_seconds` must be shorter than `throughput_adjustment_interval_seconds`.
 

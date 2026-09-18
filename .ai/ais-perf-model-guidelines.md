@@ -11,9 +11,11 @@ Python uses `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)
 Do not add parallel constructors, revive removed `from_native` / `from_regression`
 APIs, or construct a private native engine to bypass this interface.
 
-- Use `ais` / `AIS` for Dynamo integration names. Keep old `aic` names only in
-  explicit input compatibility adapters or upstream-owned protocols. Actual
-  AIConfigurator task-v2/interpolation APIs retain their upstream names.
+- Use `ais` / `AIS` for Dynamo integration names. Accept old `--aic-*` spellings
+  only in CLI parsers and immediately lower them to the canonical configuration.
+  Do not restore retired SDK aliases, modules, environment variables or config
+  formats. Actual AIConfigurator task-v2/interpolation APIs and upstream-owned
+  wire protocols retain their upstream names at their boundaries.
 - AISimulate owns schema, defaults, validation, selection, tuning and prediction.
   Pass complete configurations, including ordered roots and nested estimator
   controls. Reject unknown fields and conflicting old/new input names.

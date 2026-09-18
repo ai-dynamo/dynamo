@@ -20,6 +20,7 @@ from dynamo.common.forward_pass_metrics import (
     ScheduledRequestMetrics,
 )
 from dynamo.mocker import MockEngineArgs
+from dynamo.replay.config import canonical_upstream_config
 
 if TYPE_CHECKING:
     from dynamo.planner.core.types import EngineCapabilities
@@ -33,14 +34,15 @@ def _engine_caps(args: MockEngineArgs) -> EngineCapabilities:
     from dynamo.planner.core.types import EngineCapabilities
 
     dp_size = max(args.dp_size, 1)
+    config = args.ais_perf_config or {}
     max_kv_tokens = args.num_gpu_blocks * args.block_size * dp_size
     return EngineCapabilities(
-        num_gpu=(args.aic_tp_size or 1) * dp_size,
+        num_gpu=(args.ais_tp_size or 1) * config.get("pp", 1) * dp_size,
         max_num_batched_tokens=args.max_num_batched_tokens,
         max_num_seqs=args.max_num_seqs,
         context_length=args.max_model_len,
         max_kv_tokens=max_kv_tokens if max_kv_tokens > 0 else None,
-        speculative_nextn=args.aic_nextn,
+        speculative_nextn=args.ais_nextn,
     )
 
 
@@ -164,69 +166,15 @@ def _ais_session_kwargs(
 ) -> dict[str, Any] | None:
     """Preserve complete canonical identity when bootstrapping a role."""
 
-    if perf_config is not None and "model" in perf_config:
-        return {"config": dict(perf_config)}
-    canonical = getattr(engine_args, "ais_perf_config", None)
-    if perf_config is None and canonical is not None:
-        if isinstance(canonical, str):
-            canonical = json.loads(canonical)
+    canonical = engine_args.ais_perf_config
+    if canonical is not None:
         return {"config": dict(canonical)}
-
-    backend = (
-        perf_config.get("backend")
-        if perf_config is not None
-        else engine_args.aic_backend
-    )
-    system = (
-        perf_config.get("system") if perf_config is not None else engine_args.aic_system
-    )
-    model_path = (
-        perf_config.get("model_path")
-        if perf_config is not None
-        else engine_args.aic_model_path
-    )
-    if backend is None or system is None or model_path is None:
+    if perf_config is None:
         return None
-    nextn = (
-        perf_config.get("nextn") if perf_config is not None else engine_args.aic_nextn
-    )
-    nextn_accept_rates = ",".join(["0"] * int(nextn)) if nextn is not None else None
     return {
-        "backend_name": backend,
-        "system": system,
-        "model_path": model_path,
-        "tp_size": (
-            perf_config.get("tp_size", 1)
-            if perf_config is not None
-            else engine_args.aic_tp_size or 1
-        ),
-        "backend_version": (
-            perf_config.get("backend_version")
-            if perf_config is not None
-            else engine_args.aic_backend_version
-        ),
-        "moe_tp_size": (
-            perf_config.get("moe_tp_size")
-            if perf_config is not None
-            else engine_args.aic_moe_tp_size
-        ),
-        "moe_ep_size": (
-            perf_config.get("moe_ep_size")
-            if perf_config is not None
-            else engine_args.aic_moe_ep_size
-        ),
-        "attention_dp_size": (
-            perf_config.get("attention_dp_size")
-            if perf_config is not None
-            else engine_args.aic_attention_dp_size
-        ),
-        "gemm_dtype": engine_args.aic_gemm_dtype,
-        "moe_dtype": engine_args.aic_moe_dtype,
-        "fmha_dtype": engine_args.aic_fmha_dtype,
-        "kv_cache_dtype": engine_args.aic_kv_cache_dtype,
-        "comm_dtype": engine_args.aic_comm_dtype,
-        "nextn": nextn,
-        "nextn_accept_rates": nextn_accept_rates,
+        "config": canonical_upstream_config(
+            perf_config, worker_type=engine_args.worker_type
+        )
     }
 
 
@@ -303,7 +251,7 @@ def prepare_planner_replay(
             or (
                 decode_engine_args
                 if decode_engine_args is not None
-                and decode_engine_args.aic_backend is not None
+                and decode_engine_args.ais_perf_config is not None
                 else None
             )
             or prefill_engine_args

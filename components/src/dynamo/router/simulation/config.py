@@ -43,35 +43,11 @@ def _stepped_numeric_values(
 class PrefillLoadModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    @field_validator("type", mode="before")
-    @classmethod
-    def _legacy_name(cls, value):
-        if isinstance(value, dict) and "choices" in value:
-            return {
-                **value,
-                "choices": [
-                    "ais" if item == "aic" else item for item in value["choices"]
-                ],
-            }
-        return "ais" if value == "aic" else value
-
     type: LoadModelType = "none"
 
 
 class PrefillLoadRecommendationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    @field_validator("type", mode="before")
-    @classmethod
-    def _legacy_name(cls, value):
-        if isinstance(value, dict) and "choices" in value:
-            return {
-                **value,
-                "choices": [
-                    "ais" if item == "aic" else item for item in value["choices"]
-                ],
-            }
-        return "ais" if value == "aic" else value
 
     type: LoadModelType | Choices[LoadModelType] = Field(
         default_factory=lambda: Choices[LoadModelType](choices=["none", "ais"])
@@ -233,15 +209,6 @@ class RouterSearchSpace(BaseModel):
         default_factory=lambda: list(PREFILL_LOAD_SCALE_DEFAULTS)
     )
     temperature: list[float] = Field(default_factory=lambda: list(TEMPERATURE_DEFAULTS))
-
-    @field_validator("prefill_load_model_type", mode="before")
-    @classmethod
-    def _legacy_load_model(cls, value):
-        return (
-            ["ais" if item == "aic" else item for item in value]
-            if isinstance(value, list)
-            else value
-        )
 
     prefill_load_model_type: list[str] = Field(default_factory=lambda: ["none"])
     active_decode_blocks_threshold: int | None = None

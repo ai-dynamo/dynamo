@@ -29,7 +29,7 @@ from aisimulate.sweeper.replay import (
 from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
-from dynamo.replay.config import resolve_ais_num_gpu_blocks
+from dynamo.replay.config import lower_upstream_engine_args
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -184,26 +184,13 @@ class DynamoReplayRunner:
                         "Dynamo Router hook config requires a router_config mapping"
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
-                if (
-                    "ais_perf_config" in hook.config
-                    and "aic_perf_config" in hook.config
-                ):
-                    raise ValueError(
-                        "cannot combine ais_perf_config with aic_perf_config"
-                    )
-                raw_aic = hook.config.get(
-                    "ais_perf_config", hook.config.get("aic_perf_config")
-                )
-                if raw_aic is not None:
-                    if not isinstance(raw_aic, dict):
+                raw_ais = hook.config.get("ais_perf_config")
+                if raw_ais is not None:
+                    if not isinstance(raw_ais, dict):
                         raise TypeError(
-                            "Dynamo Router AIC config must be a mapping or null"
+                            "Dynamo Router AIS config must be a mapping or null"
                         )
-                    ais_perf_config = (
-                        AisPerfConfig(config=raw_aic)
-                        if "model" in raw_aic
-                        else AisPerfConfig(**raw_aic)
-                    )
+                    ais_perf_config = AisPerfConfig(config=raw_ais)
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
@@ -258,28 +245,7 @@ class DynamoReplayRunner:
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        lowered = dict(payload)
-        timing = lowered.get("timing_model")
-        if isinstance(timing, dict) and timing.get("type") in {
-            "fixed",
-            "polynomial",
-        }:
-            attention_dp = lowered.pop("aic_attention_dp_size", None)
-            if attention_dp is not None:
-                lowered["dp_size"] = attention_dp
-            for name in (
-                "aic_backend",
-                "aic_backend_version",
-                "aic_system",
-                "aic_model_path",
-            ):
-                lowered.pop(name, None)
-        resolve_ais_num_gpu_blocks(lowered)
-        # Pipeline parallelism is already represented in the public parallel
-        # mapping and used for AIC capacity. MockEngineArgs has no PP field.
-        lowered.pop("aic_pp_size", None)
-        lowered.pop("ais_pp_size", None)
-        return MockEngineArgs.from_json(json.dumps(lowered))
+        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
 
     def _run_trace(self, spec: ReplaySpec, common: dict[str, Any]):
         deployment = spec.backend_deployment

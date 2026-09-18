@@ -299,8 +299,9 @@ service.
 <ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
   Role-indexed AISimulate forward-pass configurations. Constructs each model through
   `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
-  interpolation sweep. The old `aic_perf_model` name and `hf_id` / pick shape are
-  compatibility inputs; serialized output uses `ais_perf_model` only.
+  interpolation sweep. Configure model identity and estimator controls through
+  `ais_perf_model.roles`; the retired `aic_perf_model` and `hf_id` / pick shape
+  are rejected.
 </ParamField>
 
 <Indent>
@@ -839,7 +840,7 @@ profiling runs do not populate this type.
 
 ### PickedParallelConfig
 
-A parallelism pick emitted by AIConfigurator. Referenced by [AICInterpolationSpec](#aicinterpolationspec) and accepted when migrating legacy `features.planner.aic_perf_model` inputs.
+A parallelism pick emitted by AIConfigurator. Referenced by [AICInterpolationSpec](#aicinterpolationspec).
 
 <ParamField path="tp" type="integer" default="1">
   Tensor-parallel size.

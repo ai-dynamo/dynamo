@@ -26,7 +26,16 @@ THREAD_COUNTS = (1, 2, 4, 8, 12, 16, 24)
 
 
 def _make_session():
-    return create_session(BACKEND, SYSTEM, MODEL, 1, backend_version=BACKEND_VERSION)
+    return create_session(
+        config={
+            "model": MODEL,
+            "system": SYSTEM,
+            "backend": BACKEND,
+            "backend_version": BACKEND_VERSION,
+            "worker_type": "aggregated",
+            "tp": 1,
+        }
+    )
 
 
 def _throughput(call, n_threads, calls_per_thread):

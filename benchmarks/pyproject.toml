@@ -39,7 +39,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@d9f1580aa4385e6f2199e1f189b64cf7528009d5#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@fbd465d9ac14d37a6e73371ba4736a9364371eb5#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'",
     "aiperf==0.12.0",
     "matplotlib",
     "networkx",

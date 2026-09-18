@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import aiohttp
 import requests
 
-from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
@@ -277,8 +277,7 @@ def _test_kv_event_publisher_disabled_diagnostic(
 
     expected_worker_ids = asyncio.run(discover_diagnostic_worker_ids())
     expected_serving_endpoint = (
-        f"{diagnostic_workers.namespace}/"
-        f"{diagnostic_workers.component_name}/generate"
+        f"{diagnostic_workers.namespace}/{diagnostic_workers.component_name}/generate"
     )
     expected_dp_ranks = ",".join(str(rank) for rank in range(expected_rank_count))
 
@@ -2235,8 +2234,7 @@ def _test_router_indexers_sync(
                     "Standalone B",
                 )
                 logger.info(
-                    "All 4 dumps match: Router 1, Router 2, "
-                    "Standalone A, Standalone B"
+                    "All 4 dumps match: Router 1, Router 2, Standalone A, Standalone B"
                 )
 
     async def test_sync():
@@ -2257,7 +2255,7 @@ def _test_router_decisions_disagg(
     test_payload: dict,
     store_backend: str = "etcd",
     request_plane: str = "nats",
-    router_aic_config: Optional[dict[str, Any]] = None,
+    router_ais_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
@@ -2280,7 +2278,7 @@ def _test_router_decisions_disagg(
         frontend_port: Port for the frontend HTTP server
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
-        router_aic_config: Optional AIC router perf-model config for frontend KV routing.
+        router_ais_config: Optional AIS router perf-model config for frontend KV routing.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2294,7 +2292,7 @@ def _test_router_decisions_disagg(
         store_backend,
         request_plane=request_plane,
         min_initial_workers=decode_workers.num_workers,
-        router_aic_config=router_aic_config,
+        router_ais_config=router_ais_config,
     ):
         # Start KV router frontend - uses decode_workers namespace for discovery
         # The frontend will auto-discover both prefill and decode workers
@@ -2728,7 +2726,7 @@ def _test_router_decisions(
     router_event_threads: int = 4,
     standalone_indexer_url: Optional[str] = None,
     standalone_selector_url: Optional[str] = None,
-    router_aic_config: Optional[dict[str, Any]] = None,
+    router_ais_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
     router_approximate_cache_policy: str = "ttl",
     initial_wait: float = 0.25,
@@ -2755,7 +2753,7 @@ def _test_router_decisions(
         block_size: KV cache block size. Defaults to 8.
         use_kv_events: If True (default), uses KV events from workers. If False, uses
             approximate routing with the configured retention policy (--no-kv-events mode).
-        router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
+        router_ais_config: Optional AIS router perf-model config for direct KvRouter tests.
         router_approximate_cache_policy: Retention policy for the local approximate indexer.
 
     Raises:
@@ -2777,14 +2775,14 @@ def _test_router_decisions(
             router_event_threads=router_event_threads,
             router_track_prefill_tokens=True,
             router_prefill_load_model=(
-                "aic" if router_aic_config is not None else "none"
+                "ais" if router_ais_config is not None else "none"
             ),
             router_predicted_ttl_secs=router_predicted_ttl_secs,
             router_approximate_cache_policy=router_approximate_cache_policy,
         )
-        aic_perf_config = (
-            AicPerfConfig(**router_aic_config)
-            if router_aic_config is not None
+        ais_perf_config = (
+            AisPerfConfig(config=router_ais_config)
+            if router_ais_config is not None
             else None
         )
 
@@ -2793,7 +2791,7 @@ def _test_router_decisions(
                 endpoint=endpoint,
                 block_size=block_size,
                 kv_router_config=kv_router_config,
-                aic_perf_config=aic_perf_config,
+                ais_perf_config=ais_perf_config,
             ),
             num_workers=expected_num_instances,
             engine_workers=engine_workers,

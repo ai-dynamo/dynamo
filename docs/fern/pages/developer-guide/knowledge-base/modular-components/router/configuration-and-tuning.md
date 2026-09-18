@@ -374,9 +374,9 @@ Set `worker_type` to the modeled deployment's role, even when Router only querie
 prefill work. Do not combine the full config with flat identity flags. The Python
 SDK accepts the same mapping as `dynamo.llm.AisPerfConfig(config=payload)`.
 
-Deprecated `--aic-*`, `DYN_AIC_*`, and `AicPerfConfig` inputs remain accepted during
-migration. Supplying both spellings of the same input is an error; new configuration
-output uses `ais`.
+Deprecated `--aic-*` flags remain accepted by the CLI parser. Use `DYN_AIS_*`
+environment variables and `AisPerfConfig` in the SDK. Supplying both CLI spellings
+of the same input is an error; configuration output uses `ais`.
 
 Optional AIS knobs:
 

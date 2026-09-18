@@ -34,7 +34,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.thunderagent_router.args import (
     ThunderAgentRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
     parse_args,
 )
@@ -160,7 +160,7 @@ class ThunderAgentRouterHandler:
             endpoint=worker_endpoint,
             block_size=self._config.router_block_size,
             kv_router_config=build_kv_router_config(self._config),
-            aic_perf_config=build_aic_perf_config(self._config),
+            ais_perf_config=build_ais_perf_config(self._config),
         )
 
         worker_client = await worker_endpoint.client()

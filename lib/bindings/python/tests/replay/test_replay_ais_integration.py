@@ -17,13 +17,13 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-AIC_MODEL = "Qwen/Qwen3-32B"
-AIC_SYSTEM = "h200_sxm"
-AIC_BACKEND_VERSION = "current"
+AIS_MODEL = "Qwen/Qwen3-32B"
+AIS_SYSTEM = "h200_sxm"
+AIS_BACKEND_VERSION = "current"
 
 
 @pytest.fixture(autouse=True)
-def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
+def _offline_ais(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
@@ -33,11 +33,13 @@ def _engine_args(worker_type: str | None = None):
 
     worker_options = {"worker_type": worker_type} if worker_type is not None else {}
     return MockEngineArgs(
-        aic_backend="vllm",
-        aic_system=AIC_SYSTEM,
-        aic_backend_version=AIC_BACKEND_VERSION,
-        aic_model_path=AIC_MODEL,
-        aic_tp_size=1,
+        ais_perf_config={
+            "model": AIS_MODEL,
+            "system": AIS_SYSTEM,
+            "backend": "vllm",
+            "backend_version": AIS_BACKEND_VERSION,
+            "worker_type": worker_type or "aggregated",
+        },
         block_size=64,
         max_num_batched_tokens=4096,
         max_num_seqs=128,
@@ -45,14 +47,14 @@ def _engine_args(worker_type: str | None = None):
     )
 
 
-def test_real_aic_memory_estimates_gpu_blocks() -> None:
-    from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
+def test_real_ais_memory_estimates_gpu_blocks() -> None:
+    from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
 
     blocks = estimate_num_gpu_blocks(
-        model_path=AIC_MODEL,
-        system=AIC_SYSTEM,
+        model_path=AIS_MODEL,
+        system=AIS_SYSTEM,
         backend="vllm",
-        backend_version=AIC_BACKEND_VERSION,
+        backend_version=AIS_BACKEND_VERSION,
         tp_size=1,
         scheduler_block_size=64,
         max_num_tokens=4096,
@@ -63,13 +65,16 @@ def test_real_aic_memory_estimates_gpu_blocks() -> None:
     assert blocks > 0
 
 
-def test_default_aic_capacity_uses_queryable_version() -> None:
+def test_default_ais_capacity_uses_queryable_version() -> None:
     args = load_engine_args(
         {
-            "aic_backend": "vllm",
-            "aic_system": AIC_SYSTEM,
-            "aic_model_path": AIC_MODEL,
-            "aic_tp_size": 1,
+            "ais_perf_config": {
+                "model": AIS_MODEL,
+                "system": AIS_SYSTEM,
+                "backend": "vllm",
+                "worker_type": "aggregated",
+                "backend_version": "current",
+            },
             "block_size": 64,
             "max_num_batched_tokens": 4096,
             "max_num_seqs": 128,
@@ -77,11 +82,15 @@ def test_default_aic_capacity_uses_queryable_version() -> None:
     )
     assert args is not None
     assert args.num_gpu_blocks > 0
-    assert args.aic_backend_version == "current"
+    from aisimulate_core.sdk import perf_database
+
+    assert args.ais_backend_version == perf_database.resolve_query_version(
+        AIS_SYSTEM, "vllm", "current"
+    )
 
 
-def test_aggregated_replay_uses_native_aic_engine() -> None:
-    from aiconfigurator_core.sdk.engine import compile_engine
+def test_aggregated_replay_uses_native_ais_engine() -> None:
+    from aisimulate_core.sdk.engine import compile_engine
 
     from dynamo.replay import run_synthetic_trace_replay
 
@@ -100,7 +109,7 @@ def test_aggregated_replay_uses_native_aic_engine() -> None:
     assert report["mean_tpot_ms"] > 0.0
 
 
-def test_disaggregated_replay_uses_native_aic_engine() -> None:
+def test_disaggregated_replay_uses_native_ais_engine() -> None:
     from dynamo.replay import run_synthetic_trace_replay
 
     report = run_synthetic_trace_replay(

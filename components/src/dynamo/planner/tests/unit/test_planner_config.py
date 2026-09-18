@@ -6,7 +6,6 @@
 import pytest
 from pydantic import ValidationError
 
-from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.config.planner_config import PlannerConfig
 
 pytestmark = [
@@ -315,33 +314,27 @@ def test_agg_mode_supports_throughput_scaling():
     assert config.scaling_enabled() is True
 
 
-def test_aic_perf_model_requires_prefill_pick_for_prefill_mode():
-    with pytest.raises(ValidationError, match="prefill_pick"):
+def test_ais_perf_model_requires_prefill_role_for_prefill_mode():
+    with pytest.raises(ValidationError, match="roles.prefill"):
         PlannerConfig(
             namespace="test-ns",
             mode="prefill",
             optimization_target="sla",
-            aic_perf_model={
-                "hf_id": "model",
-                "system": "h200_sxm",
-                "backend": "vllm",
-            },
+            ais_perf_model={"roles": {}},
         )
 
 
-def test_aic_perf_model_accepts_mode_required_picks():
-    pick = PickedParallelConfig(tp=1, pp=1, dp=1, moe_tp=1, moe_ep=1)
+def test_ais_perf_model_accepts_mode_required_roles():
     config = PlannerConfig(
         namespace="test-ns",
         mode="decode",
         optimization_target="sla",
-        aic_perf_model={
-            "hf_id": "model",
-            "system": "h200_sxm",
-            "backend": "vllm",
-            "decode_pick": pick.model_dump(),
+        ais_perf_model={
+            "roles": {
+                "decode": {"model": "model", "system": "h200_sxm", "backend": "vllm"}
+            }
         },
     )
 
-    assert config.aic_perf_model is not None
-    assert config.ais_perf_model.roles["decode"]["tp"] == pick.tp
+    assert config.ais_perf_model is not None
+    assert config.ais_perf_model.roles["decode"]["tp"] == 1

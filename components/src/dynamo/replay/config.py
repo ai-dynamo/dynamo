@@ -13,7 +13,6 @@ from typing import Any, Protocol
 
 from aisimulate.aic import materialize_aic_num_gpu_blocks
 
-from dynamo._internal.ais import resolve_backend_version
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import (
     resolve_planner_profile_data as _resolve_mocker_planner_profile_data,
@@ -24,85 +23,131 @@ class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
 
 
-def resolve_ais_num_gpu_blocks(raw: dict[str, Any]) -> None:
-    """Materialize capacity using AISimulate's upstream wire adapter."""
+def canonical_upstream_config(
+    config: Mapping[str, Any], *, worker_type: str
+) -> dict[str, Any]:
+    """Translate the upstream Replay metadata protocol to canonical AIS identity."""
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
-    # The upstream compatibility helper still names its flat inputs aic_*.
-    # Translate only at this boundary; Dynamo emits ais_* names.
-    for name in list(raw):
-        if name.startswith("ais_") and name != "ais_perf_config":
-            legacy = "aic_" + name[4:]
-            if legacy in raw:
-                raise ValueError(f"cannot combine {name} with {legacy}")
-            raw[legacy] = raw.pop(name)
-    canonical = raw.get("ais_perf_config")
-    if canonical is not None:
-        if "timing_model" in raw:
-            raise ValueError("ais_perf_config cannot be combined with timing_model")
-        if not isinstance(canonical, Mapping):
-            raise TypeError("ais_perf_config must be a mapping")
-        canonical = dict(canonical)
-        canonical.setdefault("estimation_mode", "auto")
-        canonical.setdefault("fallback_policy", "deny")
-        raw["timing_model"] = {
-            "type": "external",
-            "provider": "aic",
-            "config": canonical,
-        }
-        del raw["ais_perf_config"]
+    if "model" in config:
+        return dict(config)
+    fields = {
+        "model_path": "model",
+        "system": "system",
+        "backend": "backend",
+        "backend_version": "backend_version",
+        "tp_size": "tp",
+        "pp_size": "pp",
+        "attention_dp_size": "attention_dp",
+        "moe_tp_size": "moe_tp_size",
+        "moe_ep_size": "moe_ep_size",
+        "nextn": "nextn",
+        "speculation": "speculation",
+        "gemm_dtype": "gemm_quant_mode",
+        "moe_dtype": "moe_quant_mode",
+        "fmha_dtype": "fmha_quant_mode",
+        "kv_cache_dtype": "kvcache_quant_mode",
+        "comm_dtype": "comm_quant_mode",
+    }
+    payload = {
+        target: config[source]
+        for source, target in fields.items()
+        if config.get(source) is not None
+    }
+    payload["worker_type"] = worker_type
+    if config.get("forward_model") is not None:
+        payload["estimation_mode"] = {
+            "op_level": "op_level",
+            "fpm": "fpm_interpolation",
+        }[config["forward_model"]]
+    return ForwardPassPerfModelConfig(**payload).to_dict()
 
-    if (
-        raw.get("aic_backend") is not None
-        or raw.get("aic_attention_dp_size") is not None
-    ):
-        raw["aic_backend_version"] = resolve_backend_version(
-            raw.get("aic_backend") or "vllm", raw.get("aic_backend_version")
-        )
-    timing = raw.get("timing_model")
-    if (
-        isinstance(timing, dict)
-        and timing.get("type") == "external"
-        and timing.get("provider") == "ais"
-    ):
-        raw["timing_model"] = {**timing, "provider": "aic"}
-    timing = raw.get("timing_model")
-    if (
-        isinstance(timing, dict)
-        and timing.get("type") == "external"
-        and timing.get("provider") == "aic"
-    ):
-        config = timing.get("config")
-        if isinstance(config, dict) and "model" in config:
-            config = {"estimation_mode": "auto", "fallback_policy": "deny", **config}
-            raw["timing_model"] = {**timing, "config": config}
+
+def _materialize_capacity(raw: dict[str, Any]) -> dict[str, Any]:
     lowered = materialize_aic_num_gpu_blocks(raw)
     timing = lowered.get("timing_model")
-    if (
-        isinstance(timing, dict)
-        and timing.get("type") == "external"
-        and timing.get("provider") == "aic"
-    ):
+    if isinstance(timing, dict) and timing.get("type") == "external":
+        if timing.get("provider") != "aic":
+            raise ValueError("unsupported upstream timing provider")
         capacity_fields = {
             "gpu_memory_utilization",
             "mem_fraction_static",
             "free_gpu_memory_fraction",
             "cuda_graph_reserved_bytes",
         }
-        lowered["timing_model"] = {
-            **timing,
-            "config": {
-                name: value
-                for name, value in timing["config"].items()
-                if name not in capacity_fields
-            },
+        lowered["ais_perf_config"] = {
+            key: value
+            for key, value in timing["config"].items()
+            if key not in capacity_fields
         }
+        del lowered["timing_model"]
+    return lowered
+
+
+def resolve_ais_num_gpu_blocks(raw: dict[str, Any]) -> None:
+    """Resolve a canonical Dynamo config through the upstream capacity adapter."""
+    if any(name.startswith("aic_") for name in raw):
+        raise ValueError("AIC config fields were removed; use ais_perf_config")
+    canonical = raw.get("ais_perf_config")
+    if canonical is None:
+        return
+    if "timing_model" in raw:
+        raise ValueError("ais_perf_config cannot be combined with timing_model")
+    if not isinstance(canonical, Mapping):
+        raise TypeError("ais_perf_config must be a mapping")
+    upstream = dict(raw)
+    upstream.pop("ais_perf_config")
+    upstream["timing_model"] = {
+        "type": "external",
+        "provider": "aic",
+        "config": {"estimation_mode": "auto", "fallback_policy": "deny", **canonical},
+    }
+    lowered = _materialize_capacity(upstream)
     raw.clear()
-    raw.update(
-        {
-            ("ais_" + name[4:] if name.startswith("aic_") else name): value
-            for name, value in lowered.items()
+    raw.update(lowered)
+
+
+def lower_upstream_engine_args(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Consume AISimulate's runner wire protocol at the Dynamo boundary."""
+    raw = dict(payload)
+    timing = raw.get("timing_model")
+    has_custom_timing = isinstance(timing, dict) and timing.get("type") in {
+        "fixed",
+        "polynomial",
+    }
+    identity = {
+        name[4:]: value for name, value in raw.items() if name.startswith("aic_")
+    }
+    if has_custom_timing:
+        for name in (
+            "aic_backend",
+            "aic_backend_version",
+            "aic_system",
+            "aic_model_path",
+        ):
+            raw.pop(name, None)
+    if not has_custom_timing and timing is None and identity.get("backend") is not None:
+        raw["timing_model"] = {
+            "type": "external",
+            "provider": "aic",
+            "config": canonical_upstream_config(
+                identity, worker_type=raw.get("worker_type", "aggregated")
+            ),
         }
-    )
+    raw = _materialize_capacity(raw)
+    raw.pop("cuda_graph_reserved_bytes", None)
+    if identity.get("attention_dp_size") is not None:
+        raw.setdefault("dp_size", identity["attention_dp_size"])
+    if identity.get("tp_size") is not None:
+        raw.setdefault("tensor_parallel_size", identity["tp_size"])
+    for name in tuple(raw):
+        if name.startswith("aic_"):
+            value = raw.pop(name)
+            if name in {"aic_nextn_accept_rates", "aic_mtp_seed"}:
+                raw["ais_" + name[4:]] = value
+            elif name == "aic_nextn" and "ais_perf_config" not in raw:
+                raw["ais_nextn"] = value
+    return raw
 
 
 def resolve_planner_profile_data(
@@ -149,7 +194,3 @@ def load_engine_args(
                 del raw["planner_profile_data"]
     resolve_ais_num_gpu_blocks(raw)
     return MockEngineArgs.from_json(json.dumps(raw))
-
-
-# Deprecated Python SDK name.
-resolve_aic_num_gpu_blocks = resolve_ais_num_gpu_blocks
