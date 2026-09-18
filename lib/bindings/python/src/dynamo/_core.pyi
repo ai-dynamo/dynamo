@@ -11,6 +11,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    Mapping,
     Optional,
     Sequence,
     Set,
@@ -19,6 +20,7 @@ from typing import (
     overload,
 )
 
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -1775,9 +1777,22 @@ class LoadThresholdConfig:
     ) -> None:
         ...
 
-class AicPerfConfig:
+class AisPerfConfig:
+    """Canonical AISimulate configuration; legacy aic_* input names are aliases."""
+
+    @overload
     def __init__(
         self,
+        config: Mapping[str, Any] | ForwardPassPerfModelConfig,
+        *,
+        aic_nextn_accept_rates: Optional[str] = None,
+    ) -> None: ...
+
+    @overload
+    def __init__(
+        self,
+        config: None = None,
+        *,
         aic_backend: str,
         aic_system: str,
         aic_model_path: str,
@@ -1795,6 +1810,13 @@ class AicPerfConfig:
         aic_comm_dtype: Optional[str] = None,
     ) -> None:
         ...
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the complete canonical configuration, including estimator controls."""
+        ...
+
+# Compatibility class name; new integrations use AisPerfConfig.
+AicPerfConfig = AisPerfConfig
 
 class KvRouterConfig:
     """Values for KV router"""
@@ -1871,7 +1893,8 @@ class KvRouterConfig:
                 derivation. Required only for keyed tracking mode.
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
-                "aic" decays the oldest active prefill request using AIC-predicted duration.
+                "ais" decays the oldest active prefill request using AISimulate-predicted duration.
+                "aic" remains a compatibility input alias.
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_approximate_cache_policy: Process-local approximate-index retention policy,
                 "ttl" or "lru" (default: "ttl"). LRU requires use_kv_events=False.
@@ -2008,7 +2031,7 @@ class MockEngineArgs:
         aic_attention_dp_size: Optional[int] = None,
         aic_nextn: Optional[int] = None,
         aic_nextn_accept_rates: Optional[str] = None,
-        aic_mtp_seed: int = 42,
+        aic_mtp_seed: Optional[int] = None,
         aic_gemm_dtype: Optional[str] = None,
         aic_moe_dtype: Optional[str] = None,
         aic_fmha_dtype: Optional[str] = None,
@@ -2032,6 +2055,24 @@ class MockEngineArgs:
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
         max_model_len: Optional[int] = None,
+        ais_perf_config: Optional[Mapping[str, Any]] = None,
+        *,
+        ais_backend: Optional[str] = None,
+        ais_system: Optional[str] = None,
+        ais_backend_version: Optional[str] = None,
+        ais_tp_size: Optional[int] = None,
+        ais_model_path: Optional[str] = None,
+        ais_moe_tp_size: Optional[int] = None,
+        ais_moe_ep_size: Optional[int] = None,
+        ais_attention_dp_size: Optional[int] = None,
+        ais_nextn: Optional[int] = None,
+        ais_nextn_accept_rates: Optional[str] = None,
+        ais_mtp_seed: Optional[int] = None,
+        ais_gemm_dtype: Optional[str] = None,
+        ais_moe_dtype: Optional[str] = None,
+        ais_fmha_dtype: Optional[str] = None,
+        ais_kv_cache_dtype: Optional[str] = None,
+        ais_comm_dtype: Optional[str] = None,
     ) -> None:
         ...
 
@@ -2085,6 +2126,57 @@ class MockEngineArgs:
 
     @property
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
+
+    @property
+    def ais_perf_config(self) -> Optional[Dict[str, Any]]: ...
+
+    @property
+    def ais_backend(self) -> Optional[str]: ...
+
+    @property
+    def ais_system(self) -> Optional[str]: ...
+
+    @property
+    def ais_backend_version(self) -> Optional[str]: ...
+
+    @property
+    def ais_tp_size(self) -> Optional[int]: ...
+
+    @property
+    def ais_model_path(self) -> Optional[str]: ...
+
+    @property
+    def ais_moe_tp_size(self) -> Optional[int]: ...
+
+    @property
+    def ais_moe_ep_size(self) -> Optional[int]: ...
+
+    @property
+    def ais_attention_dp_size(self) -> Optional[int]: ...
+
+    @property
+    def ais_gemm_dtype(self) -> Optional[str]: ...
+
+    @property
+    def ais_moe_dtype(self) -> Optional[str]: ...
+
+    @property
+    def ais_fmha_dtype(self) -> Optional[str]: ...
+
+    @property
+    def ais_kv_cache_dtype(self) -> Optional[str]: ...
+
+    @property
+    def ais_comm_dtype(self) -> Optional[str]: ...
+
+    @property
+    def ais_nextn(self) -> Optional[int]: ...
+
+    @property
+    def ais_nextn_accept_rates(self) -> Optional[str]: ...
+
+    @property
+    def ais_mtp_seed(self) -> int: ...
 
     @property
     def aic_backend(self) -> Optional[str]: ...
@@ -2539,6 +2631,7 @@ def run_mocker_trace_replay(
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    ais_perf_config: Optional[AisPerfConfig] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2613,6 +2706,7 @@ def run_mocker_synthetic_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    ais_perf_config: Optional[AisPerfConfig] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2936,6 +3030,7 @@ class KvRouter:
         *,
         load_threshold_config: Optional[LoadThresholdConfig] = None,
         session_affinity_mode: str = "hard",
+        ais_perf_config: Optional[AisPerfConfig] = None,
     ) -> None:
         """
         Create a new KvRouter instance.
@@ -2944,7 +3039,8 @@ class KvRouter:
             endpoint: The endpoint to connect to for routing requests
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
-            aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            ais_perf_config: Canonical AIS configuration for effective prefill load tracking
+            aic_perf_config: Legacy alias; cannot be combined with ais_perf_config
             session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
             load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
             session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
@@ -3218,6 +3314,7 @@ class EntrypointArgs:
         enable_streaming_reasoning_dispatch: Optional[bool] = None,
         tokenizer_backend: Optional[str] = None,
         tokenizer_fallback: Optional[bool] = None,
+        ais_perf_config: Optional[AisPerfConfig] = None,
     ) -> None:
         """
         Create EntrypointArgs.
@@ -3246,7 +3343,8 @@ class EntrypointArgs:
             migration_limit: Maximum number of request migrations (0=disabled)
             migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
-            aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            ais_perf_config: Canonical AIS configuration for default KV routing
+            aic_perf_config: Legacy alias; cannot be combined with ais_perf_config
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override

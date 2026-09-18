@@ -18,10 +18,10 @@ from typing import Optional
 
 import uvloop
 
-from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouter, KvRouterConfig
 from dynamo.router.args import (
     DynamoRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
 )
 from dynamo.router.args import parse_args as parse_router_args
@@ -41,13 +41,13 @@ class StandaloneRouterHandler:
         worker_endpoint_path: str,
         block_size: int,
         kv_router_config: KvRouterConfig,
-        aic_perf_config: Optional[AicPerfConfig],
+        ais_perf_config: Optional[AisPerfConfig],
     ):
         self.runtime = runtime
         self.worker_endpoint_path = worker_endpoint_path
         self.block_size = block_size
         self.kv_router_config = kv_router_config
-        self.aic_perf_config = aic_perf_config
+        self.ais_perf_config = ais_perf_config
         self.kv_router: Optional[KvRouter] = None
         self.worker_client: Optional[Client] = None
 
@@ -73,7 +73,7 @@ class StandaloneRouterHandler:
                 endpoint=worker_endpoint,
                 block_size=self.block_size,
                 kv_router_config=self.kv_router_config,
-                aic_perf_config=self.aic_perf_config,
+                ais_perf_config=self.ais_perf_config,
             )
 
         except Exception as e:
@@ -225,7 +225,7 @@ async def worker(runtime: DistributedRuntime):
     )
 
     kv_router_config = build_kv_router_config(config)
-    aic_perf_config = build_aic_perf_config(config)
+    ais_perf_config = build_ais_perf_config(config)
 
     # Create handler
     handler = StandaloneRouterHandler(
@@ -233,7 +233,7 @@ async def worker(runtime: DistributedRuntime):
         config.endpoint,
         config.router_block_size,
         kv_router_config,
-        aic_perf_config,
+        ais_perf_config,
     )
     await handler.initialize()
 

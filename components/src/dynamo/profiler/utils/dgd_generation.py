@@ -23,9 +23,6 @@ from typing import Any, Optional
 import numpy as np
 import yaml
 
-from dynamo._internal.aic import (
-    DEFAULT_BACKEND_VERSIONS as _MOCKER_AIC_BACKEND_VERSIONS,
-)
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.backend_components import MockerComponentName
@@ -34,7 +31,7 @@ from dynamo.planner.config.parallelization import (
     picked_to_aic_model_config_kwargs,
 )
 from dynamo.planner.config.planner_config import (
-    AICPerfModelSpec,
+    AISPerfModelSpec,
     PlannerConfig,
     PlannerPreDeploymentSweepMode,
 )
@@ -54,7 +51,7 @@ from dynamo.profiler.utils.profile_common import (
     is_kv_router_enabled,
     is_mocker_enabled,
     is_planner_enabled,
-    needs_mocker_aic_perf_model,
+    needs_mocker_ais_perf_model,
     needs_profile_data,
 )
 
@@ -63,9 +60,9 @@ logger = logging.getLogger(__name__)
 
 def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
     try:
-        perf_database = importlib.import_module("aiconfigurator_core.sdk.perf_database")
+        perf_database = importlib.import_module("aisimulate_core.sdk.perf_database")
     except ModuleNotFoundError as e:
-        if e.name != "aiconfigurator_core":
+        if e.name not in ("aisimulate_core", "aiconfigurator_core"):
             raise
         return None
     return perf_database.get_latest_database_version
@@ -99,7 +96,7 @@ def assemble_final_config(
     best_prefill_config=None,
     best_decode_config=None,
     aic_spec: Optional[AICInterpolationSpec] = None,
-    aic_perf_model: Optional[AICPerfModelSpec] = None,
+    ais_perf_model: Optional[AISPerfModelSpec] = None,
     resolved_backend: Optional[str] = None,
 ) -> Any:
     """Apply Dynamo features to the picked DGD config via composable layers.
@@ -114,8 +111,8 @@ def assemble_final_config(
     4. **KV router** — configure the frontend for KV-cache-aware routing when
        ``features.kvRouter.enabled`` is true.
     5. **Planner** — inject the Planner service + planner-config ConfigMap.
-       When ``aic_perf_model`` is given, it is embedded so the planner can
-       initialize its direct AIC core model with native identity. When
+       When ``ais_perf_model`` is given, it is embedded so the planner can
+       initialize its direct AISimulate model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
     6. **Profile data** — attach interpolation-data ConfigMap when mocker
@@ -176,7 +173,7 @@ def assemble_final_config(
             best_prefill_mapping=best_prefill_config,
             best_decode_mapping=best_decode_config,
             aic_spec=aic_spec,
-            aic_perf_model=aic_perf_model,
+            ais_perf_model=ais_perf_model,
         )
         config_maps.append(planner_cm)
 
@@ -298,7 +295,7 @@ def generate_mocker_config(
     """Load the mocker DGD template and apply DGDR images and model paths.
 
     When ``aic_spec`` is provided (planner-rapid with an AIC-supported backend),
-    inject ``--aic-perf-model`` plus related flags onto the prefill/decode
+    inject ``--ais-perf-model`` plus related flags onto the prefill/decode
     workers so each mocker pod pulls its latency model directly from the
     AIConfigurator SDK at runtime — no NPZ round-trip through the profiler.
 
@@ -318,7 +315,7 @@ def generate_mocker_config(
                 main_container["image"] = image
 
     model = dgdr.model
-    aic_workers = _mocker_aic_worker_picks(aic_spec)
+    ais_workers = _mocker_ais_worker_picks(aic_spec)
     for worker_name in _mocker_worker_names():
         component = get_component_dict(mocker_config, worker_name)
         if component:
@@ -328,9 +325,9 @@ def generate_mocker_config(
             args_list = main_container.get("args", [])
             args_list = set_argument_value(args_list, "--model-path", model)
             args_list = set_argument_value(args_list, "--model-name", model)
-            pick = aic_workers.get(worker_name) if aic_workers else None
+            pick = ais_workers.get(worker_name) if ais_workers else None
             if pick is not None and aic_spec is not None:
-                args_list = _inject_mocker_aic_args(args_list, aic_spec, pick)
+                args_list = _inject_mocker_ais_args(args_list, aic_spec, pick)
             main_container["args"] = args_list
 
     return mocker_config
@@ -418,7 +415,7 @@ def _infer_subcomponent_from_component_name(component_name: str) -> Optional[str
     return None
 
 
-def _mocker_aic_worker_picks(
+def _mocker_ais_worker_picks(
     aic_spec: Optional[AICInterpolationSpec],
 ) -> Optional[dict[str, PickedParallelConfig]]:
     if aic_spec is None:
@@ -429,36 +426,40 @@ def _mocker_aic_worker_picks(
     }
 
 
-def _inject_mocker_aic_args(
+def _inject_mocker_ais_args(
     args_list: list,
     aic_spec: AICInterpolationSpec,
     pick: PickedParallelConfig,
 ) -> list:
-    """Inject ``--aic-*`` flags onto a single mocker worker's args list.
+    """Inject ``--ais-*`` flags onto a single mocker worker's args list.
 
     The mocker simulates vllm/sglang scheduling; for trtllm AIC data we keep
-    the default ``--engine-type`` and only override ``--aic-backend`` so the
+    the default ``--engine-type`` and only override ``--ais-backend`` so the
     perf-model lookups point at the correct database.
     """
     kwargs = picked_to_aic_model_config_kwargs(pick)
-    if "--aic-perf-model" not in args_list:
-        args_list.append("--aic-perf-model")
-    args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
-    backend_version = _MOCKER_AIC_BACKEND_VERSIONS.get(aic_spec.backend)
+    if "--ais-perf-model" not in args_list:
+        args_list.append("--ais-perf-model")
+    args_list = set_argument_value(args_list, "--ais-backend", aic_spec.backend)
+    backend_version = (
+        get_latest_database_version(system=aic_spec.system, backend=aic_spec.backend)
+        if get_latest_database_version is not None
+        else None
+    )
     if backend_version is not None:
         args_list = set_argument_value(
-            args_list, "--aic-backend-version", backend_version
+            args_list, "--ais-backend-version", backend_version
         )
-    args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
-    args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
+    args_list = set_argument_value(args_list, "--ais-system", aic_spec.system)
+    args_list = set_argument_value(args_list, "--ais-tp-size", str(kwargs["tp_size"]))
     args_list = set_argument_value(
-        args_list, "--aic-moe-tp-size", str(kwargs["moe_tp_size"])
+        args_list, "--ais-moe-tp-size", str(kwargs["moe_tp_size"])
     )
     args_list = set_argument_value(
-        args_list, "--aic-moe-ep-size", str(kwargs["moe_ep_size"])
+        args_list, "--ais-moe-ep-size", str(kwargs["moe_ep_size"])
     )
     args_list = set_argument_value(
-        args_list, "--aic-attention-dp-size", str(kwargs["attention_dp_size"])
+        args_list, "--ais-attention-dp-size", str(kwargs["attention_dp_size"])
     )
     if aic_spec.backend in ("vllm", "sglang"):
         args_list = set_argument_value(args_list, "--engine-type", aic_spec.backend)
@@ -471,7 +472,7 @@ def add_planner_to_config(
     best_prefill_mapping=None,
     best_decode_mapping=None,
     aic_spec: Optional[AICInterpolationSpec] = None,
-    aic_perf_model: Optional[AICPerfModelSpec] = None,
+    ais_perf_model: Optional[AISPerfModelSpec] = None,
 ) -> dict:
     """Add a Planner component and its planner-config ConfigMap to *config_dict*.
 
@@ -486,7 +487,7 @@ def add_planner_to_config(
         best_decode_mapping: Picked decode parallel config.
         aic_spec: AIC interpolation spec (rapid mode). When set, the planner
             runs AIC in-process at bootstrap instead of reading NPZ files.
-        aic_perf_model: Native AIC forward-pass perf model identity for
+        ais_perf_model: Canonical AIS forward-pass perf model identity for
             real-time Planner engine queries.
 
     Returns:
@@ -497,7 +498,7 @@ def add_planner_to_config(
         best_prefill_mapping,
         best_decode_mapping,
         aic_spec,
-        aic_perf_model,
+        ais_perf_model,
     )
     planner_cfg.profile_results_dir = PROFILE_DATA_MOUNT
 
@@ -673,13 +674,15 @@ def _build_planner_config(
     best_prefill_mapping,
     best_decode_mapping,
     aic_spec: Optional[AICInterpolationSpec] = None,
-    aic_perf_model: Optional[AICPerfModelSpec] = None,
+    ais_perf_model: Optional[AISPerfModelSpec] = None,
 ) -> PlannerConfig:
     """Build a PlannerConfig from the DGDR spec and picked parallel configs."""
     if dgdr.features and dgdr.features.planner:
         planner_cfg = dgdr.features.planner.model_copy(deep=True)
     else:
         planner_cfg = PlannerConfig()
+
+    planner_cfg.model_name = dgdr.model
 
     if best_prefill_mapping is not None:
         planner_cfg.prefill_engine_num_gpu = best_prefill_mapping.num_gpus
@@ -689,8 +692,8 @@ def _build_planner_config(
 
     if aic_spec is not None:
         planner_cfg.aic_interpolation = aic_spec
-    if aic_perf_model is not None:
-        planner_cfg.aic_perf_model = aic_perf_model
+    if ais_perf_model is not None:
+        planner_cfg.ais_perf_model = ais_perf_model
 
     # Propagate SLA targets from spec.sla so the post-deployment planner enforces
     # the same SLA used at sweep time. Without this, the planner silently uses
@@ -722,14 +725,14 @@ def _build_planner_config(
     return planner_cfg
 
 
-def build_aic_perf_model_spec(
+def build_ais_perf_model_spec(
     dgdr,
     best_prefill_pick: Optional[PickedParallelConfig],
     best_decode_pick: Optional[PickedParallelConfig],
     resolved_backend: str,
     system: str,
-) -> Optional[AICPerfModelSpec]:
-    """Build native AIC identity for the Planner's AIC core integration.
+) -> Optional[AISPerfModelSpec]:
+    """Build native AIS identity for the Planner's AISimulate integration.
 
     This is intentionally independent from AIC interpolation. It does not
     request a sweep; it only gives the Planner enough identity and parallelism
@@ -758,8 +761,8 @@ def build_aic_perf_model_spec(
 
     if get_latest_database_version is None:
         logger.warning(
-            "AISimulate's AIC perf model is unavailable; Planner will use FPM regression "
-            "instead of native AIC estimates."
+            "AISimulate perf model is unavailable; Planner will use FPM regression "
+            "instead of native AIS estimates."
         )
         return None
 
@@ -769,21 +772,43 @@ def build_aic_perf_model_spec(
     )
     if backend_version is None:
         logger.warning(
-            "No AIC performance database is available for system=%s, backend=%s; "
-            "Planner will use FPM regression instead of native AIC estimates.",
+            "No AIS performance database is available for system=%s, backend=%s; "
+            "Planner will use FPM regression instead of native AIS estimates.",
             system,
             resolved_backend,
         )
         return None
 
-    return AICPerfModelSpec(
-        hf_id=dgdr.model,
-        system=system,
-        backend=resolved_backend,
-        backend_version=backend_version,
-        prefill_pick=best_prefill_pick,
-        decode_pick=best_decode_pick,
-    )
+    roles = {}
+    for role, pick in (
+        ("prefill", best_prefill_pick),
+        ("aggregated" if mode == "agg" else "decode", best_decode_pick),
+    ):
+        if pick is None or (role == "prefill" and mode not in ("prefill", "disagg")):
+            continue
+        if role == "decode" and mode not in ("decode", "disagg"):
+            continue
+        roles[role] = {
+            "model": dgdr.model,
+            "system": system,
+            "backend": resolved_backend,
+            "backend_version": backend_version,
+            "worker_type": role,
+            "tp": pick.tp,
+            "pp": pick.pp,
+            "attention_dp": pick.dp,
+            "moe_tp_size": pick.moe_tp
+            if (pick.moe_tp, pick.moe_ep) != (1, 1)
+            else None,
+            "moe_ep_size": pick.moe_ep
+            if (pick.moe_tp, pick.moe_ep) != (1, 1)
+            else None,
+        }
+    return AISPerfModelSpec(roles=roles)
+
+
+# Compatibility import for older profiler integrations.
+build_aic_perf_model_spec = build_ais_perf_model_spec
 
 
 def build_aic_interpolation_spec(
@@ -801,7 +826,7 @@ def build_aic_interpolation_spec(
     """Build an ``AICInterpolationSpec`` for rapid-mode AIC consumers.
 
     Consumed by both the planner (to bootstrap perf models in-process) and
-    the mocker (via ``--aic-perf-model`` flags injected into worker args).
+    the mocker (via ``--ais-perf-model`` flags injected into worker args).
     Returns ``None`` when any of the following hold:
 
     * neither a throughput-scaling Planner with a rapid sweep nor a mocker in
@@ -827,7 +852,7 @@ def build_aic_interpolation_spec(
         if dgdr.features is not None and dgdr.features.planner is not None
         else None
     )
-    mocker_needs_aic = needs_mocker_aic_perf_model(dgdr)
+    mocker_needs_aic = needs_mocker_ais_perf_model(dgdr)
     planner_needs_aic = (
         is_planner_enabled(dgdr)
         and planner is not None
@@ -903,3 +928,7 @@ def _load_profiling_data(output_dir: str) -> dict:
         pass
 
     return result
+
+
+# Compatibility imports for existing profiler consumers.
+_inject_mocker_aic_args = _inject_mocker_ais_args

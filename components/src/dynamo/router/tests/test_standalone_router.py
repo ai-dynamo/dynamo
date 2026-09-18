@@ -26,7 +26,7 @@ def load_standalone_router_handler():
         "dynamo": stub_module("dynamo"),
         "dynamo.llm": stub_module(
             "dynamo.llm",
-            AicPerfConfig=placeholder_type,
+            AisPerfConfig=placeholder_type,
             KvRouter=placeholder_type,
             KvRouterConfig=placeholder_type,
         ),
@@ -34,7 +34,7 @@ def load_standalone_router_handler():
         "dynamo.router.args": stub_module(
             "dynamo.router.args",
             DynamoRouterConfig=placeholder_type,
-            build_aic_perf_config=lambda config: config,
+            build_ais_perf_config=lambda config: config,
             build_kv_router_config=lambda config: config,
             parse_args=lambda argv=None: argv,
         ),

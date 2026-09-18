@@ -85,23 +85,48 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | 如何生成可选的性能模型启动数据：`rapid`（AIC 仿真，约 30 秒）、`thorough`（真实 GPU，2-4 小时）或 `none`（跳过）。 |
 
-SLA 模式使用 Planner 自有的引擎查询层。如果配置了 `aic_perf_model`，Planner 会把原生 AIC 模型身份和引擎上限直接传给 AISimulate wheel 中的 `aiconfigurator_core.sdk.RustForwardPassPerfModel`；如果原生 AIC 不支持该模型，该模型会自动回退到基于观测 FPM 的回归模型。如果没有配置 `aic_perf_model`，该模型会从 FPM 回归模型启动，并在自基准测试或在线 FPM 观测足够后变为可用。
+SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 为每个 worker 角色创建模型。`ais_perf_model.roles` 中，分离式部署配置 `prefill` 和 `decode`，聚合式部署配置 `aggregated`；角色键必须与 `worker_type` 一致。
+
+新配置默认使用 `estimation_mode: auto` 和 `fallback_policy: deny`。Auto 依次查找 `op_level`、`fpm_interpolation`、`fpm_regression`；`deny` 只禁止显式指定模式后的回退。没有配置 `ais_perf_model` 时，Planner 创建未训练的 `fpm_regression` 模型，并用自基准测试或在线 FPM 训练。
+
+各角色可传入完整上游配置，包括有序 `systems_paths`、`database_mode`、`transfer_policy`、量化和推测解码参数，以及嵌套 `estimator_config`。显式 estimator 设置覆盖 Planner 的采样默认值；`fpm_sample_bucket_size: 16` 对应 `[4, 4]`，regression 和 correction 可以分别配置网格。未知字段及角色身份冲突会报错。
+
+旧 `aic_perf_model` 及其 `hf_id` / parallel-pick 格式只作为兼容输入，旧 native-to-regression 回退语义保持不变。新序列化输出只使用 `ais_perf_model.roles`，同时提供新旧字段会报错。
 
 启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AIC 可用或在线 FPM 足够之前报告 `model_not_ready`。
 
-手动配置原生 AIC 性能模型：
+在 DynamoGraphDeploymentRequest 中配置各角色模型：
 
 ```yaml
 spec:
   features:
     planner:
       optimization_target: sla
-      aic_perf_model:
-        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-        system: h200_sxm
-        backend: vllm
-        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      mode: disagg
+      ais_perf_model:
+        roles:
+          prefill:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: prefill
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+          decode:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: decode
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+            estimator_config:
+              fpm_regression:
+                sampling:
+                  bins_per_axis: [4, 4]
+                  max_observations: 64
+                min_observations: 5
 ```
 
 ### 基于吞吐量的扩缩容设置

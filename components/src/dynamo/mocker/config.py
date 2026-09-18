@@ -186,6 +186,27 @@ def _resolve_raw_engine_args(
     if raw.get("num_gpu_blocks") is not None:
         return raw
 
+    canonical = raw.get("ais_perf_config")
+    if canonical is not None:
+        from dynamo._internal.ais import estimate_canonical_num_gpu_blocks
+
+        raw["num_gpu_blocks"] = estimate_canonical_num_gpu_blocks(
+            canonical,
+            **{
+                key: raw[key]
+                for key in (
+                    "block_size",
+                    "max_num_batched_tokens",
+                    "max_num_seqs",
+                    "gpu_memory_utilization",
+                    "mem_fraction_static",
+                    "free_gpu_memory_fraction",
+                )
+                if raw.get(key) is not None
+            },
+        )
+        return raw
+
     aic_backend = raw.get("aic_backend")
     if aic_backend is None:
         return raw
@@ -221,6 +242,35 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         if getattr(args, "is_decode_worker", False)
         else "aggregated"
     )
+    canonical = getattr(args, "ais_perf_config", None)
+    if canonical is not None:
+        from dynamo.common.configuration.groups.ais_perf_args import (
+            parse_ais_perf_config,
+        )
+
+        canonical = parse_ais_perf_config(canonical)
+        if getattr(args, "aic_perf_model", False) or any(
+            getattr(args, "aic_" + field, None) is not None
+            for field in (
+                "backend",
+                "system",
+                "backend_version",
+                "tp_size",
+                "moe_tp_size",
+                "moe_ep_size",
+                "attention_dp_size",
+                "nextn",
+            )
+        ):
+            raise ValueError(
+                "--ais-perf-config cannot be combined with flat AIS/AIC identity flags"
+            )
+        if canonical.get("worker_type", worker_type) != worker_type:
+            raise ValueError("AIS worker_type must match the mocker worker role")
+        canonical["worker_type"] = worker_type
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+        canonical = ForwardPassPerfModelConfig(**canonical).to_dict()
     aic_backend = None
     aic_system = None
     aic_backend_version = None
@@ -244,27 +294,42 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
     engine_type = getattr(args, "engine_type", None) or "vllm"
     max_model_len = getattr(args, "max_model_len", None)
-    num_gpu_blocks = _resolve_num_gpu_blocks(
-        explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
-        engine_type=engine_type,
-        block_size=getattr(args, "block_size", None),
-        max_num_batched_tokens=getattr(
-            args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
-        ),
-        aic_backend=aic_backend,
-        aic_system=aic_system,
-        aic_backend_version=aic_backend_version,
-        aic_tp_size=aic_tp_size,
-        aic_model_path=aic_model_path,
-        aic_moe_tp_size=aic_moe_tp_size,
-        aic_moe_ep_size=aic_moe_ep_size,
-        aic_attention_dp_size=aic_attention_dp_size,
-        gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
-        mem_fraction_static=getattr(args, "mem_fraction_static", None),
-        free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
-        sglang_page_size=getattr(args, "sglang_page_size", None),
-    )
+    if canonical is not None and getattr(args, "num_gpu_blocks", None) is None:
+        from dynamo._internal.ais import estimate_canonical_num_gpu_blocks
+
+        num_gpu_blocks = estimate_canonical_num_gpu_blocks(
+            canonical,
+            block_size=getattr(args, "block_size", None),
+            max_num_batched_tokens=getattr(
+                args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            ),
+            gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
+            mem_fraction_static=getattr(args, "mem_fraction_static", None),
+            free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
+        )
+    else:
+        num_gpu_blocks = _resolve_num_gpu_blocks(
+            explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
+            engine_type=engine_type,
+            block_size=getattr(args, "block_size", None),
+            max_num_batched_tokens=getattr(
+                args, "max_num_batched_tokens", _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            ),
+            aic_backend=aic_backend,
+            aic_system=aic_system,
+            aic_backend_version=aic_backend_version,
+            aic_tp_size=aic_tp_size,
+            aic_model_path=aic_model_path,
+            aic_moe_tp_size=aic_moe_tp_size,
+            aic_moe_ep_size=aic_moe_ep_size,
+            aic_attention_dp_size=aic_attention_dp_size,
+            gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
+            mem_fraction_static=getattr(args, "mem_fraction_static", None),
+            free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
+            sglang_page_size=getattr(args, "sglang_page_size", None),
+        )
     return MockEngineArgs(
+        ais_perf_config=canonical,
         engine_type=engine_type,
         num_gpu_blocks=num_gpu_blocks,
         block_size=getattr(args, "block_size", 0) or 0,

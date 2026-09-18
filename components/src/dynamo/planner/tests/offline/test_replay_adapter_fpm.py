@@ -376,8 +376,12 @@ def test_replay_engine_caps_keeps_single_rank_defaults():
     assert caps.num_gpu == 1
 
 
+@pytest.mark.parametrize(
+    "identity_source", ["legacy_metadata", "canonical_metadata", "engine_config"]
+)
 def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
     monkeypatch,
+    identity_source,
 ):
     class _Session:
         def __init__(self, tp_size):
@@ -415,7 +419,7 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
 
     def create_session(**kwargs):
         session_requests.append(kwargs)
-        return _Session(kwargs["tp_size"])
+        return _Session(kwargs.get("tp_size", kwargs.get("config", {}).get("tp")))
 
     monkeypatch.setattr(replay_planner, "create_session", create_session)
     monkeypatch.setattr(
@@ -457,6 +461,35 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
         },
     }
 
+    if identity_source != "legacy_metadata":
+        for role, raw in metadata.items():
+            config = raw["config"]
+            config["model"] = config.pop("model_path")
+            config["tp"] = config.pop("tp_size")
+            config["attention_dp"] = config.pop("attention_dp_size")
+            config["worker_type"] = role
+            config["systems_paths"] = [f"data-{role}"]
+            config["estimator_config"] = {"correction": {"enabled": False}}
+        if identity_source == "engine_config":
+
+            def role_args(role, seqs):
+                return MockEngineArgs.from_json(
+                    json.dumps(
+                        {
+                            "worker_type": role,
+                            "ais_perf_config": metadata[role]["config"],
+                            "max_num_batched_tokens": 128,
+                            "max_num_seqs": seqs,
+                            "num_gpu_blocks": 64,
+                            "block_size": 16,
+                        }
+                    )
+                )
+
+            prefill_args = role_args("prefill", 1)
+            decode_args = role_args("decode", 2)
+            metadata = None
+
     result = replay_planner.prepare_planner_replay(
         extra_engine_args=None,
         prefill_engine_args=prefill_args,
@@ -474,7 +507,19 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
     )
 
     assert result is adapter
-    assert [request["tp_size"] for request in session_requests] == [2, 1]
+    assert [
+        request.get("tp_size", request.get("config", {}).get("tp"))
+        for request in session_requests
+    ] == [2, 1]
+    if identity_source != "legacy_metadata":
+        assert [request["config"]["worker_type"] for request in session_requests] == [
+            "prefill",
+            "decode",
+        ]
+        assert [request["config"]["systems_paths"] for request in session_requests] == [
+            ["data-prefill"],
+            ["data-decode"],
+        ]
     assert adapter.prefill_fpms
     assert adapter.decode_fpms
     assert adapter.prefill_fpms[0].wall_time == pytest.approx(0.002)

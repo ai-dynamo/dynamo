@@ -27,7 +27,7 @@ pub trait DecodeInterpolator: Send + Sync {
 
 /// Callback trait for direct AIC SDK calls.
 /// Implementors call the Rust AIC core API.
-pub trait AicCallback: Send + Sync {
+pub trait AisCallback: Send + Sync {
     /// Predict prefill latency in ms.
     /// Parameters: (batch_size, effective_isl, prefix)
     fn predict_prefill(
@@ -41,6 +41,9 @@ pub trait AicCallback: Send + Sync {
     /// Parameters: (batch_size, isl, osl)
     fn predict_decode(&self, batch_size: usize, isl: usize, osl: usize) -> Result<f64>;
 }
+
+/// Deprecated compatibility name.
+pub use AisCallback as AicCallback;
 
 /// Wrapper to implement PrefillInterpolator for the concrete Interp1D type
 struct PrefillInterp1D {
@@ -229,8 +232,13 @@ impl PerfModel {
     }
 
     /// Create an Aiconfigurator perf model from a callback.
-    pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
+    pub fn from_ais_callback(callback: Arc<dyn AicCallback>) -> Self {
         PerfModel::Aiconfigurator { callback }
+    }
+
+    /// Deprecated constructor name for existing Rust integrations.
+    pub fn from_aic_callback(callback: Arc<dyn AicCallback>) -> Self {
+        Self::from_ais_callback(callback)
     }
 
     /// Predict prefill time in milliseconds.

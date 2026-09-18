@@ -116,6 +116,8 @@ pub(crate) fn engine_components(
         max_num_batched_tokens: args.max_num_batched_tokens.unwrap_or(usize::MAX),
         enable_prefix_caching: args.enable_prefix_caching,
         enable_chunked_prefill: args.enable_chunked_prefill,
+        prefill_schedule_interval: args.prefill_schedule_interval,
+        prefill_decode_interval: args.prefill_decode_interval,
         speedup_ratio: args.speedup_ratio,
         decode_speedup_ratio: args.decode_speedup_ratio,
         aic_nextn: args.aic_nextn,
@@ -158,6 +160,7 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
+        kv_eviction_policy: Default::default(),
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
         num_gpu_blocks_is_explicit: None,
@@ -193,6 +196,7 @@ pub(crate) fn disaggregated_replay_setup(
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
+        kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
         num_gpu_blocks_is_explicit: prefill_role.num_gpu_blocks_is_explicit,

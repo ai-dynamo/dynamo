@@ -6,16 +6,15 @@
 from __future__ import annotations
 
 import pytest
-from aiconfigurator_core.sdk.engine import compile_engine
+from aisimulate_core.sdk.engine import compile_engine
 
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.parallelization import PickedParallelConfig
-from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
-from dynamo.planner.core.perf_model.aic_adapter import PlannerEnginePerfModel
+from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
+from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
 
 pytestmark = [
@@ -34,15 +33,18 @@ def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _config() -> PlannerConfig:
-    pick = PickedParallelConfig()
     return PlannerConfig.model_construct(
-        aic_perf_model=AICPerfModelSpec.model_construct(
-            hf_id="Qwen/Qwen3-32B",
-            system="h200_sxm",
-            backend="vllm",
-            backend_version="current",
-            prefill_pick=pick,
-            decode_pick=pick,
+        ais_perf_model=AISPerfModelSpec(
+            roles={
+                role: {
+                    "model": "Qwen/Qwen3-32B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "backend_version": "current",
+                    "worker_type": role,
+                }
+                for role in ("prefill", "decode")
+            }
         ),
         max_num_fpm_samples=16,
         load_min_observations=5,
@@ -114,7 +116,7 @@ def test_planner_uses_native_aic_for_estimates_and_capacity() -> None:
 
 def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
     config = PlannerConfig.model_construct(
-        aic_perf_model=None,
+        ais_perf_model=None,
         max_num_fpm_samples=16,
         load_min_observations=2,
         fpm_sample_bucket_size=16,

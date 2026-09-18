@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import builtins
-import types
 
 import pytest
 
-from dynamo._internal.aic import (
+from dynamo._internal.ais import (
     _DEFAULT_NEXTN_ACCEPT_RATES,
     _NEXTN_ACCEPT_RATES_LEN,
     DEFAULT_FREE_GPU_MEMORY_FRACTION,
@@ -34,7 +33,7 @@ def _patch_memory(monkeypatch, return_value=123):
     truth), so these tests assert the dynamo->AIC mapping rather than recompute
     the math themselves.
     """
-    memory = pytest.importorskip("aiconfigurator_core.sdk.memory")
+    memory = pytest.importorskip("aisimulate_core.sdk.memory")
     calls = []
 
     def fake(model_path, system, backend, **kwargs):
@@ -45,52 +44,6 @@ def _patch_memory(monkeypatch, return_value=123):
 
     monkeypatch.setattr(memory, "estimate_num_gpu_blocks", fake)
     return calls
-
-
-def test_runtime_loader_does_not_import_upper_aiconfigurator(monkeypatch):
-    """The mocker/runtime path must remain usable with only the core wheel."""
-    pytest.importorskip("aiconfigurator_core")
-    import dynamo._internal.aic as aic_mod
-
-    real_import = builtins.__import__
-
-    def reject_upper_package(name, *args, **kwargs):
-        """Reject accidental imports of the upper AIC distribution."""
-        if name == "aiconfigurator" or name.startswith("aiconfigurator."):
-            raise AssertionError(f"runtime imported upper package: {name}")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", reject_upper_package)
-    loaded = aic_mod._load_aiconfigurator()
-
-    assert set(loaded) == {
-        "config",
-        "get_backend",
-        "get_model",
-        "get_database",
-        "get_supported_databases",
-    }
-
-
-def test_runtime_loader_propagates_internal_missing_module(monkeypatch):
-    import dynamo._internal.aic as aic_mod
-
-    real_import = builtins.__import__
-    missing_internal = ModuleNotFoundError(
-        name="aiconfigurator_core.sdk.internal_dependency"
-    )
-
-    def broken_core_module(name, *args, **kwargs):
-        if name == "aiconfigurator_core.sdk":
-            raise missing_internal
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", broken_core_module)
-
-    with pytest.raises(ModuleNotFoundError) as exc_info:
-        aic_mod._load_aiconfigurator()
-
-    assert exc_info.value is missing_internal
 
 
 def test_estimate_num_gpu_blocks_maps_vllm_to_total_fraction(monkeypatch):
@@ -220,7 +173,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
     real_import = builtins.__import__
 
     def missing_memory(name, *args, **kwargs):
-        if name == "aiconfigurator_core.sdk.memory":
+        if name == "aisimulate_core.sdk.memory":
             raise ModuleNotFoundError(name="aiconfigurator_core")
         return real_import(name, *args, **kwargs)
 
@@ -245,7 +198,7 @@ def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch)
     missing_dependency = ModuleNotFoundError(name="transitive_dependency")
 
     def broken_memory_module(name, *args, **kwargs):
-        if name == "aiconfigurator_core.sdk.memory":
+        if name == "aisimulate_core.sdk.memory":
             raise missing_dependency
         return real_import(name, *args, **kwargs)
 
@@ -349,7 +302,7 @@ def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
 
 
 def test_resolve_quant_mode_per_field():
-    common = pytest.importorskip("aiconfigurator_core.sdk.common")
+    common = pytest.importorskip("aisimulate_core.sdk.common")
 
     assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
     assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
@@ -363,7 +316,7 @@ def test_resolve_quant_mode_per_field():
 
 
 def test_resolve_quant_mode_rejects_unsupported_per_field():
-    pytest.importorskip("aiconfigurator_core.sdk.common")
+    pytest.importorskip("aisimulate_core.sdk.common")
 
     # `int4` -> `int4_wo` is valid for GEMM/MoE but not for KV cache or FMHA,
     # which have narrower vocabularies. The error must name the field and the
@@ -378,50 +331,172 @@ def test_resolve_quant_mode_rejects_unsupported_per_field():
         _resolve_quant_mode("gemm", "not-a-dtype")
 
 
-def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
-    common = pytest.importorskip("aiconfigurator_core.sdk.common")
-    import dynamo._internal.aic as aic_mod
+class _CanonicalEstimator:
+    def __init__(self, config):
+        self.config = config
+        self.calls = []
 
-    captured: dict = {}
+    def diagnostics(self):
+        return {"readiness": "ready", "provenance": {"config": self.config}}
 
-    class FakeModelConfig:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
+    def estimate_forward_pass_time_ms(self, fpm):
+        self.calls.append(fpm["scheduled_requests"])
+        return 3.0
 
-    fake_model = types.SimpleNamespace(
-        model_name="m", context_ops=[], generation_ops=[], _nextn=0
-    )
-    fake = {
-        "config": types.SimpleNamespace(ModelConfig=FakeModelConfig),
-        "get_database": lambda system, backend, version: object(),
-        "get_supported_databases": lambda: {},
-        "get_model": lambda model_path, model_config, backend_name: fake_model,
-        "get_backend": lambda backend_name: object(),
+
+@pytest.fixture
+def canonical_estimator(monkeypatch):
+    from aisimulate_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    created = []
+
+    def create(config):
+        model = _CanonicalEstimator(config)
+        created.append(model)
+        return model
+
+    monkeypatch.setattr(RustForwardPassPerfModel, "best_available", create)
+    return created
+
+
+def test_session_passes_full_canonical_config_and_cached_prefix(canonical_estimator):
+    from dynamo._internal.ais import AisSession
+
+    config = {
+        "model": "model",
+        "system": "gpu",
+        "backend": "vllm",
+        "worker_type": "aggregated",
+        "systems_paths": ["first", "second"],
+        "estimator_config": {"correction": {"enabled": False}},
     }
-    monkeypatch.setattr(aic_mod, "_load_aiconfigurator", lambda: fake)
-    # Skip the optional compiled-engine build (it would import aiconfigurator's
-    # AIC-core Rust engine step); we only care about the ModelConfig wiring here.
-    monkeypatch.setenv("DYNAMO_AIC_DISABLE_COMPILED_ENGINE", "1")
+    session = AisSession(config=config)
+    assert canonical_estimator[0].config == config
+    assert session.predict_prefill(2, 128, 512) == 3
+    assert canonical_estimator[0].calls == [
+        {
+            "num_prefill_requests": 2,
+            "sum_prefill_tokens": 256,
+            "sum_prefill_kv_tokens": 1024,
+        }
+    ]
 
-    aic_mod.AicSession(
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"tp_size": 2},
+        {"backend_version": "current"},
+        {"gemm_dtype": "fp8"},
+        {"model_path": "other"},
+        {"nextn": 2},
+    ],
+)
+def test_session_rejects_canonical_legacy_identity_conflicts(extra):
+    from dynamo._internal.ais import AisSession
+
+    with pytest.raises(ValueError, match="cannot be combined"):
+        AisSession(config={"model": "model"}, **extra)
+
+
+@pytest.mark.parametrize(
+    "cost",
+    [
+        {"nextn": 2},
+        {
+            "nextn": 0,
+            "speculation": {"kind": "ngram", "params": {"num_speculative_tokens": 2}},
+        },
+    ],
+)
+def test_session_decode_preserves_stride_kv_and_verification_width(
+    canonical_estimator, cost
+):
+    from dynamo._internal.ais import AisSession
+
+    session = AisSession(config={"model": "model", **cost})
+    assert session.predict_decode(2, 100, 35) == 3 * 34
+    assert canonical_estimator[0].calls == [
+        {"num_decode_requests": 6, "sum_decode_kv_tokens": 6 * 101},
+        {"num_decode_requests": 6, "sum_decode_kv_tokens": 6 * 133},
+    ]
+
+
+def test_session_rejects_cold_regression(monkeypatch):
+    from aisimulate_core.sdk.rust_engine_step import RustForwardPassPerfModel
+
+    from dynamo._internal.ais import AisSession
+
+    class Cold(_CanonicalEstimator):
+        def diagnostics(self):
+            return {"readiness": "insufficient_data"}
+
+    monkeypatch.setattr(RustForwardPassPerfModel, "best_available", Cold)
+    with pytest.raises(ValueError, match="cold fpm_regression"):
+        AisSession(config={"model": "model", "estimation_mode": "fpm_regression"})
+
+
+def test_session_legacy_quantization_maps_into_canonical_config(canonical_estimator):
+    from dynamo._internal.ais import AisSession
+
+    AisSession(
         backend_name="vllm",
         system="h200_sxm",
-        model_path="m",
+        model_path="model",
         tp_size=1,
         gemm_dtype="int4",
-        moe_dtype="w4a16_mxfp4",
         fmha_dtype="fp8",
-        kv_cache_dtype="auto",  # -> omitted, ModelConfig keeps its default
-        comm_dtype="fp8",
+        kv_cache_dtype="auto",
         nextn=2,
-        nextn_accept_rates="0.85,0.3",
     )
-
-    assert captured["gemm_quant_mode"] == common.GEMMQuantMode.int4_wo
-    assert captured["moe_quant_mode"] == common.MoEQuantMode.w4a16_mxfp4
-    assert captured["fmha_quant_mode"] == common.FMHAQuantMode.fp8
-    assert "kvcache_quant_mode" not in captured
-    assert captured["comm_quant_mode"] == common.CommQuantMode.fp8
+    captured = canonical_estimator[0].config
+    assert captured["gemm_quant_mode"] == "int4_wo"
+    assert captured["fmha_quant_mode"] == "fp8"
+    assert captured["kvcache_quant_mode"] is None
     assert captured["nextn"] == 2
-    assert "nextn_accepted" not in captured
-    assert "nextn_accept_rates" not in captured
+    assert captured["estimation_mode"] == "auto"
+    assert captured["fallback_policy"] == "deny"
+
+
+def test_session_reports_disabled_compiled_path(monkeypatch):
+    from dynamo._internal.ais import AisSession
+
+    monkeypatch.setenv("DYNAMO_AIC_DISABLE_COMPILED_ENGINE", "1")
+    with pytest.raises(ValueError, match="requires the compiled canonical estimator"):
+        AisSession(config={"model": "model"})
+
+
+@pytest.mark.parametrize("nextn,attention_dp", [(0, 1), (2, 1), (0, 2), (2, 2)])
+def test_canonical_session_matches_native_static_query_oracle(nextn, attention_dp):
+    # Only packaged model metadata/performance tables are loaded, no weights or GPU.
+    from aisimulate_core.sdk.engine import EngineHandle
+
+    from dynamo._internal.ais import AisSession
+
+    payload = {
+        "model": "Qwen/Qwen3-32B",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "backend_version": "current",
+        "worker_type": "aggregated",
+        "estimation_mode": "op_level",
+        "nextn": nextn,
+        "attention_dp": attention_dp,
+    }
+    session = AisSession(config=payload)
+    oracle = EngineHandle.compile(
+        model_path=payload["model"],
+        system=payload["system"],
+        backend=payload["backend"],
+        backend_version="current",
+        nextn=nextn,
+        attention_dp_size=attention_dp,
+    )
+    for batch, new_tokens, prefix in [(1, 128, 0), (2, 128, 256)]:
+        assert session.predict_prefill(batch, new_tokens, prefix) == pytest.approx(
+            oracle.predict_prefill_latency(batch, new_tokens + prefix, prefix)
+        )
+    for batch, context, output in [(4, 1024, 2), (2, 512, 35)]:
+        assert session.predict_decode(batch, context, output) == pytest.approx(
+            oracle.predict_decode_latency(batch, context, output)
+        )

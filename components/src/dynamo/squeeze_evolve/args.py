@@ -14,9 +14,9 @@ import argparse
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.groups.aic_perf_args import (
-    AicPerfArgGroup,
-    AicPerfConfigBase,
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
@@ -38,11 +38,11 @@ def _nullable_int(raw: str) -> Optional[int]:
     return int(raw)
 
 
-class SqueezeEvolveRunConfig(KvRouterConfigBase, AicPerfConfigBase):
+class SqueezeEvolveRunConfig(KvRouterConfigBase, AisPerfConfigBase):
     """Squeeze-Evolve config: the SE knobs + the shared per-tier KvRouter knobs.
 
-    Inherits the KvRouter/AicPerf bases directly (NOT ``DynamoRouterConfig``) so we
-    reuse ``kv_router_kwargs()`` / ``aic_perf_kwargs()`` + the load-aware preset
+    Inherits the KvRouter/AisPerf bases directly (NOT ``DynamoRouterConfig``) so we
+    reuse ``kv_router_kwargs()`` / ``ais_perf_kwargs()`` + the load-aware preset
     without ``DynamoRouterConfig``'s single-``--endpoint`` requirement — Squeeze-Evolve
     has N tier endpoints (in ``--tiers``).
     """
@@ -75,6 +75,13 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AicPerfConfigBase):
 
     def validate(self) -> None:  # type: ignore[override]
         self.apply_load_aware_preset()  # shared KvRouter preset (KvRouterConfigBase)
+        if self.router_prefill_load_model in ("ais", "aic"):
+            self.ais_perf_kwargs()
+            self.router_prefill_load_model = "ais"
+        elif self.ais_perf_config is not None:
+            raise ValueError(
+                "--ais-perf-config requires --router-prefill-load-model=ais"
+            )
         if not self.tiers:
             raise ValueError("--tiers is required (JSON array, cheapest first)")
         self.confidence_percentiles = [float(p) for p in self.confidence_percentiles]
@@ -222,7 +229,7 @@ class SqueezeEvolveArgGroup(ArgGroup):
         )
         # Shared per-tier KvRouter knobs (--router-*) + AIC perf model flags.
         KvRouterArgGroup().add_arguments(parser)
-        AicPerfArgGroup().add_arguments(parser)
+        AisPerfArgGroup().add_arguments(parser)
 
 
 def parse_args(argv: Optional[list[str]] = None) -> SqueezeEvolveRunConfig:

@@ -503,11 +503,11 @@ class KvRouterArgGroup(ArgGroup):
             flag_name="--router-prefill-load-model",
             env_var="DYN_ROUTER_PREFILL_LOAD_MODEL",
             default="none",
-            choices=["none", "aic"],
+            choices=["none", "ais", "aic"],
             help=(
                 "[EXPERIMENTAL] KV Router: Prompt-side prefill load model. "
                 "'none' keeps static prompt load accounting. "
-                "'aic' decays the oldest active prefill request using AIC-predicted duration."
+                "'ais' decays the oldest active prefill request using AISimulate-predicted duration."
             ),
         )
         add_argument(

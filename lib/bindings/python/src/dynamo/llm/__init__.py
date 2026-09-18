@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
-from dynamo._core import AicPerfConfig as AicPerfConfig
+from dynamo._core import AisPerfConfig as AisPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher
@@ -63,6 +63,36 @@ except ImportError:
 
 from .exceptions import HttpError
 from .exceptions import RouterQueueLimitExceeded as RouterQueueLimitExceeded
+
+
+def AicPerfConfig(*args, **kwargs):
+    """Deprecated constructor retaining the legacy positional argument order."""
+    names = (
+        "aic_backend",
+        "aic_system",
+        "aic_model_path",
+        "aic_tp_size",
+        "aic_backend_version",
+        "aic_moe_tp_size",
+        "aic_moe_ep_size",
+        "aic_attention_dp_size",
+        "aic_nextn",
+        "aic_nextn_accept_rates",
+        "aic_gemm_dtype",
+        "aic_moe_dtype",
+        "aic_fmha_dtype",
+        "aic_kv_cache_dtype",
+        "aic_comm_dtype",
+    )
+    if len(args) > len(names):
+        raise TypeError(
+            f"AicPerfConfig expected at most {len(names)} positional arguments"
+        )
+    for name, value in zip(names, args):
+        if name in kwargs:
+            raise TypeError(f"AicPerfConfig got multiple values for {name}")
+        kwargs[name] = value
+    return AisPerfConfig(**kwargs)
 
 
 class RoutedEngine(Protocol):

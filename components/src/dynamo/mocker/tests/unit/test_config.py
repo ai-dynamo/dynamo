@@ -840,3 +840,89 @@ def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
 
     with pytest.raises(SystemExit):
         parse_args(["--response-plane", "invalid"])
+
+
+def test_canonical_ais_config_preserves_role_controls_and_roots(tmp_path):
+    roots = [tmp_path / "first", tmp_path / "second"]
+    for root in roots:
+        root.mkdir()
+    canonical = {
+        "model": "example/model",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "prefill",
+        "estimation_mode": "fpm_regression",
+        "systems_paths": [str(root) for root in roots],
+        "estimator_config": {"fpm_regression": {"sampling": {"bins_per_axis": [4, 8]}}},
+    }
+    args = CONFIG.build_mocker_engine_args(
+        make_args(
+            ais_perf_config=canonical,
+            is_prefill_worker=True,
+            num_gpu_blocks=128,
+        )
+    )
+    assert args.ais_perf_config["worker_type"] == "prefill"
+    assert args.ais_perf_config["systems_paths"] == canonical["systems_paths"]
+    assert args.ais_perf_config["estimator_config"] == canonical["estimator_config"]
+    assert args.ais_backend == "vllm"
+    assert args.aic_backend == args.ais_backend
+
+
+def test_canonical_ais_config_rejects_role_and_legacy_conflicts():
+    canonical = {
+        "model": "example/model",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "decode",
+    }
+    with pytest.raises(ValueError, match="worker role"):
+        CONFIG.build_mocker_engine_args(make_args(ais_perf_config=canonical))
+    with pytest.raises(ValueError, match="cannot be combined"):
+        CONFIG.build_mocker_engine_args(
+            make_args(ais_perf_config=canonical, aic_tp_size=1)
+        )
+
+
+def test_ais_sdk_accepts_full_config_and_legacy_constructor():
+    from dynamo.llm import AicPerfConfig, AisPerfConfig
+
+    payload = {
+        "model": "example/model",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "aggregated",
+        "estimation_mode": "fpm_regression",
+        "estimator_config": {"fpm_regression": {"sampling": {"bins_per_axis": [4, 8]}}},
+    }
+    config = AisPerfConfig(payload)
+    assert config.to_dict()["estimator_config"] == payload["estimator_config"]
+    legacy = AicPerfConfig("vllm", "h200_sxm", "example/model")
+    assert legacy.to_dict()["worker_type"] == "aggregated"
+    assert legacy.to_dict()["estimation_mode"] == "auto"
+    with pytest.raises(ValueError, match="cannot be combined"):
+        AisPerfConfig(payload, aic_tp_size=1)
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        AisPerfConfig({**payload, "typo": True})
+
+
+def test_mocker_sdk_flat_ais_input_aliases_and_conflicts():
+    args = MockEngineArgs(
+        ais_backend="vllm",
+        ais_system="h200_sxm",
+        ais_model_path="example/model",
+        ais_tp_size=2,
+        ais_moe_tp_size=2,
+        ais_moe_ep_size=1,
+        ais_attention_dp_size=1,
+        ais_mtp_seed=17,
+    )
+    assert args.ais_backend == args.aic_backend == "vllm"
+    assert args.ais_tp_size == args.aic_tp_size == 2
+    assert args.ais_mtp_seed == args.aic_mtp_seed == 17
+    with pytest.raises(ValueError, match="cannot be combined"):
+        MockEngineArgs(ais_backend="vllm", aic_backend="vllm")
+    with pytest.raises(ValueError, match="cannot be combined"):
+        MockEngineArgs(ais_mtp_seed=42, aic_mtp_seed=42)
+    with pytest.raises(TypeError, match="unexpected AIS option"):
+        MockEngineArgs(ais_backend_typo="vllm")

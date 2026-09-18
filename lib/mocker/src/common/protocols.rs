@@ -439,21 +439,38 @@ struct MockEngineArgsSerde {
     is_prefill: OptionalConfigValue<bool>,
     is_decode: OptionalConfigValue<bool>,
     planner_profile_data: OptionalConfigValue<PathBuf>,
+    #[serde(rename = "ais_backend", alias = "aic_backend")]
     aic_backend: OptionalConfigValue<String>,
+    #[serde(rename = "ais_system", alias = "aic_system")]
     aic_system: OptionalConfigValue<String>,
+    #[serde(rename = "ais_backend_version", alias = "aic_backend_version")]
     aic_backend_version: OptionalConfigValue<String>,
+    #[serde(rename = "ais_tp_size", alias = "aic_tp_size")]
+    #[serde(alias = "tensor_parallel_size")]
     aic_tp_size: OptionalConfigValue<usize>,
+    #[serde(rename = "ais_model_path", alias = "aic_model_path")]
     aic_model_path: OptionalConfigValue<String>,
+    #[serde(rename = "ais_moe_tp_size", alias = "aic_moe_tp_size")]
     aic_moe_tp_size: OptionalConfigValue<usize>,
+    #[serde(rename = "ais_moe_ep_size", alias = "aic_moe_ep_size")]
     aic_moe_ep_size: OptionalConfigValue<usize>,
+    #[serde(rename = "ais_attention_dp_size", alias = "aic_attention_dp_size")]
     aic_attention_dp_size: OptionalConfigValue<usize>,
+    #[serde(rename = "ais_gemm_dtype", alias = "aic_gemm_dtype")]
     aic_gemm_dtype: OptionalConfigValue<String>,
+    #[serde(rename = "ais_moe_dtype", alias = "aic_moe_dtype")]
     aic_moe_dtype: OptionalConfigValue<String>,
+    #[serde(rename = "ais_fmha_dtype", alias = "aic_fmha_dtype")]
     aic_fmha_dtype: OptionalConfigValue<String>,
+    #[serde(rename = "ais_kv_cache_dtype", alias = "aic_kv_cache_dtype")]
     aic_kv_cache_dtype: OptionalConfigValue<String>,
+    #[serde(rename = "ais_comm_dtype", alias = "aic_comm_dtype")]
     aic_comm_dtype: OptionalConfigValue<String>,
+    #[serde(rename = "ais_nextn", alias = "aic_nextn")]
     aic_nextn: OptionalConfigValue<usize>,
+    #[serde(rename = "ais_nextn_accept_rates", alias = "aic_nextn_accept_rates")]
     aic_nextn_accept_rates: OptionalConfigValue<String>,
+    #[serde(rename = "ais_mtp_seed", alias = "aic_mtp_seed")]
     aic_mtp_seed: OptionalConfigValue<u64>,
     gpu_memory_utilization: OptionalConfigValue<f64>,
     mem_fraction_static: OptionalConfigValue<f64>,
@@ -475,6 +492,9 @@ struct MockEngineArgsSerde {
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
     timing_model: OptionalConfigValue<TimingModelSerde>,
+    ais_perf_config: OptionalConfigValue<serde_json::Value>,
+    prefill_schedule_interval: OptionalConfigValue<usize>,
+    prefill_decode_interval: OptionalConfigValue<usize>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
 }
@@ -484,7 +504,14 @@ struct MockEngineArgsSerde {
 enum TimingModelSerde {
     Default,
     Polynomial,
-    Fixed { prefill_ms: f64, decode_ms: f64 },
+    Fixed {
+        prefill_ms: f64,
+        decode_ms: f64,
+    },
+    External {
+        provider: String,
+        config: serde_json::Value,
+    },
 }
 
 fn load_perf_model(path: &Path) -> Arc<PerfModel> {
@@ -581,6 +608,19 @@ pub struct MockEngineArgs {
     #[builder(default = "Arc::new(PerfModel::default())")]
     pub perf_model: Arc<PerfModel>,
 
+    /// Complete canonical AISimulate config. This is also the saved identity;
+    /// estimator settings are never reconstructed from the legacy flat fields.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ais_perf_config: Option<serde_json::Value>,
+
+    #[builder(default = "1")]
+    #[validate(range(min = 1))]
+    pub prefill_schedule_interval: usize,
+
+    #[builder(default = "0")]
+    pub prefill_decode_interval: usize,
+
     /// If set, indicates direct AIC SDK calls should be used.
     /// The value is the backend name (e.g., "sglang", "vllm").
     /// The Python layer reads this and overrides perf_model with an Aiconfigurator callback.
@@ -660,16 +700,19 @@ pub struct MockEngineArgs {
     /// verification-round latency.
     #[builder(default = "None")]
     #[validate(range(min = 1, max = 5))]
+    #[serde(rename = "ais_nextn")]
     pub aic_nextn: Option<usize>,
 
     /// Conditional acceptance rates for draft tokens, comma-separated.
     /// Entry i is P(draft i accepted | every earlier draft was accepted).
     #[builder(default = "None")]
+    #[serde(rename = "ais_nextn_accept_rates")]
     pub aic_nextn_accept_rates: Option<String>,
 
     /// Base RNG seed for MTP burst sampling. Worker rank is added with
     /// wrapping arithmetic before constructing each worker-local sampler.
     #[builder(default = "42")]
+    #[serde(rename = "ais_mtp_seed")]
     pub aic_mtp_seed: u64,
 
     /// GPU memory fraction for AIC KV capacity estimation with vLLM.
@@ -954,9 +997,33 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
                 builder = builder.perf_model(load_perf_model(&path));
             }
         }
+        let mut ais_perf_config = compat.ais_perf_config.into_nullable().flatten();
+        if let Some(interval) = compat
+            .prefill_schedule_interval
+            .into_non_null("prefill_schedule_interval")?
+        {
+            builder = builder.prefill_schedule_interval(interval);
+        }
+        if let Some(interval) = compat
+            .prefill_decode_interval
+            .into_non_null("prefill_decode_interval")?
+        {
+            builder = builder.prefill_decode_interval(interval);
+        }
         if let Some(timing_model) = compat.timing_model.into_nullable().flatten() {
+            if ais_perf_config.is_some() {
+                return Err("ais_perf_config cannot be combined with timing_model".to_string());
+            }
             let perf_model = match timing_model {
                 TimingModelSerde::Default | TimingModelSerde::Polynomial => PerfModel::Polynomial,
+                TimingModelSerde::External { provider, config } => {
+                    if provider != "aic" && provider != "ais" {
+                        return Err(format!("unsupported external timing provider: {provider}"));
+                    }
+                    ais_perf_config = Some(config);
+                    // The Python binding materializes the process-local callback.
+                    PerfModel::Polynomial
+                }
                 TimingModelSerde::Fixed {
                     prefill_ms,
                     decode_ms,
@@ -1096,6 +1163,23 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
             builder = builder.trtllm(trtllm);
         }
 
+        if let Some(config) = ais_perf_config {
+            if !config.is_object() {
+                return Err("ais_perf_config must be a canonical config object".to_string());
+            }
+            let configured_role = config
+                .get("worker_type")
+                .and_then(serde_json::Value::as_str);
+            let role = match worker_type {
+                WorkerType::Aggregated => "aggregated",
+                WorkerType::Prefill => "prefill",
+                WorkerType::Decode => "decode",
+            };
+            if configured_role != Some(role) {
+                return Err(format!("AIS worker_type must match the {role} engine role"));
+            }
+            builder = builder.ais_perf_config(Some(config));
+        }
         builder
             .build()
             .map_err(|e| format!("Failed to build MockEngineArgs: {e}"))?
@@ -1141,9 +1225,97 @@ impl MockEngineArgs {
     }
 
     pub fn normalized(mut self) -> anyhow::Result<Self> {
+        self.materialize_ais_config()?;
         self.materialize_defaults();
         self.validate_config()?;
         Ok(self)
+    }
+
+    fn materialize_ais_config(&mut self) -> anyhow::Result<()> {
+        let Some(config) = self.ais_perf_config.as_ref() else {
+            return Ok(());
+        };
+        let canonical: aisimulate_core::ForwardPassPerfModelConfig =
+            serde_json::from_value(config.clone())
+                .map_err(|error| anyhow::anyhow!("invalid ais_perf_config: {error}"))?;
+        // The upstream schema owns required fields, enums, unknown-field
+        // rejection and defaults. Validate before any legacy branch selection.
+        let config = serde_json::to_value(canonical)?;
+        anyhow::ensure!(
+            config
+                .pointer("/speculation/kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("ngram"),
+            "Mocker does not implement ngram draft scheduling; use a supported scheduler speculation mode"
+        );
+        let role = match self.worker_type {
+            WorkerType::Aggregated => "aggregated",
+            WorkerType::Prefill => "prefill",
+            WorkerType::Decode => "decode",
+        };
+        anyhow::ensure!(
+            config
+                .get("worker_type")
+                .and_then(serde_json::Value::as_str)
+                == Some(role),
+            "AIS worker_type must match the {role} engine role"
+        );
+        macro_rules! string_field {
+            ($name:literal, $target:ident) => {
+                if let Some(value) = config.get($name).and_then(serde_json::Value::as_str) {
+                    anyhow::ensure!(
+                        self.$target.as_deref().is_none_or(|old| old == value),
+                        "AIS {} conflicts with legacy {}",
+                        $name,
+                        stringify!($target)
+                    );
+                    self.$target = Some(value.to_string());
+                }
+            };
+        }
+        macro_rules! size_field {
+            ($name:literal, $target:ident) => {
+                if let Some(value) = config.get($name).and_then(serde_json::Value::as_u64) {
+                    let value = usize::try_from(value)?;
+                    anyhow::ensure!(
+                        self.$target.is_none_or(|old| old == value),
+                        "AIS {} conflicts with legacy {}",
+                        $name,
+                        stringify!($target)
+                    );
+                    self.$target = Some(value);
+                }
+            };
+        }
+        string_field!("backend", aic_backend);
+        string_field!("system", aic_system);
+        string_field!("model", aic_model_path);
+        string_field!("backend_version", aic_backend_version);
+        string_field!("gemm_quant_mode", aic_gemm_dtype);
+        string_field!("moe_quant_mode", aic_moe_dtype);
+        string_field!("fmha_quant_mode", aic_fmha_dtype);
+        string_field!("kvcache_quant_mode", aic_kv_cache_dtype);
+        string_field!("comm_quant_mode", aic_comm_dtype);
+        size_field!("tp", aic_tp_size);
+        size_field!("moe_tp_size", aic_moe_tp_size);
+        size_field!("moe_ep_size", aic_moe_ep_size);
+        size_field!("attention_dp", aic_attention_dp_size);
+        if let Some(dp) = self.aic_attention_dp_size {
+            anyhow::ensure!(
+                self.dp_size == 1 || self.dp_size as usize == dp,
+                "dp_size conflicts with canonical attention_dp"
+            );
+            self.dp_size = u32::try_from(dp)?;
+        }
+        if let Some(nextn) = config.get("nextn").and_then(serde_json::Value::as_u64) {
+            let nextn = usize::try_from(nextn)?;
+            anyhow::ensure!(
+                self.aic_nextn.unwrap_or(0) == 0 || self.aic_nextn == Some(nextn),
+                "canonical nextn conflicts with scheduler ais_nextn"
+            );
+            self.aic_nextn = (nextn != 0).then_some(nextn);
+        }
+        Ok(())
     }
 
     fn materialize_defaults(&mut self) {
@@ -1227,6 +1399,60 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn canonical_ais_config_preserves_controls_and_materializes_identity() {
+        let config = json!({
+            "model": "model", "system": "h200_sxm", "backend": "vllm",
+            "worker_type": "aggregated", "tp": 2, "attention_dp": 2,
+            "systems_paths": ["first", "second"],
+            "estimator_config": {"correction": {"enabled": false}}
+        });
+        let args = MockEngineArgs::from_json_str(
+            &json!({
+                "timing_model": {"type": "external", "provider": "aic", "config": config},
+                "tensor_parallel_size": 2, "dp_size": 2,
+                "prefill_schedule_interval": 3,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(args.ais_perf_config, Some(config.clone()));
+        assert_eq!(args.aic_tp_size, Some(2));
+        assert_eq!(args.aic_backend.as_deref(), Some("vllm"));
+        assert_eq!(args.prefill_schedule_interval, 3);
+        let serialized = serde_json::to_value(&args).unwrap();
+        assert_eq!(serialized["ais_perf_config"], config);
+        assert!(serialized.get("aic_nextn").is_none());
+    }
+
+    #[test]
+    fn canonical_ais_config_rejects_role_topology_and_alias_conflicts() {
+        let config = json!({"model": "model", "system": "gpu", "backend": "vllm",
+                            "worker_type": "decode", "tp": 2});
+        for value in [
+            json!({"ais_perf_config": config}),
+            json!({"worker_type": "decode", "ais_perf_config": config, "ais_tp_size": 4}),
+            json!({"ais_backend": "vllm", "aic_backend": "vllm"}),
+            json!({"ais_perf_config": []}),
+            json!({"ais_perf_config": {"model": "model", "system": "gpu", "worker_type": "aggregated"}}),
+            json!({"worker_type": "decode", "ais_perf_config": config,
+                   "timing_model": {"type": "fixed", "prefill_ms": 1, "decode_ms": 1}}),
+        ] {
+            assert!(
+                MockEngineArgs::from_json_str(&value.to_string()).is_err(),
+                "{value}"
+            );
+        }
+        let args = MockEngineArgs::builder()
+            .worker_type(WorkerType::Decode)
+            .ais_perf_config(Some(config))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap();
+        assert_eq!(args.aic_tp_size, Some(2));
+    }
 
     #[derive(Default)]
     struct FailingRawSink {

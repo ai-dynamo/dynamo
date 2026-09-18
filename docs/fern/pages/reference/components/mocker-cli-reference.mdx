@@ -53,7 +53,7 @@ mode.
 ## KV cache
 
 <ParamField path="--num-gpu-blocks-override" type="integer" default="auto">
-  Usable KV cache blocks per data-parallel rank. Non-AIC timing defaults to 16,384 blocks; AIC
+  Usable KV cache blocks per data-parallel rank. Non-AIS timing defaults to 16,384 blocks; AIS
   timing estimates capacity when this option is omitted.
 </ParamField>
 
@@ -142,74 +142,84 @@ mode.
   Mooncake JSONL trace whose `output_token_ids` provide response replay annotations.
 </ParamField>
 
-## AIC performance model
+## AIS performance model
 
-Opt-in flags for the AIConfigurator (AIC) latency model. Live Mocker workers do not use AIC by
+<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
+  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  data roots, selection policy and nested estimator controls. Defaults to
+  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
+  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
+</ParamField>
+
+Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
+
+
+Opt-in flags for the AISonfigurator (AIS) latency model. Live Mocker workers do not use AIS by
 default.
 For the timing-model design, see [Mocker Engine Architecture](../../developer-guide/knowledge-base/modular-components/backends/mocker/mocker-engine-architecture.md#performance-model).
 
-<ParamField path="--aic-perf-model" type="boolean" default="false">
-  Use the AIC compatibility API in the AISimulate wheel for latency prediction instead of the
+<ParamField path="--ais-perf-model" type="boolean" default="false">
+  Use the canonical AISimulate performance-model API for latency prediction instead of the
   interpolated or polynomial models. Install `aisimulate` and use a supported
   `system/backend/version` tuple.
 </ParamField>
 
-<ParamField path="--aic-system" type="string" default="h200_sxm when AIC is enabled">
-  AIC system name used with `--aic-perf-model`. The raw CLI value is unset when omitted; runtime
-  resolution uses `h200_sxm` when AIC modeling is enabled.
+<ParamField path="--ais-system" type="string" default="h200_sxm when AIS is enabled">
+  AIS system name used with `--ais-perf-model`. The raw CLI value is unset when omitted; runtime
+  resolution uses `h200_sxm` when AIS modeling is enabled.
 </ParamField>
 
-<ParamField path="--aic-backend" type="string" default="--engine-type">
-  Backend used for AIC performance-data lookup. Set it only to model timing for a different backend
+<ParamField path="--ais-backend" type="string" default="--engine-type">
+  Backend used for AIS performance-data lookup. Set it only to model timing for a different backend
   than the simulated scheduler.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
 
-<ParamField path="--aic-backend-version" type="string" default="auto">
-  AIC performance-database version. Use `current`, `previous`, or `next` when the slot is available
+<ParamField path="--ais-backend-version" type="string" default="auto">
+  AIS performance-database version. Use `current`, `previous`, or `next` when the slot is available
   for the selected system and backend, or specify a version assigned to one of those slots.
   When unset, uses the release database's `current` slot.
 </ParamField>
 
-<ParamField path="--aic-tp-size" type="integer" default="1">
-  Tensor-parallel size for AIC latency prediction. Affects only AIC performance-model lookups, not
+<ParamField path="--ais-tp-size" type="integer" default="1">
+  Tensor-parallel size for AIS latency prediction. Affects only AIS performance-model lookups, not
   mocker scheduling.
 </ParamField>
 
-<ParamField path="--aic-moe-tp-size" type="integer" default="null">
-  Mixture-of-Experts tensor-parallel size for AIC latency prediction. Required by some MoE models.
+<ParamField path="--ais-moe-tp-size" type="integer" default="null">
+  Mixture-of-Experts tensor-parallel size for AIS latency prediction. Required by some MoE models.
 </ParamField>
 
-<ParamField path="--aic-moe-ep-size" type="integer" default="null">
-  Mixture-of-Experts expert-parallel size for AIC latency prediction. Required by some MoE models.
+<ParamField path="--ais-moe-ep-size" type="integer" default="null">
+  Mixture-of-Experts expert-parallel size for AIS latency prediction. Required by some MoE models.
 </ParamField>
 
-<ParamField path="--aic-attention-dp-size" type="integer" default="null">
-  Attention data-parallel size for AIC latency prediction. Required by some MoE models.
+<ParamField path="--ais-attention-dp-size" type="integer" default="null">
+  Attention data-parallel size for AIS latency prediction. Required by some MoE models.
 </ParamField>
 
 <ParamField path="--gpu-memory-utilization" type="float" default="0.9">
-  vLLM GPU memory fraction used for AIC KV-capacity estimation.
+  vLLM GPU memory fraction used for AIS KV-capacity estimation.
 </ParamField>
 
 <ParamField path="--mem-fraction-static" type="float" default="0.88">
-  SGLang static memory fraction used for AIC KV-capacity estimation.
+  SGLang static memory fraction used for AIS KV-capacity estimation.
 </ParamField>
 
 <ParamField path="--free-gpu-memory-fraction" type="float" default="0.9">
-  TensorRT-LLM fraction of post-model-load free GPU memory used for AIC KV-capacity estimation.
+  TensorRT-LLM fraction of post-model-load free GPU memory used for AIS KV-capacity estimation.
 </ParamField>
 
-<ParamField path="--aic-nextn" type="integer" default="null">
+<ParamField path="--ais-nextn" type="integer" default="null">
   Experimental Multi-Token Prediction (MTP) draft length, from 1 through 5.
 </ParamField>
 
-<ParamField path="--aic-nextn-accept-rates" type="string" default="null">
+<ParamField path="--ais-nextn-accept-rates" type="string" default="null">
   Experimental comma-separated conditional MTP acceptance rates.
 </ParamField>
 
-<ParamField path="--aic-mtp-seed" type="integer" default="42">
+<ParamField path="--ais-mtp-seed" type="integer" default="42">
   Base random seed for Mocker MTP burst sampling.
 </ParamField>
 

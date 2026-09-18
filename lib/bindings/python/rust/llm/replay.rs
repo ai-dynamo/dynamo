@@ -26,8 +26,9 @@ use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::aic_callback::{
-    create_aic_callback, create_aic_prefill_load_estimator, estimate_aic_num_gpu_blocks,
+use super::ais_callback::{
+    ais_worker_type, create_aic_callback, create_ais_callback, create_ais_prefill_load_estimator,
+    estimate_aic_num_gpu_blocks,
 };
 use super::entrypoint::{AicPerfConfig, KvRouterConfig, to_pyerr};
 
@@ -107,29 +108,6 @@ impl OfflineReplayResult {
             .map(Bound::unbind)
             .map_err(to_pyerr)
     }
-}
-
-struct ResolvedAicPerfConfig<'a> {
-    config: &'a AicPerfConfig,
-    backend_version: String,
-}
-
-fn resolve_aic_perf_config<'a>(
-    py: Python<'_>,
-    config: Option<&'a AicPerfConfig>,
-) -> PyResult<Option<ResolvedAicPerfConfig<'a>>> {
-    config
-        .map(|config| {
-            Ok(ResolvedAicPerfConfig {
-                config,
-                backend_version: resolve_aic_backend_version(
-                    py,
-                    config.backend_name(),
-                    config.backend_version(),
-                )?,
-            })
-        })
-        .transpose()
 }
 
 fn parse_mocker_engine_type(engine_type: &str) -> PyResult<RsMockerEngineType> {
@@ -273,7 +251,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None, **ais_options))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -299,7 +277,7 @@ impl MockEngineArgs {
         aic_attention_dp_size: Option<usize>,
         aic_nextn: Option<usize>,
         aic_nextn_accept_rates: Option<String>,
-        aic_mtp_seed: u64,
+        aic_mtp_seed: Option<u64>,
         aic_gemm_dtype: Option<String>,
         aic_moe_dtype: Option<String>,
         aic_fmha_dtype: Option<String>,
@@ -323,7 +301,99 @@ impl MockEngineArgs {
         sglang: Option<SglangArgs>,
         trtllm: Option<TrtllmArgs>,
         max_model_len: Option<usize>,
+        ais_perf_config: Option<&Bound<'_, PyAny>>,
+        ais_options: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Self> {
+        // Flat SDK names are an input-only compatibility layer. Complete
+        // estimator settings belong to ais_perf_config and the upstream schema.
+        if let Some(options) = ais_options {
+            for (key, _) in options.iter() {
+                let key: String = key.extract()?;
+                if ![
+                    "ais_backend",
+                    "ais_system",
+                    "ais_backend_version",
+                    "ais_tp_size",
+                    "ais_model_path",
+                    "ais_moe_tp_size",
+                    "ais_moe_ep_size",
+                    "ais_attention_dp_size",
+                    "ais_nextn",
+                    "ais_nextn_accept_rates",
+                    "ais_mtp_seed",
+                    "ais_gemm_dtype",
+                    "ais_moe_dtype",
+                    "ais_fmha_dtype",
+                    "ais_kv_cache_dtype",
+                    "ais_comm_dtype",
+                ]
+                .contains(&key.as_str())
+                {
+                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                        "unexpected AIS option {key:?}; use ais_perf_config for canonical estimator settings"
+                    )));
+                }
+            }
+        }
+        macro_rules! ais_alias {
+            ($legacy:ident, $name:literal, $kind:ty) => {
+                let $legacy: Option<$kind> = if let Some(value) = ais_options
+                    .map(|options| options.get_item($name))
+                    .transpose()?
+                    .flatten()
+                {
+                    if $legacy.is_some() {
+                        return Err(PyValueError::new_err(concat!(
+                            $name,
+                            " and its aic_* legacy alias cannot be combined"
+                        )));
+                    }
+                    value.extract()?
+                } else {
+                    $legacy
+                };
+            };
+        }
+        ais_alias!(aic_backend, "ais_backend", String);
+        ais_alias!(aic_system, "ais_system", String);
+        ais_alias!(aic_backend_version, "ais_backend_version", String);
+        ais_alias!(aic_tp_size, "ais_tp_size", usize);
+        ais_alias!(aic_model_path, "ais_model_path", String);
+        ais_alias!(aic_moe_tp_size, "ais_moe_tp_size", usize);
+        ais_alias!(aic_moe_ep_size, "ais_moe_ep_size", usize);
+        ais_alias!(aic_attention_dp_size, "ais_attention_dp_size", usize);
+        ais_alias!(aic_nextn, "ais_nextn", usize);
+        ais_alias!(aic_nextn_accept_rates, "ais_nextn_accept_rates", String);
+        ais_alias!(aic_mtp_seed, "ais_mtp_seed", u64);
+        ais_alias!(aic_gemm_dtype, "ais_gemm_dtype", String);
+        ais_alias!(aic_moe_dtype, "ais_moe_dtype", String);
+        ais_alias!(aic_fmha_dtype, "ais_fmha_dtype", String);
+        ais_alias!(aic_kv_cache_dtype, "ais_kv_cache_dtype", String);
+        ais_alias!(aic_comm_dtype, "ais_comm_dtype", String);
+        if ais_perf_config.is_some()
+            && [
+                aic_backend.is_some(),
+                aic_system.is_some(),
+                aic_backend_version.is_some(),
+                aic_tp_size.is_some(),
+                aic_model_path.is_some(),
+                aic_moe_tp_size.is_some(),
+                aic_moe_ep_size.is_some(),
+                aic_attention_dp_size.is_some(),
+                aic_nextn.is_some(),
+                aic_gemm_dtype.is_some(),
+                aic_moe_dtype.is_some(),
+                aic_fmha_dtype.is_some(),
+                aic_kv_cache_dtype.is_some(),
+                aic_comm_dtype.is_some(),
+            ]
+            .into_iter()
+            .any(|present| present)
+        {
+            return Err(PyValueError::new_err(
+                "ais_perf_config and flat AIS/AIC identity fields cannot be combined",
+            ));
+        }
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
         let preemption_mode = parse_preemption_mode(preemption_mode)?;
@@ -352,6 +422,7 @@ impl MockEngineArgs {
             .startup_time(startup_time)
             .worker_type(worker_type)
             .planner_profile_data(planner_profile_data.clone())
+            .ais_perf_config(ais_perf_config.map(pythonize::depythonize).transpose()?)
             .aic_backend(aic_backend)
             .aic_system(aic_system)
             .aic_backend_version(aic_backend_version)
@@ -367,7 +438,7 @@ impl MockEngineArgs {
             .aic_comm_dtype(aic_comm_dtype)
             .aic_nextn(aic_nextn)
             .aic_nextn_accept_rates(aic_nextn_accept_rates)
-            .aic_mtp_seed(aic_mtp_seed)
+            .aic_mtp_seed(aic_mtp_seed.unwrap_or(42))
             .gpu_memory_utilization(gpu_memory_utilization)
             .mem_fraction_static(mem_fraction_static)
             .free_gpu_memory_fraction(free_gpu_memory_fraction)
@@ -521,6 +592,91 @@ impl MockEngineArgs {
     #[getter]
     fn response_replay_trace_path(&self) -> Option<PathBuf> {
         self.inner.response_replay_trace_path.clone()
+    }
+
+    #[getter]
+    fn ais_perf_config(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(pythonize(py, &self.inner.ais_perf_config)?.unbind())
+    }
+
+    #[getter]
+    fn ais_backend(&self) -> Option<String> {
+        self.inner.aic_backend.clone()
+    }
+
+    #[getter]
+    fn ais_system(&self) -> Option<String> {
+        self.inner.aic_system.clone()
+    }
+
+    #[getter]
+    fn ais_backend_version(&self) -> Option<String> {
+        self.inner.aic_backend_version.clone()
+    }
+
+    #[getter]
+    fn ais_tp_size(&self) -> Option<usize> {
+        self.inner.aic_tp_size
+    }
+
+    #[getter]
+    fn ais_model_path(&self) -> Option<String> {
+        self.inner.aic_model_path.clone()
+    }
+
+    #[getter]
+    fn ais_moe_tp_size(&self) -> Option<usize> {
+        self.inner.aic_moe_tp_size
+    }
+
+    #[getter]
+    fn ais_moe_ep_size(&self) -> Option<usize> {
+        self.inner.aic_moe_ep_size
+    }
+
+    #[getter]
+    fn ais_attention_dp_size(&self) -> Option<usize> {
+        self.inner.aic_attention_dp_size
+    }
+
+    #[getter]
+    fn ais_gemm_dtype(&self) -> Option<String> {
+        self.inner.aic_gemm_dtype.clone()
+    }
+
+    #[getter]
+    fn ais_moe_dtype(&self) -> Option<String> {
+        self.inner.aic_moe_dtype.clone()
+    }
+
+    #[getter]
+    fn ais_fmha_dtype(&self) -> Option<String> {
+        self.inner.aic_fmha_dtype.clone()
+    }
+
+    #[getter]
+    fn ais_kv_cache_dtype(&self) -> Option<String> {
+        self.inner.aic_kv_cache_dtype.clone()
+    }
+
+    #[getter]
+    fn ais_comm_dtype(&self) -> Option<String> {
+        self.inner.aic_comm_dtype.clone()
+    }
+
+    #[getter]
+    fn ais_nextn(&self) -> Option<usize> {
+        self.inner.aic_nextn
+    }
+
+    #[getter]
+    fn ais_nextn_accept_rates(&self) -> Option<String> {
+        self.inner.aic_nextn_accept_rates.clone()
+    }
+
+    #[getter]
+    fn ais_mtp_seed(&self) -> u64 {
+        self.inner.aic_mtp_seed
     }
 
     #[getter]
@@ -891,7 +1047,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, ais_perf_config=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -922,7 +1078,14 @@ pub fn run_mocker_trace_replay(
     capture_planner_details: bool,
     scaling_policy: Option<Py<PyAny>>,
     agentic_lanes: Option<isize>,
+    ais_perf_config: Option<&AicPerfConfig>,
 ) -> PyResult<PyObject> {
+    if ais_perf_config.is_some() && aic_perf_config.is_some() {
+        return Err(PyValueError::new_err(
+            "ais_perf_config and aic_perf_config cannot be combined",
+        ));
+    }
+    let aic_perf_config = ais_perf_config.or(aic_perf_config);
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
@@ -940,7 +1103,7 @@ pub fn run_mocker_trace_replay(
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
-    let (prefill_load_estimator, _) = load_replay_prefill_load_estimator(
+    let prefill_load_estimator = load_replay_prefill_load_estimator(
         py,
         router_mode,
         router_config.as_ref(),
@@ -1375,7 +1538,7 @@ fn write_per_request_jsonl(
 }
 
 #[pyfunction]
-#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None))]
+#[pyo3(signature = (input_tokens, output_tokens, request_count, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, request_rate=None, arrival_interval_ms=None, arrival_seed=42, turns_per_session=1, shared_prefix_ratio=0.0, num_prefix_groups=0, inter_turn_delay_ms=0.0, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, ais_perf_config=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_synthetic_trace_replay(
     py: Python<'_>,
@@ -1408,7 +1571,14 @@ pub fn run_mocker_synthetic_trace_replay(
     capture_per_request: bool,
     capture_planner_details: bool,
     scaling_policy: Option<Py<PyAny>>,
+    ais_perf_config: Option<&AicPerfConfig>,
 ) -> PyResult<PyObject> {
+    if ais_perf_config.is_some() && aic_perf_config.is_some() {
+        return Err(PyValueError::new_err(
+            "ais_perf_config and aic_perf_config cannot be combined",
+        ));
+    }
+    let aic_perf_config = ais_perf_config.or(aic_perf_config);
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
@@ -1437,7 +1607,7 @@ pub fn run_mocker_synthetic_trace_replay(
         num_decode_workers,
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
-    let (prefill_load_estimator, _) = load_replay_prefill_load_estimator(
+    let prefill_load_estimator = load_replay_prefill_load_estimator(
         py,
         router_mode,
         router_config.as_ref(),
@@ -1975,19 +2145,76 @@ fn materialize_replay_mocker_args(
         // `dp_size` independent per-rank schedulers, each with a per-rank KV pool.
         // The topology applies whether KV capacity is explicit or estimated.
         if !num_gpu_blocks_explicit {
-            let per_rank_blocks = estimate_aic_num_gpu_blocks(
+            let per_rank_blocks = if let Some(config) = args.ais_perf_config.as_ref() {
+                let kwargs = pyo3::types::PyDict::new(py);
+                kwargs.set_item("block_size", args.block_size)?;
+                kwargs.set_item(
+                    "max_num_batched_tokens",
+                    args.max_num_batched_tokens.unwrap_or(8192),
+                )?;
+                for (key, value) in [
+                    ("gpu_memory_utilization", args.gpu_memory_utilization),
+                    ("mem_fraction_static", args.mem_fraction_static),
+                    ("free_gpu_memory_fraction", args.free_gpu_memory_fraction),
+                ] {
+                    if let Some(value) = value {
+                        kwargs.set_item(key, value)?;
+                    }
+                }
+                py.import("dynamo._internal.ais")?
+                    .call_method(
+                        "estimate_canonical_num_gpu_blocks",
+                        (pythonize(py, config)?,),
+                        Some(&kwargs),
+                    )?
+                    .extract()?
+            } else {
+                estimate_aic_num_gpu_blocks(
+                    py,
+                    &backend,
+                    &system,
+                    &model_name,
+                    tp_size,
+                    args.block_size,
+                    args.max_num_batched_tokens.unwrap_or(8192),
+                    args.gpu_memory_utilization
+                        .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
+                    args.mem_fraction_static
+                        .or(Some(DEFAULT_MEM_FRACTION_STATIC)),
+                    args.free_gpu_memory_fraction,
+                    backend_version.as_deref(),
+                    moe_tp_size,
+                    moe_ep_size,
+                    attention_dp_size,
+                    gemm_dtype.as_deref(),
+                    moe_dtype.as_deref(),
+                    fmha_dtype.as_deref(),
+                    kv_cache_dtype.as_deref(),
+                    comm_dtype.as_deref(),
+                )
+                .map_err(|error| {
+                    PyException::new_err(format!(
+                        "Failed to estimate AIC KV cache capacity \
+                     (--aic-perf-model was requested): {error}"
+                    ))
+                })?
+            };
+            // AIC returns a per-rank (per-GPU) block count. When replicating
+            // attention-DP into per-rank workers, each worker owns this per-rank
+            // pool (engine-wide capacity stays `per_rank * dp`, now partitioned
+            // per rank as on real hardware). With dp == 1 the per-rank pool is
+            // the engine-wide pool.
+            args.num_gpu_blocks = per_rank_blocks;
+        }
+        let callback = if let Some(config) = args.ais_perf_config.as_ref() {
+            create_ais_callback(py, config)
+        } else {
+            create_aic_callback(
                 py,
                 &backend,
                 &system,
                 &model_name,
                 tp_size,
-                args.block_size,
-                args.max_num_batched_tokens.unwrap_or(8192),
-                args.gpu_memory_utilization
-                    .unwrap_or(DEFAULT_GPU_MEMORY_UTILIZATION),
-                args.mem_fraction_static
-                    .or(Some(DEFAULT_MEM_FRACTION_STATIC)),
-                args.free_gpu_memory_fraction,
                 backend_version.as_deref(),
                 moe_tp_size,
                 moe_ep_size,
@@ -1997,38 +2224,11 @@ fn materialize_replay_mocker_args(
                 fmha_dtype.as_deref(),
                 kv_cache_dtype.as_deref(),
                 comm_dtype.as_deref(),
+                nextn,
+                undiscounted_accept_rates.as_deref(),
+                ais_worker_type(args.worker_type),
             )
-            .map_err(|error| {
-                PyException::new_err(format!(
-                    "Failed to estimate AIC KV cache capacity \
-                     (--aic-perf-model was requested): {error}"
-                ))
-            })?;
-            // AIC returns a per-rank (per-GPU) block count. When replicating
-            // attention-DP into per-rank workers, each worker owns this per-rank
-            // pool (engine-wide capacity stays `per_rank * dp`, now partitioned
-            // per rank as on real hardware). With dp == 1 the per-rank pool is
-            // the engine-wide pool.
-            args.num_gpu_blocks = per_rank_blocks;
         }
-        let callback = create_aic_callback(
-            py,
-            &backend,
-            &system,
-            &model_name,
-            tp_size,
-            backend_version.as_deref(),
-            moe_tp_size,
-            moe_ep_size,
-            attention_dp_size,
-            gemm_dtype.as_deref(),
-            moe_dtype.as_deref(),
-            fmha_dtype.as_deref(),
-            kv_cache_dtype.as_deref(),
-            comm_dtype.as_deref(),
-            nextn,
-            undiscounted_accept_rates.as_deref(),
-        )
         .map_err(|e| {
             PyException::new_err(format!(
                 "Failed to create AIC callback (--aic-perf-model was requested): {}",
@@ -2043,7 +2243,7 @@ fn materialize_replay_mocker_args(
             backend_version
         );
         // Every scheduler sees its own local batch, including under attention-DP.
-        args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+        args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
     }
 
     Ok(args)
@@ -2082,71 +2282,49 @@ fn load_replay_router_config(
     Ok(router_config.map(|config| config.inner().with_policy_model_name(model_name)))
 }
 
-fn load_replay_prefill_load_estimator<'a>(
+fn load_replay_prefill_load_estimator(
     py: Python<'_>,
     router_mode: dynamo_mocker::replay::ReplayRouterMode,
     router_config: Option<&KvRouterConfig>,
-    aic_perf_config: Option<&'a AicPerfConfig>,
-) -> PyResult<(
-    Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>,
-    Option<ResolvedAicPerfConfig<'a>>,
-)> {
+    aic_perf_config: Option<&AicPerfConfig>,
+) -> PyResult<Option<dynamo_mocker::replay::ReplayPrefillLoadEstimator>> {
     if router_mode != dynamo_mocker::replay::ReplayRouterMode::KvRouter {
         if aic_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_mode='kv_router'",
+                "ais_perf_config requires router_mode='kv_router'",
             ));
         }
-        return Ok((None, None));
+        return Ok(None);
     }
 
     let Some(router_config) = router_config else {
         if aic_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_config with router_prefill_load_model='aic'",
+                "ais_perf_config requires router_config with router_prefill_load_model='ais'",
             ));
         }
-        return Ok((None, None));
+        return Ok(None);
     };
 
     let router_config = router_config.inner();
     if !router_config.router_prefill_load_model.is_enabled() {
         if aic_perf_config.is_some() {
             return Err(PyException::new_err(
-                "aic_perf_config requires router_prefill_load_model='aic'",
+                "ais_perf_config requires router_prefill_load_model='ais'",
             ));
         }
-        return Ok((None, None));
+        return Ok(None);
     }
 
     let Some(aic_perf_config) = aic_perf_config else {
         return Err(PyException::new_err(
-            "router_prefill_load_model='aic' requires aic_perf_config",
+            "router_prefill_load_model='ais' requires ais_perf_config",
         ));
     };
-    let resolved_aic_perf_config = resolve_aic_perf_config(py, Some(aic_perf_config))?
-        .expect("AIC perf config resolution must preserve a present config");
-    let aic_perf_config = resolved_aic_perf_config.config;
-
-    let estimator = create_aic_prefill_load_estimator(
+    Ok(Some(create_ais_prefill_load_estimator(
         py,
-        aic_perf_config.backend_name(),
-        aic_perf_config.system(),
-        aic_perf_config.model_path(),
-        aic_perf_config.tp_size(),
-        Some(&resolved_aic_perf_config.backend_version),
-        aic_perf_config.moe_tp_size(),
-        aic_perf_config.moe_ep_size(),
-        aic_perf_config.attention_dp_size(),
-        aic_perf_config.gemm_dtype(),
-        aic_perf_config.moe_dtype(),
-        aic_perf_config.fmha_dtype(),
-        aic_perf_config.kv_cache_dtype(),
-        aic_perf_config.comm_dtype(),
-        aic_perf_config.nextn(),
-        aic_perf_config.nextn_accept_rates(),
-    )?;
-    Ok((Some(estimator), Some(resolved_aic_perf_config)))
+        aic_perf_config.config(),
+    )?))
 }
 
 fn parse_replay_router_mode(

@@ -294,10 +294,10 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-prefill-load-model" type="string" default="none">
-  Prompt-side load model. `none` keeps static prompt load; `aic` decays the oldest active prefill
-  request using an AIC prediction. See [AIC prefill load model](#aic-prefill-load-model).
+  Prompt-side load model. `none` keeps static prompt load; `ais` decays the oldest active prefill
+  request using an AIS prediction. See [AIS prefill load model](#ais-prefill-load-model).
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>aic</Badge></span>
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>none</Badge> <Badge intent="note" minimal>ais</Badge></span>
 
   Environment variable: `DYN_ROUTER_PREFILL_LOAD_MODEL`
 </ParamField>
@@ -343,61 +343,71 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_DECODE_POLICY`
 </ParamField>
 
-## AIC prefill load model
+## AIS prefill load model
 
-These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model aic`.
+<ParamField path="--ais-perf-config" type="JSON object or JSON/YAML file" default="null">
+  Complete AISimulate `ForwardPassPerfModelConfig`, including immutable worker role,
+  data roots, selection policy and nested estimator controls. Defaults to
+  `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
+  with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
+</ParamField>
+
+Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.
+
+
+These options apply only when `--router-mode kv` is combined with `--router-prefill-load-model ais`.
 
 When enabled, the frontend's embedded KV router predicts one expected prefill duration per admitted request, using the selected worker's overlap-derived cached prefix, then decays only the oldest active prefill request on each worker for prompt-side load accounting.
 
-<ParamField path="--aic-backend" type="string" default="null">
-  Backend family to model in AIC, for example `vllm` or `sglang`.
+<ParamField path="--ais-backend" type="string" default="null">
+  Backend family to model in AIS, for example `vllm` or `sglang`.
 
-  Environment variable: `DYN_AIC_BACKEND`
+  Environment variable: `DYN_AIS_BACKEND`
 </ParamField>
 
-<ParamField path="--aic-system" type="string" default="null">
-  AIC hardware/system identifier, for example `h200_sxm`.
+<ParamField path="--ais-system" type="string" default="null">
+  AIS hardware/system identifier, for example `h200_sxm`.
 
-  Environment variable: `DYN_AIC_SYSTEM`
+  Environment variable: `DYN_AIS_SYSTEM`
 </ParamField>
 
-<ParamField path="--aic-model-path" type="string" default="null">
-  Model path or model identifier used for AIC perf lookup.
+<ParamField path="--ais-model-path" type="string" default="null">
+  Model path or model identifier used for AIS perf lookup.
 
-  Environment variable: `DYN_AIC_MODEL_PATH`
+  Environment variable: `DYN_AIS_MODEL_PATH`
 </ParamField>
 
-<ParamField path="--aic-backend-version" type="string" default="backend-specific">
-  Pinned AIC database version. If omitted, Dynamo uses the backend default.
+<ParamField path="--ais-backend-version" type="string" default="backend-specific">
+  Pinned AIS database version. If omitted, Dynamo uses the backend default.
 
-  Environment variable: `DYN_AIC_BACKEND_VERSION`
+  Environment variable: `DYN_AIS_BACKEND_VERSION`
 </ParamField>
 
-<ParamField path="--aic-tp-size" type="integer" default="1">
-  Tensor-parallel size to model in AIC.
+<ParamField path="--ais-tp-size" type="integer" default="1">
+  Tensor-parallel size to model in AIS.
 
-  Environment variable: `DYN_AIC_TP_SIZE`
+  Environment variable: `DYN_AIS_TP_SIZE`
 </ParamField>
 
-<ParamField path="--aic-moe-tp-size" type="integer" default="null">
-  MoE tensor-parallel size for models that require AIC MoE parallelism.
+<ParamField path="--ais-moe-tp-size" type="integer" default="null">
+  MoE tensor-parallel size for models that require AIS MoE parallelism.
 
-  Environment variable: `DYN_AIC_MOE_TP_SIZE`
+  Environment variable: `DYN_AIS_MOE_TP_SIZE`
 </ParamField>
 
-<ParamField path="--aic-moe-ep-size" type="integer" default="null">
-  MoE expert-parallel size for models that require AIC MoE parallelism.
+<ParamField path="--ais-moe-ep-size" type="integer" default="null">
+  MoE expert-parallel size for models that require AIS MoE parallelism.
 
-  Environment variable: `DYN_AIC_MOE_EP_SIZE`
+  Environment variable: `DYN_AIS_MOE_EP_SIZE`
 </ParamField>
 
-<ParamField path="--aic-attention-dp-size" type="integer" default="null">
-  Attention data-parallel size for models that require AIC MoE parallelism.
+<ParamField path="--ais-attention-dp-size" type="integer" default="null">
+  Attention data-parallel size for models that require AIS MoE parallelism.
 
-  Environment variable: `DYN_AIC_ATTENTION_DP_SIZE`
+  Environment variable: `DYN_AIS_ATTENTION_DP_SIZE`
 </ParamField>
 
-For MoE models, AIC requires `aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--aic-moe-tp-size` to the same value as `--aic-tp-size`, with `--aic-moe-ep-size 1` and `--aic-attention-dp-size 1`.
+For MoE models, AIS requires `ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`. For Kimi-style TP-only MoE runs, set `--ais-moe-tp-size` to the same value as `--ais-tp-size`, with `--ais-moe-ep-size 1` and `--ais-attention-dp-size 1`.
 
 ## Fault tolerance
 

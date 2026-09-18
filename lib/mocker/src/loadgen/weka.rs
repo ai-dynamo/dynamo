@@ -41,6 +41,9 @@ fn agentic_mooncake_row(row: dynamo_data_gen::AgenticMooncakeRow) -> AgenticMoon
         output_token_ids: row.output_token_ids,
         hash_ids: row.hash_ids,
         not_before_ms: row.not_before_ms,
+        // Dynamo's Weka reader does not expose these optional source annotations.
+        recorded_api_time_ms: None,
+        source_play_ordinal: None,
         priority: row.priority,
         strict_priority: row.strict_priority,
         policy_class: row.policy_class,

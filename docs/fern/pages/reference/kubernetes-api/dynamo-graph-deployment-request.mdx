@@ -296,43 +296,45 @@ service.
   Directory holding profiler-generated performance data (npz or JSON), used to bootstrap or tune the performance model when the `get_perf_metrics` endpoint is unavailable.
 </ParamField>
 
-<ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
-  Native AIConfigurator forward-pass model identity passed to the compatibility `aiconfigurator_core` namespace in the `aisimulate` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+<ParamField path="ais_perf_model" type="AISPerfModelSpec" default="null">
+  Role-indexed AISimulate forward-pass configurations. Constructs each model through
+  `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` without an
+  interpolation sweep. The old `aic_perf_model` name and `hf_id` / pick shape are
+  compatibility inputs; serialized output uses `ais_perf_model` only.
 </ParamField>
 
 <Indent>
-  <ParamField path="hf_id" type="string" required={true}>
-    HuggingFace model id, for example `Qwen/Qwen3-32B`.
+  <ParamField path="roles" type="object" required={true}>
+    Maps deployment roles to complete upstream `ForwardPassPerfModelConfig` objects.
+    Supply `prefill` and `decode` for `disagg`, the matching single role for `prefill`
+    or `decode`, and `aggregated` for `agg`. Each key must match `worker_type`.
   </ParamField>
-  <ParamField path="system" type="string" required={true}>
-    AIC system identifier, for example `h200_sxm`.
+  <ParamField path="roles.&lt;role&gt;.model / system / backend" type="string" required={true}>
+    Model identifier, AISimulate system identifier, and inference backend
+    (`vllm`, `sglang`, or `trtllm`). Optional `backend_version`, `tp`, `pp`,
+    `attention_dp`, MoE axes, quantization, KV block size, and speculation fields
+    use the upstream schema. Published worker capabilities must agree with the
+    configured identity.
   </ParamField>
-  <ParamField path="backend" type="string" required={true}>
-    <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>trtllm</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>sglang</Badge></span>
+  <ParamField path="roles.&lt;role&gt;.estimation_mode" type="string" default="auto">
+    `auto` searches `op_level`, `fpm_interpolation`, then `fpm_regression`.
+    Explicit modes select the named estimator.
   </ParamField>
-  <ParamField path="backend_version" type="string" default="null">
-    Optional backend version string.
+  <ParamField path="roles.&lt;role&gt;.fallback_policy" type="string" default="deny">
+    `deny` rejects failure of an explicitly selected mode. `allow` permits the
+    remaining lower-priority modes; `regression` permits a regression fallback.
+    Auto selection searches the full priority order even with `deny`.
   </ParamField>
-  <ParamField path="prefill_pick" type="PickedParallelConfig" default="null">
-    Parallelism pick for the prefill engine. Required for `mode` `disagg` or `prefill`. See [PickedParallelConfig](#pickedparallelconfig).
+  <ParamField path="roles.&lt;role&gt;.systems_paths" type="list[string]" default="[]">
+    Ordered performance-data roots. The SDK resolves its packaged root when unset.
+    `database_mode` and `transfer_policy` are also passed through unchanged.
   </ParamField>
-  <ParamField path="decode_pick" type="PickedParallelConfig" default="null">
-    Parallelism pick for the decode engine. Required for `mode` `disagg`, `decode`, or `agg`. See [PickedParallelConfig](#pickedparallelconfig).
-  </ParamField>
-  <ParamField path="model_arch" type="string" default="null">
-    Optional model architecture override.
-  </ParamField>
-  <ParamField path="weight_dtype" type="string" default="null">
-    Optional weight dtype.
-  </ParamField>
-  <ParamField path="moe_dtype" type="string" default="null">
-    Optional Mixture-of-Experts dtype.
-  </ParamField>
-  <ParamField path="activation_dtype" type="string" default="null">
-    Optional activation dtype.
-  </ParamField>
-  <ParamField path="kv_cache_dtype" type="string" default="null">
-    Optional KV cache dtype.
+  <ParamField path="roles.&lt;role&gt;.estimator_config" type="object" default="{}">
+    Complete upstream estimator controls, including independent regression and
+    correction sampling, fit settings, feature weights, and correction bounds.
+    Explicit settings override Planner sampling defaults. A legacy total bucket
+    count of 16 maps to `bins_per_axis: [4, 4]`. Unknown fields are rejected by
+    AISimulate. See the [AISimulate core API](https://github.com/ai-dynamo/aisimulate/blob/main/docs/core-api.md).
   </ParamField>
 </Indent>
 
@@ -837,7 +839,7 @@ profiling runs do not populate this type.
 
 ### PickedParallelConfig
 
-A parallelism pick emitted by AIConfigurator. Referenced by `features.planner.aic_perf_model.prefill_pick` / `decode_pick` and by [AICInterpolationSpec](#aicinterpolationspec).
+A parallelism pick emitted by AIConfigurator. Referenced by [AICInterpolationSpec](#aicinterpolationspec) and accepted when migrating legacy `features.planner.aic_perf_model` inputs.
 
 <ParamField path="tp" type="integer" default="1">
   Tensor-parallel size.

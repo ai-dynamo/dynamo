@@ -32,7 +32,7 @@ from packaging.version import Version
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.llm import (
-    AicPerfConfig,
+    AisPerfConfig,
     EngineType,
     EntrypointArgs,
     FrontendRoute,
@@ -470,8 +470,8 @@ async def async_main():
         ).chat_engine_factory
         kwargs["chat_engine_factory"] = chat_engine_factory
 
-    if config.router_prefill_load_model == "aic":
-        kwargs["aic_perf_config"] = AicPerfConfig(**config.aic_perf_kwargs())
+    if config.router_prefill_load_model in ("ais", "aic"):
+        kwargs["ais_perf_config"] = AisPerfConfig(**config.ais_perf_kwargs())
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

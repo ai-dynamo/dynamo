@@ -13,7 +13,7 @@ from typing import Any, Protocol
 
 from aisimulate.aic import materialize_aic_num_gpu_blocks
 
-from dynamo._internal.aic import resolve_backend_version
+from dynamo._internal.ais import resolve_backend_version
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import (
     resolve_planner_profile_data as _resolve_mocker_planner_profile_data,
@@ -24,8 +24,32 @@ class PlannerProfileDataResult(Protocol):
     npz_path: Path | None
 
 
-def resolve_aic_num_gpu_blocks(raw: dict[str, Any]) -> None:
-    """Materialize AIC KV capacity in-place for SDK compatibility."""
+def resolve_ais_num_gpu_blocks(raw: dict[str, Any]) -> None:
+    """Materialize capacity using AISimulate's upstream wire adapter."""
+
+    # The upstream compatibility helper still names its flat inputs aic_*.
+    # Translate only at this boundary; Dynamo emits ais_* names.
+    for name in list(raw):
+        if name.startswith("ais_") and name != "ais_perf_config":
+            legacy = "aic_" + name[4:]
+            if legacy in raw:
+                raise ValueError(f"cannot combine {name} with {legacy}")
+            raw[legacy] = raw.pop(name)
+    canonical = raw.get("ais_perf_config")
+    if canonical is not None:
+        if "timing_model" in raw:
+            raise ValueError("ais_perf_config cannot be combined with timing_model")
+        if not isinstance(canonical, Mapping):
+            raise TypeError("ais_perf_config must be a mapping")
+        canonical = dict(canonical)
+        canonical.setdefault("estimation_mode", "auto")
+        canonical.setdefault("fallback_policy", "deny")
+        raw["timing_model"] = {
+            "type": "external",
+            "provider": "aic",
+            "config": canonical,
+        }
+        del raw["ais_perf_config"]
 
     if (
         raw.get("aic_backend") is not None
@@ -34,9 +58,51 @@ def resolve_aic_num_gpu_blocks(raw: dict[str, Any]) -> None:
         raw["aic_backend_version"] = resolve_backend_version(
             raw.get("aic_backend") or "vllm", raw.get("aic_backend_version")
         )
+    timing = raw.get("timing_model")
+    if (
+        isinstance(timing, dict)
+        and timing.get("type") == "external"
+        and timing.get("provider") == "ais"
+    ):
+        raw["timing_model"] = {**timing, "provider": "aic"}
+    timing = raw.get("timing_model")
+    if (
+        isinstance(timing, dict)
+        and timing.get("type") == "external"
+        and timing.get("provider") == "aic"
+    ):
+        config = timing.get("config")
+        if isinstance(config, dict) and "model" in config:
+            config = {"estimation_mode": "auto", "fallback_policy": "deny", **config}
+            raw["timing_model"] = {**timing, "config": config}
     lowered = materialize_aic_num_gpu_blocks(raw)
+    timing = lowered.get("timing_model")
+    if (
+        isinstance(timing, dict)
+        and timing.get("type") == "external"
+        and timing.get("provider") == "aic"
+    ):
+        capacity_fields = {
+            "gpu_memory_utilization",
+            "mem_fraction_static",
+            "free_gpu_memory_fraction",
+            "cuda_graph_reserved_bytes",
+        }
+        lowered["timing_model"] = {
+            **timing,
+            "config": {
+                name: value
+                for name, value in timing["config"].items()
+                if name not in capacity_fields
+            },
+        }
     raw.clear()
-    raw.update(lowered)
+    raw.update(
+        {
+            ("ais_" + name[4:] if name.startswith("aic_") else name): value
+            for name, value in lowered.items()
+        }
+    )
 
 
 def resolve_planner_profile_data(
@@ -81,5 +147,9 @@ def load_engine_args(
                 raw["planner_profile_data"] = str(result.npz_path)
             else:
                 del raw["planner_profile_data"]
-    resolve_aic_num_gpu_blocks(raw)
+    resolve_ais_num_gpu_blocks(raw)
     return MockEngineArgs.from_json(json.dumps(raw))
+
+
+# Deprecated Python SDK name.
+resolve_aic_num_gpu_blocks = resolve_ais_num_gpu_blocks

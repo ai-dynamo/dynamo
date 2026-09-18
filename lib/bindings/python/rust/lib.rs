@@ -354,7 +354,8 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::frontend_routes::PyFrontendExtensionContext>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
-    m.add_class::<llm::entrypoint::AicPerfConfig>()?;
+    m.add_class::<llm::entrypoint::AisPerfConfig>()?;
+    m.add("AicPerfConfig", m.getattr("AisPerfConfig")?)?;
     m.add_class::<llm::entrypoint::RouterConfig>()?;
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::LoadThresholdConfig>()?;

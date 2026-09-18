@@ -109,7 +109,7 @@ def test_aic_mtp_cli_documents_conditional_rates_and_seed() -> None:
     assert config.aic_nextn == 3
     assert config.aic_nextn_accept_rates == "1,0.5"
     assert config.aic_mtp_seed == 99
-    assert "all earlier drafts were accepted" in parser.format_help()
+    assert "all earlier drafts were accepted" in " ".join(parser.format_help().split())
 
 
 def test_deprecated_overlap_score_weight_cli_flows_to_binding_kwargs() -> None:

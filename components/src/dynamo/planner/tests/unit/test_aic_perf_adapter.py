@@ -15,9 +15,9 @@ except ImportError:
     pytest.skip("forward_pass_metrics not available", allow_module_level=True)
 
 from dynamo.planner.config.parallelization import PickedParallelConfig
-from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
-from dynamo.planner.core.perf_model import aic_adapter
-from dynamo.planner.core.perf_model.aic_adapter import PlannerEnginePerfModel
+from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
+from dynamo.planner.core.perf_model import ais_adapter
+from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
 
 pytestmark = [
@@ -92,7 +92,7 @@ def fake_engine_factory(monkeypatch):
             cls.last_kwargs = kwargs
             return cls.next_model
 
-    monkeypatch.setattr(aic_adapter, "AicCoreEnginePerfModel", FakeEngineFactory)
+    monkeypatch.setattr(ais_adapter, "AISCoreEnginePerfModel", FakeEngineFactory)
     return FakeEngineFactory
 
 
@@ -109,7 +109,7 @@ def _config(
 ) -> PlannerConfig:
     pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
-        aic_perf_model=AICPerfModelSpec.model_construct(
+        ais_perf_model=AISPerfModelSpec(
             hf_id="Qwen/Qwen3-0.6B",
             system="h200_sxm",
             backend="vllm",
@@ -218,8 +218,8 @@ def test_missing_capability_fields_use_engine_query_defaults(fake_engine_factory
     assert fake_engine_factory.last_kwargs is not None
     limits = fake_engine_factory.last_kwargs["limits"]
     assert limits.max_num_batched_tokens == 2048
-    assert limits.max_num_seqs == aic_adapter.DEFAULT_MAX_NUM_SEQS
-    assert limits.max_kv_tokens == aic_adapter.DEFAULT_MAX_KV_TOKENS
+    assert limits.max_num_seqs == ais_adapter.DEFAULT_MAX_NUM_SEQS
+    assert limits.max_kv_tokens == ais_adapter.DEFAULT_MAX_KV_TOKENS
 
 
 @pytest.mark.parametrize(
@@ -253,7 +253,7 @@ def test_aic_config_requests_raw_spec_decode_iteration_time(
     )
 
     assert fake_engine_factory.last_kwargs is not None
-    aic_config = fake_engine_factory.last_kwargs["aic_config"]
+    aic_config = fake_engine_factory.last_kwargs["ais_config"]
     assert aic_config["nextn"] == int(expected_nextn)
 
 
@@ -293,7 +293,7 @@ def test_capability_nextn_update_rebuilds_aic_model_and_replays_fpms(
     model.update_capabilities(_caps(speculative_nextn=3))
 
     assert fake_engine_factory.last_kwargs is not None
-    aic_config = fake_engine_factory.last_kwargs["aic_config"]
+    aic_config = fake_engine_factory.last_kwargs["ais_config"]
     assert aic_config["nextn"] == 3
     assert second.tuned_iterations == [[fpm]]
 

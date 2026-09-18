@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner-owned engine-level queries over AIC forward-pass estimates.
+"""Planner-owned engine-level queries over AISimulate forward-pass estimates.
 
-``aiconfigurator_core.sdk.RustForwardPassPerfModel`` owns native AIC
+``aisimulate_core.sdk.RustForwardPassPerfModel`` owns native AISimulate
 estimation, online correction, and regression fallback. This module owns the
 Dynamo policy above that forward-pass abstraction: queue-drain estimates,
 TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
@@ -19,7 +19,7 @@ from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
 import msgspec
-from aiconfigurator_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
+from aisimulate_core.sdk import RustForwardPassPerfModel as AISForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -183,8 +183,8 @@ class _PrefillChunkPlan:
         return 0
 
 
-class AicCoreEnginePerfModel:
-    """Dynamo engine-query layer backed by the AIC SDK shipped in AISimulate."""
+class AISCoreEnginePerfModel:
+    """Dynamo engine-query layer backed by the AISimulate SDK shipped in AISimulate."""
 
     def __init__(
         self,
@@ -211,22 +211,21 @@ class AicCoreEnginePerfModel:
     def best_available(
         cls,
         *,
-        aic_config: Optional[dict[str, Any]],
+        ais_config: dict[str, Any],
         worker_type: WorkerType,
         limits: EnginePerfLimits,
-        options: dict[str, int],
+        max_observations: int,
         attention_dp_size: int,
-    ) -> AicCoreEnginePerfModel:
-        if aic_config is None:
-            model = AicForwardPassPerfModel.from_regression(options)
-        else:
-            model = AicForwardPassPerfModel.best_available(aic_config, options)
+    ) -> AISCoreEnginePerfModel:
+        if ais_config["worker_type"] != worker_type:
+            raise ValueError("AIS worker_type must match the Planner deployment role")
+        model = AISForwardPassPerfModel.best_available(ais_config)
         return cls(
             model=model,
             worker_type=worker_type,
             limits=limits,
             attention_dp_size=attention_dp_size,
-            max_observations=options["max_observations"],
+            max_observations=max_observations,
         )
 
     def tune_with_fpms(self, iterations: list[list[ForwardPassMetrics]]) -> None:
@@ -234,7 +233,7 @@ class AicCoreEnginePerfModel:
             self._validate_metrics_by_rank(metrics_by_rank)
         self._model.tune_with_fpms(
             [
-                [_fpm_to_aic_dict(metrics) for metrics in metrics_by_rank]
+                [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
                 for metrics_by_rank in iterations
             ]
         )
@@ -244,7 +243,7 @@ class AicCoreEnginePerfModel:
         diagnostics = self._model.diagnostics()
         if not isinstance(diagnostics, dict):
             raise TypeError(
-                "aiconfigurator-core diagnostics must be a mapping, "
+                "AISimulate diagnostics must be a mapping, "
                 f"got {type(diagnostics).__name__}"
             )
         return diagnostics
@@ -617,21 +616,21 @@ class AicCoreEnginePerfModel:
         self, metrics_by_rank: list[ForwardPassMetrics]
     ) -> Optional[float]:
         estimate_ms = self._model.estimate_forward_pass_time_ms(
-            [_fpm_to_aic_dict(metrics) for metrics in metrics_by_rank]
+            [_fpm_to_ais_dict(metrics) for metrics in metrics_by_rank]
         )
         if estimate_ms is None:
             return None
         if not math.isfinite(estimate_ms):
             raise ValueError(
-                f"AIC forward-pass estimate must be finite, got {estimate_ms}"
+                f"AISimulate forward-pass estimate must be finite, got {estimate_ms}"
             )
         return _checked_duration_seconds(
             max(0.0, estimate_ms) / 1000.0,
-            "AIC forward-pass estimate",
+            "AISimulate forward-pass estimate",
         )
 
 
-def _fpm_to_aic_dict(metrics: ForwardPassMetrics) -> dict[str, Any]:
+def _fpm_to_ais_dict(metrics: ForwardPassMetrics) -> dict[str, Any]:
     payload = msgspec.to_builtins(metrics)
     if not isinstance(payload, dict):
         raise TypeError(
@@ -856,3 +855,7 @@ def _ceil_u32(value: float, name: str) -> int:
     if rounded > _U32_MAX:
         raise ValueError(f"{name} exceeds u32::MAX")
     return rounded
+
+
+# Compatibility import for integrations using the previous Dynamo name.
+AicCoreEnginePerfModel = AISCoreEnginePerfModel

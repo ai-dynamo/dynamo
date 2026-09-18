@@ -149,7 +149,13 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         osl=128,
         batch_size=8,
     )
-    expected_ttft_ms = aic["context_latency"] + aic["tpot"]
+    # SGLang emits the first token in its prefill forward. Its simulator's
+    # simulate_prefill_first_tokens only records that token; it does not run
+    # or charge a decode iteration. The vLLM replay path still reports the
+    # first token after the first decode iteration.
+    expected_ttft_ms = aic["context_latency"]
+    if backend_name == "vllm":
+        expected_ttft_ms += aic["tpot"]
 
     assert report["mean_ttft_ms"] == pytest.approx(expected_ttft_ms, rel=0.05)
     assert report["mean_tpot_ms"] == pytest.approx(aic["tpot"], rel=0.05)

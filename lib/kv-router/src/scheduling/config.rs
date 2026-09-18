@@ -473,6 +473,7 @@ impl fmt::Display for RouterQueuePolicy {
 pub enum RouterPrefillLoadModel {
     #[default]
     None,
+    #[serde(rename = "ais", alias = "aic")]
     Aic,
 }
 
@@ -480,7 +481,7 @@ impl fmt::Display for RouterPrefillLoadModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("none"),
-            Self::Aic => f.write_str("aic"),
+            Self::Aic => f.write_str("ais"),
         }
     }
 }
@@ -491,9 +492,9 @@ impl FromStr for RouterPrefillLoadModel {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
-            "aic" => Ok(Self::Aic),
+            "ais" | "aic" => Ok(Self::Aic),
             _ => Err(format!(
-                "unknown prefill load model: {s:?}, expected 'none' or 'aic'"
+                "unknown prefill load model: {s:?}, expected 'none' or 'ais'"
             )),
         }
     }
@@ -1769,7 +1770,7 @@ mod tests {
 
         let error =
             try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
-        assert!(error.contains("expected 'none' or 'aic'"));
+        assert!(error.contains("expected 'none' or 'ais'"));
 
         assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }

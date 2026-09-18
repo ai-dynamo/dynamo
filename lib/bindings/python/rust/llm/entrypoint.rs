@@ -36,7 +36,9 @@ use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
+use super::ais_callback::{
+    ais_worker_type, create_aic_callback, create_ais_callback, create_ais_prefill_load_estimator,
+};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
@@ -87,96 +89,31 @@ impl KvRouterConfig {
 
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct AicPerfConfig {
-    aic_backend: String,
-    aic_system: String,
-    aic_backend_version: Option<String>,
-    aic_tp_size: usize,
-    aic_model_path: String,
-    aic_moe_tp_size: Option<usize>,
-    aic_moe_ep_size: Option<usize>,
-    aic_attention_dp_size: Option<usize>,
-    aic_gemm_dtype: Option<String>,
-    aic_moe_dtype: Option<String>,
-    aic_fmha_dtype: Option<String>,
-    aic_kv_cache_dtype: Option<String>,
-    aic_comm_dtype: Option<String>,
-    aic_nextn: Option<usize>,
-    aic_nextn_accept_rates: Option<String>,
+pub struct AisPerfConfig {
+    config: serde_json::Value,
 }
 
-impl AicPerfConfig {
-    pub(crate) fn backend_name(&self) -> &str {
-        &self.aic_backend
-    }
+/// Deprecated input name retained while downstream SDK users migrate.
+pub type AicPerfConfig = AisPerfConfig;
 
-    pub(crate) fn system(&self) -> &str {
-        &self.aic_system
-    }
-
-    pub(crate) fn backend_version(&self) -> Option<&str> {
-        self.aic_backend_version.as_deref()
-    }
-
-    pub(crate) fn tp_size(&self) -> usize {
-        self.aic_tp_size
-    }
-
-    pub(crate) fn model_path(&self) -> &str {
-        &self.aic_model_path
-    }
-
-    pub(crate) fn moe_tp_size(&self) -> Option<usize> {
-        self.aic_moe_tp_size
-    }
-
-    pub(crate) fn moe_ep_size(&self) -> Option<usize> {
-        self.aic_moe_ep_size
-    }
-
-    pub(crate) fn attention_dp_size(&self) -> Option<usize> {
-        self.aic_attention_dp_size
-    }
-
-    pub(crate) fn gemm_dtype(&self) -> Option<&str> {
-        self.aic_gemm_dtype.as_deref()
-    }
-
-    pub(crate) fn moe_dtype(&self) -> Option<&str> {
-        self.aic_moe_dtype.as_deref()
-    }
-
-    pub(crate) fn fmha_dtype(&self) -> Option<&str> {
-        self.aic_fmha_dtype.as_deref()
-    }
-
-    pub(crate) fn kv_cache_dtype(&self) -> Option<&str> {
-        self.aic_kv_cache_dtype.as_deref()
-    }
-
-    pub(crate) fn comm_dtype(&self) -> Option<&str> {
-        self.aic_comm_dtype.as_deref()
-    }
-
-    pub(crate) fn nextn(&self) -> Option<usize> {
-        self.aic_nextn
-    }
-
-    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
-        self.aic_nextn_accept_rates.as_deref()
+impl AisPerfConfig {
+    pub(crate) fn config(&self) -> &serde_json::Value {
+        &self.config
     }
 }
 
 #[pymethods]
-impl AicPerfConfig {
+impl AisPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
+    #[pyo3(signature = (config=None, *, aic_backend=None, aic_system=None, aic_model_path=None, aic_tp_size=None, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
-        aic_backend: String,
-        aic_system: String,
-        aic_model_path: String,
-        aic_tp_size: usize,
+        py: Python<'_>,
+        config: Option<&Bound<'_, PyAny>>,
+        aic_backend: Option<String>,
+        aic_system: Option<String>,
+        aic_model_path: Option<String>,
+        aic_tp_size: Option<usize>,
         aic_backend_version: Option<String>,
         aic_moe_tp_size: Option<usize>,
         aic_moe_ep_size: Option<usize>,
@@ -189,53 +126,98 @@ impl AicPerfConfig {
         aic_kv_cache_dtype: Option<String>,
         aic_comm_dtype: Option<String>,
     ) -> PyResult<Self> {
-        if aic_backend.is_empty() {
-            return Err(PyValueError::new_err("aic_backend must be non-empty"));
-        }
-        if aic_system.is_empty() {
-            return Err(PyValueError::new_err("aic_system must be non-empty"));
-        }
-        if aic_model_path.is_empty() {
-            return Err(PyValueError::new_err("aic_model_path must be non-empty"));
-        }
-        if aic_tp_size == 0 {
-            return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
-        }
-        for (name, value) in [
-            ("aic_moe_tp_size", aic_moe_tp_size),
-            ("aic_moe_ep_size", aic_moe_ep_size),
-            ("aic_attention_dp_size", aic_attention_dp_size),
+        let mut legacy = serde_json::json!({});
+        for (key, value) in [
+            ("backend", serde_json::to_value(&aic_backend)),
+            ("system", serde_json::to_value(&aic_system)),
+            ("model", serde_json::to_value(&aic_model_path)),
+            ("tp", serde_json::to_value(aic_tp_size)),
+            (
+                "backend_version",
+                serde_json::to_value(&aic_backend_version),
+            ),
+            ("moe_tp_size", serde_json::to_value(aic_moe_tp_size)),
+            ("moe_ep_size", serde_json::to_value(aic_moe_ep_size)),
+            ("attention_dp", serde_json::to_value(aic_attention_dp_size)),
+            ("nextn", serde_json::to_value(aic_nextn)),
+            ("gemm_quant_mode", serde_json::to_value(&aic_gemm_dtype)),
+            ("moe_quant_mode", serde_json::to_value(&aic_moe_dtype)),
+            ("fmha_quant_mode", serde_json::to_value(&aic_fmha_dtype)),
+            (
+                "kvcache_quant_mode",
+                serde_json::to_value(&aic_kv_cache_dtype),
+            ),
+            ("comm_quant_mode", serde_json::to_value(&aic_comm_dtype)),
         ] {
-            if matches!(value, Some(0)) {
-                return Err(PyValueError::new_err(format!("{name} must be >= 1")));
+            let value = value.map_err(to_pyerr)?;
+            if !value.is_null() {
+                legacy[key] = value;
             }
         }
-        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
-        if let Some(nextn) = aic_nextn
-            && !(1..=5).contains(&nextn)
-        {
+        let config = if let Some(config) = config {
+            if !legacy.as_object().expect("object").is_empty() {
+                return Err(PyValueError::new_err(
+                    "config and legacy aic_* identity fields cannot be combined",
+                ));
+            }
+            let mapping = if config.hasattr("to_dict")? {
+                config.call_method0("to_dict")?
+            } else {
+                config.clone()
+            };
+            let text: String = py
+                .import("json")?
+                .call_method1("dumps", (mapping,))?
+                .extract()?;
+            serde_json::from_str::<serde_json::Value>(&text).map_err(to_pyerr)?
+        } else {
+            let module = py.import("dynamo._internal.ais")?;
+            for (field, key) in [
+                ("gemm", "gemm_quant_mode"),
+                ("moe", "moe_quant_mode"),
+                ("fmha", "fmha_quant_mode"),
+                ("kvcache", "kvcache_quant_mode"),
+                ("comm", "comm_quant_mode"),
+            ] {
+                if let Some(value) = legacy[key].as_str() {
+                    let normalized: Option<String> = module
+                        .call_method1("_resolve_quant_mode_name", (field, value))?
+                        .extract()?;
+                    legacy[key] = serde_json::to_value(normalized).map_err(to_pyerr)?;
+                }
+            }
+            legacy["worker_type"] = serde_json::json!("aggregated");
+            legacy
+        };
+        if !config.is_object() {
             return Err(PyValueError::new_err(
-                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
+                "AIS config must be a mapping or ForwardPassPerfModelConfig",
             ));
         }
+        // Validation/defaulting belongs to the AISimulate SDK; retain its full
+        // result so nested estimator controls and future fields are not cropped.
+        let text = serde_json::to_string(&config).map_err(to_pyerr)?;
+        let mapping = py.import("json")?.call_method1("loads", (text,))?;
+        let kwargs = mapping.downcast::<pyo3::types::PyDict>()?;
+        let canonical = py
+            .import("aisimulate_core.sdk")?
+            .getattr("ForwardPassPerfModelConfig")?
+            .call((), Some(kwargs))?;
+        let text: String = py
+            .import("json")?
+            .call_method1("dumps", (canonical.call_method0("to_dict")?,))?
+            .extract()?;
+        let config: serde_json::Value = serde_json::from_str(&text).map_err(to_pyerr)?;
+        if config["nextn"].as_u64().unwrap_or(0) > 0 {
+            py.import("dynamo._internal.ais")?
+                .call_method1("_pad_nextn_accept_rates", (aic_nextn_accept_rates,))?;
+        }
+        Ok(Self { config })
+    }
 
-        Ok(Self {
-            aic_backend,
-            aic_system,
-            aic_backend_version,
-            aic_tp_size,
-            aic_model_path,
-            aic_moe_tp_size,
-            aic_moe_ep_size,
-            aic_attention_dp_size,
-            aic_gemm_dtype,
-            aic_moe_dtype,
-            aic_fmha_dtype,
-            aic_kv_cache_dtype,
-            aic_comm_dtype,
-            aic_nextn,
-            aic_nextn_accept_rates,
-        })
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let text = serde_json::to_string(&self.config).map_err(to_pyerr)?;
+        Ok(py.import("json")?.call_method1("loads", (text,))?.unbind())
     }
 }
 
@@ -599,7 +581,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None, ais_perf_config=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -634,7 +616,15 @@ impl EntrypointArgs {
         reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
         tokenizer_fallback: Option<bool>,
+        ais_perf_config: Option<AicPerfConfig>,
     ) -> PyResult<Self> {
+        if aic_perf_config.is_some() && ais_perf_config.is_some() {
+            return Err(PyValueError::new_err(
+                "use only ais_perf_config; aic_perf_config is a legacy alias",
+            ));
+        }
+        let aic_perf_config = ais_perf_config.or(aic_perf_config);
+
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
             || (tls_cert_path.is_none() && tls_key_path.is_some())
@@ -884,26 +874,7 @@ async fn select_engine(
                 .aic_perf_config
                 .as_ref()
                 .map(|config| {
-                    Python::with_gil(|py| {
-                        create_aic_prefill_load_estimator(
-                            py,
-                            config.backend_name(),
-                            config.system(),
-                            config.model_path(),
-                            config.tp_size(),
-                            config.backend_version(),
-                            config.moe_tp_size(),
-                            config.moe_ep_size(),
-                            config.attention_dp_size(),
-                            config.gemm_dtype(),
-                            config.moe_dtype(),
-                            config.fmha_dtype(),
-                            config.kv_cache_dtype(),
-                            config.comm_dtype(),
-                            config.nextn(),
-                            config.nextn_accept_rates(),
-                        )
-                    })
+                    Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
             RsEngineConfig::Dynamic {
@@ -931,7 +902,10 @@ async fn select_engine(
             };
 
             // If aic_backend is set, create Python AIC callback and override perf_model
-            if let Some(ref backend_name) = mocker_args.aic_backend {
+            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
+                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
+                mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
+            } else if let Some(ref backend_name) = mocker_args.aic_backend {
                 let backend = backend_name.clone();
                 let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
                 let model_name = mocker_args
@@ -968,6 +942,7 @@ async fn select_engine(
                         comm_dtype,
                         nextn,
                         undiscounted_accept_rates.as_deref(),
+                        ais_worker_type(mocker_args.worker_type),
                     )
                 }) {
                     Ok(callback) => {
@@ -978,7 +953,7 @@ async fn select_engine(
                             model_name,
                             backend_version
                         );
-                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
+                        mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
                     }
                     Err(e) => {
                         return Err(anyhow::anyhow!(

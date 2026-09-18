@@ -297,7 +297,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
+        "--ais-perf-model",
         "--aic-perf-model",
+        dest="aic_perf_model",
         action="store_true",
         default=False,
         help="Use AISimulate's AIC perf model directly for latency prediction. "
@@ -325,13 +327,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "for AIC KV capacity estimation with TRT-LLM (default: 0.9).",
     )
     parser.add_argument(
+        "--ais-system",
         "--aic-system",
+        dest="aic_system",
         type=str,
         default=None,
         help="AIC system name (e.g., 'h200_sxm'). Used with --aic-perf-model.",
     )
     parser.add_argument(
+        "--ais-backend",
         "--aic-backend",
+        dest="aic_backend",
         type=str,
         default=None,
         choices=["vllm", "sglang", "trtllm"],
@@ -341,7 +347,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "trtllm AIC data).",
     )
     parser.add_argument(
+        "--ais-backend-version",
         "--aic-backend-version",
+        dest="aic_backend_version",
         type=str,
         default=None,
         help="AIC performance-database version: 'current', 'previous', or 'next' "
@@ -349,41 +357,53 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "Defaults to the release database's 'current' slot.",
     )
     parser.add_argument(
+        "--ais-tp-size",
         "--aic-tp-size",
+        dest="aic_tp_size",
         type=int,
         default=None,
         help="Tensor parallel size for AIC latency prediction (default: 1). "
         "Only affects AIC performance model lookups, not mocker scheduling.",
     )
     parser.add_argument(
+        "--ais-moe-tp-size",
         "--aic-moe-tp-size",
+        dest="aic_moe_tp_size",
         type=int,
         default=None,
         help="MoE tensor-parallel size for AIC latency prediction. "
         "Required for MoE models. Constraint: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.",
     )
     parser.add_argument(
+        "--ais-moe-ep-size",
         "--aic-moe-ep-size",
+        dest="aic_moe_ep_size",
         type=int,
         default=None,
         help="MoE expert-parallel size for AIC latency prediction. "
         "Required for MoE models. Constraint: aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size.",
     )
     parser.add_argument(
+        "--ais-attention-dp-size",
         "--aic-attention-dp-size",
+        dest="aic_attention_dp_size",
         type=int,
         default=None,
         help="Attention data-parallel size for AIC latency prediction (default: 1). "
         "Corresponds to the 'dp' dimension in AIC CLI output.",
     )
     parser.add_argument(
+        "--ais-nextn",
         "--aic-nextn",
+        dest="aic_nextn",
         type=int,
         default=None,
         help="[EXPERIMENTAL] Number of MTP draft tokens to sample (1-5).",
     )
     parser.add_argument(
+        "--ais-nextn-accept-rates",
         "--aic-nextn-accept-rates",
+        dest="aic_nextn_accept_rates",
         type=str,
         default=None,
         help=(
@@ -392,7 +412,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--ais-mtp-seed",
         "--aic-mtp-seed",
+        dest="aic_mtp_seed",
         type=int,
         default=42,
         help="[EXPERIMENTAL] Base RNG seed for mocker MTP burst sampling.",
@@ -403,6 +425,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1,
         help="Number of mocker workers to launch in the same process (default: 1). "
         "All workers share the same tokio runtime and thread pool.",
+    )
+
+    from dynamo.common.configuration.groups.ais_perf_args import parse_ais_perf_config
+
+    parser.add_argument(
+        "--ais-perf-config",
+        type=parse_ais_perf_config,
+        default=None,
+        help="Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML file.",
     )
 
     # Reasoning token output
@@ -631,6 +662,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # in for a real worker set when exercising per-role routing.
     add_worker_router_arguments(parser)
 
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    spellings = {}
+    for token in argv:
+        flag = token.split("=", 1)[0]
+        if flag.startswith(("--ais-", "--aic-")):
+            canonical = flag.replace("--aic-", "--ais-", 1)
+            if canonical in spellings and spellings[canonical] != flag:
+                parser.error(
+                    f"{canonical} and its legacy --aic spelling cannot be combined"
+                )
+            spellings[canonical] = flag
     args = parser.parse_args(argv)
     # Collect them into their own config object, matching the backends.
     args.router_advertisement = WorkerRouterConfig.from_cli_args(args)

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Smoke the experimental router-side AIC path in the frontend image."""
+"""Smoke the experimental router-side AIS path in the frontend image."""
 
 from __future__ import annotations
 
@@ -21,44 +21,52 @@ def main() -> None:
         "--router-mode",
         "kv",
         "--router-prefill-load-model",
-        "aic",
+        "ais",
         "--dyn-chat-processor",
         "dynamo",
-        "--aic-backend",
+        "--ais-backend",
         "vllm",
-        "--aic-system",
+        "--ais-system",
         "h200_sxm",
-        "--aic-model-path",
+        "--ais-model-path",
         "Qwen/Qwen3-32B",
-        "--aic-backend-version",
+        "--ais-backend-version",
         "current",
     ]
 
-    from aiconfigurator_core.sdk.engine import EngineHandle
+    import json
 
     from dynamo.frontend.main import parse_args
-    from dynamo.llm import AicPerfConfig
+    from dynamo.llm import AisPerfConfig, KvRouterConfig
+    from dynamo.mocker import MockEngineArgs
+    from dynamo.replay import run_synthetic_trace_replay
 
     config, _, _ = parse_args()
     assert config.router_mode == "kv"
-    assert config.router_prefill_load_model == "aic"
-    assert config.aic_backend is not None
-    assert config.aic_system is not None
-    assert config.aic_model_path is not None
-
-    # This is the object passed by dynamo.frontend into the native KV router.
-    assert AicPerfConfig(**config.aic_perf_kwargs())
-
-    # Exercise the compiled predictor and packaged perf data that the router's
-    # native AIC prefill-load estimator consumes at startup.
-    engine = EngineHandle.compile(
-        model_path=config.aic_model_path,
-        system=config.aic_system,
-        backend=config.aic_backend,
-        backend_version=config.aic_backend_version,
-        tp_size=config.aic_tp_size,
+    assert config.router_prefill_load_model == "ais"
+    perf = AisPerfConfig(**config.ais_perf_kwargs())
+    engine_args = MockEngineArgs.from_json(
+        json.dumps(
+            {
+                "ais_perf_config": perf.to_dict(),
+                "num_gpu_blocks": 1024,
+            }
+        )
     )
-    assert engine.predict_prefill_latency(1, 1024, 0) > 0.0
+    # Exercise Dynamo's actual embedded Rust callback and Replay engine together.
+    # This catches a wheel/crate EngineSpec mismatch that an SDK-only query misses.
+    report = run_synthetic_trace_replay(
+        input_tokens=1024,
+        output_tokens=2,
+        request_count=2,
+        num_workers=2,
+        extra_engine_args=engine_args,
+        ais_perf_config=perf,
+        router_mode="kv_router",
+        router_config=KvRouterConfig(router_prefill_load_model="ais"),
+        replay_concurrency=1,
+    )
+    assert report.summary
 
 
 if __name__ == "__main__":

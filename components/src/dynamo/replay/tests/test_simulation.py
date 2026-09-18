@@ -282,7 +282,11 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["num_decode_workers"] == 4
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics == {
+        "output_throughput_tok_s": 99.0,
+        "power_w": None,
+        "power_coverage": None,
+    }
 
 
 def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
@@ -316,7 +320,11 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
     assert seen["request_count"] == 200
     assert seen["replay_concurrency"] is None
     assert seen["arrival_interval_ms"] == 50.0
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics == {
+        "output_throughput_tok_s": 99.0,
+        "power_w": None,
+        "power_coverage": None,
+    }
 
 
 @pytest.mark.parametrize("request_rate", [0.0, -1.0])
@@ -369,7 +377,7 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
         simulation,
-        "resolve_aic_num_gpu_blocks",
+        "resolve_ais_num_gpu_blocks",
         lambda payload: payload,
     )
     engine_args = simulation.DynamoReplayRunner._engine_args(
@@ -417,6 +425,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             supported_backend_topologies=(),
             supported_hooks=(),
             supports_disaggregated_attention_dp=False,
+            supports_agentic_lanes=False,
         ):
             seen["version"] = replay_spec_api_version
             seen[
@@ -453,3 +462,29 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
 
     with pytest.raises(RuntimeError, match="did not emit goodput"):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+def test_planner_bootstrap_preserves_each_canonical_role_identity():
+    from types import SimpleNamespace
+
+    from dynamo.replay.planner import _ais_session_kwargs
+
+    prefill = {
+        "model": "model-p",
+        "system": "gpu-p",
+        "backend": "vllm",
+        "worker_type": "prefill",
+        "systems_paths": ["custom-p"],
+        "estimator_config": {"correction": {"enabled": False}},
+    }
+    decode = {
+        "model": "model-d",
+        "system": "gpu-d",
+        "backend": "sglang",
+        "worker_type": "decode",
+        "systems_paths": ["custom-d"],
+    }
+    for config in (prefill, decode):
+        args = SimpleNamespace(ais_perf_config=config)
+        assert _ais_session_kwargs(None, args) == {"config": config}
+        assert _ais_session_kwargs(config, SimpleNamespace()) == {"config": config}

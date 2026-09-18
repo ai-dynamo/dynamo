@@ -223,7 +223,7 @@ def is_kv_router_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     )
 
 
-def needs_mocker_aic_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+def needs_mocker_ais_perf_model(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
     """True when mocker workers should load performance data from AIC.
 
     Requests with Planner configuration use its pre-deployment sweep mode. For
@@ -249,15 +249,15 @@ def needs_profile_data(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
       Requests with Planner configuration use its sweep mode; mocker-only
       requests use the DGDR search strategy. In rapid mode the mocker pulls
       latency data directly from the AIConfigurator SDK via
-      ``--aic-perf-model`` flags injected by the profiler, so no NPZ is
+      ``--ais-perf-model`` flags injected by the profiler, so no NPZ is
       emitted.
     * **Planner** when thorough-mode bootstrap data is requested. In rapid
-      mode the planner receives ``aic_perf_model`` and can also run AIC
+      mode the planner receives ``ais_perf_model`` and can also run AIC
       interpolation in-process at bootstrap; in none mode it starts from
       native AIC or live FPM regression warmup.
     """
     if is_mocker_enabled(dgdr):
-        return not needs_mocker_aic_perf_model(dgdr)
+        return not needs_mocker_ais_perf_model(dgdr)
     sweep_mode = (
         dgdr.features.planner.pre_deployment_sweeping_mode
         if dgdr.features is not None and dgdr.features.planner is not None
@@ -361,3 +361,7 @@ def inject_tolerations_into_dgd(dgd_config: dict, tolerations: list) -> dict:
         if new_entries:
             pod_spec["tolerations"] = list(existing) + new_entries
     return result
+
+
+# Compatibility import; generated perf-model configuration uses AIS naming.
+needs_mocker_aic_perf_model = needs_mocker_ais_perf_model

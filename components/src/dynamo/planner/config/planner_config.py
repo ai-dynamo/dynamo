@@ -17,9 +17,11 @@ import json
 import logging
 import math
 import os
+from copy import deepcopy
+from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional, Protocol
+from typing import Any, Dict, Literal, Optional, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
@@ -96,29 +98,121 @@ class PlannerPreDeploymentSweepMode(str, Enum):
     Thorough = "thorough"
 
 
-class AICPerfModelSpec(BaseModel):
-    """Native AIC model identity used by Planner performance modeling.
+class AISPerfModelSpec(BaseModel):
+    """Role-indexed AISimulate canonical configurations.
 
-    Unlike ``AICInterpolationSpec``, this does not describe an AIC sweep.
-    It is the forward-pass model/backend/parallelism identity used for
-    real-time queries through the aiconfigurator-core wheel. Unsupported
-    native AIC configs are allowed: the AIC model falls back to FPM regression
-    and can still tune from observations.
+    The SDK owns the estimator schema. Dynamo only binds each configuration
+    to its deployment role. Legacy ``hf_id`` / picks are accepted at this
+    input boundary and are never written back to generated configuration.
     """
 
-    hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
-    system: str = Field(description="AIC system identifier, e.g. h200_sxm")
-    backend: Literal["trtllm", "vllm", "sglang"]
-    backend_version: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
 
-    prefill_pick: Optional[PickedParallelConfig] = None
-    decode_pick: Optional[PickedParallelConfig] = None
+    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]]
 
-    model_arch: Optional[str] = None
-    weight_dtype: Optional[str] = None
-    moe_dtype: Optional[str] = None
-    activation_dtype: Optional[str] = None
-    kv_cache_dtype: Optional[str] = None
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_identity(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "hf_id" not in value:
+            return value
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+        allowed = {
+            "hf_id",
+            "system",
+            "backend",
+            "backend_version",
+            "prefill_pick",
+            "decode_pick",
+            "model_arch",
+            "weight_dtype",
+            "moe_dtype",
+            "activation_dtype",
+            "kv_cache_dtype",
+        }
+        unknown = value.keys() - allowed
+        if unknown:
+            raise ValueError(f"unknown legacy AIS perf model fields: {sorted(unknown)}")
+        missing = {"hf_id", "system", "backend"} - value.keys()
+        if missing:
+            raise ValueError(f"missing legacy AIS perf model fields: {sorted(missing)}")
+        roles = {}
+        for role, pick_key in (
+            ("prefill", "prefill_pick"),
+            ("decode", "decode_pick"),
+            ("aggregated", "decode_pick"),
+        ):
+            pick = value.get(pick_key)
+            if pick is None:
+                continue
+            if isinstance(pick, dict):
+                unknown_pick = pick.keys() - PickedParallelConfig.model_fields.keys()
+                if unknown_pick:
+                    raise ValueError(
+                        f"unknown {pick_key} fields: {sorted(unknown_pick)}"
+                    )
+            pick = PickedParallelConfig.model_validate(pick)
+            legacy = {
+                "schema_version": 1,
+                "model_name": value["hf_id"],
+                "system_name": value["system"],
+                "backend": value["backend"],
+                "backend_version": value.get("backend_version"),
+                "tp_size": pick.tp,
+                "pp_size": pick.pp,
+                "attention_dp_size": pick.dp,
+                "moe_tp_size": pick.moe_tp
+                if (pick.moe_tp, pick.moe_ep) != (1, 1)
+                else None,
+                "moe_ep_size": pick.moe_ep
+                if (pick.moe_tp, pick.moe_ep) != (1, 1)
+                else None,
+            }
+            for name in (
+                "weight_dtype",
+                "moe_dtype",
+                "activation_dtype",
+                "kv_cache_dtype",
+            ):
+                if value.get(name) is not None:
+                    legacy[name] = value[name]
+            migrated = asdict(
+                ForwardPassPerfModelConfig.from_legacy_engine_config(
+                    legacy, role, allow_regression=True
+                )
+            )
+            # Observation controls belong to Planner unless supplied in the
+            # new canonical config. Apply them at runtime, after limits arrive.
+            migrated["estimator_config"] = {}
+            roles[role] = migrated
+        return {"roles": roles}
+
+    @field_validator("roles")
+    @classmethod
+    def validate_role_identity(
+        cls, roles: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        from aisimulate_core import RustForwardPassPerfModel
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+        result = {}
+        for role, config in roles.items():
+            config = deepcopy(config)
+            if config.get("worker_type", role) != role:
+                raise ValueError(f"AIS role {role!r} conflicts with worker_type")
+            config["worker_type"] = role
+            try:
+                # Use the installed SDK's fields/defaults; never duplicate its
+                # expanding schema or discard an unrecognized input field.
+                result[role] = asdict(ForwardPassPerfModelConfig(**config))
+                RustForwardPassPerfModel.normalize_config(json.dumps(result[role]))
+            except TypeError as error:
+                raise ValueError(f"invalid AIS config for {role}: {error}") from error
+        return result
+
+
+# Compatibility import; new code and serialized configuration use AIS.
+AICPerfModelSpec = AISPerfModelSpec
 
 
 class ExternalPluginEntry(BaseModel):
@@ -493,16 +587,36 @@ class PlannerConfig(BaseModel):
             "the legacy profile_results_dir file loader)."
         ),
     )
-    aic_perf_model: Optional[AICPerfModelSpec] = Field(
+    ais_perf_model: Optional[AISPerfModelSpec] = Field(
         default=None,
+        validation_alias=AliasChoices("ais_perf_model", "aic_perf_model"),
         description=(
-            "Native AIC forward-pass perf model identity for the Planner "
-            "engine-query layer. This enables real-time AIC estimates plus online "
-            "correction; unsupported native configs automatically fall back to "
-            "FPM regression in the AIC core wheel. This field does not trigger AIC "
-            "interpolation sweeps."
+            "Role-indexed AISimulate ForwardPassPerfModelConfig mappings. "
+            "The SDK owns estimator selection, tuning, and validation; "
+            "new configs default to auto selection with fallback denied."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_duplicate_perf_model_names(cls, values):
+        if (
+            isinstance(values, dict)
+            and {"ais_perf_model", "aic_perf_model"} <= values.keys()
+        ):
+            raise ValueError(
+                "use only ais_perf_model; aic_perf_model is a compatibility alias"
+            )
+        return values
+
+    @property
+    def aic_perf_model(self) -> Optional[AISPerfModelSpec]:
+        """Compatibility attribute; serialization always uses ais_perf_model."""
+        return self.ais_perf_model
+
+    @aic_perf_model.setter
+    def aic_perf_model(self, value: Optional[AISPerfModelSpec]) -> None:
+        self.ais_perf_model = value
 
     ttft_ms: float = Field(
         default=SLAPlannerDefaults.ttft_ms,
@@ -1003,28 +1117,24 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
-                    "is not set; planner will use aic_perf_model, live FPM "
+                    "is not set; planner will use ais_perf_model, live FPM "
                     "tuning, or profile_results_dir files if the "
                     "get_perf_metrics endpoint is unavailable."
                 )
 
-        if self.aic_perf_model is not None:
-            if (
-                self.mode in ("disagg", "prefill")
-                and self.aic_perf_model.prefill_pick is None
-            ):
-                raise ValueError(
-                    "aic_perf_model.prefill_pick is required for prefill "
-                    f"perf queries in mode={self.mode!r}"
-                )
-            if (
-                self.mode in ("disagg", "decode", "agg")
-                and self.aic_perf_model.decode_pick is None
-            ):
-                raise ValueError(
-                    "aic_perf_model.decode_pick is required for decode/agg "
-                    f"perf queries in mode={self.mode!r}"
-                )
+        if self.ais_perf_model is not None:
+            required_roles = {
+                "disagg": ("prefill", "decode"),
+                "prefill": ("prefill",),
+                "decode": ("decode",),
+                "agg": ("aggregated",),
+            }[self.mode]
+            for role in required_roles:
+                if role not in self.ais_perf_model.roles:
+                    raise ValueError(
+                        f"ais_perf_model.roles.{role} is required for mode={self.mode!r} "
+                        "(legacy configs must supply the corresponding prefill_pick/decode_pick)"
+                    )
 
         intervals = [float(self.load_adjustment_interval_seconds)]
         if self.enable_throughput_scaling:

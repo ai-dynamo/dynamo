@@ -344,4 +344,4 @@ def test_aic_perf_model_accepts_mode_required_picks():
     )
 
     assert config.aic_perf_model is not None
-    assert config.aic_perf_model.decode_pick == pick
+    assert config.ais_perf_model.roles["decode"]["tp"] == pick.tp
