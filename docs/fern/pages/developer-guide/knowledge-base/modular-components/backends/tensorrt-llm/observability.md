@@ -52,16 +52,22 @@ $ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model <model_name> \
 **Note:** The `backend` must be set to `"pytorch"` for metrics collection (enforced in `components/src/dynamo/trtllm/main.py`). TensorRT-LLM's `MetricsCollector` integration has only been tested/validated with the PyTorch backend.
 
 `--publish-metrics` exposes metrics on this worker's own endpoint. It also
-publishes the per-rank used-block count the frontend's optional busy-rejection
-thresholds read; the KV router's worker selection uses its own tracking, so
-scraping a worker never changes how it is scheduled. Because the Planner's
-forward-pass metrics read the same iteration statistics, `--publish-metrics`
-publishes those too; `--fpm-trace` and `DYN_FORWARDPASS_METRIC_PORT`, the opt-in
-the other backends use, enable them without the Prometheus surface. KV-event
-publication is configured independently with `--publish-kv-events`. Use both
-publishing flags when a worker must publish both event and metric telemetry. For
-backward compatibility, the deprecated `--publish-events-and-metrics` flag
-continues to enable both controls for one release.
+publishes the per-rank used-block count that the frontend's optional
+`--active-decode-blocks-threshold` reads. The KV router's per-worker scoring
+(`worker_logit`) never reads that sample — it takes overlap from KV events and
+load from its own active-sequence tracking — so enabling `--publish-metrics`
+does not change KV-aware ranking. It is not inert, though: with that threshold
+set, the published count is OR-ed with the router's own decode-block estimate,
+and a worker marked overloaded leaves the candidate set until it recovers.
+
+Because the Planner's forward-pass metrics read the same iteration statistics,
+`--publish-metrics` publishes those too; `--fpm-trace` and
+`DYN_FORWARDPASS_METRIC_PORT`, the opt-in the other backends use, enable them
+without the Prometheus surface. KV-event publication is configured
+independently with `--publish-kv-events`. Use both publishing flags when a
+worker must publish both event and metric telemetry. For backward
+compatibility, the deprecated `--publish-events-and-metrics` flag continues to
+enable both controls for one release.
 
 Wait for the TensorRT-LLM worker to start, then send requests and check metrics:
 
