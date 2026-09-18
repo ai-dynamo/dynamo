@@ -4,7 +4,9 @@
 """E2E coverage for lib/sidecar/{vllm,sglang,trtllm}/launch/agg.sh (native-gRPC sidecar + engine)."""
 
 import dataclasses
+import importlib.util
 import os
+import pathlib
 
 import pytest
 
@@ -26,6 +28,38 @@ sglang_sidecar_dir = os.environ.get("SGLANG_SIDECAR_DIR") or os.path.join(
 )
 trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/trtllm"
+)
+
+
+def _trtllm_serves_openengine() -> bool:
+    """Is the installed TensorRT-LLM new enough to serve `openengine.v1`?
+
+    `lib/sidecar/trtllm` speaks OpenEngine, which the servicer provides from
+    release 1.3.0rc27 onward. `container/context.yaml` pins that release, so
+    this passes in the stock container and the case runs; it guards the
+    off-container and downgraded-image paths, where
+    `trtllm-serve --grpc-protocol openengine` does not exist and the launcher
+    cannot come up at all.
+
+    Probing for the servicer module beats comparing version strings: it is the
+    thing the sidecar actually needs, and it tracks the pinned image by itself.
+    `find_spec` on the parent does not import TensorRT-LLM, so this stays cheap
+    and works on a host without a GPU.
+    """
+    spec = importlib.util.find_spec("tensorrt_llm")
+    locations = getattr(spec, "submodule_search_locations", None) if spec else None
+    if not locations:
+        return False
+    return any(
+        (pathlib.Path(root) / "grpc" / "openengine" / "servicer.py").is_file()
+        for root in locations
+    )
+
+
+TRTLLM_OPENENGINE_SKIP_REASON = (
+    "the installed TensorRT-LLM has no OpenEngine servicer; the sidecar needs "
+    "release 1.3.0rc27 or newer, which container/context.yaml pins. Seeing this "
+    "skip in CI means the pin moved backwards."
 )
 
 
