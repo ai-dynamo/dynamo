@@ -433,7 +433,7 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
 
     components: list[Component] = []
     unresolved = 0
-    removed = 0
+    skipped: list[str] = []
     for line in result.stdout.splitlines():
         if "\t" not in line:
             continue
@@ -446,7 +446,7 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
         if not name or not version:
             continue
         if status in _FILELESS_STATES:
-            removed += 1
+            skipped.append(f"{name}@{version} ({status})")
             continue
         spdx = _resolve_license(name, version, root)
         if spdx == UNKNOWN:
@@ -467,8 +467,12 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
         len(components),
         root,
         unresolved,
-        removed,
+        len(skipped),
     )
+    if skipped:
+        # Name them: a skipped package leaves its conffiles under /etc, so the
+        # NOTICES and CSV it drops out of are the only record that it was there.
+        logger.info("Skipped dpkg entries: %s", ", ".join(sorted(skipped)))
     return components
 
 
