@@ -24,9 +24,9 @@ on:
   pull_request_target:
     types: [opened, edited, synchronize, reopened, ready_for_review]
     # Only pull requests that target `main`. A branch cut for a release
-    # takes cherry-picks, and a cherry-pick cites the pull request it picks
+    # takes cherry-picks, and a cherry-pick cites the original pull request
     # rather than an issue, which this check does not accept and should not:
-    # the issue link belongs on the original change, which was already
+    # the issue link belongs on that original change, which was already
     # checked on its way into `main`. Filtering on the base branch here
     # means the workflow never starts for those, so there is no check to
     # explain away and none to mark required by accident.
