@@ -487,8 +487,8 @@ def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
             calls.append(("promote", kwargs))
             return 9
 
-        def hbm_inventory(self):
-            return {b"ready": (3, 5)}
+        def hbm_lease_inventory(self):
+            return {"rank": [3, 5]}, {"rank": [(3, 13), (5, 15)]}
 
         def close(self):
             calls.append(("close",))
@@ -499,11 +499,40 @@ def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
     monkeypatch.setenv("ENGINE_ID", "primary")
     monkeypatch.setattr(content_directory, "ContentDirectory", FakeDirectory)
 
-    protected = _promote_content_directory_after_fence("vllm", "shadow")
+    protected, leases = _promote_content_directory_after_fence("vllm", "shadow")
 
     assert protected == {3, 5}
+    assert leases == {(3, 13), (5, 15)}
     assert ("promote", {"force_new_epoch": True}) in calls
     assert calls[-1] == ("close",)
+
+
+def test_post_lock_directory_promotion_preserves_legacy_block_fallback(monkeypatch):
+    from dynamo.common.gms_failover import _promote_content_directory_after_fence
+    from gms_kv_ring.common import content_directory
+
+    class FakeDirectory:
+        def __init__(self, _socket_path, **_kwargs):
+            pass
+
+        def promote(self, **_kwargs):
+            return 9
+
+        def hbm_lease_inventory(self):
+            return {"rank": [3, 5]}, None
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model-layout-v7")
+    monkeypatch.setattr(content_directory, "ContentDirectory", FakeDirectory)
+
+    protected, leases = _promote_content_directory_after_fence("vllm", "shadow")
+
+    assert protected == {3, 5}
+    assert leases is None
 
 
 @pytest.mark.asyncio
@@ -515,13 +544,15 @@ async def test_gms_failover_promotes_directory_before_lease_reclaim(monkeypatch)
     def promote(backend_name, role):
         order.append(("promote", backend_name, role))
 
-        return {7, 9}
+        return {7, 9}, {(7, 17), (9, 19)}
 
     async def to_thread(fn, *args):
         return fn(*args)
 
-    def reclaim(backend_name, role, protected_blocks=None):
-        order.append(("reclaim", backend_name, role, protected_blocks))
+    def reclaim(backend_name, role, protected_blocks=None, protected_leases=None):
+        order.append(
+            ("reclaim", backend_name, role, protected_blocks, protected_leases)
+        )
 
     monkeypatch.setattr(
         "dynamo.common.gms_failover._promote_content_directory_after_fence",
@@ -537,7 +568,7 @@ async def test_gms_failover_promotes_directory_before_lease_reclaim(monkeypatch)
 
     assert order == [
         ("promote", "vllm", "shadow"),
-        ("reclaim", "vllm", "shadow", {7, 9}),
+        ("reclaim", "vllm", "shadow", {7, 9}, {(7, 17), (9, 19)}),
     ]
 
 
@@ -552,7 +583,7 @@ async def test_cancelled_fence_drains_directory_promotion(monkeypatch):
     async def to_thread(fn, *args):
         promotion_started.set()
         await allow_promotion.wait()
-        return {7}
+        return {7}, {(7, 17)}
 
     monkeypatch.setattr("dynamo.common.gms_failover.asyncio.to_thread", to_thread)
     monkeypatch.setattr(
@@ -598,12 +629,16 @@ def test_post_fence_reclaim_uses_allocator_namespace(monkeypatch):
     )
 
     gms_failover._reclaim_foreign_kv_leases_after_fence(
-        "sglang", "shadow", protected_blocks={7}
+        "sglang",
+        "shadow",
+        protected_blocks={7},
+        protected_leases={(7, 17)},
     )
 
     assert calls[0][0:2] == ("sglang", 0)
     assert calls[0][2]["namespace_suffix"] == "page-pool"
     assert calls[0][2]["protected_blocks"] == {7}
+    assert calls[0][2]["protected_leases"] == {(7, 17)}
 
 
 def test_post_fence_reclaim_honors_disabled_engine_override(monkeypatch):
