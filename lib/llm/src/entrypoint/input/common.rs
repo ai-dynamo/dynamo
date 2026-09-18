@@ -150,6 +150,7 @@ fn validate_router_mode_for_lora(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
