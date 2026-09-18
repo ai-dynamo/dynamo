@@ -393,6 +393,13 @@ pub mod llm {
     /// Maximum distinct unresolved request-time adapter identities.
     pub const DYN_LORA_MAX_PENDING_RUNTIME_KEYS: &str = "DYN_LORA_MAX_PENDING_RUNTIME_KEYS";
 
+    /// Maximum pending request admissions for resident request-time adapters.
+    pub const DYN_LORA_MAX_PENDING_ADMISSIONS: &str = "DYN_LORA_MAX_PENDING_ADMISSIONS";
+
+    /// Pending request-time adapter lease lifetime before generation activation.
+    pub const DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS: &str =
+        "DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS";
+
     /// Maximum resident request-time adapters per worker.
     pub const DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS: &str = "DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS";
 
@@ -1108,6 +1115,8 @@ mod tests {
             llm::DYN_LORA_RESOLVE_TIMEOUT_SECONDS,
             llm::DYN_LORA_MAX_CONCURRENT_RESOLUTIONS,
             llm::DYN_LORA_MAX_PENDING_RUNTIME_KEYS,
+            llm::DYN_LORA_MAX_PENDING_ADMISSIONS,
+            llm::DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS,
             llm::DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS,
             llm::DYN_LORA_MAX_DOWNLOAD_BYTES,
             llm::DYN_LORA_MAX_CACHE_BYTES,

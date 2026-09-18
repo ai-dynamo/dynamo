@@ -7139,18 +7139,13 @@ impl
             .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
             .ok()
             .flatten();
-        let mut sanitized_payload_request = None;
-        let payload_request = if let Some(selection) = runtime_lora.as_deref() {
-            let mut sanitized = request.clone();
-            sanitized.inner.model = selection.base_model_name.clone();
-            sanitized_payload_request.insert(sanitized)
-        } else {
-            &request
-        };
-        let payload_handle = crate::request_trace::payload::create_handle(
-            payload_request,
+        let payload_handle = crate::request_trace::payload::create_handle_with_model_override(
+            &request,
             &request_id,
             payload_http_headers,
+            runtime_lora
+                .as_deref()
+                .map(|selection| selection.base_model_name.as_str()),
         );
 
         // For non-streaming requests (stream=false), enable usage by default

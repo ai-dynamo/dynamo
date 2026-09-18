@@ -1011,10 +1011,40 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
     }
 }
 
+fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
+    match error {
+        RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "invalid_lora_model_id".to_string(),
+        }),
+        RuntimeLoraError::BaseModelRequired => ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "runtime_lora_base_model_required".to_string(),
+        }),
+        RuntimeLoraError::BaseModelNotFound(base) => ErrorMessage::from_http_error(HttpError {
+            code: 404,
+            message: format!("model_not_found: {base}"),
+        }),
+        RuntimeLoraError::BaseModelUnsupported(_) => ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "runtime_lora_unsupported".to_string(),
+        }),
+        RuntimeLoraError::InvalidConfiguration(message) => {
+            ErrorMessage::internal_server_error_with_details(
+                "Runtime LoRA configuration is invalid",
+                message,
+            )
+        }
+    }
+}
+
 fn runtime_lora_selection(
     state: &service_v2::State,
     requested_model: &str,
 ) -> Result<Option<RuntimeLoraSelection>, ErrorResponse> {
+    if !state.runtime_lora_config().enabled {
+        return Ok(None);
+    }
     if requested_model.is_empty() {
         return Ok(None);
     }
@@ -1041,28 +1071,23 @@ fn runtime_lora_selection(
                 .filter(|model| model.has_runtime_lora_base_deployment())
                 .map(|_| canonical)
         },
-        || state.manager().unique_committed_base_model(),
+        || {
+            let canonical = state
+                .manager()
+                .unique_committed_canonical_base_model()
+                .ok_or(RuntimeLoraError::BaseModelRequired)?;
+            if state
+                .manager()
+                .get_committed_model(&canonical)
+                .is_some_and(|model| model.has_runtime_lora_base_deployment())
+            {
+                Ok(canonical)
+            } else {
+                Err(RuntimeLoraError::BaseModelUnsupported(canonical))
+            }
+        },
     )
-    .map_err(|error| match error {
-        RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: "invalid_lora_model_id".to_string(),
-        }),
-        RuntimeLoraError::BaseModelRequired => ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: "runtime_lora_base_model_required".to_string(),
-        }),
-        RuntimeLoraError::BaseModelNotFound(base) => ErrorMessage::from_http_error(HttpError {
-            code: 404,
-            message: format!("model_not_found: {base}"),
-        }),
-        RuntimeLoraError::InvalidConfiguration(message) => {
-            ErrorMessage::internal_server_error_with_details(
-                "Runtime LoRA configuration is invalid",
-                message,
-            )
-        }
-    })
+    .map_err(runtime_lora_error_response)
 }
 
 /// Warn once when the disabled NvExt policy discards a field or routing header.
@@ -1095,14 +1120,16 @@ async fn handler_completions(
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
+    // Match chat-completions precedence: process readiness is authoritative
+    // before model parsing or runtime-LoRA selection.
+    check_ready(&state)?;
     let runtime_lora = runtime_lora_selection(&state, &request.inner.model)?;
     let serving_model = runtime_lora
         .as_ref()
         .map(|selection| selection.base_model_name.as_str())
         .unwrap_or(&request.inner.model);
 
-    // return a 503 if the service or model is not ready
-    check_ready(&state)?;
+    // return a 503 if the selected base model is not ready
     check_model_serving_ready(&state, serving_model)?;
 
     if !state.nvext_enabled() {
@@ -8935,6 +8962,16 @@ mod tests {
             classify_error_for_metrics(StatusCode::FORBIDDEN),
             ErrorType::Validation
         );
+    }
+
+    #[test]
+    fn runtime_lora_unsupported_base_maps_to_bad_request() {
+        let response = runtime_lora_error_response(RuntimeLoraError::BaseModelUnsupported(
+            "known-base".to_string(),
+        ));
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.0.message, "runtime_lora_unsupported");
     }
 
     #[test]

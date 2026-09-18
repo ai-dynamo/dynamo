@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, HashSet};
+
 use dynamo_kv_router::{
-    protocols::{WorkerSelectionResult, WorkerWithDpRank},
+    protocols::{RoutingConstraints, WorkerId, WorkerSelectionResult, WorkerWithDpRank},
     scheduling::KvSchedulerError,
     selector::{HostedSelectionInputs, WorkerInputs, WorkerSelectionInput, WorkerSelector},
 };
@@ -10,7 +12,7 @@ use dynamo_runtime::pipeline::{BuiltinRoutePicker, RouterMode};
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
-use super::kv_selection::runtime_lora_workers_have_homogeneous_resolvers;
+use super::kv_selection::constrain_runtime_lora_workers;
 
 /// First-party selector hosted directly by [`RoutingHost`](super::RoutingHost).
 pub(super) struct BuiltinWorkerSelector {
@@ -95,6 +97,39 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
     }
 }
 
+fn routable_lora_worker_ids(
+    is_runtime_lora: bool,
+    live_worker_ids: Vec<WorkerId>,
+    allowed_worker_ids: Option<&HashSet<WorkerId>>,
+    runtime_configs: Option<&HashMap<WorkerId, ModelRuntimeConfig>>,
+    routing_constraints: Option<&RoutingConstraints>,
+) -> Vec<WorkerId> {
+    if !is_runtime_lora {
+        return live_worker_ids
+            .into_iter()
+            .filter(|worker_id| {
+                allowed_worker_ids.is_none_or(|allowed| allowed.contains(worker_id))
+            })
+            .collect();
+    }
+
+    let Some(runtime_configs) = runtime_configs else {
+        return Vec::new();
+    };
+    let live_worker_ids = live_worker_ids.into_iter().collect::<HashSet<_>>();
+    let default_constraints = RoutingConstraints::default();
+    constrain_runtime_lora_workers(
+        true,
+        allowed_worker_ids.cloned(),
+        &live_worker_ids,
+        runtime_configs,
+        routing_constraints.unwrap_or(&default_constraints),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .collect()
+}
+
 use super::*;
 
 impl RoutingHost {
@@ -123,33 +158,14 @@ impl RoutingHost {
         let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.as_ref());
         let constraints = routing.and_then(|routing| routing.routing_constraints.as_ref());
         let runtime_configs = lora.runtime_configs.as_ref().map(|watch| watch.borrow());
-        let routable = self
-            .inner
-            .client
-            .instance_ids_avail()
-            .into_iter()
-            .filter(|worker_id| {
-                allowed_worker_ids.is_none_or(|allowed| allowed.contains(worker_id))
-            })
-            .filter(|worker_id| {
-                if !is_runtime_lora {
-                    return true;
-                }
-                runtime_configs
-                    .as_ref()
-                    .and_then(|configs| configs.get(worker_id))
-                    .is_some_and(|config| {
-                        constraints.is_none_or(|constraints| {
-                            constraints.is_compatible_with_worker_taints(&config.taints)
-                        })
-                    })
-            })
-            .collect::<Vec<_>>();
-        let homogeneous_runtime_resolvers = !is_runtime_lora
-            || runtime_configs.as_ref().is_some_and(|configs| {
-                runtime_lora_workers_have_homogeneous_resolvers(&routable, configs)
-            });
-        if is_runtime_lora && (routable.is_empty() || !homogeneous_runtime_resolvers) {
+        let routable = routable_lora_worker_ids(
+            is_runtime_lora,
+            self.inner.client.instance_ids_avail(),
+            allowed_worker_ids,
+            runtime_configs.as_deref(),
+            constraints,
+        );
+        if is_runtime_lora && routable.is_empty() {
             return Err(anyhow::anyhow!(
                 DynamoError::builder()
                     .error_type(ErrorType::Unavailable)
@@ -578,12 +594,45 @@ mod tests {
 
     use super::*;
 
+    fn runtime_config(capability: &str, scheme: &str) -> ModelRuntimeConfig {
+        let mut config = ModelRuntimeConfig::default();
+        config.taints.insert(capability.to_string());
+        config
+            .set_engine_specific("supports_runtime_lora_resolution", true)
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_protocol_versions", vec![2_u32])
+            .unwrap();
+        config
+            .set_engine_specific("runtime_lora_schemes", vec![scheme])
+            .unwrap();
+        config
+    }
+
     fn select(selector: &BuiltinWorkerSelector, worker_ids: &[u64]) -> u64 {
         selector
             .select_worker(WorkerSelectionInput::hosted(worker_ids, None))
             .unwrap()
             .worker
             .worker_id
+    }
+
+    #[test]
+    fn runtime_lora_routing_excludes_stale_heterogeneous_worker() {
+        let capability = "dynamo.runtime-lora/v2";
+        let configs = HashMap::from([
+            (1, runtime_config(capability, "custom")),
+            (2, runtime_config(capability, "wandb-artifact")),
+        ]);
+        let constraints = RoutingConstraints {
+            required_taints: HashSet::from([capability.to_string()]),
+            ..Default::default()
+        };
+
+        let routable =
+            routable_lora_worker_ids(true, vec![2], None, Some(&configs), Some(&constraints));
+
+        assert_eq!(routable, vec![2]);
     }
 
     #[test]
