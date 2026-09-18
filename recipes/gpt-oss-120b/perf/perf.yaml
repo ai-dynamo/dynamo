@@ -40,6 +40,13 @@ spec:
         image: python:3.12-slim
         imagePullPolicy: IfNotPresent
         workingDir: /workspace
+        # aiperf runs up to --workers-max worker processes plus record processors, all on this pod.
+        # The podAffinity above co-locates it with the DGD frontend, which may be a small or busy
+        # node, so reserve CPU explicitly. Without a reservation the client can be starved by
+        # co-tenants, which appears as connection-probe timeouts during startup and then a hang
+        # after "sending complete" with requests still in flight while the GPUs sit idle.
+        resources:
+          requests: {cpu: "16", memory: "32Gi"}
         command:
         - /bin/bash
         - -c
