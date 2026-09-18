@@ -155,7 +155,9 @@ def test_manifest_does_not_pass_real_backend_args_to_mocker(backend: str) -> Non
 
     dgdr = dgdr_tests.manifest(manager, "mocker")
 
-    assert "overrides" not in dgdr["spec"]
+    overrides = dgdr["spec"]["overrides"]
+    assert "trustRemoteCode" not in overrides
+    assert "dgd" not in overrides
 
 
 @pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
