@@ -70,7 +70,7 @@ disabled.
 
 ##### Runtime version required for custom images
 
-**Change:** Components resolve their Dynamo runtime compatibility version from the main container
+**Change:** Components resolve their Dynamo runtime version from the main container
 image tag or `runtimeVersionOverride`. The override takes precedence when the operator selects
 runtime-specific flags, environment variables, and behavior; it does not change the image reference.
 
