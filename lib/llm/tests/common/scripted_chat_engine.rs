@@ -130,7 +130,7 @@ impl ScriptedChatEngine {
     pub fn with_generate_error(error: DynamoError) -> Self {
         Self {
             scripts: Mutex::new(VecDeque::from([QueuedScript::GenerateError(error)])),
-            requests: Mutex::new(Vec::new()),
+            ..Self::new([])
         }
     }
 
