@@ -19,7 +19,7 @@ import kr8s
 import pytest
 import requests
 import yaml
-from kr8s.objects import Pod, Service
+from kr8s.objects import Pod, Service, new_class
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
@@ -32,6 +32,9 @@ from tests.utils.client import send_request
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
+
+# Declare the CRD explicitly so clusters without it return a normal 404.
+SnapshotJob = new_class("SnapshotJob", version="nvidia.com/v1alpha1")
 
 # Shared chat-completion request defaults and response validation.
 #
@@ -1529,14 +1532,27 @@ class ManagedDeployment:
             self._logger,
         )
 
-    def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
+    def get_pod_manifest_logs_metrics(
+        self,
+        service_name: str,
+        pod: Pod,
+        suffix="",
+        *,
+        collect_metrics: bool = True,
+    ) -> bool:
+        """Return whether the manifest and all current container logs were saved.
+
+        Previous-instance logs are optional and metrics do not affect the result.
+        """
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
+        diagnostics_saved = True
 
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
                 f.write(pod.to_yaml())
         except Exception as e:
+            diagnostics_saved = False
             self._logger.error(e)
 
         # Resolve the container list from the pod manifest. Multi-container pods
@@ -1555,6 +1571,7 @@ class ManagedDeployment:
                 if c.get("name"):
                     container_names.append(c["name"])
         except Exception as e:
+            diagnostics_saved = False
             self._logger.debug(f"Failed to resolve containers for {pod.name}: {e}")
 
         if not container_names:
@@ -1570,6 +1587,7 @@ class ManagedDeployment:
                 ) as f:
                     f.write("\n".join(logs))
             except Exception as e:
+                diagnostics_saved = False
                 self._logger.error(
                     f"Failed to fetch logs for {pod.name} container={container or '<default>'}: {e}"
                 )
@@ -1595,9 +1613,97 @@ class ManagedDeployment:
                     f"No previous logs for {pod.name} container={container or '<default>'}: {e}"
                 )
 
-        self._get_pod_metrics(pod, service_name, suffix)
+        if collect_metrics:
+            self._get_pod_metrics(pod, service_name, suffix)
 
-    def _get_service_logs(self, service_name=None, suffix=""):
+        return diagnostics_saved
+
+    def _get_checkpoint_pods(self, name: str, uid: str) -> list[Pod]:
+        # Match the SnapshotJob incarnation, not just its reusable name.
+        return retry_vcluster_api(
+            f"listing pods for checkpoint job {name}",
+            lambda: list(
+                kr8s.get(
+                    "pods",
+                    namespace=self.namespace,
+                    label_selector=(
+                        f"nvidia.com/snapshot-job={name},"
+                        f"nvidia.com/snapshot-job-uid={uid}"
+                    ),
+                )
+            ),
+            _KR8S_VCLUSTER_CONNECTION_ERRORS,
+            self._logger,
+        )
+
+    def _get_checkpoint_pod_logs(self) -> set[str]:
+        collected_pods: set[str] = set()
+        try:
+            jobs = retry_vcluster_api(
+                "listing checkpoint jobs",
+                lambda: list(
+                    kr8s.get(
+                        SnapshotJob,
+                        namespace=self.namespace,
+                        label_selector=(
+                            "nvidia.com/dynamo-graph-deployment-name="
+                            f"{self._deployment_name}"
+                        ),
+                    )
+                ),
+                _KR8S_VCLUSTER_CONNECTION_ERRORS,
+                self._logger,
+            )
+        except kr8s.ServerError as exc:
+            # Non-checkpoint deployments may run without the SnapshotJob CRD.
+            if exc.response is None or exc.response.status_code != 404:
+                self._logger.warning("Failed to list checkpoint jobs: %s", exc)
+            return collected_pods
+        except (
+            kr8s.APITimeoutError,
+            kr8s.ConnectionClosedError,
+            httpx.HTTPError,
+        ) as exc:
+            self._logger.warning("Failed to list checkpoint jobs: %s", exc)
+            return collected_pods
+
+        for job in jobs:
+            metadata = job.raw.get("metadata", {})
+            name, uid = metadata.get("name"), metadata.get("uid")
+            if not name or not uid:
+                continue
+            try:
+                pods = self._get_checkpoint_pods(name, uid)
+            except (
+                kr8s.ServerError,
+                kr8s.APITimeoutError,
+                kr8s.ConnectionClosedError,
+                httpx.HTTPError,
+            ) as exc:
+                self._logger.warning(
+                    "Failed to find pods for checkpoint job %s: %s", name, exc
+                )
+                continue
+            if not pods:
+                self._logger.info("No source pods remain for checkpoint job %s", name)
+            for pod in pods:
+                try:
+                    if self.get_pod_manifest_logs_metrics(
+                        "checkpoint", pod, collect_metrics=False
+                    ):
+                        collected_pods.add(pod.name)
+                except OSError as exc:
+                    self._logger.warning(
+                        "Failed to save checkpoint pod %s diagnostics: %s",
+                        pod.name,
+                        exc,
+                    )
+
+        return collected_pods
+
+    def _get_service_logs(
+        self, service_name=None, suffix="", *, exclude_pods: set[str] | None = None
+    ):
         service_names = None
         if service_name:
             service_names = [service_name]
@@ -1606,6 +1712,8 @@ class ManagedDeployment:
 
         for service, pods in service_pods.items():
             for pod in pods:
+                if exclude_pods and pod.name in exclude_pods:
+                    continue
                 self.get_pod_manifest_logs_metrics(service, pod, suffix)
 
     def _get_pod_metrics(self, pod: Pod, service_name: str, suffix=""):
@@ -1788,8 +1896,9 @@ class ManagedDeployment:
 
     async def _cleanup(self):
         try:
+            checkpoint_pods = self._get_checkpoint_pod_logs()
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
-            self._get_service_logs()
+            self._get_service_logs(exclude_pods=checkpoint_pods)
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
