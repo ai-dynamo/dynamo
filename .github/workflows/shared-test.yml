@@ -117,7 +117,7 @@ on:
         type: boolean
         default: true
       source_ref:
-        description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
+        description: 'Git ref/SHA for image tags and checkout. Sidecar jobs always check out the caller SHA. Empty = caller SHA (github.sha).'
         required: false
         type: string
         default: ''
@@ -136,6 +136,16 @@ on:
         required: false
         type: string
         default: 'true'
+      sidecar_backend:
+        description: 'Backend name (vllm/sglang/trtllm) to install a dynamo-*-sidecar binary for before running tests. Empty = skip (non-sidecar callers).'
+        required: false
+        type: string
+        default: ''
+      sidecar_binary_artifact:
+        description: 'Name of the workflow artifact (from shared-build-sidecar.yml) containing the amd64 dynamo-*-sidecar binaries. Required when sidecar_backend is set.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -201,6 +211,7 @@ jobs:
           ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_trtllm.py' || '' }}
     permissions:
       contents: read
+      actions: read
     services:
       minio:
         image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
@@ -217,7 +228,39 @@ jobs:
         id: checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          ref: ${{ inputs.sidecar_backend != '' && github.sha || inputs.source_ref || github.sha }}
+      - name: Download sidecar binary
+        if: ${{ inputs.sidecar_backend != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ inputs.sidecar_binary_artifact }}
+          path: sidecar-artifact
+      - name: Install sidecar binary
+        if: ${{ inputs.sidecar_backend != '' }}
+        shell: bash
+        env:
+          SIDECAR_BACKEND: ${{ inputs.sidecar_backend }}
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+        run: |
+          set -euo pipefail
+          # Use a workspace-local directory writable by the container user.
+          bin_dir="${GITHUB_WORKSPACE}/.sidecar-bin"
+          mkdir -p "${bin_dir}"
+          install -m755 "sidecar-artifact/dynamo-${SIDECAR_BACKEND}-sidecar" \
+            "${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          if [ -z "${CONTAINER_WORKSPACE}" ]; then
+            echo "::error::container_workspace is empty; refusing to replace test files"
+            exit 1
+          fi
+          if [ ! "${GITHUB_WORKSPACE}" -ef "${CONTAINER_WORKSPACE}" ]; then
+            # Replace the test inputs so files deleted by the PR cannot linger.
+            for path in lib/sidecar tests examples/common conftest.py pyproject.toml Cargo.toml; do
+              rm -rf "${CONTAINER_WORKSPACE}/${path}"
+              mkdir -p "$(dirname "${CONTAINER_WORKSPACE}/${path}")"
+              cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
+            done
+          fi
       - name: Export KVBM MLA backend
         if: ${{ inputs.kvbm_mla_backend != '' }}
         shell: bash

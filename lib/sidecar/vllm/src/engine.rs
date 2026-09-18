@@ -679,7 +679,8 @@ impl LLMEngine for VllmSidecarEngine {
             "connecting to vLLM gRPC"
         );
         let startup_deadline = client::startup_deadline(self.transport.startup_deadline)?;
-        let client = VllmClient::connect(&self.endpoint, self.transport, startup_deadline).await?;
+        let client =
+            VllmClient::connect(&self.endpoint, self.transport, startup_deadline, false).await?;
         client
             .wait_for_services(
                 &[CONTROL_SERVICE, INFERENCE_SERVICE],
@@ -1264,7 +1265,8 @@ fn bootstrap_discover(
             connections: std::num::NonZeroUsize::MIN,
             ..transport
         };
-        let client = VllmClient::connect(endpoint, bootstrap_transport, startup_deadline).await?;
+        let client =
+            VllmClient::connect(endpoint, bootstrap_transport, startup_deadline, true).await?;
         client
             .wait_for_services(
                 &[CONTROL_SERVICE],
