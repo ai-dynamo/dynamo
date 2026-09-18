@@ -42,6 +42,80 @@ func TestBuildFromGbuildManifestV2ProjectsRuntimeIO(t *testing.T) {
 	require.ErrorContains(t, err, "contractRevision")
 }
 
+func TestBuildFromGbuildManifestV2RetainsRuntimeOverrides(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Keep only compiler metadata whose runtime default would differ")
+	for _, test := range []struct {
+		name                   string
+		architectureVocabulary uint32
+		tokenizerVocabulary    uint32
+		architectureSWA        bool
+		programSWA             bool
+		want                   map[string]any
+	}{
+		{name: "matching vocabulary", architectureVocabulary: 128, tokenizerVocabulary: 128},
+		{name: "architecture vocabulary only", architectureVocabulary: 128},
+		{name: "tokenizer vocabulary only", tokenizerVocabulary: 128, want: map[string]any{"vocab_size": int64(128)}},
+		{name: "tokenizer overrides architecture padding", architectureVocabulary: 256, tokenizerVocabulary: 128, want: map[string]any{"vocab_size": int64(128)}},
+		{name: "architecture SWA is runtime-owned", architectureSWA: true, programSWA: true},
+		{name: "program-only SWA defaults", programSWA: true, want: map[string]any{"swa": map[string]any{
+			"chunked": true, "num_swa_dkvc_blocks": int64(2),
+		}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Encode compiler values and the selected vocabulary/SWA boundary")
+			manifest := newManifestV2ContractFixture(t)
+			deployment, err := manifest.Deployment()
+			require.NoError(t, err)
+			deployment.SetCompilationMode(manifestcapnpv2.CompilationMode_lpuOnly)
+			program, err := deployment.Program()
+			require.NoError(t, err)
+			require.NoError(t, program.SetProgramName("program"))
+			require.NoError(t, program.SetPackageName("package"))
+			program.SetSequenceLength(4096)
+			program.SetInputSize(1)
+			program.SetOutputSize(1)
+			program.SetNumKvCaches(8)
+			program.SetSwaChunked(test.programSWA)
+			if test.programSWA {
+				program.SetNumSwaDkvcBlocks(2)
+			}
+			model, err := manifest.NewModel()
+			require.NoError(t, err)
+			if test.architectureVocabulary != 0 || test.architectureSWA {
+				arch, err := model.NewArch()
+				require.NoError(t, err)
+				arch.SetVocabSize(test.architectureVocabulary)
+				arch.SetNLayers(12)
+				if test.architectureSWA {
+					swa, err := arch.NewSwa()
+					require.NoError(t, err)
+					swa.SetMaxSeqLen(128)
+					swa.SetPadding(32)
+				}
+			}
+			tokenizer, err := model.NewTokenizer()
+			require.NoError(t, err)
+			tokenizer.SetVocabSize(test.tokenizerVocabulary)
+			require.NoError(t, tokenizer.SetPath("tokenizer"))
+			stops, err := tokenizer.NewStopTokens(1)
+			require.NoError(t, err)
+			stops.Set(0, 2)
+
+			t.Log("Preserve required overrides without copying settings the runtime reads itself")
+			build, err := buildFromGbuildManifestV2("gs://models/build", manifest)
+			require.NoError(t, err)
+			require.NoError(t, resolveBuildSettings(build, nil))
+			if test.want == nil {
+				require.Empty(t, build.runtimeSettings)
+			} else {
+				require.Equal(t, test.want, build.runtimeSettings)
+			}
+		})
+	}
+}
+
 func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 	t.Log("Define malformed HX artifact inventories")
 	tests := []struct {
@@ -199,12 +273,11 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 
 	t.Log("Define revision-2 path, XT geometry, node-count, and embedding contracts")
 	tests := []struct {
-		name, partitionPath, tokenizerPath, wantErr, wantAsset string
-		geometry                                               *geometryFixture
-		embedding                                              *embeddingFixture
+		name, partitionPath, wantErr string
+		geometry                     *geometryFixture
+		embedding                    *embeddingFixture
 	}{
 		{name: "partition traversal", partitionPath: "../outside", wantErr: "LPU partition 0 path"},
-		{name: "absolute tokenizer", tokenizerPath: "/outside", wantErr: "model.tokenizer.path"},
 		{
 			name: "runtime asset line break", embedding: &embeddingFixture{path: "runtime\nasset", cpu: true},
 			wantErr: "artifacts.runtimeAssets.tokenEmbeddingsPath",
@@ -229,7 +302,6 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 		},
 		{
 			name: "valid standalone asset", embedding: &embeddingFixture{path: "runtime/text_embeddings.npz", cpu: true, standalone: true},
-			wantAsset: "runtime/text_embeddings.npz",
 		},
 	}
 
@@ -257,13 +329,6 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 					deployment.SetNumLpuNodes(test.geometry.numNodes)
 				}
 			}
-			if test.tokenizerPath != "" {
-				model, err := manifest.NewModel()
-				require.NoError(t, err)
-				tokenizer, err := model.NewTokenizer()
-				require.NoError(t, err)
-				require.NoError(t, tokenizer.SetPath(test.tokenizerPath))
-			}
 			if test.embedding != nil {
 				deployment, err := manifest.Deployment()
 				require.NoError(t, err)
@@ -286,13 +351,12 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 			}
 
 			t.Log("Accept only the safe and internally consistent revision-2 contract")
-			build, err := buildFromGbuildManifestV2("gs://models/build", manifest)
+			_, err := buildFromGbuildManifestV2("gs://models/build", manifest)
 			if test.wantErr != "" {
 				require.ErrorContains(t, err, test.wantErr)
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, test.wantAsset, build.RuntimeTokenEmbeddingsPath)
 		})
 	}
 }

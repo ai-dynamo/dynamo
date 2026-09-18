@@ -121,8 +121,6 @@ spec:
               - $(POD_IP)
               - --control-server-addr
               - $(POD_IP):51045
-              - --datacenter-config-filepath
-              - /configs/datacenter.toml
               - --model-config-filepath
               - /configs/model_config.toml
               - --json-logs
@@ -146,6 +144,10 @@ spec:
               - --allocation
               - $(LPX_ALLOCATION)
               env:
+              - name: NOVA_MODEL_BASE_PATHS
+                value: /nfs
+              - name: NOVA_NODE_NAME_TEMPLATE
+                value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
               - name: OMPI_ALLOW_RUN_AS_ROOT
                 value: '1'
               - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM

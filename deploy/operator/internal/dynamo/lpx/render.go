@@ -92,7 +92,7 @@ func RenderSelectedNodeLocal(
 	}
 	modelStorage.volume = *modelStorage.volume.DeepCopy()
 	modelStorage.mount = *modelStorage.mount.DeepCopy()
-	configMap, err := renderLPUConfigMap(namespace, plan.PodCliqueSetName, modelStorage.mount.MountPath, projections, plan.Agents)
+	configMap, err := renderLPUConfigMap(namespace, plan.PodCliqueSetName, modelStorage.mount.MountPath, projections)
 	if err != nil {
 		return nil, err
 	}

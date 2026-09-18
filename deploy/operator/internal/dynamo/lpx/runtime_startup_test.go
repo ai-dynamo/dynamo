@@ -123,7 +123,7 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				t.Log("Keep static environment values template-owned, including intentional omission")
 				dynamicEnv := map[string]bool{
 					"LPX_ALLOCATION": role.conductor,
-					"TOPOLOGIES":     role.direct, "GAS_DIR": role.direct,
+					"GAS_DIR":        role.direct,
 				}
 				container.Env = slices.DeleteFunc(slices.Clone(container.Env), func(variable corev1.EnvVar) bool { return dynamicEnv[variable.Name] })
 				if role.conductor {

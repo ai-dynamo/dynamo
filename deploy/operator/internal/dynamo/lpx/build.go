@@ -36,7 +36,7 @@ const (
 // Build is the registry's source-independent view of an LPU build.
 //
 // The version 2 Cap'n Proto manifest populates this shape before deployment code
-// derives container args, replica counts, prop-sync settings, and tokenizer defaults.
+// derives placement, replica counts, and runtime overrides.
 type Build struct {
 	// Path is the absolute file or GCS reference of the build payload.
 	Path string
@@ -46,24 +46,18 @@ type Build struct {
 	CompilationMode BuildCompilationMode
 	// Partitions contains the normalized physical compiler partitions.
 	Partitions []BuildPartition
-	// BatchSize is the normalized batch size for the build.
-	BatchSize int
 	// SelectedPropSyncChains contains source partition IDs grouped into selected prop-sync chains.
 	SelectedPropSyncChains [][]int
 	// StandaloneTokenEmbeddings reports whether token embeddings occupy a standalone partition.
 	StandaloneTokenEmbeddings bool
 	// SupportsCPUEmbeddings reports whether standalone token embeddings may run on the CPU.
 	SupportsCPUEmbeddings bool
-	// RuntimeTokenizerPath is the tokenizer path relative to the build payload.
-	RuntimeTokenizerPath string
-	// RuntimeTokenEmbeddingsPath is the token-embeddings path relative to the build payload.
-	RuntimeTokenEmbeddingsPath string
 	// IOFPGACount is the number of I/O FPGA endpoints described by the build.
 	IOFPGACount int32
 	// IOFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
 	IOFanoutFactor int32
-	// runtimeSettings holds immutable normalized defaults on a snapshot and
-	// configured runtime settings shared by immutable component projections.
+	// runtimeSettings holds manifest overrides on a snapshot and merged
+	// authored settings shared by immutable component projections.
 	runtimeSettings map[string]any
 }
 

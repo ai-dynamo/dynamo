@@ -14,7 +14,6 @@ import (
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -268,6 +267,9 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
 	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
 	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
+	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{
+		Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}",
+	}}
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
@@ -313,7 +315,10 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	require.Contains(t, configMap.Data["model_config.toml"], "SpecDecode")
 	require.Contains(t, configMap.Data["model_config.toml"], "[draft")
 	require.Contains(t, configMap.Data["model_config.toml"], "[target")
-	require.Contains(t, configMap.Data["model_config.toml"], "num_drafts = 2")
+	require.NotContains(t, configMap.Data["model_config.toml"], "num_drafts")
+	require.NotContains(t, configMap.Data["model_config.toml"], "draft_to_target_port")
+	require.NotContains(t, configMap.Data["model_config.toml"], "target_to_draft_port")
+	require.NotContains(t, configMap.Data["model_config.toml"], "head_to_head_port")
 	require.Contains(t, configMap.Data["model_config.toml"], "max_swa_dkvc_blocks_draft = 2")
 	require.Equal(t, 1, strings.Count(configMap.Data["model_config.toml"], "agent_connect_timeout = '30s'"))
 	require.Equal(t, 1, strings.Count(configMap.Data["model_config.toml"], "agent_setup_timeout = '180s'"))
@@ -324,23 +329,16 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	t.Log("Bind conductor allocation and Nova hostnames to the renamed Agent cliques")
 	require.Equal(t, "agt0:agt1:agt2", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
-	var datacenter struct {
-		Datacenters struct {
-			Racks map[string]struct {
-				NodeNameTemplate string `toml:"node_name_template"`
-			}
-		}
-	}
-	require.NoError(t, toml.Unmarshal([]byte(configMap.Data["datacenter.toml"]), &datacenter))
-	require.Len(t, datacenter.Datacenters.Racks, len(plan.Agents))
+	require.NotContains(t, configMap.Data, "datacenter.toml")
+	nodeNameTemplate := testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, "NOVA_NODE_NAME_TEMPLATE")
 	for _, agent := range plan.Agents {
-		rack := datacenter.Datacenters.Racks[agent.TemplateName]
 		hostname := strings.NewReplacer(
 			"${GROVE_PCSG_NAME}", plan.LPXScalingGroup,
 			"${GROVE_PCSG_INDEX}", "0",
+			"{rack}", agent.TemplateName,
 			"{node}", "0",
 			"${GROVE_HEADLESS_SERVICE}", pcs.Name,
-		).Replace(rack.NodeNameTemplate)
+		).Replace(nodeNameTemplate)
 		require.Equal(t, agent.CliqueName+"-0."+pcs.Name, hostname)
 	}
 }

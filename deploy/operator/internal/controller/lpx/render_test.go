@@ -403,7 +403,7 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 	template := target.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
 	template.Spec.Containers[0].Image = "independent-conductor-runtime"
 	template.Spec.Containers[0].Command = []string{"/bin/nova"}
-	template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "CONDUCTOR_ONLY", Value: "kept"}}
+	template.Spec.Containers[0].Env = append(template.Spec.Containers[0].Env, corev1.EnvVar{Name: "CONDUCTOR_ONLY", Value: "kept"})
 	template.Labels = map[string]string{"owner": "explicit-conductor"}
 	template.Spec.NodeSelector = map[string]string{"runtime-role": "conductor"}
 	template.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
@@ -437,9 +437,10 @@ func TestLPXSpecDecodeConductorTemplate(t *testing.T) {
 			conductors++
 			require.Equal(t, "independent-conductor-runtime", container.Image)
 			require.Equal(t, []string{"/bin/nova"}, container.Command)
-			configFlag := slices.Index(container.Args, "--datacenter-config-filepath")
-			require.GreaterOrEqual(t, configFlag, 0)
-			require.Equal(t, "/configs/datacenter.toml", container.Args[configFlag+1])
+			require.NotContains(t, container.Args, "--datacenter-config-filepath")
+			require.Contains(t, container.Env, corev1.EnvVar{
+				Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}",
+			})
 			require.Equal(t, "explicit-conductor", clique.Labels["owner"])
 			require.Equal(t, template.Spec.NodeSelector, clique.Spec.PodSpec.NodeSelector)
 			require.Equal(t, template.Spec.Affinity, clique.Spec.PodSpec.Affinity)
@@ -729,7 +730,7 @@ func testV3GraphManifestCapnp(t *testing.T, buildID string, fixture testV3GraphM
 	return data
 }
 
-func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
+func TestSingleV2ConfigContainsOnlyDeploymentOverrides(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Orchestrators: configv1alpha1.OrchestratorConfiguration{
 			Grove: configv1alpha1.GroveConfiguration{TerminationDelay: metav1.Duration{Duration: 15 * time.Minute}},
@@ -745,7 +746,7 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 		modelConfig string
 		hash        string
 	}
-	t.Log("Render manifest-derived, equivalent explicit, and overridden runtime settings")
+	t.Log("Render omitted defaults and explicit deployment overrides")
 	configs := make([]renderedConfig, 0, 3)
 	for _, settingsJSON := range []string{"", `{"batch_size":1,"swa":{"chunked":false}}`, `{"sequence_length":65536}`} {
 		payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/single_v2.input.yaml")
@@ -788,44 +789,22 @@ func TestSingleV2ManifestDefaultsDriveConfigAndHash(t *testing.T) {
 		configs = append(configs, renderedConfig{modelConfig: configMap.Data["model_config.toml"], hash: hash})
 	}
 
-	t.Log("Preserve derived config and hash until an explicit value changes the output")
-	derived, explicitButEqual, overridden := configs[0], configs[1], configs[2]
+	t.Log("Hash only emitted settings while preserving explicit deployment intent")
+	derived, explicit, overridden := configs[0], configs[1], configs[2]
 
 	buildPath := filepath.Join(registryRoot, buildID)
 	require.Equal(t, fmt.Sprintf(`type = 'Single'
 
 [iop]
-batch_size = 1
-cpu_embeddings = true
-dkvc = true
-input_size = 1
 model_path = '%s'
-num_dkvc_blocks = 256
-num_kv_caches = 1
-num_layers = 24
-output_size = 1
-prop_sync = false
-sequence_length = 131072
-stop_tokens = [200002, 199999, 200012]
-tokenizer_path = '%s'
-vocab_size = 201088
-
-[iop.swa]
-chunked = false
-num_swa_dkvc_blocks = 1
-swa_ctx_len = 128
-swa_num_users = 8
-swa_padding_len = 0
-
-[scheduler]
 
 [setup]
 resolved_partitions_dir = '/configs'
-setup_ops_format = 'agent_v2'
-`, buildPath, filepath.Join(buildPath, "tokenizer")), derived.modelConfig)
-	require.Equal(t, derived.modelConfig, explicitButEqual.modelConfig)
-	require.Equal(t, derived.hash, explicitButEqual.hash)
-	require.NotEqual(t, derived.modelConfig, overridden.modelConfig)
+`, buildPath), derived.modelConfig)
+	require.Contains(t, explicit.modelConfig, "batch_size = 1")
+	require.Contains(t, explicit.modelConfig, "chunked = false")
+	require.NotEqual(t, derived.hash, explicit.hash)
+	require.Contains(t, overridden.modelConfig, "sequence_length = 65536")
 	require.NotEqual(t, derived.hash, overridden.hash)
 }
 
@@ -1171,7 +1150,7 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	lpuConfigName := lpx.LPUConfigMapName(plan.PodCliqueSetName, agent.Annotations[commonconsts.AnnotationExtraResourcesHash])
 	require.Equal(t, lpuConfigName, gasDirSource.ConfigMapKeyRef.Name)
 	require.Equal(t, "gas_dir", gasDirSource.ConfigMapKeyRef.Key)
-	require.Equal(t, "topologies", envValueSource(main.Env, "TOPOLOGIES").ConfigMapKeyRef.Key)
+	require.NotContains(t, runtimeEnv, "TOPOLOGIES")
 	podIPSource := envValueSource(main.Env, "POD_IP")
 	require.NotNil(t, podIPSource)
 	require.NotNil(t, podIPSource.FieldRef)

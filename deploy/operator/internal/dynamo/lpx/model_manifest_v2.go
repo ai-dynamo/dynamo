@@ -97,9 +97,12 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 			ioFanoutFactor,
 		)
 	}
-	defaults, tokenizerPath, err := defaultsFromManifestV2(manifest, program, compilationMode, chains)
-	if err != nil {
-		return nil, err
+	var settings map[string]any
+	if compilationMode == BuildCompilationModeLPUOnly {
+		settings, err = runtimeSettingsFromManifestV2(manifest, program)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if !manifest.HasArtifacts() {
 		return nil, fmt.Errorf("%s is missing artifacts", gbuildManifestV2CapnpFile)
@@ -121,17 +124,14 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	}
 
 	build := &Build{
-		Path:                       buildRef,
-		CompilationMode:            compilationMode,
-		BatchSize:                  batchSize,
-		SelectedPropSyncChains:     chains,
-		StandaloneTokenEmbeddings:  program.StandaloneTokenEmbeddings(),
-		SupportsCPUEmbeddings:      program.SupportsCpuEmbeddings(),
-		RuntimeTokenEmbeddingsPath: runtimeTokenEmbeddingsPath,
-		IOFPGACount:                ioFPGACount,
-		IOFanoutFactor:             ioFanoutFactor,
-		runtimeSettings:            defaults,
-		RuntimeTokenizerPath:       tokenizerPath,
+		Path:                      buildRef,
+		CompilationMode:           compilationMode,
+		SelectedPropSyncChains:    chains,
+		StandaloneTokenEmbeddings: program.StandaloneTokenEmbeddings(),
+		SupportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
+		IOFPGACount:               ioFPGACount,
+		IOFanoutFactor:            ioFanoutFactor,
+		runtimeSettings:           settings,
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.
@@ -203,123 +203,48 @@ func selectedPropSyncChainsFromManifestV2(deployment manifestcapnpv2.DeploymentI
 	return chains, nil
 }
 
-func defaultsFromManifestV2(
-	manifest manifestcapnpv2.Manifest,
-	program manifestcapnpv2.ProgramConfig,
-	compilationMode BuildCompilationMode,
-	chains [][]int,
-) (map[string]any, string, error) {
-	defaults := make(map[string]any)
-	tokenizerPath, err := addModelDefaultsFromManifestV2(defaults, manifest)
-	if err != nil {
-		return nil, "", err
+func runtimeSettingsFromManifestV2(manifest manifestcapnpv2.Manifest, program manifestcapnpv2.ProgramConfig) (map[string]any, error) {
+	// Retain only settings whose omission would change the runtime's interpretation.
+	settings := map[string]any{
+		"batch_folding":             program.BatchFolding(),
+		"num_batch_split_divisions": int64(program.NumBatchSplitDivisions()),
 	}
-	defaults["batch_size"] = int64(program.BatchSize())
-	if err := addManifestTextDefault(defaults, "program_name", gbuildManifestV2CapnpFile+" deployment.program.programName", program.HasProgramName(), program.ProgramName); err != nil {
-		return nil, "", err
-	}
-	if err := addManifestTextDefault(defaults, "package_name", gbuildManifestV2CapnpFile+" deployment.program.packageName", program.HasPackageName(), program.PackageName); err != nil {
-		return nil, "", err
-	}
-	defaults["sequence_length"] = int64(program.SequenceLength())
-	defaults["input_size"] = int64(program.InputSize())
-	defaults["output_size"] = int64(program.OutputSize())
-	defaults["num_kv_caches"] = int64(program.NumKvCaches())
-	defaults["num_batch_split_divisions"] = int64(program.NumBatchSplitDivisions())
-	defaults["batch_folding"] = program.BatchFolding()
-	defaults["cpu_embeddings"] = program.SupportsCpuEmbeddings()
-	if program.HasTopk() {
-		topk, err := program.Topk()
+	var archVocabulary uint32
+	hasSWA := false
+	if manifest.HasModel() {
+		model, err := manifest.Model()
 		if err != nil {
-			return nil, "", fmt.Errorf("reading %s deployment.program.topk: %w", gbuildManifestV2CapnpFile, err)
+			return nil, fmt.Errorf("reading %s model: %w", gbuildManifestV2CapnpFile, err)
 		}
-		defaults["topk"] = int64(topk.Value())
-	}
-	if program.EnableLogitMasking() {
-		defaults["enable_logit_masking"] = true
-	}
-	defaults["dkvc"] = program.HasDkvc()
-	if program.HasDkvc() {
-		dkvc, err := program.Dkvc()
-		if err != nil {
-			return nil, "", fmt.Errorf("reading %s deployment.program.dkvc: %w", gbuildManifestV2CapnpFile, err)
-		}
-		defaults["num_dkvc_blocks"] = int64(dkvc.NumBlocksPerKvCache())
-	}
-	defaults["prop_sync"] = compilationMode == BuildCompilationModeLPUOnly && len(chains) > 0
-	if _, hasSWA := defaults["swa"]; hasSWA || program.SwaChunked() || program.NumSwaDkvcBlocks() != 0 {
-		swaDefaults := childSwaDefaults(defaults)
-		swaDefaults["chunked"] = program.SwaChunked()
-		swaDefaults["num_swa_dkvc_blocks"] = int64(program.NumSwaDkvcBlocks())
-	}
-	return defaults, tokenizerPath, nil
-}
-
-func addModelDefaultsFromManifestV2(defaults map[string]any, manifest manifestcapnpv2.Manifest) (string, error) {
-	if !manifest.HasModel() {
-		return "", nil
-	}
-	model, err := manifest.Model()
-	if err != nil {
-		return "", fmt.Errorf("reading %s model: %w", gbuildManifestV2CapnpFile, err)
-	}
-	if model.HasArch() {
-		arch, err := model.Arch()
-		if err != nil {
-			return "", fmt.Errorf("reading %s model.arch: %w", gbuildManifestV2CapnpFile, err)
-		}
-		defaults["num_layers"] = int64(arch.NLayers())
-		defaults["vocab_size"] = int64(arch.VocabSize())
-		if arch.HasSwa() {
-			swa, err := arch.Swa()
+		if model.HasArch() {
+			arch, err := model.Arch()
 			if err != nil {
-				return "", fmt.Errorf("reading %s model.arch.swa: %w", gbuildManifestV2CapnpFile, err)
+				return nil, fmt.Errorf("reading %s model.arch: %w", gbuildManifestV2CapnpFile, err)
 			}
-			swaDefaults := childSwaDefaults(defaults)
-			swaDefaults["swa_ctx_len"] = int64(swa.MaxSeqLen())
-			swaDefaults["swa_padding_len"] = int64(swa.Padding())
-			if swa.HasNumUsers() {
-				numUsers, err := swa.NumUsers()
-				if err != nil {
-					return "", fmt.Errorf("reading %s model.arch.swa.numUsers: %w", gbuildManifestV2CapnpFile, err)
-				}
-				swaDefaults["swa_num_users"] = int64(numUsers.Value())
+			archVocabulary = arch.VocabSize()
+			hasSWA = arch.HasSwa()
+		}
+
+		// Tokenizer vocabulary takes precedence over architecture padding in the deployment contract.
+		if model.HasTokenizer() {
+			tokenizer, err := model.Tokenizer()
+			if err != nil {
+				return nil, fmt.Errorf("reading %s model.tokenizer: %w", gbuildManifestV2CapnpFile, err)
+			}
+			if vocabulary := tokenizer.VocabSize(); vocabulary != 0 && vocabulary != archVocabulary {
+				settings["vocab_size"] = int64(vocabulary)
 			}
 		}
 	}
-	if !model.HasTokenizer() {
-		return "", nil
-	}
-	tokenizer, err := model.Tokenizer()
-	if err != nil {
-		return "", fmt.Errorf("reading %s model.tokenizer: %w", gbuildManifestV2CapnpFile, err)
-	}
-	if tokenizer.VocabSize() != 0 {
-		defaults["vocab_size"] = int64(tokenizer.VocabSize())
-	}
-	tokenizerPath := ""
-	if tokenizer.HasPath() {
-		tokenizerPath, err = tokenizer.Path()
-		if err != nil {
-			return "", fmt.Errorf("reading %s model.tokenizer.path: %w", gbuildManifestV2CapnpFile, err)
-		}
-		tokenizerPath, err = cleanManifestRelativeBuildPath(
-			fmt.Sprintf("%s model.tokenizer.path", gbuildManifestV2CapnpFile),
-			tokenizerPath,
-			true,
-		)
-		if err != nil {
-			return "", err
+
+	// Program-only SWA settings are not inferred when the architecture has no SWA descriptor.
+	if !hasSWA && (program.SwaChunked() || program.NumSwaDkvcBlocks() != 0) {
+		settings["swa"] = map[string]any{
+			"chunked":             program.SwaChunked(),
+			"num_swa_dkvc_blocks": int64(program.NumSwaDkvcBlocks()),
 		}
 	}
-	if tokenizer.HasStopTokens() {
-		stopTokens, err := tokenizer.StopTokens()
-		if err != nil {
-			return "", fmt.Errorf("reading %s model.tokenizer.stopTokens: %w", gbuildManifestV2CapnpFile, err)
-		}
-		defaults["stop_tokens"] = capnpUInt32List(stopTokens)
-	}
-	return tokenizerPath, nil
+	return settings, nil
 }
 
 func addLPUArtifactsFromManifestV2(

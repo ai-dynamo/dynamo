@@ -18,9 +18,6 @@ import (
 // maxSpecDecodeNumDrafts bounds the supported speculative-decoding draft fanout.
 const maxSpecDecodeNumDrafts = 8
 
-// Preserve the setup-ops discriminator consumed by the LPU runtime image.
-const agentSetupOpsFormat = "agent_v2"
-
 // resolveBuildSettings requires a nonnil build; it normalizes and consumes modelSettings, which callers must not reuse.
 func resolveBuildSettings(build *Build, modelSettings map[string]any) error {
 	// Preserve normalized defaults before reusing the compiler-owned field for model overrides.
@@ -41,9 +38,12 @@ func resolveBuildSettings(build *Build, modelSettings map[string]any) error {
 	}
 
 	// Preserve the selected prop-sync and embedding transformations on the merged settings.
-	cpuEmbeddings, err := boolSetting(settings, "cpu_embeddings")
-	if err != nil {
-		return fmt.Errorf("settings.%w", err)
+	cpuEmbeddings := build.SupportsCPUEmbeddings
+	if _, overridden := settings["cpu_embeddings"]; overridden {
+		cpuEmbeddings, err = boolSetting(settings, "cpu_embeddings")
+		if err != nil {
+			return fmt.Errorf("settings.%w", err)
+		}
 	}
 	if err := build.consumeRuntimeSelectedPropSyncChain(); err != nil {
 		return err
@@ -110,43 +110,6 @@ func mergeRuntimeSettingOverride(base, override any, path string) (any, error) {
 	}
 }
 
-// validateRuntimeTokenizerSettings validates and normalizes tokenizer settings shared by V2 and V3.
-func validateRuntimeTokenizerSettings(iop map[string]any) error {
-	tokenizerPath, ok := iop["tokenizer_path"]
-	if !ok {
-		return fmt.Errorf("iop.tokenizer_path is required; set spec.components[].lpx.settings.tokenizer_path when the capnp manifest does not provide model.tokenizer.path")
-	}
-	path, ok := tokenizerPath.(string)
-	path = strings.TrimSpace(path)
-	if !ok || path == "" {
-		return fmt.Errorf("iop.tokenizer_path must be a non-empty string")
-	}
-	iop["tokenizer_path"] = path
-
-	stopTokens, ok := iop["stop_tokens"]
-	if !ok {
-		return fmt.Errorf("iop.stop_tokens is required; set spec.components[].lpx.settings.stop_tokens when the capnp manifest does not provide model.tokenizer.stopTokens")
-	}
-	var normalized []uint32
-	switch tokens := stopTokens.(type) {
-	case []uint32:
-		normalized = append([]uint32(nil), tokens...)
-	case []any:
-		normalized = make([]uint32, len(tokens))
-		for i, value := range tokens {
-			integer, ok := value.(int64)
-			if !ok || integer < 0 || uint64(integer) > uint64(^uint32(0)) {
-				return fmt.Errorf("iop.stop_tokens[%d] must be an integer between 0 and %d", i, uint64(^uint32(0)))
-			}
-			normalized[i] = uint32(integer)
-		}
-	default:
-		return fmt.Errorf("iop.stop_tokens must be an array")
-	}
-	iop["stop_tokens"] = normalized
-	return nil
-}
-
 // normalizeLegacyNovaSettings validates legacy Agent V2 controls and removes
 // their accepted defaults. It consumes caller-owned settings without touching build geometry.
 func normalizeLegacyNovaSettings(iop map[string]any) error {
@@ -156,10 +119,10 @@ func normalizeLegacyNovaSettings(iop map[string]any) error {
 		return fmt.Errorf("iop.batch_folding must be a boolean")
 	}
 	if batchFolding {
-		return fmt.Errorf("iop.batch_folding=true is not supported with setup_ops_format %q", agentSetupOpsFormat)
+		return fmt.Errorf("iop.batch_folding=true is not supported")
 	}
 
-	// Accept only zero or one, including JSON numbers from unresolved V2 LPX settings.
+	// Accept only zero or one, preserving exact authored JSON numbers.
 	if value, ok := iop["num_batch_split_divisions"]; ok {
 		var numBatchSplitDivisions *big.Rat
 		switch typed := value.(type) {
@@ -174,11 +137,7 @@ func normalizeLegacyNovaSettings(iop map[string]any) error {
 			return fmt.Errorf("iop.num_batch_split_divisions must be an integer")
 		}
 		if numBatchSplitDivisions.Sign() < 0 || numBatchSplitDivisions.Cmp(big.NewRat(1, 1)) > 0 {
-			return fmt.Errorf(
-				"iop.num_batch_split_divisions=%v is not supported with setup_ops_format %q",
-				value,
-				agentSetupOpsFormat,
-			)
+			return fmt.Errorf("iop.num_batch_split_divisions=%v is not supported", value)
 		}
 	}
 

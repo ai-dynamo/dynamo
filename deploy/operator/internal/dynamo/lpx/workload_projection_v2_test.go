@@ -174,7 +174,7 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	build.SelectedPropSyncChains = nil
 
 	t.Log("Keep Cyborg's partition zero regardless of the Nova CPU-embedding setting")
-	for _, settings := range []string{"", `{"cpu_embeddings":false}`, `{"cpu_embeddings":true}`} {
+	for _, settings := range []string{"", `{"cpu_embeddings":false}`, `{"cpu_embeddings":true}`, `{"cpu_embeddings":"runtime-owned","batch_folding":true}`} {
 		projection := projectTestBuild(t, normalized, PipelineLPX, settings)
 		spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
 		require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
@@ -186,14 +186,6 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 		require.Equal(t, "0\n2", data["partition_node_offsets"])
 	}
 
-	t.Log("Still reject a malformed setting")
-	_, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline:      PipelineLPX,
-		Models:        []string{"default"},
-		BuildSnapshot: normalized,
-		ModelSettings: json.RawMessage(`{"cpu_embeddings":"false"}`),
-	})
-	require.EqualError(t, err, "model settings.cpu_embeddings must be a boolean")
 }
 
 func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {

@@ -19,27 +19,32 @@ func TestResolveBuildSettingsSelectedPropSyncChainWithCPUEmbeddings(t *testing.T
 	t.Parallel()
 
 	for _, test := range []struct {
-		name                     string
-		cpuSupported, standalone bool
-		firstPartition           int
+		name                                  string
+		cpuSupported, standalone, cpuDisabled bool
+		firstPartition                        int
 	}{
-		{"standalone CPU embeddings", true, true, 1},
-		{"CPU embeddings unsupported", false, true, 0},
-		{"partition zero is runnable", true, false, 0},
+		{"standalone CPU embeddings", true, true, false, 1},
+		{"CPU embeddings unsupported", false, true, false, 0},
+		{"partition zero is runnable", true, false, false, 0},
+		{"explicitly disabled CPU embeddings", true, true, true, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Construct a selected chain with independent embedding placement requirements")
 			build := selectedPropSyncBuildWithTopologies(t,
 				[]string{registryTestTopology, registryTestTopology, registryTestTopology}, [][]int{{0, 1, 2}})
 			build.SupportsCPUEmbeddings, build.StandaloneTokenEmbeddings = test.cpuSupported, test.standalone
-			build.runtimeSettings = map[string]any{"cpu_embeddings": true}
+			settings := map[string]any{}
+			if test.cpuDisabled {
+				settings["cpu_embeddings"] = false
+			}
 			partitions := slices.Clone(build.Partitions)
 			configured := *build
 
 			t.Log("Resolve the selected chain and omit partition zero only when both flags permit it")
-			require.NoError(t, resolveBuildSettings(&configured, nil))
+			require.NoError(t, resolveBuildSettings(&configured, settings))
 			require.Equal(t, partitions[test.firstPartition:], configured.Partitions)
 			require.Empty(t, configured.SelectedPropSyncChains)
+			require.Equal(t, settings, configured.runtimeSettings)
 
 			t.Log("Keep the original partition IDs, paths and selected chain unchanged")
 			require.Equal(t, partitions, build.Partitions)
@@ -191,7 +196,7 @@ func TestResolveBuildSettingsDeepMergesDefaultsAndOverrides(t *testing.T) {
 func TestProjectModelLegacyNovaSettings(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Capture the merged HX and direct XT-hybrid settings paths without legacy overrides")
+	t.Log("Capture the Nova and hybrid settings paths before runtime-specific overrides")
 	singleIntent := ModelProjectionInput{
 		Models: []string{"default"}, Pipeline: PipelineSingle,
 		BuildSnapshot: normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV3CompilerFixture(t))),
@@ -220,19 +225,20 @@ func TestProjectModelLegacyNovaSettings(t *testing.T) {
 		{`{"num_batch_split_divisions":1.0}`, "", false},
 		{`{"num_batch_split_divisions":10e-1}`, "", false},
 		{`{"num_batch_split_divisions":-0.0}`, "", false},
-		{`{"batch_folding":true}`, `iop.batch_folding=true is not supported with setup_ops_format "agent_v2"`, false},
+		{`{"batch_folding":true}`, `iop.batch_folding=true is not supported`, false},
 		{`{"batch_folding":"false"}`, "iop.batch_folding must be a boolean", false},
-		{`{"num_batch_split_divisions":-1}`, `iop.num_batch_split_divisions=-1 is not supported with setup_ops_format "agent_v2"`, false},
-		{`{"num_batch_split_divisions":2}`, `iop.num_batch_split_divisions=2 is not supported with setup_ops_format "agent_v2"`, false},
-		{`{"num_batch_split_divisions":-1.0}`, `iop.num_batch_split_divisions=-1.0 is not supported with setup_ops_format "agent_v2"`, false},
+		{`{"num_batch_split_divisions":-1}`, `iop.num_batch_split_divisions=-1 is not supported`, false},
+		{`{"num_batch_split_divisions":2}`, `iop.num_batch_split_divisions=2 is not supported`, false},
+		{`{"num_batch_split_divisions":-1.0}`, `iop.num_batch_split_divisions=-1.0 is not supported`, false},
 		{`{"num_batch_split_divisions":0.5}`, "iop.num_batch_split_divisions must be an integer", false},
 		{`{"num_batch_split_divisions":0.99999999999999999999}`, "iop.num_batch_split_divisions must be an integer", false},
 		{`{"num_batch_split_divisions":1.00000000000000000001}`, "iop.num_batch_split_divisions must be an integer", false},
 		{`{"num_batch_split_divisions":1e-1000}`, "iop.num_batch_split_divisions must be an integer", false},
 		{`{"num_batch_split_divisions":"1"}`, "iop.num_batch_split_divisions must be an integer", false},
 		{`{"batch_folding":false,"num_batch_split_divisions":1.0}`, "", true},
-		{`{"batch_folding":true}`, `iop.batch_folding=true is not supported with setup_ops_format "agent_v2"`, true},
-		{`{"num_batch_split_divisions":0.99999999999999999999}`, "iop.num_batch_split_divisions must be an integer", true},
+		{`{"batch_folding":true}`, "", true},
+		{`{"num_batch_split_divisions":0.99999999999999999999}`, "", true},
+		{`{"cpu_embeddings":"runtime-owned"}`, "", true},
 	}
 
 	for _, test := range tests {
@@ -256,10 +262,12 @@ func TestProjectModelLegacyNovaSettings(t *testing.T) {
 			require.Equal(t, baseline.configuredBuild.Partitions, projection.configuredBuild.Partitions)
 			require.Equal(t, baseline.connectors, projection.connectors)
 
-			t.Log("Omit both accepted legacy keys from normalized settings and rendered TOML")
-			require.NotContains(t, projection.configuredBuild.runtimeSettings, "batch_folding")
-			require.NotContains(t, projection.configuredBuild.runtimeSettings, "num_batch_split_divisions")
-			configMap, err := renderLPUConfigMap("test", "test-dgd", "/models", []*ModelProjection{projection}, nil)
+			t.Log("Omit legacy Nova settings from runtime output without validating unused hybrid values")
+			if !test.hybrid {
+				require.NotContains(t, projection.configuredBuild.runtimeSettings, "batch_folding")
+				require.NotContains(t, projection.configuredBuild.runtimeSettings, "num_batch_split_divisions")
+			}
+			configMap, err := renderLPUConfigMap("test", "test-dgd", "/models", []*ModelProjection{projection})
 			require.NoError(t, err)
 			require.NotContains(t, configMap.Data["model_config.toml"], "batch_folding")
 			require.NotContains(t, configMap.Data["model_config.toml"], "num_batch_split_divisions")
@@ -291,54 +299,6 @@ func TestResolveBuildSettingsRejectsNestedNullOverride(t *testing.T) {
 	build = &Build{}
 	err = resolveBuildSettings(build, map[string]any{"z": nil, "a": nil})
 	require.ErrorContains(t, err, "settings.a must not be null")
-}
-
-func TestValidateRuntimeTokenizerSettings(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define incomplete and invalid tokenizer runtime settings")
-	tests := []struct {
-		name     string
-		settings map[string]any
-		wantErr  string
-	}{
-		{
-			name:     "tokenizer path",
-			settings: map[string]any{"stop_tokens": []uint32{1}},
-			wantErr:  "iop.tokenizer_path is required; set spec.components[].lpx.settings.tokenizer_path",
-		},
-		{
-			name:     "stop tokens",
-			settings: map[string]any{"tokenizer_path": "/models/tokenizer"},
-			wantErr:  "iop.stop_tokens is required; set spec.components[].lpx.settings.stop_tokens",
-		},
-		{
-			name: "negative stop token",
-			settings: map[string]any{
-				"tokenizer_path": "/models/tokenizer",
-				"stop_tokens":    []any{int64(-1)},
-			},
-			wantErr: "iop.stop_tokens[0] must be an integer between 0 and 4294967295",
-		},
-		{
-			name: "non-integer stop token representation",
-			settings: map[string]any{
-				"tokenizer_path": "/models/tokenizer",
-				"stop_tokens":    []any{float64(1)},
-			},
-			wantErr: "iop.stop_tokens[0] must be an integer between 0 and 4294967295",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			t.Log("Validate and verify rejection of the tokenizer settings")
-			err := validateRuntimeTokenizerSettings(tt.settings)
-			require.ErrorContains(t, err, tt.wantErr)
-		})
-	}
 }
 
 func selectedPropSyncBuild(t *testing.T, chains [][]int) *Build {

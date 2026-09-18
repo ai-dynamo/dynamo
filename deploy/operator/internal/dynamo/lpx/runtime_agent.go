@@ -22,13 +22,6 @@ func configureDirectHybridAgentRuntime(
 
 	agent.Env = append(agent.Env,
 		corev1.EnvVar{
-			Name: "TOPOLOGIES",
-			ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: lpuConfigMapName},
-				Key:                  "topologies",
-			}},
-		},
-		corev1.EnvVar{
 			Name: "GAS_DIR",
 			ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
 				LocalObjectReference: corev1.LocalObjectReference{Name: lpuConfigMapName},

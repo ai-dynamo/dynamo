@@ -45,47 +45,27 @@ func renderLPUConfigMap(
 	materializationName string,
 	modelStoragePath string,
 	projections []*ModelProjection,
-	agents []ExpectedAgent,
 ) (*corev1.ConfigMap, error) {
-	modelConfig, err := lpuModelConfig(projections, modelStoragePath)
-	if err != nil {
-		return nil, fmt.Errorf("render model_config.toml: %w", err)
-	}
-	var modelTOML strings.Builder
-	if err := toml.NewEncoder(&modelTOML).Encode(modelConfig); err != nil {
-		return nil, fmt.Errorf("render model_config.toml: %w", err)
-	}
-
-	datacenterRacks := make(map[string]any, len(agents))
-	for _, agent := range agents {
-		availableNodes := make([]int, agent.Replicas)
-		for index := range availableNodes {
-			availableNodes[index] = index
-		}
-		datacenterRacks[agent.TemplateName] = map[string]any{
-			"available_nodes": availableNodes,
-			"preferred_start": 0,
-			"node_name_template": fmt.Sprintf(
-				"%s-%s-{node}.${GROVE_HEADLESS_SERVICE}",
-				"${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}",
-				agent.TemplateName,
-			),
-		}
-	}
-	var datacenterTOML strings.Builder
-	if err := toml.NewEncoder(&datacenterTOML).Encode(map[string]any{
-		"model_base_paths": []string{modelStoragePath},
-		"datacenters":      map[string]any{"racks": datacenterRacks},
-	}); err != nil {
-		return nil, fmt.Errorf("render datacenter.toml: %w", err)
-	}
-
 	data := resolvedPartitionData(projections)
 	if projections[0].pipeline == PipelineLPX {
-		data["gas_dir"] = modelConfig["iop"].(map[string]any)["model_path"].(string)
+		// Direct agents consume the build directory and partition table.
+		modelPath, err := buildRuntimePath(lpuRuntimeBuildRef(projections[0], modelStoragePath), modelStoragePath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve gas_dir: %w", err)
+		}
+		data["gas_dir"] = modelPath
+	} else {
+		// Conductors consume deployment overrides alongside compile-owned manifest defaults.
+		modelConfig, err := lpuModelConfig(projections, modelStoragePath)
+		if err != nil {
+			return nil, fmt.Errorf("render model_config.toml: %w", err)
+		}
+		var modelTOML strings.Builder
+		if err := toml.NewEncoder(&modelTOML).Encode(modelConfig); err != nil {
+			return nil, fmt.Errorf("render model_config.toml: %w", err)
+		}
+		data["model_config.toml"] = modelTOML.String()
 	}
-	data["model_config.toml"] = modelTOML.String()
-	data["datacenter.toml"] = datacenterTOML.String()
 	return renderRuntimeConfigMap(namespace, materializationName+"-lpu", data)
 }
 
@@ -167,7 +147,6 @@ func lpuModelConfig(projections []*ModelProjection, modelStoragePath string) (ma
 	if err != nil {
 		return nil, err
 	}
-	delete(setup, "setup_ops_format")
 	delete(setup, "resolved_partitions_dir")
 	if len(setup) > 0 {
 		config["setup"] = setup
@@ -187,7 +166,6 @@ func lpuModelConfig(projections []*ModelProjection, modelStoragePath string) (ma
 	// limited to the operator-owned LPU runtime bindings so Nova can inherit the
 	// parent timeouts exactly as it did with the legacy pipeline field.
 	draft["setup"] = map[string]any{
-		"setup_ops_format":        agentSetupOpsFormat,
 		"resolved_partitions_dir": lpuConfigMountPath,
 	}
 	target, err := nestedLPUModelConfig(projections[draftCount], modelStoragePath)
@@ -197,10 +175,6 @@ func lpuModelConfig(projections []*ModelProjection, modelStoragePath string) (ma
 	config["type"] = "SpecDecode"
 	config["draft"] = draft
 	config["target"] = target
-	config["num_drafts"] = draftCount
-	setConfigDefault(config, "draft_to_target_port", 23456)
-	setConfigDefault(config, "target_to_draft_port", 23457)
-	setConfigDefault(config, "head_to_head_port", 23458)
 	return config, nil
 }
 
@@ -211,9 +185,6 @@ func nestedLPUModelConfig(projection *ModelProjection, modelStoragePath string) 
 	scheduler, err := modelObjectSetting(projection, "scheduler")
 	if err != nil {
 		return nil, err
-	}
-	if scheduler == nil {
-		scheduler = map[string]any{}
 	}
 	delete(settings, "scheduler")
 	setup, err := modelObjectSetting(projection, "setup")
@@ -226,7 +197,6 @@ func nestedLPUModelConfig(projection *ModelProjection, modelStoragePath string) 
 	delete(settings, "setup")
 
 	// Keep operator-owned LPU runtime setup bindings authoritative.
-	setup["setup_ops_format"] = agentSetupOpsFormat
 	setup["resolved_partitions_dir"] = lpuConfigMountPath
 	delete(settings, v3MaxSWADKVCBlocksDraft)
 
@@ -241,48 +211,29 @@ func nestedLPUModelConfig(projection *ModelProjection, modelStoragePath string) 
 		delete(settings, "extra_programs")
 		if projection.configuredBuild.Family == BuildFamilyXT &&
 			projection.pipeline == PipelineSingle && len(extraPrograms) > 0 {
-			return nil, fmt.Errorf("model %q settings.extra_programs is not supported with setup_ops_format %q", projection.model, agentSetupOpsFormat)
+			return nil, fmt.Errorf("model %q settings.extra_programs is not supported for XT Single", projection.model)
 		}
 	}
 
 	build := &projection.configuredBuild
 	buildRef := build.Path
-	if projection.pipeline == PipelineLPX ||
-		projection.configuredBuild.Family == BuildFamilyHX {
+	if projection.configuredBuild.Family == BuildFamilyHX {
 		buildRef = lpuRuntimeBuildRef(projection, modelStoragePath)
 	}
 	modelPath, err := buildRuntimePath(buildRef, modelStoragePath)
 	if err != nil {
 		return nil, fmt.Errorf("model %q model_path: %w", projection.model, err)
 	}
-	if _, overridden := settings["tokenizer_path"]; !overridden &&
-		strings.TrimSpace(build.RuntimeTokenizerPath) != "" {
-		settings["tokenizer_path"] = filepath.Join(modelPath, build.RuntimeTokenizerPath)
-	}
-	if projection.configuredBuild.Family == BuildFamilyHX ||
-		projection.pipeline == PipelineSingle {
-		if err := validateRuntimeTokenizerSettings(settings); err != nil {
-			return nil, fmt.Errorf("model %q settings: %w", projection.model, err)
-		}
-	}
-	if build.SupportsCPUEmbeddings {
-		if enabled, _ := settings["cpu_embeddings"].(bool); enabled {
-			if _, overridden := settings["embedding_path"]; !overridden &&
-				strings.TrimSpace(build.RuntimeTokenEmbeddingsPath) != "" {
-				settings["embedding_path"] = filepath.Join(modelPath, build.RuntimeTokenEmbeddingsPath)
-			}
-		}
-	}
-	if projection.configuredBuild.Family == BuildFamilyXT &&
-		projection.pipeline == PipelineSpecDecode {
-		setConfigDefault(settings, "model_path", modelPath)
-	} else {
+	if _, overridden := settings["model_path"]; !overridden ||
+		projection.configuredBuild.Family != BuildFamilyXT || projection.pipeline != PipelineSpecDecode {
 		settings["model_path"] = modelPath
 	}
 	config := map[string]any{
-		"scheduler": scheduler,
-		"setup":     setup,
-		"iop":       settings,
+		"setup": setup,
+		"iop":   settings,
+	}
+	if scheduler != nil {
+		config["scheduler"] = scheduler
 	}
 	if extraPrograms != nil {
 		config["extra_programs"] = extraPrograms
@@ -378,12 +329,6 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 		data[keys[column]] = strings.TrimSuffix(columns[column].String(), "\n")
 	}
 	return data
-}
-
-func setConfigDefault(values map[string]any, key string, value any) {
-	if _, present := values[key]; !present {
-		values[key] = value
-	}
 }
 
 func withLPUConfigVolume(spec *corev1.PodSpec, configMapName string, allowOverrides bool) error {

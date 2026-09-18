@@ -109,28 +109,22 @@ func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
 		"test-dgd",
 		"/models",
 		[]*ModelProjection{projection},
-		nil,
 	)
 
 	t.Log("Keep gas_dir rooted at the selected image-owned build")
 	require.NoError(t, err)
-	require.Contains(t, configMap.Data["model_config.toml"], "model_path = '/models/model-build'")
+	require.NotContains(t, configMap.Data, "model_config.toml")
+	require.NotContains(t, configMap.Data, "datacenter.toml")
 	require.Equal(t, "/models/model-build", configMap.Data["gas_dir"])
 	require.True(t, *configMap.Immutable)
 	require.Equal(t, LPUConfigMapName("test-dgd", LPUConfigMapHash(configMap)), configMap.Name)
 
-	t.Log("Reject an LPX setting that makes the rendered ConfigMap exceed the API limit")
+	t.Log("Ignore model settings that are not consumed by the direct runtime")
 	projection.configuredBuild.runtimeSettings["oversized"] = strings.Repeat("x", corev1.MaxSecretSize)
-	_, err = renderLPUConfigMap(
-		"test-namespace",
-		"test-dgd",
-		"/models",
-		[]*ModelProjection{projection},
-		nil,
-	)
-	require.ErrorContains(t, err, "rendered LPX ConfigMap")
-	require.ErrorContains(t, err, "maximum is 1048576")
-	delete(projection.configuredBuild.runtimeSettings, "oversized")
+	projection.configuredBuild.runtimeSettings["scheduler"] = "not-a-Nova-scheduler"
+	unchanged, err := renderLPUConfigMap("test-namespace", "test-dgd", "/models", []*ModelProjection{projection})
+	require.NoError(t, err)
+	require.Equal(t, configMap, unchanged)
 
 	t.Log("Render the preserved runtime with an invalid snapshot build reference")
 	projection.configuredBuild.Path = "relative-build"
@@ -139,11 +133,10 @@ func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
 		"test-dgd",
 		"/models",
 		[]*ModelProjection{projection},
-		nil,
 	)
 
 	t.Log("Return the model-path error before projecting gas_dir")
-	require.ErrorContains(t, err, "render model_config.toml: model \"default\" model_path: parse build path \"relative-build\": ref \"relative-build\" must be an absolute path or URL")
+	require.ErrorContains(t, err, "resolve gas_dir: parse build path \"relative-build\": ref \"relative-build\" must be an absolute path or URL")
 }
 
 func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testing.T) {
@@ -199,14 +192,14 @@ func TestV3SingleConfigUsesManifestTopologyAndArbitraryModelSettings(t *testing.
 		"test-dgd",
 		"/models",
 		[]*ModelProjection{projection},
-		[]ExpectedAgent{{TemplateName: "rack", Replicas: 1}},
 	)
 	require.NoError(t, err)
 
 	t.Log("Verify the generated files need no manual topology or model-setting patches")
 	require.Equal(t, "part-1", configMap.Data["partition_paths"])
 	require.Equal(t, v3OpaqueTopology, configMap.Data["topologies"])
-	require.Contains(t, configMap.Data["model_config.toml"], "sequence_length = 8192")
+	require.NotContains(t, configMap.Data["model_config.toml"], "sequence_length")
+	require.NotContains(t, configMap.Data, "datacenter.toml")
 	require.Contains(t, configMap.Data["model_config.toml"], "model_path = '/models/model-build'")
 	require.Contains(t, configMap.Data["model_config.toml"], "batch_size = 4")
 	require.Contains(t, configMap.Data["model_config.toml"], "custom_runtime_knob = 'enabled'")
@@ -215,34 +208,24 @@ func TestV3SingleConfigUsesManifestTopologyAndArbitraryModelSettings(t *testing.
 	require.Contains(t, configMap.Data["model_config.toml"], "stop_tokens = [1]")
 }
 
-func TestNestedLPUModelConfigJoinsRuntimeAssetsToRemappedRoot(t *testing.T) {
-	t.Log("Construct a projection with build-relative runtime assets")
+func TestNestedLPUModelConfigPreservesExplicitOverrides(t *testing.T) {
+	t.Log("Construct a model with deployment overrides and a remapped runtime path")
 	projection := &ModelProjection{
-		model: "default", pipeline: PipelineLPX, runtimeBuildRef: "model-build",
+		model: "default", pipeline: PipelineSingle, runtimeBuildRef: "model-build",
 		configuredBuild: Build{
-			Path: "file:///snapshot-build", SupportsCPUEmbeddings: true,
-			RuntimeTokenizerPath: ".", RuntimeTokenEmbeddingsPath: "runtime/text_embeddings.npz",
-			runtimeSettings: map[string]any{"cpu_embeddings": true},
+			Path: "file:///snapshot-build", Family: BuildFamilyHX,
+			runtimeSettings: map[string]any{"tokenizer_path": "/custom/tokenizer", "batch_size": 4},
 		},
 	}
 
-	t.Log("Render model configuration under the remapped runtime root")
+	t.Log("Leave manifest defaults to the runtime while retaining authored overrides")
 	config, err := nestedLPUModelConfig(projection, "/models")
-
-	t.Log("Verify default runtime asset paths are joined to the remapped build")
 	require.NoError(t, err)
-	iop := config["iop"].(map[string]any)
-	require.Equal(t, "/models/model-build", iop["model_path"])
-	require.Equal(t, "/models/model-build", iop["tokenizer_path"])
-	require.Equal(t, "/models/model-build/runtime/text_embeddings.npz", iop["embedding_path"])
-
-	t.Log("Render an explicit absolute embedding-path override")
-	projection.configuredBuild.runtimeSettings["embedding_path"] = "/custom/embeddings"
-	config, err = nestedLPUModelConfig(projection, "/models")
-
-	t.Log("Verify the absolute override remains unchanged")
-	require.NoError(t, err)
-	require.Equal(t, "/custom/embeddings", config["iop"].(map[string]any)["embedding_path"])
+	require.Equal(t, map[string]any{
+		"model_path": "/models/model-build", "tokenizer_path": "/custom/tokenizer", "batch_size": 4,
+	}, config["iop"])
+	require.Equal(t, map[string]any{"resolved_partitions_dir": "/configs"}, config["setup"])
+	require.NotContains(t, config, "scheduler")
 }
 
 func TestV2SingleConfigRejectsExtraPrograms(t *testing.T) {

@@ -37,8 +37,7 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	require.NoError(t, err)
 	projection := projectionBatch[0]
 	require.Equal(t, BuildCompilationModeHybrid, projection.configuredBuild.CompilationMode)
-	require.Equal(t, int64(8192), projection.configuredBuild.runtimeSettings["sequence_length"])
-	require.Equal(t, false, projection.configuredBuild.runtimeSettings["prop_sync"])
+	require.Empty(t, projection.configuredBuild.runtimeSettings)
 	digest, err := workloadSetDigest([]*ModelProjection{projection})
 	require.NoError(t, err)
 	require.Equal(t, projection.Digest(), digest, "one model is the aggregate digest base case")
@@ -75,6 +74,13 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	require.Equal(t, before.CyborgPodCliqueRef, cyborgRef)
 	require.Equal(t, *before, projection.RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents"))
 	require.Nil(t, projection.RequestSpec(&MaterializationPlan{}, "agents").CyborgPodCliqueRef)
+
+	t.Log("Leave unused Nova settings opaque on the hybrid path")
+	intent.ModelSettings = json.RawMessage(`{"cpu_embeddings":"runtime-owned","batch_folding":true}`)
+	authored, err := appendModelProjections(nil, intent)
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"cpu_embeddings": "runtime-owned", "batch_folding": true}, authored[0].configuredBuild.runtimeSettings)
+	require.Equal(t, *before, authored[0].RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents"))
 
 	t.Log("Remove the manifest's selected chain without synthesizing hybrid connectors")
 	fixture.selectedPropSyncChains = nil

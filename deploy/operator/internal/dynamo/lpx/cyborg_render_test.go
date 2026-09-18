@@ -84,7 +84,6 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	fixture.partitions[0].devicesPerNode = 8
 	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	build := normalized.build
-	build.BatchSize = 4
 	build.CompilationMode = BuildCompilationModeHybrid
 	build.IOFPGACount = 2
 	build.IOFanoutFactor = 2

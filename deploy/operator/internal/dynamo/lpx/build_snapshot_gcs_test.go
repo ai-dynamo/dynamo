@@ -118,7 +118,6 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 			build, err := normalizeRegistryFixtureBuild(testCase.ctx, registry, testCase.ref)
 			require.NoError(t, err)
 			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
-			require.Equal(t, 8, build.BatchSize)
 			require.Len(t, build.Partitions, 1)
 			require.Equal(t, "part-0", build.Partitions[0].PartPath)
 			require.Len(t, client.listRequests, 2)

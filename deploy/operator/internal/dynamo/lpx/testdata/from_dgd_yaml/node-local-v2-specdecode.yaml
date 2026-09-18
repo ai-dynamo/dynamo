@@ -2,71 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
-  datacenter.toml: |
-    model_base_paths = ['/nfs']
-
-    [datacenters]
-    [datacenters.racks]
-    [datacenters.racks.agt0]
-    available_nodes = [0, 1, 2, 3]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt0-{node}.${GROVE_HEADLESS_SERVICE}'
-    preferred_start = 0
-
-    [datacenters.racks.agt1]
-    available_nodes = [0, 1, 2, 3]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt1-{node}.${GROVE_HEADLESS_SERVICE}'
-    preferred_start = 0
-
-    [datacenters.racks.agt2]
-    available_nodes = [0, 1, 2, 3]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt2-{node}.${GROVE_HEADLESS_SERVICE}'
-    preferred_start = 0
   model_config.toml: |
-    draft_to_target_port = 23456
-    head_to_head_port = 23458
-    num_drafts = 2
-    target_to_draft_port = 23457
     type = 'SpecDecode'
 
     [draft]
     [draft.iop]
-    batch_size = 1
-    cpu_embeddings = false
-    dkvc = false
-    input_size = 1
     model_path = '/testdata/node-local-v2-connected'
-    num_kv_caches = 1
-    output_size = 1
-    prop_sync = true
-    sequence_length = 8192
-    stop_tokens = [1]
-    tokenizer_path = '/testdata/node-local-v2-connected/tokenizer'
-
-    [draft.scheduler]
 
     [draft.setup]
     resolved_partitions_dir = '/configs'
-    setup_ops_format = 'agent_v2'
 
     [target]
     [target.iop]
-    batch_size = 1
-    cpu_embeddings = false
-    dkvc = false
-    input_size = 1
     model_path = '/testdata/node-local-v2-connected'
-    num_kv_caches = 1
-    output_size = 1
-    prop_sync = true
-    sequence_length = 8192
-    stop_tokens = [1]
-    tokenizer_path = '/testdata/node-local-v2-connected/tokenizer'
-
-    [target.scheduler]
 
     [target.setup]
     resolved_partitions_dir = '/configs'
-    setup_ops_format = 'agent_v2'
   nodes_per_partition: |-
     2
     2
@@ -124,7 +75,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-specdecode-63df-lpu-0b6c0b4b697c4048
+  name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
   namespace: test
 ---
 metadata:
@@ -146,7 +97,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a973a2e0a92065344cab16b5b6af504f9403288bc2b332785293de5f036bc404
@@ -279,14 +230,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-0b6c0b4b697c4048
+              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
             name: config
         replicas: 4
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3061125e8a82194e7fadab40ddf2334081340728a740f3bd3d1231f72c061e1b
@@ -419,14 +370,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-0b6c0b4b697c4048
+              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
             name: config
         replicas: 4
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:55b7f43000a720e9afec381ae28b43d4a1436b5b8a2b666c4706d692411d218e
@@ -559,14 +510,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-0b6c0b4b697c4048
+              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
             name: config
         replicas: 4
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 0b6c0b4b697c4048acd29fadadbc9592c833ad1360fd9a4eed6a4ebf2fe6ebd2
+        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:75b46c16650574198e849b16926c63faebce97ca1ddffdfd4c7a54e0d7b1db81
         scheduling.lpu.nvidia.com/role: conductor
@@ -598,8 +549,6 @@ spec:
             - $(POD_IP)
             - --control-server-addr
             - $(POD_IP):51045
-            - --datacenter-config-filepath
-            - /configs/datacenter.toml
             - --model-config-filepath
             - /configs/model_config.toml
             - --json-logs
@@ -641,6 +590,10 @@ spec:
               value: agt0:agt1:agt2
             - name: NATS_SERVER
               value: nats-address
+            - name: NOVA_MODEL_BASE_PATHS
+              value: /nfs
+            - name: NOVA_NODE_NAME_TEMPLATE
+              value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
             - name: OMPI_ALLOW_RUN_AS_ROOT
               value: "1"
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
@@ -724,7 +677,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-0b6c0b4b697c4048
+              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
             name: config
         replicas: 1
         roleName: cond

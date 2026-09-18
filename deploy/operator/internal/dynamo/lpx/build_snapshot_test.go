@@ -59,8 +59,7 @@ func TestAcquireBuildSnapshotTracksLocalContent(t *testing.T) {
 	normalized, err := normalizeBuildSnapshot(first)
 	require.NoError(t, err)
 	build := normalized.build
-	require.Equal(t, 8, build.BatchSize)
-	require.Equal(t, int64(8), build.runtimeSettings["batch_size"])
+	require.NotContains(t, build.runtimeSettings, "batch_size")
 	require.EqualValues(t, 4, build.IOFPGACount)
 	require.EqualValues(t, 2, build.IOFanoutFactor)
 
@@ -69,7 +68,7 @@ func TestAcquireBuildSnapshotTracksLocalContent(t *testing.T) {
 	require.NoError(t, err)
 	relativeBuild, err := normalizeRegistryFixtureBuild(t.Context(), relativeRegistry, "build-id")
 	require.NoError(t, err)
-	require.Equal(t, 8, relativeBuild.BatchSize)
+	require.Equal(t, build, relativeBuild)
 
 	t.Log("Changing only a payload path changes snapshot identity")
 	require.NoError(t, os.Rename(filepath.Join(buildDir, "part-0/chip-0.gas"), filepath.Join(buildDir, "part-0/chip-1.gas")))

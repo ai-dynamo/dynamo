@@ -17,50 +17,6 @@ import (
 
 const hxTopologyFamily = "16x8x2x3"
 
-func addManifestTextDefault(
-	defaults map[string]any,
-	key string,
-	subject string,
-	has bool,
-	read func() (string, error),
-) error {
-	if !has {
-		return nil
-	}
-	value, err := read()
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", subject, err)
-	}
-	value = strings.TrimSpace(value)
-	if value != "" {
-		defaults[key] = value
-	}
-	return nil
-}
-
-func childSwaDefaults(defaults map[string]any) map[string]any {
-	child, _ := defaults["swa"].(map[string]any)
-	if child == nil {
-		child = make(map[string]any)
-		defaults["swa"] = child
-	}
-	return child
-}
-
-func capnpUInt32List(values capnp.UInt32List) []uint32 {
-	seen := make(map[uint32]struct{}, values.Len())
-	out := make([]uint32, 0, values.Len())
-	for i := 0; i < values.Len(); i++ {
-		value := values.At(i)
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
 func classifyManifestPartitions(filename string, partitions []BuildPartition, partSelect bool) (BuildFamily, int, int, error) {
 	family := BuildFamilyXT
 	packagedNodes, partitionZeroNodes := 0, 0

@@ -258,11 +258,11 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			_, err = workloadSetDigest([]*ModelProjection{projections[0], &mixedFamily})
 			require.ErrorContains(t, err, "mixed target families")
 
-			t.Log("Preserve family-specific runtime settings in every logical projection")
+			t.Log("Preserve compiled placement without repeating runtime-derived model settings")
 			for _, projection := range projections {
 				require.EqualValues(t, compiledAgentCount, projection.agentReplicas)
 				if test.family == BuildFamilyHX {
-					require.EqualValues(t, 8192, projection.configuredBuild.runtimeSettings["sequence_length"])
+					require.NotContains(t, projection.configuredBuild.runtimeSettings, "sequence_length")
 				}
 			}
 

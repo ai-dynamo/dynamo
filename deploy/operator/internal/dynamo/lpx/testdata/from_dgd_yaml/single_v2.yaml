@@ -2,37 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
-  datacenter.toml: |
-    model_base_paths = ['/nfs']
-
-    [datacenters]
-    [datacenters.racks]
-    [datacenters.racks.agt]
-    available_nodes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt-{node}.${GROVE_HEADLESS_SERVICE}'
-    preferred_start = 0
   model_config.toml: |
     type = 'Single'
 
     [iop]
     batch_size = 1
-    cpu_embeddings = false
-    dkvc = false
     input_size = 1
     model_path = '/testdata/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c'
     num_kv_caches = 1
-    output_size = 1
-    prop_sync = false
     sequence_length = 8192
     stop_tokens = [128001, 128008, 128009]
     tokenizer_path = 'llama3.1'
     vocab_size = 128256
 
-    [scheduler]
-
     [setup]
     resolved_partitions_dir = '/configs'
-    setup_ops_format = 'agent_v2'
   nodes_per_partition: |-
     1
     1
@@ -131,7 +115,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-single-v2-3a98-lpu-cc95c2008c398eaa
+  name: dgd-single-v2-3a98-lpu-bd962bcf06374376
   namespace: inference-engine
 ---
 metadata:
@@ -153,7 +137,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: cc95c2008c398eaa60b329a696fa0f2faeff6c094df93b3d88d73cde3e6966a4
+        nvidia.com/extra-resources-hash: bd962bcf06374376e0a6e9e786629713da2a5ddb698e5f351f8d27707e2335e5
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:8222ae5a90349801092d323d462e997d1cd67c2bf846c4094c22689e6f0837d1
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f41776b5eeefee5dab35cb81c9d4c052c88b10ac1025b0f408d690dec65d0ea1
@@ -286,14 +270,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-single-v2-3a98-lpu-cc95c2008c398eaa
+              name: dgd-single-v2-3a98-lpu-bd962bcf06374376
             name: config
         replicas: 17
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-single-v2
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: cc95c2008c398eaa60b329a696fa0f2faeff6c094df93b3d88d73cde3e6966a4
+        nvidia.com/extra-resources-hash: bd962bcf06374376e0a6e9e786629713da2a5ddb698e5f351f8d27707e2335e5
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f41776b5eeefee5dab35cb81c9d4c052c88b10ac1025b0f408d690dec65d0ea1
         scheduling.lpu.nvidia.com/role: conductor
@@ -327,8 +311,6 @@ spec:
             - $(POD_IP)
             - --control-server-addr
             - $(POD_IP):51045
-            - --datacenter-config-filepath
-            - /configs/datacenter.toml
             - --model-config-filepath
             - /configs/model_config.toml
             - --json-logs
@@ -372,6 +354,10 @@ spec:
               value: 192.0.2.0/24
             - name: NATS_SERVER
               value: nats-address
+            - name: NOVA_MODEL_BASE_PATHS
+              value: /nfs
+            - name: NOVA_NODE_NAME_TEMPLATE
+              value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
             - name: OMPI_ALLOW_RUN_AS_ROOT
               value: "1"
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
@@ -457,7 +443,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: dgd-single-v2-3a98-lpu-cc95c2008c398eaa
+              name: dgd-single-v2-3a98-lpu-bd962bcf06374376
             name: config
         replicas: 1
         roleName: cond

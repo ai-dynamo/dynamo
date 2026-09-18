@@ -1198,13 +1198,17 @@ func TestLPXReadableNamesSurviveServingComponentChanges(t *testing.T) {
 		}
 		require.ElementsMatch(t, []string{"cond", "agt0", "agt1"}, cliqueNames)
 
-		t.Log("Keep runtime Agent addresses aligned with the clique names")
+		t.Log("Keep runtime allocation aligned with the clique names")
 		config := &corev1.ConfigMap{}
 		configKey := client.ObjectKey{Namespace: child.Namespace, Name: lpx.LPUConfigMapName(root, configHash)}
 		require.NoError(t, r.Get(t.Context(), configKey, config))
 		require.True(t, metav1.IsControlledBy(config, child))
-		require.Contains(t, config.Data["datacenter.toml"], "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt0-{node}")
-		require.Contains(t, config.Data["datacenter.toml"], "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt1-{node}")
+		require.NotContains(t, config.Data, "datacenter.toml")
+		for _, clique := range pcs.Spec.Template.Cliques {
+			if clique.Name == "cond" {
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_ALLOCATION", Value: "agt0:agt1"})
+			}
+		}
 	}
 }
 

@@ -2,37 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
-  datacenter.toml: |
-    model_base_paths = ['/nfs']
-
-    [datacenters]
-    [datacenters.racks]
-    [datacenters.racks.agt]
-    available_nodes = [0]
-    node_name_template = '${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-agt-{node}.${GROVE_HEADLESS_SERVICE}'
-    preferred_start = 0
   gas_dir: /nfs/node-local-v3-hx-connected-lpx
-  model_config.toml: |
-    type = 'Single'
-
-    [iop]
-    batch_size = 1
-    cpu_embeddings = false
-    dkvc = false
-    input_size = 1
-    model_path = '/nfs/node-local-v3-hx-connected-lpx'
-    num_kv_caches = 1
-    output_size = 1
-    prop_sync = false
-    sequence_length = 8192
-    stop_tokens = [1]
-    tokenizer_path = '/nfs/node-local-v3-hx-connected-lpx/tokenizer'
-
-    [scheduler]
-
-    [setup]
-    resolved_partitions_dir = '/configs'
-    setup_ops_format = 'agent_v2'
   nodes_per_partition: "1"
   partition_ids: "1"
   partition_indices: "0"
@@ -48,7 +18,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
+  name: node-local-v3-hx-hybrid-be18-lpu-dc7a6b2e2078e821
   namespace: test
 ---
 metadata:
@@ -70,7 +40,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 7443e572ed6c9124e2bfdacd89de30a0515735f36cfb677a99e1be70668ca8d0
+        nvidia.com/extra-resources-hash: dc7a6b2e2078e8215ec068db5b51870b05382a0252a8e8c788c34b1173fe44ca
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:1b19ea57d294e47602beabc264d0173ec31a48c53cb5c411a0dd53e19a4880f1
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
@@ -111,7 +81,7 @@ spec:
               valueFrom:
                 configMapKeyRef:
                   key: gas_dir
-                  name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
+                  name: node-local-v3-hx-hybrid-be18-lpu-dc7a6b2e2078e821
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: LPU_MODEL_NAME
@@ -142,11 +112,6 @@ spec:
               value: "19877"
             - name: READINESS_PORT
               value: "19878"
-            - name: TOPOLOGIES
-              valueFrom:
-                configMapKeyRef:
-                  key: topologies
-                  name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
             - name: UCX_TLS
               value: tcp
             image: example.invalid/lpu-runtime:test
@@ -231,7 +196,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-hybrid-be18-lpu-7443e572ed6c9124
+              name: node-local-v3-hx-hybrid-be18-lpu-dc7a6b2e2078e821
             name: config
         replicas: 1
         roleName: agt

@@ -32,12 +32,18 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	// intentionally contains no artifact partitions.
 	runtimeBuild.Partitions = nil
 	runtimeBuild.SelectedPropSyncChains = nil
-	if err := resolveBuildSettings(&runtimeBuild, modelSettings); err != nil {
+	if intent.Pipeline == PipelineLPX {
+		runtimeBuild.runtimeSettings = modelSettings
+	} else if err := resolveBuildSettings(&runtimeBuild, modelSettings); err != nil {
 		return nil, fmt.Errorf("resolving configured V3 runtime build: %w", err)
 	}
-	propSyncEnabled, ok := runtimeBuild.runtimeSettings["prop_sync"].(bool)
-	if !ok {
-		return nil, fmt.Errorf("configured V3 runtime settings.prop_sync must be a boolean")
+	propSyncEnabled := runtimeBuild.CompilationMode == BuildCompilationModeLPUOnly && len(selectedPropSyncChains) > 0
+	if _, overridden := runtimeBuild.runtimeSettings["prop_sync"]; overridden {
+		var err error
+		propSyncEnabled, err = boolSetting(runtimeBuild.runtimeSettings, "prop_sync")
+		if err != nil {
+			return nil, fmt.Errorf("configured V3 runtime settings.%w", err)
+		}
 	}
 	if runtimeBuild.CompilationMode == BuildCompilationModeLPUOnly {
 		if len(selectedPropSyncChains) > 0 && !propSyncEnabled {
