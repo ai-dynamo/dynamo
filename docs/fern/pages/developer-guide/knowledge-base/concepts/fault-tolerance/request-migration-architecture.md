@@ -11,7 +11,7 @@ This is an architecture reference. For how to enable and tune migration, its ben
 
 ## Overview
 
-Request migration is implemented through a Migration operator that sits in the LLM processing pipeline between the Backend operator and the service backend. When a worker fails during request processing, the migration system preserves the partial generation state and recreates the request on a new worker to continue from where the previous worker left off.
+Request migration is implemented through a Migration operator that sits in the LLM processing pipeline between the frontend preprocessing and the service backend. When a worker fails during request processing, the migration system preserves the partial generation state and recreates the request on a new worker to continue from where the previous worker left off.
 
 ## Architecture Components
 
@@ -59,13 +59,13 @@ The migration system handles two distinct failure scenarios:
 
 #### 2. Ongoing Request Migration (Mid-Stream Disconnection)
 
-**Scenario**: Connection lost during active generation after partial responses have been received.
+**Scenario**: The connection is lost or an ongoing request ends with a migratable error.
 
-**Error Pattern**: Stream termination detected before generation completion.
+**Error Pattern**: A migratable stream error is reported before generation completes.
 
 **Migration Process**:
 
-1. **Failure Detection**: The system detects the stream disconnection through error monitoring.
+1. **Failure Detection**: The system detects the connection loss or migratable request error.
 
 2. **State Preservation**: At this point, the request's token sequence contains both the original prompt tokens and all successfully generated tokens from the failed worker.
 

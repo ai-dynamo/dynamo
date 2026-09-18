@@ -207,23 +207,6 @@ pub struct LowerTierQueryOptions {
     pub retain_kv_transfer_chain: bool,
 }
 
-/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
-/// per-tier match map seeded from `device_matches`. Per-worker continuations
-/// flow forward: a worker that matched N device blocks starts the host walk
-/// at block N (anchored on its last device hash), and so on.
-pub fn query_lower_tiers(
-    indexers: &LowerTierIndexers,
-    sequence: &[LocalBlockHash],
-    device_matches: &MatchDetails,
-) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    query_lower_tiers_with_options(
-        indexers,
-        sequence,
-        device_matches,
-        LowerTierQueryOptions::default(),
-    )
-}
-
 fn merge_kv_transfer_tier_candidates(
     device_candidates: Option<&KvTransferCandidates>,
     tier_matches: &LowerTierMatchDetails,
@@ -286,6 +269,10 @@ fn merge_kv_transfer_tier_candidates(
     })
 }
 
+/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
+/// per-tier match map seeded from `device_matches`. Per-worker continuations
+/// flow forward: a worker that matched N device blocks starts the host walk
+/// at block N (anchored on its last device hash), and so on.
 pub fn query_lower_tiers_with_options(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
@@ -302,24 +289,6 @@ pub fn query_lower_tiers_with_options(
         device_matches,
         options,
         snapshot,
-    )
-}
-
-pub fn query_lower_tiers_with_options_and_projection(
-    indexers: &LowerTierIndexers,
-    sequence: &[LocalBlockHash],
-    device_matches: &MatchDetails,
-    options: LowerTierQueryOptions,
-    projection: &ResidencyProjection,
-) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    query_lower_tiers_with_options_and_snapshot(
-        indexers,
-        sequence,
-        device_matches,
-        options,
-        Arc::new(ResidencyRoutingSnapshot::from_projection(
-            projection.clone(),
-        )),
     )
 }
 
@@ -407,6 +376,35 @@ mod tests {
         LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
     };
     use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
+
+    #[test]
+    fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {
+        let worker = WorkerWithDpRank::new(7, 1);
+        let mut original = TieredMatchDetails::default();
+        original.device.overlap_scores.scores.insert(worker, 2);
+        original.device.overlap_scores.frequencies = vec![1, 1];
+        let mut lower = LowerTierMatchDetails::default();
+        lower.hits.insert(worker, 1);
+        original.lower_tier.insert(StorageTier::HostPinned, lower);
+
+        let json = serde_json::to_vec(&WireTieredMatchDetails::from(&original)).unwrap();
+        let wire: WireTieredMatchDetails = serde_json::from_slice(&json).unwrap();
+        let restored = TieredMatchDetails::from(wire);
+
+        assert_eq!(
+            restored.device.overlap_scores.scores,
+            original.device.overlap_scores.scores
+        );
+        assert_eq!(
+            restored.device.overlap_scores.frequencies,
+            original.device.overlap_scores.frequencies
+        );
+        assert_eq!(restored.lower_tier.len(), 1);
+        assert_eq!(
+            restored.lower_tier[&StorageTier::HostPinned].hits,
+            original.lower_tier[&StorageTier::HostPinned].hits
+        );
+    }
 
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()
@@ -534,7 +532,12 @@ mod tests {
         };
 
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
-        let result = query_lower_tiers(&indexers, &sequence, &device_matches);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions::default(),
+        );
         assert!(result.is_empty());
     }
 

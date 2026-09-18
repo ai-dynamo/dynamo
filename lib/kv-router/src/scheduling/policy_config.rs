@@ -49,6 +49,15 @@ impl PolicyClassConfig {
         self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
     }
 
+    /// Any zero per-worker limit means `queue_rejection` rejects every queued
+    /// entry (`current >= limit` holds at zero usage), so the class can never
+    /// hold a queued request and must keep the direct admission path.
+    pub fn never_queues(&self) -> bool {
+        self.request_queue_limit_per_worker == Some(0)
+            || self.raw_isl_token_queue_limit_per_worker == Some(0)
+            || self.cached_token_queue_limit_per_worker == Some(0)
+    }
+
     pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
         let absolute_busy = self
             .prefill_busy_threshold

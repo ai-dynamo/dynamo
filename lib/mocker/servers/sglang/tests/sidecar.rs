@@ -201,8 +201,9 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     decode.start(1).await.unwrap();
 
     let prefill_outputs = collect(&prefill, request(3)).await;
-    assert_eq!(prefill_outputs.len(), 1);
+    assert_eq!(prefill_outputs.len(), 2);
     assert!(prefill_outputs[0].token_ids.is_empty());
+    assert!(prefill_outputs[0].finish_reason.is_none());
     let handoff = prefill_outputs[0]
         .disaggregated_params
         .clone()
@@ -210,6 +211,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
     assert_eq!(handoff["bootstrap_host"], "127.0.0.1");
     assert_eq!(handoff["bootstrap_port"], 8_998);
     assert!(handoff["bootstrap_room"].is_number());
+    assert_eq!(prefill_outputs[1].finish_reason, Some(FinishReason::Length));
+    assert!(prefill_outputs[1].disaggregated_params.is_none());
 
     let mut decode_request = request(3);
     decode_request.prefill_result = Some(PrefillResult {
