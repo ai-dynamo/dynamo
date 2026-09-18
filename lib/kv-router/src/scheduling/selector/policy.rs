@@ -162,17 +162,18 @@ impl CustomWorkerSelectionState {
     // Keep row construction and storage together to avoid passing a full row through a call.
     #[inline(always)]
     fn push_candidate(&mut self, candidate: WorkerCandidate) {
-        if self.scorers.is_empty() {
+        // Build the picker's rows alongside the input snapshot. The scoring loop then only
+        // writes costs, without growing vectors or copying optional columns across trait calls.
+        push_picker_candidate(
+            &candidate,
+            0.0,
+            self.picker_inputs,
+            &mut self.candidates,
+            &mut self.cache_inputs,
+            &mut self.load_inputs,
+        );
+        if !self.scorers.is_empty() {
             // Picker-only policies do not need a second copy of the worker inputs.
-            push_picker_candidate(
-                &candidate,
-                0.0,
-                self.picker_inputs,
-                &mut self.candidates,
-                &mut self.cache_inputs,
-                &mut self.load_inputs,
-            );
-        } else {
             self.unscored_candidates.push(candidate);
         }
     }
@@ -183,20 +184,35 @@ impl CustomWorkerSelectionState {
     ) -> Result<(), KvSchedulerError> {
         let Self {
             scorers,
-            picker_inputs,
             unscored_candidates,
             candidates,
-            cache_inputs,
-            load_inputs,
             ..
         } = self;
         if unscored_candidates.is_empty() {
             return Ok(());
         }
+        debug_assert_eq!(unscored_candidates.len(), candidates.len());
         for scorer in scorers.iter_mut() {
             scorer.prepare(context, unscored_candidates)?;
         }
-        for (row, candidate) in unscored_candidates.iter().enumerate() {
+        if let [scorer] = scorers.as_mut_slice() {
+            // One scorer needs neither a per-row scorer loop nor separate contribution/total
+            // checks. Keep the initial addition to preserve the sign of a zero total.
+            for (row, (candidate, scored)) in unscored_candidates.iter().zip(candidates).enumerate()
+            {
+                let cost = scorer.score(context, candidate)?;
+                if !cost.is_finite() {
+                    return Err(WorkerSelectionPolicyError::NonFiniteCost {
+                        scorer_index: 0,
+                        row,
+                    }
+                    .into());
+                }
+                scored.cost = 0.0 + cost;
+            }
+            return Ok(());
+        }
+        for (row, (candidate, scored)) in unscored_candidates.iter().zip(candidates).enumerate() {
             let mut cost = 0.0;
             for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
                 let contribution = scorer.score(context, candidate)?;
@@ -207,14 +223,7 @@ impl CustomWorkerSelectionState {
                     );
                 }
             }
-            push_picker_candidate(
-                candidate,
-                cost,
-                *picker_inputs,
-                candidates,
-                cache_inputs,
-                load_inputs,
-            );
+            scored.cost = cost;
         }
         Ok(())
     }

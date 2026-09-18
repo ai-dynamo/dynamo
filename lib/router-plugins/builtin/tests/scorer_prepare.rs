@@ -263,3 +263,74 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
         assert!(error.to_string().contains("non-finite"));
     }
 }
+
+#[test]
+fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
+    struct FailSecondScoreOnce(usize);
+    impl WorkerScorer for FailSecondScoreOnce {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::LOAD
+        }
+        fn score(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            candidate: &WorkerCandidate,
+        ) -> Result<f64, WorkerSelectionPolicyError> {
+            self.0 += 1;
+            if self.0 == 2 {
+                return Err(WorkerSelectionPolicyError::failed("score failed"));
+            }
+            Ok(candidate.load().unwrap().active_requests() as f64)
+        }
+    }
+    struct CheckColumns;
+    impl WorkerPicker for CheckColumns {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            WorkerInputs::CACHE | WorkerInputs::LOAD
+        }
+        fn pick(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            let cache = input.cache().unwrap();
+            let load = input.load().unwrap();
+            assert_eq!(cache.len(), input.candidates().len());
+            assert_eq!(load.len(), input.candidates().len());
+            for (row, candidate) in input.candidates().iter().enumerate() {
+                let worker = candidate.worker();
+                let expected_overlap = (worker.worker_id * 7 + u64::from(worker.dp_rank)) % 9;
+                assert_eq!(cache[row].device_overlap_blocks(), expected_overlap as f64);
+                assert_eq!(load[row].active_requests(), worker.worker_id as usize % 5);
+                assert_eq!(candidate.cost(), load[row].active_requests() as f64);
+            }
+            Ok(0)
+        }
+    }
+    let (workers, mut request) = fixture(8, 17);
+    let policy = WorkerSelectionPolicy::new_with_filters(
+        KvRouterConfig::default(),
+        "test",
+        vec![Box::new(ExcludeWorkerOne)],
+        vec![Box::new(FailSecondScoreOnce(0))],
+        Box::new(CheckColumns),
+    );
+    let select = |request: &dynamo_kv_router::scheduling::SchedulingRequest| {
+        policy.select_worker(WorkerSelectionInput::configured(
+            &workers,
+            request,
+            request.eligibility(),
+            16,
+        ))
+    };
+    assert!(
+        select(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("score failed")
+    );
+    request.allowed_worker_ids = Some([1, 3, 4].into_iter().collect());
+    assert!([3, 4].contains(&select(&request).unwrap().worker.worker_id));
+    request.allowed_worker_ids = None;
+    assert_ne!(select(&request).unwrap().worker.worker_id, 1);
+}

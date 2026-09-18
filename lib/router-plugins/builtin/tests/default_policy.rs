@@ -14,16 +14,18 @@ use support::*;
 fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
     for temperature in [0.0, 0.7] {
         for prompt in [1, 17, 127, 2048] {
-            for mode in 0..8 {
+            for mode in 0..32 {
                 let (workers, mut request) = fixture(16, prompt);
                 let config = KvRouterConfig {
                     router_temperature: temperature,
                     overlap_score_credit_decay: 0.6,
                     host_cache_hit_weight: 0.25,
                     disk_cache_hit_weight: 0.1,
+                    decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
+                    shared_cache_multiplier: if mode & 16 == 0 { 0.0 } else { 0.6 },
                     ..Default::default()
                 };
-                if mode >= 4 {
+                if mode % 8 >= 4 {
                     request.shared_cache_hits =
                         Some(dynamo_kv_router::SharedCacheHits::from_ranges(vec![
                             1..3,
@@ -61,6 +63,96 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                         expected.potential_decode_blocks
                     );
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
+    let (workers, mut request) = fixture(8, 17);
+    let policy = default_policy(
+        KvRouterConfig {
+            overlap_score_credit: 0.0,
+            prefill_load_scale: 0.0,
+            decode_active_request_weight: 1.0,
+            ..Default::default()
+        },
+        "prefill",
+    );
+    for best in [[0, 1], [2, 5], [6, 7]] {
+        for (worker, load) in &mut request.worker_loads {
+            load.active_requests = if best.contains(&worker.worker_id) {
+                0
+            } else {
+                10
+            };
+            load.active_decode_blocks = 0;
+            load.additional_active_blocks = 0;
+        }
+        for _ in 0..32 {
+            let selected = policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap();
+            assert!(best.contains(&selected.worker.worker_id));
+        }
+    }
+}
+
+#[test]
+fn prepared_values_follow_each_request_when_reusing_a_policy() {
+    for label in ["prefill", "decode"] {
+        for temperature in [0.0, 0.7] {
+            let config = KvRouterConfig {
+                router_temperature: temperature,
+                overlap_score_credit_decay: 0.6,
+                host_cache_hit_weight: 0.25,
+                disk_cache_hit_weight: 0.1,
+                ..Default::default()
+            };
+            let reference = dynamo_kv_router::DefaultWorkerSelector::new_seeded(
+                Some(config.clone()),
+                label,
+                42,
+            );
+            let plugin = DefaultWorkerSelector::new_seeded(Some(config), label, 42);
+            for round in 0..64 {
+                let prompt = [1, 17, 127, 2048][round % 4];
+                let block_size = [8, 16, 32, 17, 3][round % 5];
+                let (workers, mut request) = fixture(16, prompt);
+                request.track_prefill_tokens = round % 2 == 0;
+                if round % 3 == 0 {
+                    request.overlap.tier_overlap_blocks = Default::default();
+                }
+                if round % 5 == 0 {
+                    request.worker_loads.clear();
+                } else {
+                    for load in request.worker_loads.values_mut() {
+                        load.active_prefill_tokens += round * 19;
+                    }
+                }
+                let input = WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    block_size,
+                );
+                let expected = reference.select_worker(input).unwrap();
+                let actual = plugin.select_worker(input).unwrap();
+                assert_eq!(
+                    actual.worker, expected.worker,
+                    "label={label} temperature={temperature} round={round}"
+                );
+                assert_eq!(actual.cached_tokens, expected.cached_tokens);
+                assert_eq!(
+                    actual.potential_decode_blocks,
+                    expected.potential_decode_blocks
+                );
             }
         }
     }

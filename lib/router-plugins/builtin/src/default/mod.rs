@@ -27,15 +27,10 @@ fn policy_with_rng(
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
     plain_decode: bool,
 ) -> WorkerSelectionPolicy {
-    let scorer = scorer::DefaultScorer::new(config.clone(), worker_label, plain_decode);
+    let scorer = scorer::build(&config, worker_label, plain_decode);
     let picker = picker::DefaultPicker::new(config.router_temperature, rng);
-    WorkerSelectionPolicy::new(
-        config,
-        worker_label,
-        vec![Box::new(scorer)],
-        Box::new(picker),
-    )
-    .with_exclusive_affinity(true)
+    WorkerSelectionPolicy::new(config, worker_label, vec![scorer], Box::new(picker))
+        .with_exclusive_affinity(true)
 }
 
 /// Factory installed by routing hosts, including hosts without a custom catalog.
