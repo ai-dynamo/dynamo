@@ -11,6 +11,7 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
+mod deepseek_v41;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
@@ -3361,7 +3362,15 @@ impl OpenAIPreprocessor {
         };
         let has_media_loader = self.media_loader.is_some();
 
-        for message in messages.iter() {
+        // V4.1 sorts tool results in its prompt. Collect their media in the same
+        // order, including UUID-only slots, so image identities cannot swap.
+        let message_order = (self.model_info.model_type() == "deepseek_v41"
+            && messages
+                .iter()
+                .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_))))
+        .then(|| deepseek_v41::media_message_order(messages));
+        for index in 0..messages.len() {
+            let message = &messages[message_order.as_ref().map_or(index, |order| order[index])];
             let Some(content_parts) = multimodal_content_parts(message) else {
                 continue;
             };
