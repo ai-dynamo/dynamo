@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       framework:
-        description: 'Backend the test image was built with (vllm, sglang, trtllm, dynamo); labels test metadata and coverage/Allure artifacts'
+        description: 'Backend the test image was built with (vllm, sglang, trtllm, triton, dynamo); labels test metadata and coverage/Allure artifacts'
         required: true
         type: string
       test_type:
