@@ -5653,6 +5653,14 @@ impl OpenAIPreprocessor {
                 error: None,
             };
 
+            // BEFORE the glm47 recovery pass below: that pass keys per-choice state on
+            // `choice.index` and accumulates `emitted_text`, so a chunk carrying two entries
+            // for one index would run it twice against the same state and corrupt the
+            // truncation bookkeeping. Normalize the shape first, then recover.
+            if let Some(data) = &mut nv_chunk.data {
+                Self::coalesce_duplicate_stream_indices(&mut data.inner);
+            }
+
             if is_glm47 && let Some(data) = &mut nv_chunk.data {
                 let mut recovery = choice_recovery
                     .lock()
@@ -5694,10 +5702,6 @@ impl OpenAIPreprocessor {
                         state.emitted_text.push_str(content);
                     }
                 }
-            }
-
-            if let Some(data) = &mut nv_chunk.data {
-                Self::coalesce_duplicate_stream_indices(&mut data.inner);
             }
 
             futures::stream::iter(std::iter::once(nv_chunk))
@@ -5813,23 +5817,66 @@ impl OpenAIPreprocessor {
         let mut merged: Vec<dynamo_protocols::types::ChatChoiceStream> =
             Vec::with_capacity(inner.choices.len());
         for choice in std::mem::take(&mut inner.choices) {
-            match merged.iter_mut().find(|seen| seen.index == choice.index) {
+            match merged
+                .iter_mut()
+                .find(|seen| seen.index == choice.index && Self::choices_are_mergeable(seen, &choice))
+            {
                 Some(target) => Self::merge_duplicate_choice(target, choice),
+                // No mergeable peer: keep it as its own entry. A chunk we cannot fold
+                // without losing content goes out unchanged rather than half-dropped.
                 None => merged.push(choice),
             }
         }
         inner.choices = merged;
     }
 
+    /// Whether two same-index entries can be folded without losing information.
+    ///
+    /// Only `Text` content concatenates meaningfully. `Parts` (multimodal) has no
+    /// defined concatenation, and dropping one side would lose data that the
+    /// malformed-but-intact chunk still carries — so such a chunk is left exactly as
+    /// it arrived rather than silently halved.
+    fn choices_are_mergeable(
+        a: &dynamo_protocols::types::ChatChoiceStream,
+        b: &dynamo_protocols::types::ChatChoiceStream,
+    ) -> bool {
+        !matches!(
+            (&a.delta.content, &b.delta.content),
+            (
+                Some(ChatCompletionMessageContent::Parts(_)),
+                Some(ChatCompletionMessageContent::Parts(_))
+            ) | (Some(ChatCompletionMessageContent::Parts(_)), Some(_))
+                | (Some(_), Some(ChatCompletionMessageContent::Parts(_)))
+        )
+    }
+
     /// Fold `extra` into `target`, which carries the same choice index.
+    ///
+    /// The delta is destructured exhaustively on purpose: `dynamo-protocols` is a
+    /// separately versioned crate, and a field added there must break this build
+    /// rather than be silently dropped on the merge path.
     fn merge_duplicate_choice(
         target: &mut dynamo_protocols::types::ChatChoiceStream,
         extra: dynamo_protocols::types::ChatChoiceStream,
     ) {
-        let delta = &mut target.delta;
-        let extra_delta = extra.delta;
+        let dynamo_protocols::types::ChatChoiceStream {
+            index: _,
+            delta: extra_delta,
+            finish_reason: extra_finish_reason,
+            logprobs: extra_logprobs,
+        } = extra;
+        let dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: extra_content,
+            function_call: extra_function_call,
+            tool_calls: extra_tool_calls,
+            role: extra_role,
+            refusal: extra_refusal,
+            reasoning_content: extra_reasoning_content,
+        } = extra_delta;
 
-        match (delta.content.take(), extra_delta.content) {
+        let delta = &mut target.delta;
+
+        match (delta.content.take(), extra_content) {
             (
                 Some(ChatCompletionMessageContent::Text(mut existing)),
                 Some(ChatCompletionMessageContent::Text(added)),
@@ -5837,11 +5884,12 @@ impl OpenAIPreprocessor {
                 existing.push_str(&added);
                 delta.content = Some(ChatCompletionMessageContent::Text(existing));
             }
-            // Non-text content has no defined concatenation; keep what arrived first.
+            // `choices_are_mergeable` rejects the ambiguous pairs before we get here,
+            // so at most one side is populated.
             (existing, added) => delta.content = existing.or(added),
         }
 
-        match (delta.reasoning_content.take(), extra_delta.reasoning_content) {
+        match (delta.reasoning_content.take(), extra_reasoning_content) {
             (Some(mut existing), Some(added)) => {
                 existing.push_str(&added);
                 delta.reasoning_content = Some(existing);
@@ -5849,7 +5897,7 @@ impl OpenAIPreprocessor {
             (existing, added) => delta.reasoning_content = existing.or(added),
         }
 
-        match (delta.tool_calls.take(), extra_delta.tool_calls) {
+        match (delta.tool_calls.take(), extra_tool_calls) {
             (Some(mut existing), Some(added)) => {
                 existing.extend(added);
                 delta.tool_calls = Some(existing);
@@ -5858,14 +5906,14 @@ impl OpenAIPreprocessor {
         }
         Self::coalesce_duplicate_tool_call_indices(&mut delta.tool_calls);
 
-        delta.role = delta.role.take().or(extra_delta.role);
-        delta.refusal = delta.refusal.take().or(extra_delta.refusal);
-        delta.function_call = delta.function_call.take().or(extra_delta.function_call);
+        delta.role = delta.role.take().or(extra_role);
+        delta.refusal = delta.refusal.take().or(extra_refusal);
+        delta.function_call = delta.function_call.take().or(extra_function_call);
 
         // A finish reason arrives once for a choice; take it from whichever entry
         // carried it rather than letting the position of the flush decide.
-        target.finish_reason = target.finish_reason.take().or(extra.finish_reason);
-        target.logprobs = target.logprobs.take().or(extra.logprobs);
+        target.finish_reason = target.finish_reason.take().or(extra_finish_reason);
+        target.logprobs = target.logprobs.take().or(extra_logprobs);
     }
 
     /// Merge `tool_calls` entries that share a call index, concatenating their
@@ -7622,6 +7670,28 @@ mod tests {
             serde_json::to_string(&inner).unwrap(),
             before,
             "a chunk with one entry per index must be untouched"
+        );
+    }
+
+    /// Two same-index entries whose content cannot be concatenated must both survive:
+    /// folding them would drop data the malformed-but-intact chunk still carries.
+    #[test]
+    fn unmergeable_multimodal_content_passes_through_untouched() {
+        use dynamo_protocols::types::{ChatCompletionMessageContent, ChatCompletionResponseContentPart};
+        let mut inner = chunk_from(vec![(0, vec![]), (0, vec![])], None);
+        for choice in &mut inner.choices {
+            choice.delta.tool_calls = None;
+            choice.delta.content = Some(ChatCompletionMessageContent::Parts(
+                Vec::<ChatCompletionResponseContentPart>::new(),
+            ));
+        }
+        let before = inner.clone();
+
+        OpenAIPreprocessor::coalesce_duplicate_stream_indices(&mut inner);
+
+        assert_eq!(
+            inner, before,
+            "a chunk that cannot be folded without losing content must go out unchanged"
         );
     }
 
