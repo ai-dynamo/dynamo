@@ -17,10 +17,15 @@
 //!
 //! # Status classes
 //!
-//! These match `scheduler_error_status`
-//! (`lib/kv-router/src/services/selection/error.rs`) exactly. That mapping
-//! answered a queue rejection with 503; this change moves it to 429 alongside
-//! the overload family, per DEP #9755 (`dep:approved`, `dep:implementing`):
+//! A scheduler error is classified once, by [`KvSchedulerError::rejection`] in
+//! `dynamo-kv-router`; this module only renders that classification in ext_proc's
+//! status vocabulary. The selection service renders the same classification in
+//! HTTP's, via `scheduler_error_status`, so the two cannot drift —
+//! `epp_statuses_match_the_selection_service` pins that.
+//!
+//! That shared mapping answered a queue rejection with 503; this change moves it
+//! to 429 alongside the overload family, per DEP #9755 (`dep:approved`,
+//! `dep:implementing`):
 //!
 //! > Terminal router-side rejection **SHOULD** use downstream throttling
 //! > semantics, such as `TooManyRequests` / HTTP 429.
@@ -42,30 +47,31 @@ use crate::picker::PickError;
 
 /// Why the embedded router refused to place a request.
 ///
-/// Deliberately coarser than [`KvSchedulerError`]: the EPP only needs enough
-/// resolution to choose a status class and a metric label, and a coarse enum
-/// keeps a non-exhaustive upstream enum from breaking this crate every time a
-/// variant is added.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RouterRejection {
-    /// Downstream capacity is saturated. Retryable backpressure → 429.
-    Overloaded,
-    /// A policy-class queue-depth limit refused the request → 429.
-    QueueRejected,
-    /// No worker could serve the request right now → 503.
-    Unavailable,
-    /// The request contradicted router state, e.g. a duplicate booking → 409.
-    Conflict,
-    /// The request itself was not routable, e.g. a pin outside the allowed
-    /// set → 400.
-    BadRequest,
-    /// A router-internal invariant failed → 500.
-    Internal,
+/// The router's own classification, reused rather than restated:
+/// [`KvSchedulerError::rejection`] is the single place a scheduler error is
+/// given a meaning, so the EPP and the selection service cannot drift apart on
+/// what a refusal is. This crate only decides how to *present* it, in
+/// [`RouterRejectionExt`].
+pub use dynamo_kv_router::scheduling::SchedulerRejection as RouterRejection;
+
+/// How the EPP presents a [`RouterRejection`] to a gateway client.
+///
+/// An extension trait because the enum belongs to `dynamo-kv-router`; the
+/// status vocabulary and the metric namespace are this crate's.
+pub trait RouterRejectionExt {
+    /// Stable, low-cardinality label for the rejection metric.
+    fn metric_label(self) -> &'static str;
+
+    /// Client-safe [`PickError`] for this rejection.
+    ///
+    /// No variant carries router internals. The detailed cause is logged at the
+    /// call site; the client sees only the category, matching how the tokenizer
+    /// variants already behave.
+    fn into_pick_error(self) -> PickError;
 }
 
-impl RouterRejection {
-    /// Stable, low-cardinality label for the rejection metric.
-    pub fn metric_label(self) -> &'static str {
+impl RouterRejectionExt for RouterRejection {
+    fn metric_label(self) -> &'static str {
         match self {
             Self::Overloaded => "overloaded",
             Self::QueueRejected => "queue_rejected",
@@ -76,12 +82,7 @@ impl RouterRejection {
         }
     }
 
-    /// Client-safe [`PickError`] for this rejection.
-    ///
-    /// No variant carries router internals. The detailed cause is logged at the
-    /// call site; the client sees only the category, matching how the tokenizer
-    /// variants already behave.
-    pub fn into_pick_error(self) -> PickError {
+    fn into_pick_error(self) -> PickError {
         match self {
             Self::Overloaded => PickError::RouterOverloaded,
             Self::QueueRejected => PickError::RouterQueueRejected,
@@ -107,7 +108,7 @@ pub fn classify_router_error(error: &anyhow::Error) -> RouterRejection {
             return rejection;
         }
         if let Some(scheduler_error) = cause.downcast_ref::<KvSchedulerError>() {
-            return classify_scheduler_error(scheduler_error);
+            return scheduler_error.rejection();
         }
     }
 
@@ -138,28 +139,6 @@ fn classify_error_class(class: ErrorType) -> Option<RouterRejection> {
         // with 429. One class, two right answers, so both keep the
         // `Unavailable` (503) fallback until they can be told apart.
         _ => None,
-    }
-}
-
-fn classify_scheduler_error(error: &KvSchedulerError) -> RouterRejection {
-    // Mirrors `scheduler_error_status` in
-    // `lib/kv-router/src/services/selection/error.rs`; keep the two in step.
-    //
-    // `KvSchedulerError` is `#[non_exhaustive]`, so the wildcard is required
-    // from this crate; it is also what keeps a newly added variant from failing
-    // the build here rather than being classified conservatively.
-    match error {
-        KvSchedulerError::AllEligibleWorkersOverloaded
-        | KvSchedulerError::PinnedWorkerOverloaded { .. } => RouterRejection::Overloaded,
-        KvSchedulerError::QueueRejected(_) => RouterRejection::QueueRejected,
-        KvSchedulerError::NoEndpoints
-        | KvSchedulerError::AllEligibleWorkersFiltered
-        | KvSchedulerError::SubscriberShutdown
-        | KvSchedulerError::InitFailed(_) => RouterRejection::Unavailable,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => RouterRejection::BadRequest,
-        KvSchedulerError::BookingFailed(_) => RouterRejection::Conflict,
-        KvSchedulerError::WorkerSelectionPolicy(_) => RouterRejection::Internal,
-        _ => RouterRejection::Unavailable,
     }
 }
 

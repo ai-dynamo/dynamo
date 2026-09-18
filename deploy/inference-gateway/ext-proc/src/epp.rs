@@ -32,7 +32,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use uuid::Uuid;
 
-use crate::admission::{RouterRejection, classify_router_error};
+use crate::admission::{RouterRejection, RouterRejectionExt, classify_router_error};
 use crate::epp_router::{endpoint_in_subset, requested_policy_class};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,

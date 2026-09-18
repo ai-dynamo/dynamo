@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::indexer::KvRouterError;
-use crate::scheduling::KvSchedulerError;
+use crate::scheduling::{KvSchedulerError, SchedulerRejection};
 use crate::sequences::SequenceError;
 
 #[derive(Debug, thiserror::Error)]
@@ -68,25 +68,25 @@ impl SelectionError {
     }
 }
 
-fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
-    match error {
-        KvSchedulerError::NoEndpoints
-        | KvSchedulerError::AllEligibleWorkersFiltered
-        | KvSchedulerError::SubscriberShutdown
-        | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        // A queue rejection joins the overload family rather than being 503.
-        // The class refused to admit the request, so the caller should back off;
-        // 503 would invite a gateway to fail over to another endpoint, which
-        // cannot help when the limit is a fleet-wide policy-class setting.
-        // DEP #9755: "Terminal router-side rejection SHOULD use downstream
-        // throttling semantics, such as `TooManyRequests` / HTTP 429. This
-        // includes router queue full [...]".
-        KvSchedulerError::AllEligibleWorkersOverloaded
-        | KvSchedulerError::PinnedWorkerOverloaded { .. }
-        | KvSchedulerError::QueueRejected(_) => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
-        KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
+/// HTTP status for a scheduler refusal.
+///
+/// Classification lives on [`KvSchedulerError::rejection`] so that every host
+/// mapping these errors agrees on what a refusal *means*; this function only
+/// renders that meaning in HTTP's vocabulary.
+///
+/// A queue rejection is throttling, not unavailability: the class refused to
+/// admit the request, so the caller should back off. A 503 would invite a
+/// gateway to fail over to another endpoint, which cannot help when the limit
+/// is a fleet-wide policy-class setting.
+pub fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
+    match error.rejection() {
+        SchedulerRejection::Overloaded | SchedulerRejection::QueueRejected => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        SchedulerRejection::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        SchedulerRejection::BadRequest => StatusCode::BAD_REQUEST,
+        SchedulerRejection::Conflict => StatusCode::CONFLICT,
+        SchedulerRejection::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

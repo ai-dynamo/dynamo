@@ -1740,6 +1740,55 @@ mod tests {
         assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
     }
 
+    /// The EPP and the standalone selection service must answer the same
+    /// scheduler error with the same status. Classification is already shared
+    /// (`KvSchedulerError::rejection`), but each host renders it in its own
+    /// status type, and the rendering is what a client sees.
+    ///
+    /// Variants are listed explicitly rather than iterated, so adding one to the
+    /// `#[non_exhaustive]` upstream enum does not silently inherit the
+    /// `Unavailable` fallback here without someone deciding it should.
+    #[test]
+    fn epp_statuses_match_the_selection_service() {
+        use crate::admission::RouterRejectionExt;
+        use dynamo_kv_router::protocols::WorkerId;
+        use dynamo_kv_router::scheduling::{KvSchedulerError, QueueLimitKind, QueueRejection};
+        use dynamo_kv_router::services::selection::SelectionError;
+
+        let cases = [
+            KvSchedulerError::NoEndpoints,
+            KvSchedulerError::AllEligibleWorkersOverloaded,
+            KvSchedulerError::AllEligibleWorkersFiltered,
+            KvSchedulerError::SubscriberShutdown,
+            KvSchedulerError::InitFailed("boom".to_string()),
+            KvSchedulerError::BookingFailed("duplicate".to_string()),
+            KvSchedulerError::PinnedWorkerOverloaded {
+                worker_id: WorkerId::default(),
+            },
+            KvSchedulerError::PinnedWorkerNotAllowed {
+                worker_id: WorkerId::default(),
+            },
+            KvSchedulerError::QueueRejected(QueueRejection {
+                policy_class: "batch".to_string(),
+                limit_kind: QueueLimitKind::Requests,
+                current: 8,
+                limit: 8,
+            }),
+        ];
+
+        for error in cases {
+            let label = error.to_string();
+            // Read the classification before the error moves into `SelectionError`.
+            let epp = ExtProcError::from_pick_error(error.rejection().into_pick_error());
+            let selection = SelectionError::Scheduler(error).status_code();
+
+            assert_eq!(
+                epp.status_code as u16, selection,
+                "EPP and selection service disagree on {label:?}"
+            );
+        }
+    }
+
     /// Router-reported worker saturation is 429, matching `scheduler_error_status`
     /// in `lib/kv-router/src/services/selection/error.rs`. Deliberately distinct
     /// from the EPP's own front-door shed, which stays 503 — see

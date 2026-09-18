@@ -22,7 +22,7 @@ use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TEXT_FORMAT, TextEncoder,
 };
 
-use crate::admission::RouterRejection;
+use crate::admission::{RouterRejection, RouterRejectionExt};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
 /// otherwise. Distinct from the ext_proc gRPC port (9002) and the health port
