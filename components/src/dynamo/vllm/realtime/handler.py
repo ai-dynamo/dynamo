@@ -49,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 OPENAI_PCM_SAMPLE_RATE = 24_000
 MAX_AUDIO_CHUNK_BYTES = 4 * 1024 * 1024
+# Bound uncommitted text independently of the engine's token/context limit.
+MAX_TEXT_BUFFER_BYTES = 4 * 1024 * 1024
 RESAMPLE_BLOCK_MILLISECONDS = 100
 MAX_UTTERANCE_SECONDS = 60
 
@@ -279,7 +281,7 @@ class _TextTurn(RealtimeTurn):
 
 
 class _TextPrefill:
-    """Queue incremental text for one best-effort prefill request."""
+    """Coalesce incremental text for one best-effort prefill request."""
 
     def __init__(
         self,
@@ -288,24 +290,27 @@ class _TextPrefill:
         factory: TextPrefillFactory,
     ) -> None:
         self.messages = messages
-        self._parts: list[str] = []
-        self._updates: asyncio.Queue[tuple[str, bool] | None] = asyncio.Queue()
+        self.text = ""
+        self._text_bytes = 0
+        self._updated = asyncio.Event()
         self.task: asyncio.Task[None] = asyncio.create_task(
             factory(messages, self.updates())
         )
 
-    @property
-    def text(self) -> str:
-        return "".join(self._parts)
-
-    async def updates(self) -> AsyncGenerator[tuple[str, bool], None]:
-        while (update := await self._updates.get()) is not None:
-            yield update
+    async def updates(self) -> AsyncGenerator[str, None]:
+        while True:
+            await self._updated.wait()
+            self._updated.clear()
+            yield self.text
 
     def append(self, text: str) -> None:
-        self._parts.append(text)
+        text_bytes = self._text_bytes + len(text.encode("utf-8"))
+        if text_bytes > MAX_TEXT_BUFFER_BYTES:
+            raise ValueError(f"input text exceeds {MAX_TEXT_BUFFER_BYTES} bytes")
+        self.text += text
+        self._text_bytes = text_bytes
         if not self.task.done():
-            self._updates.put_nowait((text, False))
+            self._updated.set()
 
     def commit(self) -> None:
         # Final generation reuses completed prefix blocks. Finishing another
@@ -370,6 +375,10 @@ class RealtimeTextHandler:
                 session.get("tool_choice") in (None, "none"),
                 "tool_choice is not supported",
             ),
+            (
+                session.get("truncation") in (None, "disabled"),
+                "automatic truncation is not supported; use truncation='disabled'",
+            ),
         )
         for supported, message in checks:
             if not supported:
@@ -415,6 +424,7 @@ class RealtimeTextHandler:
     async def _run_turn(self, turn: _TextTurn, context: Context) -> None:
         usage = None
         finish_reason = None
+        stream = None
         try:
             if turn.prefill_task is not None:
                 # Join cancelled speculative work before final generation;
@@ -487,6 +497,10 @@ class RealtimeTextHandler:
                     },
                 ),
             )
+        finally:
+            # Cancellation may interrupt an output queue put, not stream.__anext__.
+            if stream is not None:
+                await stream.aclose()
 
     async def generate(
         self,
@@ -499,6 +513,7 @@ class RealtimeTextHandler:
             "instructions": "",
             "max_output_tokens": "inf",
             "output_modalities": ["text"],
+            "truncation": "disabled",
         }
         items: list[dict[str, Any]] = []
         messages: list[dict[str, str]] = []
@@ -630,7 +645,10 @@ class RealtimeTextHandler:
                         messages=prompt,
                         factory=self._text_prefill_factory,
                     )
-                active_prefill.append(text)
+                try:
+                    active_prefill.append(text)
+                except ValueError as exc:
+                    emit_error(event, "invalid_text", str(exc))
             elif event_type == "input_text.commit":
                 if active_prefill is None or not active_prefill.text:
                     emit_error(event, "invalid_text", "input text buffer is empty")

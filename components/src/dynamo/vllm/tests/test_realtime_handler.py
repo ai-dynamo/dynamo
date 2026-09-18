@@ -15,7 +15,7 @@ from dynamo.vllm.realtime import (
     RealtimeTextHandler,
     RealtimeTranscriptionHandler,
 )
-from dynamo.vllm.realtime.handler import _TextTurn
+from dynamo.vllm.realtime.handler import _TextPrefill, _TextTurn
 
 pytestmark = [
     pytest.mark.unit,
@@ -285,7 +285,7 @@ def test_text_commit_cancels_warming_before_final_generation():
         try:
             async for update in updates:
                 updates_seen.append(update)
-                if len(updates_seen) == 2:
+                if update == "Hello world":
                     prefill_seen.set()
         except asyncio.CancelledError:
             prefill_done.set()
@@ -322,10 +322,7 @@ def test_text_commit_cancels_warming_before_final_generation():
     )
 
     assert prefill_messages == [{"role": "system", "content": "Answer clearly."}]
-    assert updates_seen == [
-        ("Hello", False),
-        (" world", False),
-    ]
+    assert updates_seen == ["Hello world"]
     user_items = [
         event["item"]
         for event in result
@@ -343,7 +340,7 @@ def test_text_buffer_clear_discards_input_and_allows_replay():
 
     async def prefill(messages, updates):
         del messages
-        async for text, _ in updates:
+        async for text in updates:
             prefill_texts.append(text)
             if text == "correct":
                 prefill_seen.set()
@@ -426,6 +423,39 @@ def test_text_prefill_failure_does_not_fail_final_generation():
     assert done["response"]["status"] == "completed"
 
 
+@pytest.mark.parametrize("prefill_fails", [False, True])
+def test_text_buffer_coalesces_updates_and_limits_bytes(monkeypatch, prefill_fails):
+    monkeypatch.setattr("dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", 8)
+
+    async def scenario():
+        seen = asyncio.Event()
+        updates_seen = []
+
+        async def factory(messages, updates):
+            async for text in updates:
+                updates_seen.append(text)
+                seen.set()
+                if prefill_fails:
+                    raise RuntimeError("prefill failed")
+
+        prefill = _TextPrefill(messages=[], factory=factory)
+        try:
+            prefill.append("ab")
+            prefill.append("\u20ac")
+            await seen.wait()
+            if prefill_fails:
+                await asyncio.gather(prefill.task, return_exceptions=True)
+            assert updates_seen == ["ab\u20ac"]
+            prefill.append("123")
+            with pytest.raises(ValueError, match="input text exceeds"):
+                prefill.append("4")
+            assert prefill.text == "ab\u20ac123"
+        finally:
+            await prefill.cancel()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=1))
+
+
 def test_text_buffer_must_be_committed_before_response():
     async def unused_chat_completion(messages, max_output_tokens):
         raise AssertionError((messages, max_output_tokens))
@@ -459,10 +489,13 @@ def test_text_buffer_must_be_committed_before_response():
     [
         ({"type": "input_text.append", "text": ""}, "non-empty"),
         ({"type": "input_text.append", "text": 123}, "non-empty"),
+        ({"type": "input_text.append", "text": "123456789"}, "exceeds"),
         ({"type": "input_text.commit"}, "buffer is empty"),
     ],
 )
-def test_invalid_text_buffer_events_are_recoverable(event, message):
+def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message):
+    monkeypatch.setattr("dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", 8)
+
     async def unused_chat_completion(messages, max_output_tokens):
         raise AssertionError((messages, max_output_tokens))
 
@@ -489,6 +522,18 @@ def test_invalid_text_buffer_events_are_recoverable(event, message):
     "session_update, item, code",
     [
         ({"output_modalities": ["audio"]}, _text_item("Hello"), "invalid_session"),
+        ({"truncation": "auto"}, _text_item("Hello"), "invalid_session"),
+        (
+            {
+                "truncation": {
+                    "type": "retention_ratio",
+                    "retention_ratio": 0.5,
+                    "token_limits": {"post_instructions": 1},
+                }
+            },
+            _text_item("Hello"),
+            "invalid_session",
+        ),
         (
             {},
             {
@@ -503,7 +548,7 @@ def test_invalid_text_buffer_events_are_recoverable(event, message):
         ),
     ],
 )
-def test_text_session_rejects_unsupported_modalities(session_update, item, code):
+def test_text_session_rejects_unsupported_options(session_update, item, code):
     async def unused_chat_completion(messages, max_output_tokens):
         raise AssertionError((messages, max_output_tokens))
 
@@ -526,6 +571,8 @@ def test_text_session_rejects_unsupported_modalities(session_update, item, code)
     errors = [event for event in result if event["type"] == "error"]
     assert len(errors) == 1
     assert errors[0]["error"]["code"] == code
+    if code == "invalid_session":
+        assert not any(event["type"] == "session.updated" for event in result)
 
 
 @pytest.mark.parametrize("after_first_delta", [False, True])
@@ -585,6 +632,100 @@ def test_response_cancel_aborts_generation(after_first_delta):
     assert done[0]["response"]["output"][0]["content"] == (
         [{"type": "output_text", "text": "partial"}] if after_first_delta else []
     )
+
+
+def test_cancellation_under_backpressure_closes_chat_stream():
+    async def scenario():
+        started = asyncio.Event()
+        closed = asyncio.Event()
+
+        async def frames():
+            try:
+                started.set()
+                yield 'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            finally:
+                await asyncio.sleep(0)
+                closed.set()
+
+        stream = frames()
+
+        async def chat_completion(messages, max_tokens):
+            return stream
+
+        handler = RealtimeTextHandler(
+            model_name=TEXT_MODEL, chat_completion_factory=chat_completion
+        )
+        turn = _TextTurn(
+            messages=[],
+            max_output_tokens=32,
+            wire_max_output_tokens=32,
+            add_to_conversation=False,
+            items=[],
+            conversation_messages=[],
+        )
+        while not turn.events.full():
+            turn.events.put_nowait({})
+        task = asyncio.create_task(handler._run_turn(turn, _Context()))
+        await started.wait()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert closed.is_set()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=1))
+
+
+@pytest.mark.parametrize("close_early", [False, True])
+def test_text_serving_closes_nested_engine_stream(monkeypatch, close_early):
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+
+    from dynamo.vllm.realtime.serving import build_realtime_text_factories
+
+    monkeypatch.setattr(OpenAIServingChat, "__init__", lambda self, **kwargs: None)
+    monkeypatch.setattr(
+        "vllm.renderers.online_renderer.OnlineRenderer", lambda **kwargs: None
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.realtime.serving._build_models", lambda **kwargs: None
+    )
+
+    async def scenario():
+        closed = asyncio.Event()
+
+        async def engine_output():
+            try:
+                yield "data: [DONE]\n\n"
+            finally:
+                await asyncio.sleep(0)
+                closed.set()
+
+        engine_stream = engine_output()
+
+        async def create(self, request):
+            return self.chat_completion_stream_generator(request, engine_stream)
+
+        async def frames(self, request, result_generator):
+            async for frame in result_generator:
+                yield frame
+
+        monkeypatch.setattr(OpenAIServingChat, "create_chat_completion", create)
+        monkeypatch.setattr(
+            OpenAIServingChat, "chat_completion_stream_generator", frames
+        )
+        factory, _ = build_realtime_text_factories(
+            engine_client=SimpleNamespace(model_config=None, renderer=None),
+            model_name=TEXT_MODEL,
+            model_path=TEXT_MODEL,
+            chat_template_path=None,
+        )
+        stream = await factory([{"role": "user", "content": "Hi"}], 32)
+        await anext(stream)
+        if close_early:
+            await stream.aclose()
+        else:
+            assert [frame async for frame in stream] == []
+        assert closed.is_set()
+
+    asyncio.run(asyncio.wait_for(scenario(), timeout=1))
 
 
 def test_generation_failure_closes_announced_response_item():

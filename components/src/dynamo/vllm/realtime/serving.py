@@ -9,6 +9,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
+from contextlib import aclosing
 from typing import Any
 
 import numpy as np
@@ -22,7 +23,7 @@ ChatCompletionFactory = Callable[
     Awaitable[AsyncGenerator[str, None]],
 ]
 TextPrefillFactory = Callable[
-    [list[dict[str, str]], AsyncGenerator[tuple[str, bool], None]],
+    [list[dict[str, str]], AsyncGenerator[str, None]],
     Coroutine[Any, Any, None],
 ]
 
@@ -77,6 +78,23 @@ def build_realtime_text_factories(
     from vllm.renderers.online_renderer import OnlineRenderer
     from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+    class RealtimeServingChat(OpenAIServingChat):
+        async def chat_completion_stream_generator(
+            self,
+            request: ChatCompletionRequest,
+            result_generator: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> AsyncGenerator[str, None]:
+            # Closing the SSE generator alone does not close its engine iterator.
+            async with aclosing(result_generator), aclosing(
+                super().chat_completion_stream_generator(
+                    request, result_generator, *args, **kwargs
+                )
+            ) as stream:
+                async for frame in stream:
+                    yield frame
+
     chat_template = load_chat_template(chat_template_path)
     online_renderer = OnlineRenderer(
         model_config=engine_client.model_config,
@@ -85,7 +103,7 @@ def build_realtime_text_factories(
         chat_template=chat_template,
         chat_template_content_format="auto",
     )
-    serving = OpenAIServingChat(
+    serving = RealtimeServingChat(
         engine_client=engine_client,
         models=_build_models(
             engine_client=engine_client,
@@ -116,14 +134,12 @@ def build_realtime_text_factories(
             raise ValueError(message)
         return response
 
-    async def render_tokens(
-        messages: list[dict[str, str]], *, final: bool
-    ) -> list[int]:
+    async def render_tokens(messages: list[dict[str, str]]) -> list[int]:
         request = ChatCompletionRequest(
             messages=messages,
             model=model_name,
-            add_generation_prompt=final,
-            continue_final_message=not final,
+            add_generation_prompt=False,
+            continue_final_message=True,
         )
         rendered = await serving.render_chat_request(request)
         if not isinstance(rendered, tuple):
@@ -139,7 +155,7 @@ def build_realtime_text_factories(
 
     async def prefill_text(
         messages: list[dict[str, str]],
-        updates: AsyncGenerator[tuple[str, bool], None],
+        updates: AsyncGenerator[str, None],
     ) -> None:
         cache_config = engine_client.vllm_config.cache_config
         block_size = cache_config.block_size
@@ -149,7 +165,6 @@ def build_realtime_text_factories(
             return
 
         emitted: list[int] = []
-        text_parts: list[str] = []
         sampling_params = SamplingParams.from_optional(
             temperature=0.0,
             max_tokens=1,
@@ -159,26 +174,21 @@ def build_realtime_text_factories(
 
         async def streaming_input() -> AsyncGenerator[Any, None]:
             nonlocal emitted
-            async for text_delta, final in updates:
-                text_parts.append(text_delta)
+            async for text in updates:
                 token_ids = await render_tokens(
-                    [*messages, {"role": "user", "content": "".join(text_parts)}],
-                    final=final,
+                    [*messages, {"role": "user", "content": text}],
                 )
                 if token_ids[: len(emitted)] != emitted:
                     # Appending text can change tokenizer boundaries. Stop this
                     # optimization instead of feeding an incorrect token stream;
                     # final generation independently renders the exact prompt.
                     return
-                if final:
-                    end = len(token_ids)
-                else:
-                    # Retokenizing appended text may alter the last few tokens.
-                    # Keep one cache block pending and submit only full blocks,
-                    # which also avoids engine work that the final request
-                    # cannot reuse through prefix caching.
-                    stable_end = max(0, len(token_ids) - block_size)
-                    end = stable_end // block_size * block_size
+                # Retokenizing appended text may alter the last few tokens.
+                # Keep one cache block pending and submit only full blocks,
+                # which also avoids engine work that the final request
+                # cannot reuse through prefix caching.
+                stable_end = max(0, len(token_ids) - block_size)
+                end = stable_end // block_size * block_size
                 if end > len(emitted):
                     delta = token_ids[len(emitted) : end]
                     emitted = token_ids[:end]
