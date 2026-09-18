@@ -290,12 +290,14 @@ def _new_decode_handler(
 async def test_shutdown_abort_chunk_raises_engine_shutdown(
     processor_name, finish_reason
 ):
+    """Shutdown remains retryable even when its abort carries validation details."""
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
     context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     async def stream():
+        """Yield the terminal abort from the shutting-down backend."""
         yield {
             "text": "",
             "output_ids": [],
@@ -312,6 +314,7 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(
 
 @pytest.fixture
 def abort_context():
+    """Track first-token notification without cancelling the test request."""
     return SimpleNamespace(
         id=lambda: "request-id",
         is_stopped=lambda: False,
@@ -320,7 +323,7 @@ def abort_context():
 
 
 def _abort_chunk(finish_reason):
-    # SGLang can return a placeholder token and text even when grammar setup failed.
+    """Model the placeholder token and text SGLang can emit after grammar failure."""
     return {
         "output_ids": [101],
         "text": "_color",
@@ -372,6 +375,7 @@ def _abort_chunk(finish_reason):
 async def test_error_abort_preserves_http_error_before_output(
     processor_name, status_code, message, err_type, abort_context
 ):
+    """Raise the backend error before exposing placeholder output or token timing."""
     handler = _new_decode_handler()
     finish_reason = {
         "type": "abort",
@@ -399,6 +403,49 @@ async def test_error_abort_preserves_http_error_before_output(
 @pytest.mark.parametrize(
     "processor_name", ["_process_token_stream", "_process_text_stream"]
 )
+async def test_error_abort_after_output_preserves_error_and_stops(
+    processor_name, abort_context
+):
+    """Preserve an earlier delta, then terminate with the original validation error."""
+    handler = _new_decode_handler()
+    normal_chunk = _abort_chunk(None)
+    normal_chunk["output_ids"] = [42]
+    normal_chunk["text"] = "hello"
+    message = "Failed to compile json grammar: unsupported schema type"
+    error_chunk = _abort_chunk(
+        {
+            "type": "abort",
+            "message": message,
+            "status_code": 400,
+            "err_type": "BadRequestError",
+        }
+    )
+    stream = getattr(handler, processor_name)(
+        _stream([normal_chunk, error_chunk]), abort_context
+    )
+
+    first = await anext(stream)
+    if processor_name == "_process_token_stream":
+        assert first["token_ids"] == [42]
+        assert first.get("finish_reason") is None
+    else:
+        assert first["choices"][0]["delta"]["content"] == "hello"
+        assert first["choices"][0]["finish_reason"] is None
+
+    with pytest.raises(InvalidArgument) as error:
+        await anext(stream)
+    assert str(error.value) == message
+
+    # Neither the abort's placeholder nor a successful terminal chunk can follow.
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    abort_context.notify_first_token.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
 @pytest.mark.parametrize(
     "status_fields",
     [
@@ -415,6 +462,7 @@ async def test_error_abort_preserves_http_error_before_output(
 async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
     processor_name, status_fields, abort_context
 ):
+    """Malformed error metadata fails as a server error instead of a completion."""
     handler = _new_decode_handler()
     message = "Failed to compile json grammar"
     finish_reason = {
@@ -454,6 +502,7 @@ async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
 async def test_abort_without_error_details_remains_cancelled(
     processor_name, finish_fields, abort_context
 ):
+    """An ordinary SGLang cancellation keeps its existing finish mapping."""
     handler = _new_decode_handler()
     chunk = _abort_chunk({"type": "abort", **finish_fields})
     chunk["output_ids"] = []
