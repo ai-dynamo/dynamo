@@ -133,8 +133,8 @@ pub mod code {
 /// Adapter configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Model name the workers serve. Recorded for the startup log and used to
-    /// assert that both legs describe the same model.
+    /// Model name the workers serve. Recorded for the startup log and
+    /// diagnostics.
     pub model: String,
     /// Maximum accepted request body size in bytes.
     pub max_request_bytes: usize,
@@ -224,7 +224,7 @@ impl PdAdapter for VllmNixlAdapter {
                         self.config.max_request_bytes
                     ),
                 ),
-                BoundedRead::Read => SidecarError::adapter(
+                BoundedRead::Transport(_) | BoundedRead::Unreadable => SidecarError::adapter(
                     axum::http::StatusCode::BAD_REQUEST,
                     code::INVALID_PD_REQUEST,
                     "Could not read the request body",
@@ -303,7 +303,25 @@ impl VllmNixlAdapter {
                         self.config.max_prefill_response_bytes
                     ),
                 ),
-                BoundedRead::Read => SidecarError::adapter(
+                BoundedRead::Transport(error) => {
+                    // A peer that stalls mid-body is an upstream timeout, which
+                    // is a different failure from a malformed handoff. Falling
+                    // through to the JSON parse below would report 502.
+                    if error.is_timeout() {
+                        SidecarError::adapter(
+                            axum::http::StatusCode::GATEWAY_TIMEOUT,
+                            code::PREFILL_UPSTREAM_TIMEOUT,
+                            "The prefill worker timed out",
+                        )
+                    } else {
+                        SidecarError::adapter(
+                            axum::http::StatusCode::BAD_GATEWAY,
+                            code::INVALID_PREFILL_HANDOFF,
+                            "Could not read the prefill response",
+                        )
+                    }
+                }
+                BoundedRead::Unreadable => SidecarError::adapter(
                     axum::http::StatusCode::BAD_GATEWAY,
                     code::INVALID_PREFILL_HANDOFF,
                     "Could not read the prefill response",
@@ -358,10 +376,16 @@ impl VllmNixlAdapter {
 }
 
 /// Outcome of a bounded body read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum BoundedRead {
+    /// The stream outgrew the configured cap.
     TooLarge,
-    Read,
+    /// The upstream stream failed in transit. The cause is kept so a timeout can
+    /// be told apart from an ordinary read failure.
+    Transport(reqwest::Error),
+    /// A local body stream failed. It carries no upstream meaning, so only the
+    /// fact of the failure is reported.
+    Unreadable,
 }
 
 /// Read a request body with a hard cap, so one stream cannot buffer without
@@ -369,10 +393,12 @@ enum BoundedRead {
 async fn read_bounded(body: Body, limit: usize) -> Result<Bytes, BoundedRead> {
     use futures::StreamExt;
 
-    let mut stream = body.into_data_stream();
+    let mut stream = std::pin::pin!(body.into_data_stream());
     let mut collected: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| BoundedRead::Read)?;
+        // An axum body stream carries no upstream semantics, so any failure to
+        // read it is simply an unreadable body.
+        let chunk = chunk.map_err(|_| BoundedRead::Unreadable)?;
         if collected.len().saturating_add(chunk.len()) > limit {
             return Err(BoundedRead::TooLarge);
         }
@@ -383,16 +409,31 @@ async fn read_bounded(body: Body, limit: usize) -> Result<Bytes, BoundedRead> {
 
 /// Read an upstream response with a hard cap. `Content-Length` is checked first
 /// so an obviously oversized response is rejected without buffering it.
+///
+/// The response stream is consumed directly rather than wrapped in an
+/// `axum::Body`: wrapping erases the error type, and only `reqwest::Error`
+/// exposes the timeout that tells a stalled peer apart from a malformed payload.
 async fn read_bounded_response(
     response: reqwest::Response,
     limit: usize,
 ) -> Result<Bytes, BoundedRead> {
+    use futures::StreamExt;
+
     if let Some(length) = response.content_length()
         && length > limit as u64
     {
         return Err(BoundedRead::TooLarge);
     }
-    read_bounded(Body::from_stream(response.bytes_stream()), limit).await
+    let mut stream = std::pin::pin!(response.bytes_stream());
+    let mut collected: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(BoundedRead::Transport)?;
+        if collected.len().saturating_add(chunk.len()) > limit {
+            return Err(BoundedRead::TooLarge);
+        }
+        collected.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(collected))
 }
 
 /// Map a prefill transport failure to a prefill-stage error, so it is never
@@ -936,9 +977,9 @@ mod tests {
         assert_eq!(read_bounded(body, 64).await.unwrap().len(), 64);
 
         let body = Body::from(vec![b'x'; 65]);
-        assert_eq!(
+        assert!(matches!(
             read_bounded(body, 64).await.unwrap_err(),
             BoundedRead::TooLarge
-        );
+        ));
     }
 }

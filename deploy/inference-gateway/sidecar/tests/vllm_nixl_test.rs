@@ -67,9 +67,14 @@ enum Behaviour {
     TruncatedJson,
     /// 200 with a body larger than any legitimate handoff.
     Oversized(usize),
-    /// 200 whose streamed body is a valid prefill response followed by nothing.
-    /// Parks the caller inside the bounded body read, deterministically.
+    /// 200 whose streamed body is a valid prefill response followed by nothing,
+    /// with a `Content-Length` that promises more. Parks the caller inside the
+    /// bounded body read, deterministically.
     PartialBodyThenHang(Value),
+    /// 200 whose streamed body never yields a byte and never ends. Parked
+    /// inside the body read with a satisfied `Content-Length`, so only
+    /// end-of-stream can finish it.
+    HeadersThenStall,
     /// Never answer at all.
     Hang,
 }
@@ -168,15 +173,30 @@ async fn fake_handler(State(fake): State<Arc<Fake>>, request: Request<Body>) -> 
                 "kv_transfer_params": handoff
             }))
             .expect("fixture serializes");
+            // Promise the whole body, deliver only the first chunk: the peer then
+            // stalls without reaching end-of-stream.
+            let promised = first.len() + 4096;
             let head =
                 futures::stream::once(async move { Ok::<_, Infallible>(Bytes::from(first)) });
             (
                 StatusCode::OK,
-                [("content-type", "application/json")],
+                [
+                    ("content-type", "application/json"),
+                    ("content-length", &promised.to_string()),
+                ],
                 Body::from_stream(head.chain(futures::stream::pending())),
             )
                 .into_response()
         }
+        Behaviour::HeadersThenStall => (
+            StatusCode::OK,
+            [
+                ("content-type", "application/json"),
+                ("content-length", "32"),
+            ],
+            Body::from_stream(futures::stream::pending::<Result<Bytes, Infallible>>()),
+        )
+            .into_response(),
         Behaviour::Hang => {
             futures::future::pending::<()>().await;
             unreachable!("a hanging fake never returns")
@@ -303,6 +323,33 @@ impl Harness {
         )
         .unwrap();
         Self::from_adapter(adapter, prefill, decode)
+    }
+
+    /// A P/D sidecar with explicit client timeouts, for the timeout cases.
+    async fn with_timeouts(
+        prefill_behaviour: Behaviour,
+        connect_timeout: Duration,
+        read_timeout: Duration,
+    ) -> (Router, Arc<Fake>, Arc<Fake>) {
+        let prefill = Fake::start(prefill_behaviour).await;
+        let decode = Fake::start(Behaviour::Json(decode_success())).await;
+        let adapter: Arc<dyn PdAdapter> = VllmNixlAdapter::new(
+            decode_url(&decode),
+            connect_timeout,
+            read_timeout,
+            vllm_nixl::Config::default(),
+        )
+        .unwrap();
+        let state = SidecarState::new(
+            decode_url(&decode),
+            connect_timeout,
+            read_timeout,
+            adapter,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+        (router(state), prefill, decode)
     }
 
     /// Build a sidecar around an explicitly supplied adapter, for the tests
@@ -1000,6 +1047,86 @@ async fn c17_non_json_prefill_responses_stop_before_decode() {
     }
 }
 
+/// A peer that stalls mid-body is an upstream timeout (504), not a malformed
+/// handoff (502). The fixture promises a larger Content-Length than it delivers,
+/// so the read is parked inside the body with bytes still outstanding.
+#[tokio::test]
+async fn c17b_prefill_mid_body_stall_is_an_upstream_timeout() {
+    let (app, prefill, decode) = Harness::with_timeouts(
+        Behaviour::PartialBodyThenHang(handoff()),
+        // A local connect is immediate, so only the read timeout can fire here.
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+
+    let response = app
+        .oneshot(pd_request(prefill.address(), &original_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        error_code(&body_json(response).await),
+        "prefill_upstream_timeout"
+    );
+    assert_eq!(
+        decode.call_count(),
+        0,
+        "a stalled prefill must not be followed by a decode dispatch"
+    );
+}
+
+/// A peer that accepts the request, sends response headers, and then produces no
+/// body at all is the same 504 case.
+#[tokio::test]
+async fn c17c_prefill_header_then_body_stall_is_an_upstream_timeout() {
+    let (app, prefill, decode) = Harness::with_timeouts(
+        Behaviour::HeadersThenStall,
+        std::time::Duration::from_secs(10),
+        std::time::Duration::from_millis(500),
+    )
+    .await;
+
+    let response = app
+        .oneshot(pd_request(prefill.address(), &original_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        error_code(&body_json(response).await),
+        "prefill_upstream_timeout"
+    );
+    assert_eq!(decode.call_count(), 0);
+}
+
+/// The counterpart: a malformed body that ends immediately is a protocol error
+/// (502), not a timeout. Timeout classification must not swallow this case.
+#[tokio::test]
+async fn c17d_malformed_prefill_body_that_ends_immediately_is_a_protocol_error() {
+    let (app, prefill, decode) = Harness::with_timeouts(
+        Behaviour::TruncatedJson,
+        std::time::Duration::from_secs(10),
+        // Much longer than an immediate end-of-body needs, so a misclassified
+        // read failure cannot pass this case by timing out instead.
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+
+    let response = app
+        .oneshot(pd_request(prefill.address(), &original_request()))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        error_code(&body_json(response).await),
+        "invalid_prefill_handoff"
+    );
+    assert_eq!(decode.call_count(), 0);
+}
+
 /// C18: request and prefill-response buffering are both bounded.
 #[tokio::test]
 async fn c18_oversized_request_and_prefill_response_are_rejected_with_bounds() {
@@ -1079,29 +1206,12 @@ async fn c19_prefill_connect_and_read_failures_are_prefill_stage_errors() {
     assert_eq!(decode.call_count(), 0);
 
     // A prefill worker that accepts the request and never answers.
-    let prefill = Fake::start(Behaviour::Hang).await;
-    let decode = Fake::start(Behaviour::Json(decode_success())).await;
-    let adapter: Arc<dyn PdAdapter> = VllmNixlAdapter::new(
-        decode_url(&decode),
-        Duration::from_millis(200),
-        Duration::from_millis(300),
-        vllm_nixl::Config {
-            model: String::new(),
-            max_request_bytes: 1024 * 1024,
-            max_prefill_response_bytes: 1024 * 1024,
-        },
+    let (app, prefill, decode) = Harness::with_timeouts(
+        Behaviour::Hang,
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(300),
     )
-    .unwrap();
-    let state = SidecarState::new(
-        decode_url(&decode),
-        Duration::from_millis(200),
-        Duration::from_millis(300),
-        adapter,
-        CancellationToken::new(),
-        CancellationToken::new(),
-    )
-    .unwrap();
-    let app = router(state);
+    .await;
 
     let response = app
         .oneshot(pd_request(prefill.address(), &original_request()))
@@ -1469,15 +1579,27 @@ async fn c28_ipv6_endpoint_and_query_and_base_path_are_preserved() {
         "/v1/chat/completions?trace=1&stream=true"
     );
 
+    // A closed loopback port, so the failure is a connection refusal on any
+    // runner. A documentation-prefix address is not portable: where IPv6 is
+    // routable it black-holes until the timeout and reports 504 instead.
+    let Ok(listener) = TcpListener::bind("[::1]:0").await else {
+        // No IPv6 loopback here; the IPv6-specific subcase does not apply.
+        return;
+    };
+    // Let the os pick the port and release it, so this is a port that is closed
+    // rather than a documentation prefix that may or may not be routable here.
+    let closed = listener.local_addr().unwrap();
+    drop(listener);
+
     let mut request = pd_request(harness.prefill.address(), &original_request());
     request
         .headers_mut()
-        .insert(PREFILLER_HOST_PORT, "[2001:db8::10]:8001".parse().unwrap());
+        .insert(PREFILLER_HOST_PORT, closed.to_string().parse().unwrap());
     let response = harness.app.oneshot(request).await.unwrap();
     assert_eq!(
         response.status(),
         StatusCode::BAD_GATEWAY,
-        "the IPv6 literal is a valid authority and then fails to connect"
+        "a refused IPv6 connection is an unavailable upstream, not a timeout"
     );
     assert_eq!(
         error_code(&body_json(response).await),
