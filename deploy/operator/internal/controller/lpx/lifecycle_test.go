@@ -323,6 +323,34 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 	require.Contains(t, lpxResult(classification).Message, "TargetUnsupported")
 }
 
+func TestLPXMaterializationRejectsExcessiveReplicas(t *testing.T) {
+	for _, nativeScale := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nativeScale=%t", nativeScale), func(t *testing.T) {
+			t.Log("Prepare a valid workload and its owned Grove scaling group")
+			ctx := t.Context()
+			child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+			objects := lpxMaterializedObjects(t, r, child, source, desired)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			group := findLPXTestScalingGroup(t, objects, desired.plan.LPXScalingGroup)
+
+			t.Log("Exceed the engine limit through either the DGD or native Grove scale")
+			lpx.ServingComponent(source).Replicas = ptr.To(int32(2497))
+			if nativeScale {
+				lpx.ServingComponent(source).Replicas = nil
+				group.Spec.Replicas = 2497
+			}
+			createLPXTestObjects(t, ctx, r.Client, pcs, group)
+
+			t.Log("Reject the count before constructing per-engine request state")
+			selected, classification, err := r.prepareLPXMaterializing(ctx, child, source, pcs)
+			require.NoError(t, err)
+			require.Nil(t, selected)
+			require.Equal(t, &lpxRejected{reason: "LPX replica count must be between 0 and 2496"}, classification)
+		})
+	}
+}
+
 func TestLPXImplicitReplicaObservationWaitsForMatchingPodCliqueSet(t *testing.T) {
 	t.Log("Render the stable Grove identities for an externally managed replica count")
 	ctx := t.Context()

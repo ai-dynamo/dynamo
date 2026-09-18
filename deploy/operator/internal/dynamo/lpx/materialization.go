@@ -18,6 +18,7 @@ import (
 const (
 	lpxScalingGroupTemplateName = "lpx"
 	conductorTemplateName       = "cond"
+	maxEngineReplicas           = 2496
 )
 
 // MaxPodCliqueSetNameLength reserves Grove's combined name budget for the fixed
@@ -101,10 +102,10 @@ func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*Materi
 	return plan, plan.ValidateReplicaCount()
 }
 
-// ValidateReplicaCount checks conductor and Agent hostnames.
+// ValidateReplicaCount bounds per-engine allocations and checks Pod hostnames.
 func (p *MaterializationPlan) ValidateReplicaCount() error {
-	if p.Replicas < 0 {
-		return fmt.Errorf("LPX replica count must not be negative")
+	if p.Replicas < 0 || p.Replicas > maxEngineReplicas {
+		return fmt.Errorf("LPX replica count must be between 0 and %d", maxEngineReplicas)
 	}
 	if p.ConductorTemplate != "" {
 		if err := p.validatePodHostname("conductor", p.ConductorTemplate, 0); err != nil {

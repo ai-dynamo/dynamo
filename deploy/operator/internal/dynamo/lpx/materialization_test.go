@@ -17,7 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-func TestPlanMaterializationBoundsGeneratedPodHostnames(t *testing.T) {
+func TestPlanMaterializationBounds(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Project hybrid and LPU-only materialization fixtures")
@@ -51,7 +51,7 @@ func TestPlanMaterializationBoundsGeneratedPodHostnames(t *testing.T) {
 			}
 			workload := &SelectedWorkload{
 				modelProjections:     projections,
-				scalingGroupReplicas: math.MaxInt32,
+				scalingGroupReplicas: 2496,
 			}
 			pcsName := strings.Repeat("a", MaxPodCliqueSetNameLength)
 			plan, err := workload.PlanNodeLocalMaterialization(pcsName)
@@ -90,6 +90,13 @@ func TestPlanMaterializationBoundsGeneratedPodHostnames(t *testing.T) {
 			t.Log("Reject a PCS name one character beyond Grove's combined name budget")
 			_, err = workload.PlanNodeLocalMaterialization(pcsName + "a")
 			require.ErrorContains(t, err, "exceeds the LPX maximum of 38 characters")
+
+			t.Log("Bound engine replicas before allocating per-engine request state")
+			for _, replicas := range []int32{-1, 0, 1, 2496, 2497, math.MaxInt32} {
+				workload.scalingGroupReplicas = replicas
+				_, err := workload.PlanNodeLocalMaterialization(pcsName)
+				require.Equal(t, replicas < 0 || replicas > 2496, err != nil, "replicas=%d: %v", replicas, err)
+			}
 		})
 	}
 }
