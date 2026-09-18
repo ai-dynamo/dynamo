@@ -9,56 +9,25 @@ use std::sync::Arc;
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose};
 use dynamo_memory::SystemStorage;
-use dynamo_memory::nixl::{self, NixlAgent, NixlDescriptor, RegisteredView};
+use dynamo_memory::nixl::{self, NixlAgent, RegisteredView};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessageContentPartImage, ChatCompletionRequestUserMessageContentPart,
 };
 use flate2::{Compression, write::ZlibEncoder};
 use lru::LruCache;
 use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
 
 use super::common::EncodedMediaData;
-use super::decoded::{DataType, DecodedMediaData, MediaTensorInfo};
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+use super::decoded::MediaTensorInfo;
+use super::decoded::{DataType, DecodedMediaData};
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use super::decoders::DecodedMediaMetadata;
 use super::decoders::{Decoder, MediaDecoder};
 use super::loader::MediaFetcher;
-
-/// NIXL descriptor for decoded media sent to the next pipeline stage.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct RdmaMediaDataDescriptor {
-    pub(crate) nixl_metadata: String,
-    pub(crate) nixl_descriptor: NixlDescriptor,
-
-    #[serde(flatten)]
-    pub(crate) tensor_info: MediaTensorInfo,
-
-    /// Canonical xxh3-64 key for decoded media. Image identity covers shape,
-    /// dtype, and RGB bytes; video identity additionally covers decoded
-    /// metadata that affects the model-visible token sequence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) content_hash: Option<String>,
-
-    /// Keep the registered bytes alive while the descriptor is in use.
-    #[serde(skip, default)]
-    #[allow(dead_code)]
-    pub(crate) source_storage: Option<Arc<nixl::NixlRegistered<SystemStorage>>>,
-}
+use super::rdma_descriptor::RdmaMediaDataDescriptor;
 
 impl RdmaMediaDataDescriptor {
-    /// Canonical cache/routing key serialized on the descriptor.
-    pub(crate) fn content_hash_key(&self) -> Option<&str> {
-        self.content_hash.as_deref()
-    }
-
-    /// Numeric form used by MM-aware KV routing.
-    #[cfg(feature = "mm-routing")]
-    pub(crate) fn content_hash(&self) -> Option<u64> {
-        self.content_hash_key()
-            .and_then(|key| u64::from_str_radix(key, 16).ok())
-    }
-
     #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
     fn local_payload(&self) -> Option<&[u8]> {
         use dynamo_memory::actions::Slice;
@@ -117,7 +86,7 @@ impl DecodedMediaData {
         let registered = nixl::register_with_nixl(source_storage, nixl_agent, None)
             .map_err(|_| anyhow::anyhow!("Failed to register storage with NIXL"))?;
 
-        let nixl_descriptor = registered.descriptor();
+        let nixl_descriptor = registered.descriptor().into();
         let nixl_metadata = get_nixl_metadata(nixl_agent, registered.storage())?;
 
         Ok(RdmaMediaDataDescriptor {
@@ -156,7 +125,6 @@ pub struct MediaLoader {
 }
 
 impl MediaLoader {
-    /// Convert a cache budget expressed in GiB into bytes.
     pub(super) fn cache_budget_bytes(value: Option<&str>) -> u64 {
         let gb = value
             .and_then(|s| s.parse::<f64>().ok())
@@ -165,13 +133,11 @@ impl MediaLoader {
         (gb * (1024.0 * 1024.0 * 1024.0)) as u64
     }
 
-    /// Read the decoded-media cache budget from the process environment.
     fn cache_budget_bytes_from_env() -> u64 {
         let value = std::env::var("DYN_MULTIMODAL_LOADER_CACHE_GB").ok();
         Self::cache_budget_bytes(value.as_deref())
     }
 
-    /// Hash a media URL into the cache key used by this process.
     pub(super) fn cache_key(url: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         url.hash(&mut hasher);
@@ -311,7 +277,9 @@ impl MediaLoader {
             _ => anyhow::bail!("Unsupported media type"),
         };
 
-        let descriptor = decoded.into_rdma_descriptor(&self.nixl_agent)?;
+        let nixl_agent = self.nixl_agent.clone();
+        let descriptor =
+            tokio_rayon::spawn(move || decoded.into_rdma_descriptor(&nixl_agent)).await?;
         if let (Some(cache), ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part)) =
             (self.cache.as_ref(), oai_content_part)
             && media_io_kwargs.is_none()
@@ -334,7 +302,6 @@ struct LoaderCache {
 }
 
 impl LoaderCache {
-    /// Create an empty cache with a decoded-byte budget.
     fn new(budget_bytes: u64) -> Self {
         Self {
             lru: LruCache::unbounded(),
@@ -363,13 +330,11 @@ impl LoaderCache {
         }
     }
 
-    /// Return the number of cached descriptors.
     fn len(&self) -> usize {
         self.lru.len()
     }
 }
 
-/// Calculate the decoded payload size represented by a descriptor.
 fn descriptor_bytes(descriptor: &RdmaMediaDataDescriptor) -> u64 {
     let element_bytes = match descriptor.tensor_info.dtype {
         DataType::UINT8 => 1_u64,
