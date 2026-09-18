@@ -170,7 +170,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222` |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379` |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
-| dynamo-operator.lpx.enabled | bool | `false` | Enable the Dynamo operator's LPX integration. Startup requires the externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest and scheduler.grove.io/v1alpha1 PodGang APIs. |
+| dynamo-operator.lpx.enabled | bool | `false` | Enable the Dynamo operator's LPX integration. Startup requires the externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API. |
 | dynamo-operator.lpx.modelRegistryURL | string | `""` | Configure the LPU model registry used by the LPX integration. |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments. |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production. |
