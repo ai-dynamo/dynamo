@@ -20,6 +20,7 @@ Runtime data-contract notes (not code-level shims):
   >= 0.5.11. Pass through; do not re-encode.
 """
 
+import argparse
 import importlib
 import inspect
 import logging
@@ -34,7 +35,8 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name != "sglang.srt.utils.server_args_config_parser":
         raise
-    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+    # Fallback for the separately pinned XPU SGLang 0.5.11.
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 try:
@@ -42,8 +44,8 @@ try:
         model_config_of as sglang_model_config_of,
     )
 except ImportError:
-    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.get_model_config().
-    # Remove when min supported version has the accessor move (sgl #36972).
+    # Fallback for XPU SGLang 0.5.11, which exposes ServerArgs.get_model_config().
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     sglang_model_config_of = None
 
 try:
@@ -51,15 +53,15 @@ try:
         use_mla_backend as sglang_use_mla_backend,
     )
 except ImportError:
-    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.use_mla_backend().
-    # Remove when min supported version has the accessor move (sgl #36972).
+    # Fallback for XPU SGLang 0.5.11, which exposes ServerArgs.use_mla_backend().
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     sglang_use_mla_backend = None
 
 try:
     from sglang.srt.runtime_context import publish as _sglang_publish
 except ImportError:
-    # Fallback for SGLang 0.5.18 and the XPU 0.5.11 pin. Remove the 0.5.18
-    # portion when minimum supported SGLang is 0.5.19+.
+    # Fallback for the XPU SGLang 0.5.11 pin.
+    # Remove when the XPU pin is upgraded to 0.5.19+.
     _sglang_publish = None
 
 
@@ -119,17 +121,31 @@ try:
         resolved_view as sglang_resolved_view,
     )
 except ImportError:
-    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
-    try:
-        from sglang.srt.arg_groups.overrides import (
-            resolved_view as sglang_resolved_view,
-        )
-    except ImportError:
-        # The separately pinned XPU SGLang 0.5.11 stores effective values on
-        # ServerArgs directly. Remove when that pin is upgraded.
-        sglang_resolved_view = None
+    # The separately pinned XPU SGLang 0.5.11 stores effective values on
+    # ServerArgs directly. Remove when that pin is upgraded to 0.5.19+.
+    sglang_resolved_view = None
 
 logger = logging.getLogger(__name__)
+
+
+def add_sglang_cli_compat(parser: argparse.ArgumentParser) -> None:
+    """Keep launch scripts compatible with SGLang's renamed graph options."""
+    legacy_flag = "--disable-piecewise-cuda-graph"
+    options = parser._option_string_actions
+    if legacy_flag in options or "--cuda-graph-backend-prefill" not in options:
+        return
+    # SGLang 0.5.20 removed the alias supplied by 0.5.19. Preserve its exact
+    # translation while launch scripts also support the XPU 0.5.11 pin.
+    # Remove when all supported pins accept --cuda-graph-backend-prefill and
+    # the launch scripts have migrated to that spelling.
+    parser.add_argument(
+        legacy_flag,
+        dest="cuda_graph_backend_prefill",
+        action="store_const",
+        const="disabled",
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
 
 
 def get_mm_encoder_class() -> type[Any]:
@@ -142,8 +158,8 @@ def get_mm_encoder_class() -> type[Any]:
     try:
         from sglang.srt.disaggregation.encoder.server import MMEncoder
     except ImportError:
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
+        # Fallback for XPU SGLang 0.5.11.
+        # Remove when the XPU pin is upgraded to 0.5.19+.
         from sglang.srt.disaggregation.encode_server import MMEncoder
 
     return MMEncoder
@@ -154,8 +170,8 @@ def get_encoder_preprocessor_modules() -> tuple[ModuleType, ...]:
     modules: list[ModuleType] = []
     for module_path in (
         "sglang.srt.disaggregation.encoder.preprocessor",
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
+        # Fallback for XPU SGLang 0.5.11.
+        # Remove when the XPU pin is upgraded to 0.5.19+.
         "sglang.srt.disaggregation.encode_server",
     ):
         try:
@@ -171,8 +187,8 @@ async def mm_encode(
     """Encode media across the supported SGLang MMEncoder APIs."""
     legacy_encode = getattr(encoder, "_encode", None)
     if callable(legacy_encode):
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
+        # Fallback for XPU SGLang 0.5.11.
+        # Remove when the XPU pin is upgraded to 0.5.19+.
         return await legacy_encode(media_inputs, modality)
 
     prepare = getattr(encoder, "_prepare_encode_context", None)
@@ -219,8 +235,8 @@ def ensure_sglang_tensor_image_size() -> None:
     instead returns a CHW tensor, causing multimodal requests to fall back to
     retokenization.
 
-    Remove this compatibility override once the minimum supported SGLang
-    release handles tensor image dimensions itself.
+    Remove this compatibility override when the minimum supported SGLang
+    release is 0.5.20+, which handles tensor image dimensions itself.
     """
     import torch
     from sglang.srt.multimodal.processors.base_processor import BaseMultimodalProcessor
@@ -277,7 +293,7 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang 0.5.18 and 0.5.19 keep ``ServerArgs`` raw and expose the effective
+    SGLang 0.5.19 and 0.5.20 keep ``ServerArgs`` raw and expose the effective
     projection through ``resolved_view()``. The separately pinned XPU release
     and Dynamo's non-LLM argument stubs retain effective values on the object
     itself.
@@ -358,6 +374,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 __all__ = [
     "ConfigArgumentMerger",
+    "add_sglang_cli_compat",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",
