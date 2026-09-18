@@ -115,6 +115,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # assertions live in tests/mm_router/test_router_rust_mm_router_e2e.py
             # (post_merge).
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.pre_merge, pytest.mark.xpu_2],
                 gpu_marker="xpu_2",
                 timeout_s=400,
@@ -133,6 +134,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # SINGLE_GPU=true packs both workers onto GPU 0 to match the
             # single-GPU CI environment.
             "agg_router_chat_processor": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge, pytest.mark.xpu_2],
                 gpu_marker="xpu_2",
                 timeout_s=400,
@@ -177,6 +179,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2.5-vl-3b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 gpu_marker="xpu_2",
@@ -192,6 +195,7 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
         short_name="qwen2-vl-2b",
         topologies={
             "agg_router": TopologyConfig(
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=500,
                 gpu_marker="xpu_2",

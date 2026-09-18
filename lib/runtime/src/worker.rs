@@ -146,6 +146,15 @@ impl Worker {
         RT.get().is_some()
     }
 
+    /// The process-wide runtime, if one was ever created. Never creates one.
+    ///
+    /// Unlike [`Worker::ensure_process_runtime`], this returns `None` rather than building a
+    /// runtime, so a caller running at process exit can ask about the runtime without starting
+    /// worker threads on the way out.
+    pub fn existing_process_runtime() -> Option<&'static tokio::runtime::Runtime> {
+        RT.get()
+    }
+
     pub fn tokio_runtime(&self) -> anyhow::Result<&'static tokio::runtime::Runtime> {
         RT.get()
             .ok_or_else(|| anyhow::anyhow!("Worker not initialized"))

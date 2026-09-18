@@ -65,6 +65,7 @@ pub struct ResponseStreamConverter {
     usage: Option<ResponseUsage>,
     // The backend ended with a terminal reason that is not success-like.
     incomplete_reason: Option<&'static str>,
+    terminal_failure_emitted: bool,
 }
 
 struct ReasoningState {
@@ -133,6 +134,7 @@ impl ResponseStreamConverter {
             next_output_index: 0,
             usage: None,
             incomplete_reason: None,
+            terminal_failure_emitted: false,
         }
     }
 
@@ -371,11 +373,16 @@ impl ResponseStreamConverter {
     }
 
     /// Process a single chat completion stream chunk and append zero or more SSE events.
+    /// Returns `true` after appending a terminal failure so the caller can drop the upstream stream.
     pub fn append_chunk_events(
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
         events: &mut Vec<Result<Event, anyhow::Error>>,
-    ) {
+    ) -> bool {
+        if self.terminal_failure_emitted {
+            return false;
+        }
+
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
             self.usage = Some(ResponseUsage {
@@ -492,15 +499,9 @@ impl ResponseStreamConverter {
                 // allocating converter state so suppressed calls cannot emit
                 // any Responses API events at finish or EOF.
                 let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
-                let mut tool_calls = tool_calls
+                let tool_calls = tool_calls
                     .iter()
-                    .filter(|tc| !enforce_single_tool_call || tc.index == 0)
-                    .peekable();
-                if tool_calls.peek().is_some() {
-                    // Starting a tool call is also an explicit reasoning phase
-                    // boundary, independent of this chunk's finish reason.
-                    self.append_active_reasoning_done_events(events, OutputStatus::Completed);
-                }
+                    .filter(|tc| !enforce_single_tool_call || tc.index == 0);
                 for tc in tool_calls {
                     let tc_index = tc.index as usize;
 
@@ -547,10 +548,32 @@ impl ResponseStreamConverter {
                     // a monotonically increasing index, so indices are not interleaved today;
                     // keying state by `tc_index` would handle interleaving too, but that path
                     // is defensive rather than exercised by any current backend.
-                    let should_start = {
+                    let (should_start, disallowed_name) = {
                         let state = &self.function_call_items[tc_index];
-                        !state.started && state.has_identity()
+                        let has_identity = state.has_identity();
+                        let is_allowed = self.params.function_is_allowed(&state.name);
+                        (
+                            !state.started && has_identity && is_allowed,
+                            (has_identity && !is_allowed).then(|| state.name.clone()),
+                        )
                     };
+                    if let Some(name) = disallowed_name {
+                        let error = ErrorObject {
+                            code: "server_error".to_string(),
+                            message: format!(
+                                "Backend returned function '{name}' outside allowed_tools"
+                            ),
+                        };
+                        let terminal_event = self.append_error_events(error, events);
+                        events.push(terminal_event);
+                        self.terminal_failure_emitted = true;
+                        return true;
+                    }
+                    if should_start {
+                        // Starting an allowed tool call is an explicit reasoning
+                        // phase boundary, independent of the finish reason.
+                        self.append_active_reasoning_done_events(events, OutputStatus::Completed);
+                    }
                     let new_output_index = should_start.then(|| {
                         let output_index = self.next_output_index;
                         self.next_output_index += 1;
@@ -643,6 +666,8 @@ impl ResponseStreamConverter {
             let output_status = self.output_status();
             self.append_pending_function_call_done_events(events, output_status, true);
         }
+
+        false
     }
 
     fn append_pending_function_call_done_events(
@@ -870,6 +895,10 @@ impl ResponseStreamConverter {
 
     /// Append remaining output completion events and `response.completed` at stream end.
     pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if self.terminal_failure_emitted {
+            return;
+        }
+
         let output_status = self.output_status();
         // Without a later output item, the response finish reason determines
         // whether the still-open reasoning item completed or was truncated.
@@ -1470,6 +1499,59 @@ mod tests {
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Completed));
+    }
+
+    #[test]
+    fn disallowed_function_call_fails_without_splitting_reasoning() {
+        let params = ResponseParams {
+            tool_choice: Some(
+                serde_json::from_value(serde_json::json!({
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }))
+                .unwrap(),
+            ),
+            ..reasoning_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let reasoning_events = conv.process_chunk(&reasoning_chunk("still thinking"));
+        assert_eq!(
+            event_types(&reasoning_events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.reasoning_text.delta".to_string(),
+            ]
+        );
+
+        let tool_events = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("delete_file"),
+            Some("{\"path\":\"notes.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&tool_events),
+            vec![
+                "response.reasoning_text.done".to_string(),
+                "response.content_part.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.failed".to_string(),
+            ]
+        );
+        assert_eq!(
+            conv.reasoning_items[0].output_status,
+            Some(OutputStatus::Incomplete)
+        );
+
+        assert!(
+            conv.process_chunk(&reasoning_chunk(" must be ignored"))
+                .is_empty()
+        );
+        assert!(conv.emit_end_events().is_empty());
+        assert_eq!(conv.reasoning_items.len(), 1);
+        assert_eq!(conv.reasoning_items[0].accumulated_text, "still thinking");
     }
 
     #[test]
