@@ -57,7 +57,7 @@ AIPERF_HTTP_X_DYNAMO_SESSION_ID_FROM_CORRELATION_ID=true \
   --output-artifact-dir /tmp/continuum-weka-correctness/aiperf
 ```
 
-The command keeps the fixed InferenceX protocol and replay flags. It intentionally scales concurrency, duration, and dataset count down for a one-trajectory correctness run. The local AIPerf branch does not expose the SemiAnalysis fork's `--warmup-requests-per-lane` flag. The fixture timestamps are already compressed, so this run does not use either `--ignore-trace-delays` or `--trace-idle-gap-cap-seconds`.
+The command uses the fixed InferenceX protocol and replay flags with concurrency, duration, and dataset count reduced for one trajectory. The local AIPerf branch does not expose the SemiAnalysis fork's `--warmup-requests-per-lane` flag. The fixture timestamps are already compressed, so this run does not use `--ignore-trace-delays` or `--trace-idle-gap-cap-seconds`.
 
 Validate the captured lifecycle contract:
 
@@ -66,23 +66,21 @@ python experiments/continuum-kv-hints/weka-correctness/check_headers.py \
   /tmp/continuum-weka-correctness/captured-requests.jsonl
 ```
 
-The next stage replaces the capture endpoint with the networked Dynamo/vLLM stack and checks SessionPrefixIndexer lineage plus deferred `kv.retain` and `kv.evict` actions.
-
 ## Run through Dynamo and vLLM
 
-`run_networked.sh` launches the experiment branches, enables G1 KV events and SessionPrefixIndexer, and runs the same fixture through the public Dynamo endpoint. The fixed-TTL policy emits deferred retention for continuing sessions and deferred eviction for final sessions. Its log records the number of lineage blocks resolved from SessionPrefixIndexer for every hint.
+`run_networked.sh` launches Dynamo and vLLM from the experiment branches, enables G1 KV events and SessionPrefixIndexer, and sends the fixture through the public Dynamo endpoint. The policy emits deferred retention for continuing sessions and deferred eviction for final sessions. Its log records the number of lineage blocks resolved for each hint.
 
 ```bash
 bash experiments/continuum-kv-hints/weka-correctness/run_networked.sh
 ```
 
-Results are written under `/tmp/continuum-weka-correctness/networked` by default.
+Results are written under `/tmp/continuum-weka-correctness/networked` by default. The output directory retains its legacy name.
 
 To run the same replay against the pinned container instead of source worktrees:
 
 ```bash
-CONTINUUM_IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295 \
+CONTINUUM_IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-3c5a01b513-vllm-9b6e116be2 \
   bash experiments/continuum-kv-hints/weka-correctness/run_container.sh
 ```
 
-Container results are written under `/tmp/continuum-weka-correctness/container-networked` by default.
+Container results are written under `/tmp/continuum-weka-correctness/container-networked` by default. The output directory retains its legacy name.

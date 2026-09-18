@@ -12,7 +12,7 @@ experiments/continuum-kv-hints/
   policy/                             post-selection session KV hint policy crate
   session-prefix-indexer/             SessionPrefixIndexer CPU microbenchmark crate
   dynamo-vllm-boundary/smoke.py       in-process Dynamo-to-vLLM boundary smoke
-  networked-e2e/                      public HTTP frontend-to-vLLM smoke notes
+  networked-e2e/                      Dynamo vLLM constrained-cache runners (legacy directory name)
   weka-correctness/                   reduced WEKA fixture and end-to-end correctness replay
 ```
 
@@ -27,4 +27,4 @@ cargo bench -p dynamo-continuum-session-prefix-bench --bench session_prefix_inde
   --warm-up-time 1 --measurement-time 3 --sample-size 30
 ```
 
-The smoke runner needs the matching vLLM experiment branch and Dynamo Python environment. Reproduction commands and archived outputs live in `dynamo-workflows/dynamo/routing/agentic-kv-management/experiments/continuum-kv-hints/`.
+The boundary smoke requires the matching vLLM experiment branch and Dynamo Python environment. Build instructions are in [`BUILD.md`](./BUILD.md). Results are archived in `dynamo-workflows/dynamo/routing/agentic-kv-management/experiments/continuum-kv-hints/`.

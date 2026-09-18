@@ -1,108 +1,106 @@
-# Building the Continuum KV Hints container
+# Building the Continuum KV hints container
 
-Two Docker images are needed: a Dynamo+vLLM base built from this branch, and a thin
-patch layer that overlays the custom vLLM onto it.
+The tested container consists of a Dynamo base built from the experiment branch and a Python-only vLLM overlay. The overlay does not replace vLLM native extensions.
 
-## Image names
+## Tested revisions
 
-| Image | Tag |
+| Component | Revision |
 |---|---|
-| Dynamo base (this branch) | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm` |
-| Dynamo + vLLM image | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-<dynamo-sha>-vllm-<vllm-sha>` |
+| Dynamo | `3c5a01b51370a01902744939a147cf99605579ca` |
+| vLLM | `9b6e116be2d9efdd044df1d738bba5aabdfbbd56` |
+| Final image | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-3c5a01b513-vllm-9b6e116be2` |
+| Published digest | `sha256:26619aa378b001207f91b93d560a065d77a295eb7d87e71d471a98462889cb4f` |
 
-The image tag identifies the exact Dynamo and vLLM revisions used for the build.
+Pull the tested image without rebuilding:
+
+```bash
+docker pull nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-3c5a01b513-vllm-9b6e116be2@sha256:26619aa378b001207f91b93d560a065d77a295eb7d87e71d471a98462889cb4f
+```
+
+## Prerequisites
+
+The build requires Docker, Python 3, GitHub access, and permission to pull and push `nvcr.io/nvidian/dynamo-dev/karenc` images.
+
+```bash
+export BUILD_ROOT="${BUILD_ROOT:-$HOME/continuum-kv-hints-build}"
+export DYNAMO_COMMIT=3c5a01b51370a01902744939a147cf99605579ca
+export VLLM_COMMIT=9b6e116be2d9efdd044df1d738bba5aabdfbbd56
+export DYNAMO_DIR="$BUILD_ROOT/dynamo"
+export VLLM_DIR="$BUILD_ROOT/vllm"
+
+mkdir -p "$BUILD_ROOT"
+git clone https://github.com/ai-dynamo/dynamo.git "$DYNAMO_DIR"
+git -C "$DYNAMO_DIR" fetch origin "$DYNAMO_COMMIT"
+git -C "$DYNAMO_DIR" checkout --detach "$DYNAMO_COMMIT"
+git clone https://github.com/karen-sy/vllm.git "$VLLM_DIR"
+git -C "$VLLM_DIR" fetch origin "$VLLM_COMMIT"
+git -C "$VLLM_DIR" checkout --detach "$VLLM_COMMIT"
+
+test -z "$(git -C "$DYNAMO_DIR" status --porcelain)"
+test -z "$(git -C "$VLLM_DIR" status --porcelain)"
+```
 
 ## Native vLLM request path
 
-The standard Dynamo vLLM runtime installs vLLM-Omni. When `VLLM_PLUGINS` is
-unset, vLLM loads every general plugin, and importing the Omni plugin globally
-patches the native `vllm.v1.request.Request`. This text-only experiment must use
-the native request path so `kv_hints` reaches the scheduler. The base-image
-template and vLLM overlay Dockerfile set the following image-wide allowlist:
+The standard Dynamo vLLM runtime installs vLLM-Omni. When `VLLM_PLUGINS` is unset, importing the Omni plugin replaces `vllm.v1.request.Request` and drops this prototype's `kv_hints` field. The base template and vLLM overlay use this image-wide allowlist:
 
 ```bash
 VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver
 ```
 
-## Step 1 — Dynamo base image
+## Build the Dynamo base
+
+The overlay Dockerfile currently references the legacy intermediate tag `dynamo-kv-hints-55667792-vllm`. The tag is rebuilt from the pinned Dynamo commit below and is not the final image name.
 
 ```bash
-cd /home/scratch.karenc_coreai/dynamo
-git checkout karenc/continuum-kv-hints-poc
-
-# Render the Dockerfile
+cd "$DYNAMO_DIR"
 python3 container/render.py --framework vllm --output-short-filename
+patch container/rendered.Dockerfile experiments/continuum-kv-hints/rendered-dockerfile-experiments.patch
 
-# Apply the experiments/ patch — needed because this branch adds Cargo workspace
-# members under experiments/ but the Dockerfile template only copies lib/ and
-# components/. The patch adds COPY experiments/ at both build stages.
-patch container/rendered.Dockerfile \
-  experiments/continuum-kv-hints/rendered-dockerfile-experiments.patch
-
-docker build \
-  --build-arg ENABLE_MEDIA_FFMPEG=false \
-  -t nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm \
-  -f container/rendered.Dockerfile \
-  .
-
-docker push nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm
+export DYNAMO_BASE_IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm
+docker build --build-arg ENABLE_MEDIA_FFMPEG=false -t "$DYNAMO_BASE_IMAGE" -f container/rendered.Dockerfile .
+docker push "$DYNAMO_BASE_IMAGE"
 ```
 
-> **Note:** `render.py` regenerates `container/rendered.Dockerfile` and wipes any
-> manual edits. Always re-apply the patch after re-running `render.py`.
+`container/render.py` regenerates `container/rendered.Dockerfile`; apply the experiment patch after every render. The patch adds `COPY experiments/` to the build stages because this branch adds experiment crates to the Cargo workspace.
 
-## Step 2 — vLLM patch layer
-
-The vLLM overlay Dockerfile ([`container/Dockerfile.vllm-kv-hints-patch`](../../container/Dockerfile.vllm-kv-hints-patch))
-copies only the Python files changed by the feature branch — no C extensions are
-touched. The build context is the vLLM checkout.
+## Build the vLLM overlay
 
 ```bash
-cd ~/vllm
-git checkout karenc/kv-hints-g1-actions
+cd "$VLLM_DIR"
+export DYNAMO_SHA=$(printf '%s' "$DYNAMO_COMMIT" | cut -c1-10)
+export VLLM_SHA=$(printf '%s' "$VLLM_COMMIT" | cut -c1-10)
+export IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-${DYNAMO_SHA}-vllm-${VLLM_SHA}
 
-DYNAMO_DIR=/home/scratch.karenc_coreai/dynamo
-DYNAMO_SHA=$(git -C "$DYNAMO_DIR" rev-parse --short=10 karenc/continuum-kv-hints-poc)
-VLLM_SHA=$(git rev-parse --short=10 HEAD)
-IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-${DYNAMO_SHA}-vllm-${VLLM_SHA}
-docker build \
-  -t "$IMAGE" \
-  -f "$DYNAMO_DIR/container/Dockerfile.vllm-kv-hints-patch" \
-  .
-
+docker build -t "$IMAGE" -f "$DYNAMO_DIR/container/Dockerfile.vllm-kv-hints-patch" .
 docker push "$IMAGE"
 ```
 
-### vLLM files patched
+## Verify the image
 
-The overlay copies these files from `karenc/kv-hints-g1-actions` into the container's
-`/usr/local/lib/python3.12/dist-packages/vllm/`:
+```bash
+docker inspect "$IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx 'VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver'
+docker run --rm --entrypoint python3 "$IMAGE" -c 'import inspect; from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope; from vllm.v1.request import Request; assert "kv_hints" in inspect.signature(Request).parameters; assert KvHintsEnvelope(protocol_version="0.1", message_id="smoke", actions=[KvHintAction(action_id="a", action_type="kv.retain", action_version="0.1", payload={})])'
+```
+
+## vLLM overlay files
 
 | File | Change |
 |---|---|
-| `v1/kv_hints/__init__.py` | new — KV hint protocol types |
-| `v1/kv_hints/protocol.py` | new — envelope/action dataclasses |
-| `v1/kv_hints/actions.py` | new — evict/retain action parsing |
-| `v1/core/retained_block_queue.py` | new — deferred-free block queue |
-| `v1/core/block_pool.py` | modified — external hash index, retained queue integration, session_id on BlockStored |
-| `v1/core/kv_cache_manager.py` | modified — apply_request_completion_retention/eviction hooks |
-| `v1/core/sched/scheduler.py` | modified — call retention/eviction hooks on request completion |
-| `v1/engine/__init__.py` | modified — kv_hints field on EngineCoreRequest |
-| `v1/engine/async_llm.py` | modified — forward kv_hints from request |
-| `v1/engine/input_processor.py` | modified — forward kv_hints from request |
-| `v1/engine/llm_engine.py` | modified — forward kv_hints from request |
-| `v1/request.py` | modified — kv_hints field on Request |
-| `v1/kv_offload/base.py` | modified — kv_hints in ReqContext |
-| `v1/kv_offload/tiering/kvcr/manager.py` | modified — KVCR hint contract rebased onto envelope |
-| `distributed/kv_events.py` | modified — session_id on BlockStored (upstream PR #51381) |
-| `distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py` | modified — hints plumbing |
-| `engine/protocol.py` | modified — kv_hints in EngineClient protocol |
-
-## Why two stages?
-
-vLLM's C extensions (`_C.abi3.so`, flash-attn, etc.) are compiled into the base
-`vllm/vllm-openai:v0.29.0-ubuntu2404` image. The feature changes are pure Python, so
-they can be layered on top without recompilation. The vLLM branch
-(`karenc/kv-hints-g1-actions`) was cherry-picked onto v0.29.0 specifically to isolate
-the feature diff from upstream-main changes that could break API compatibility with the
-compiled extensions.
+| `v1/kv_hints/__init__.py` | KV hint exports |
+| `v1/kv_hints/protocol.py` | Envelope and action types |
+| `v1/kv_hints/actions.py` | Retain and evict parsing |
+| `v1/core/retained_block_queue.py` | Retention lease queue |
+| `v1/core/block_pool.py` | External-hash index, retained queue, and `BlockStored.session_id` |
+| `v1/core/kv_cache_manager.py` | Request-completion retention and eviction |
+| `v1/core/sched/scheduler.py` | Request-completion action timing |
+| `v1/engine/__init__.py` | `EngineCoreRequest.kv_hints` |
+| `v1/engine/async_llm.py` | Request propagation |
+| `v1/engine/input_processor.py` | Request propagation |
+| `v1/engine/llm_engine.py` | Request propagation |
+| `v1/request.py` | `Request.kv_hints` |
+| `v1/kv_offload/base.py` | `ReqContext.kv_hints` |
+| `v1/kv_offload/tiering/kvcr/manager.py` | KVCR envelope integration |
+| `distributed/kv_events.py` | `BlockStored.session_id` |
+| `distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py` | Connector propagation |
+| `engine/protocol.py` | Engine client protocol field |
