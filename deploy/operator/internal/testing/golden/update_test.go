@@ -80,3 +80,18 @@ func TestWriteAdaptedWritesEmptyFileWithoutActualObjects(t *testing.T) {
 		t.Fatalf("adapted file = %q, want empty", contents)
 	}
 }
+
+func TestRestoreVariableDirectives(t *testing.T) {
+	t.Log("Create an adapted scalar that originated from a resolved golden variable")
+	node := &yaml.Node{
+		Kind:  yaml.ScalarNode,
+		Tag:   variableValueTagPrefix + "worker-hash",
+		Value: "aabbccdd",
+	}
+
+	t.Log("Restore the stable directive before writing diagnostic manifest output")
+	restoreVariableDirectives(node)
+	if node.Tag != yamlStringTag || node.Value != "$var:worker-hash" {
+		t.Fatalf("restored node = tag %q value %q, want string $var:worker-hash", node.Tag, node.Value)
+	}
+}

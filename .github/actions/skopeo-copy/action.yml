@@ -67,7 +67,7 @@ runs:
   using: "composite"
   steps:
     - name: Login to Source Registry
-      uses: ./.github/actions/skopeo-login
+      uses: $/.github/actions/skopeo-login
       with:
         aws_default_region: ${{ inputs.source_aws_default_region }}
         ecr_registry: ${{ inputs.source_ecr_registry }}
@@ -76,7 +76,7 @@ runs:
         azure_acr_password: ${{ inputs.source_azure_acr_password }}
 
     - name: Login to Target Registry
-      uses: ./.github/actions/skopeo-login
+      uses: $/.github/actions/skopeo-login
       with:
         aws_default_region: ${{ inputs.target_aws_default_region }}
         ecr_registry: ${{ inputs.target_ecr_registry }}

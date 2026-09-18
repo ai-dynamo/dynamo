@@ -20,6 +20,7 @@ use async_once_cell::OnceCell;
 pub mod config;
 pub use config::RuntimeConfig;
 
+pub mod admission_gate;
 pub mod component;
 pub mod compute;
 pub mod discovery;
@@ -35,6 +36,7 @@ pub mod distributed;
 pub mod instances;
 pub mod logging;
 pub mod metrics;
+pub mod namespace;
 pub mod nvtx;
 pub mod pipeline;
 pub mod prelude;

@@ -461,7 +461,9 @@ struct MockEngineArgsSerde {
     enable_local_indexer: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
     handoff_session_timeout_ms: OptionalConfigValue<u64>,
+    #[serde(alias = "kv_transfer_bytes_per_token")]
     kv_bytes_per_token: OptionalConfigValue<usize>,
+    kv_cache_bytes_per_token: OptionalConfigValue<usize>,
     kv_transfer_bandwidth: OptionalConfigValue<f64>,
     kv_transfer_timing_mode: OptionalConfigValue<String>,
     reasoning: OptionalConfigValue<ReasoningConfig>,
@@ -472,8 +474,17 @@ struct MockEngineArgsSerde {
     router_queue_policy: OptionalConfigValue<String>,
     sglang: OptionalConfigValue<SglangArgs>,
     trtllm: OptionalConfigValue<TrtllmArgs>,
+    timing_model: OptionalConfigValue<TimingModelSerde>,
     #[serde(rename = "has_perf_model")]
     _has_perf_model: OptionalConfigValue<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum TimingModelSerde {
+    Default,
+    Polynomial,
+    Fixed { prefill_ms: f64, decode_ms: f64 },
 }
 
 fn load_perf_model(path: &Path) -> Arc<PerfModel> {
@@ -582,8 +593,9 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub aic_system: Option<String>,
 
-    /// AIC backend engine version (e.g., "0.12.0" for vLLM, "0.5.6.post2" for SGLang).
-    /// If None, uses the default version for the backend.
+    /// AIC performance-database slot ("current", "previous", or "next" when available),
+    /// or a version assigned to one of those slots.
+    /// If None, uses the release database's "current" slot.
     #[serde(skip)]
     #[builder(default = "None")]
     pub aic_backend_version: Option<String>,
@@ -694,10 +706,15 @@ pub struct MockEngineArgs {
     #[validate(range(min = 1))]
     pub handoff_session_timeout_ms: u64,
 
-    /// KV cache bytes per token, auto-computed from model config by Python CLI.
+    /// Bytes transferred per token, auto-computed from model config by Python CLI.
     /// Formula: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
     #[builder(default = "None")]
     pub kv_bytes_per_token: Option<usize>,
+
+    /// Physical KV-cache bytes occupied by one token, independent of transfer geometry.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kv_cache_bytes_per_token: Option<usize>,
 
     /// KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation.
     /// Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay.
@@ -937,6 +954,31 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
                 builder = builder.perf_model(load_perf_model(&path));
             }
         }
+        if let Some(timing_model) = compat.timing_model.into_nullable().flatten() {
+            let perf_model = match timing_model {
+                TimingModelSerde::Default | TimingModelSerde::Polynomial => PerfModel::Polynomial,
+                TimingModelSerde::Fixed {
+                    prefill_ms,
+                    decode_ms,
+                } => {
+                    if !prefill_ms.is_finite()
+                        || prefill_ms < 0.0
+                        || !decode_ms.is_finite()
+                        || decode_ms < 0.0
+                    {
+                        return Err(
+                            "fixed timing prefill_ms and decode_ms must be finite and nonnegative"
+                                .to_string(),
+                        );
+                    }
+                    PerfModel::Fixed {
+                        prefill_ms,
+                        decode_ms,
+                    }
+                }
+            };
+            builder = builder.perf_model(Arc::new(perf_model));
+        }
 
         if let Some(aic_backend) = compat.aic_backend.into_nullable() {
             builder = builder.aic_backend(aic_backend);
@@ -1012,6 +1054,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(kv_bytes_per_token) = compat.kv_bytes_per_token.into_nullable() {
             builder = builder.kv_bytes_per_token(kv_bytes_per_token);
+        }
+        if let Some(kv_cache_bytes_per_token) = compat.kv_cache_bytes_per_token.into_nullable() {
+            builder = builder.kv_cache_bytes_per_token(kv_cache_bytes_per_token);
         }
         if let Some(kv_transfer_bandwidth) = compat.kv_transfer_bandwidth.into_nullable() {
             builder = builder.kv_transfer_bandwidth(kv_transfer_bandwidth);

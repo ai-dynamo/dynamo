@@ -342,20 +342,20 @@ const (
 	fuzzDGDROutputCopierContainerName = "output-copier"
 )
 
+func fuzzDGDRProfilingExtraContainerNames(c randfill.Continue) []string {
+	names := make([]string, 1+c.Intn(3))
+	for i := range names {
+		names[i] = fmt.Sprintf("container-%d", i)
+	}
+	return names
+}
+
 func fuzzDGDRProfilingContainerNames(c randfill.Continue) []string {
 	switch c.Intn(10) {
 	case 0:
 		return nil
 	case 1:
 		return []string{}
-	}
-
-	extraNames := func() []string {
-		names := make([]string, 1+c.Intn(3))
-		for i := range names {
-			names[i] = fmt.Sprintf("container-%d", i)
-		}
-		return names
 	}
 
 	var names []string
@@ -365,17 +365,17 @@ func fuzzDGDRProfilingContainerNames(c randfill.Continue) []string {
 	case 1:
 		names = []string{fuzzDGDROutputCopierContainerName}
 	case 2:
-		names = extraNames()
+		names = fuzzDGDRProfilingExtraContainerNames(c)
 	case 3:
 		names = []string{fuzzDGDRProfilerContainerName, fuzzDGDROutputCopierContainerName}
 	case 4:
-		names = append([]string{fuzzDGDROutputCopierContainerName}, extraNames()...)
+		names = append([]string{fuzzDGDROutputCopierContainerName}, fuzzDGDRProfilingExtraContainerNames(c)...)
 	case 5:
-		names = append([]string{fuzzDGDRProfilerContainerName}, extraNames()...)
+		names = append([]string{fuzzDGDRProfilerContainerName}, fuzzDGDRProfilingExtraContainerNames(c)...)
 	default:
 		names = append(
 			[]string{fuzzDGDRProfilerContainerName, fuzzDGDROutputCopierContainerName},
-			extraNames()...,
+			fuzzDGDRProfilingExtraContainerNames(c)...,
 		)
 	}
 

@@ -27,6 +27,7 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
+from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -291,7 +292,11 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            else:
+                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -315,6 +320,41 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
             logger.error(f"Unknown arguments specified: {unknown}")
             sys.exit(1)
     return config, vllm_flags, sglang_flags
+
+
+def _export_transport_tls_env(config: FrontendConfig) -> None:
+    """Propagate transport TLS/mTLS CLI flags to the env vars the Rust runtime
+    reads. Must run before ``DistributedRuntime`` is constructed: it connects to
+    NATS eagerly, so NATS settings applied afterwards are ignored. The TCP
+    request/response planes dial lazily, so they only need the vars set before
+    the first connection, but exporting everything up front keeps it consistent.
+    """
+    if config.tcp_tls_cert_path:
+        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
+    if config.tcp_tls_key_path:
+        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
+    if config.tcp_tls_ca_cert_path:
+        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
+    if config.tcp_tls_client_cert_path:
+        os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = config.tcp_tls_client_cert_path
+    if config.tcp_tls_client_key_path:
+        os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = config.tcp_tls_client_key_path
+    if config.tcp_tls_client_ca_cert_path:
+        os.environ[
+            "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+        ] = config.tcp_tls_client_ca_cert_path
+    if config.nats_tls_ca_cert_path:
+        os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
+    if config.nats_tls_insecure:
+        os.environ["NATS_TLS_INSECURE"] = "1"
+    else:
+        # Clear any inherited NATS_TLS_INSECURE so --no-nats-tls-insecure can
+        # override it before the Rust runtime reads the env var.
+        os.environ.pop("NATS_TLS_INSECURE", None)
+    if config.nats_tls_client_cert_path:
+        os.environ["NATS_TLS_CLIENT_CERT_PATH"] = config.nats_tls_client_cert_path
+    if config.nats_tls_client_key_path:
+        os.environ["NATS_TLS_CLIENT_KEY_PATH"] = config.nats_tls_client_key_path
 
 
 async def async_main():
@@ -352,11 +392,16 @@ async def async_main():
         )
 
     loop = asyncio.get_running_loop()
+    # Export transport TLS/mTLS settings BEFORE constructing DistributedRuntime:
+    # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
+    # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
+    _export_transport_tls_env(config)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
         config.request_plane,
         event_plane=config.event_plane,
+        response_plane=config.response_plane,
     )
 
     def signal_handler():
@@ -402,12 +447,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
-    if config.tcp_tls_cert_path:
-        os.environ["DYN_TCP_TLS_CERT_PATH"] = config.tcp_tls_cert_path
-    if config.tcp_tls_key_path:
-        os.environ["DYN_TCP_TLS_KEY_PATH"] = config.tcp_tls_key_path
-    if config.tcp_tls_ca_cert_path:
-        os.environ["DYN_TCP_TLS_CA_CERT_PATH"] = config.tcp_tls_ca_cert_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
@@ -434,14 +475,6 @@ async def async_main():
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
-    # Validate mode compatibility before loading extensions, so an incompatible
-    # mode fails fast without importing/executing third-party provider code.
-    if config.frontend_route_extensions and (
-        config.interactive or config.kserve_grpc_server
-    ):
-        raise ValueError(
-            "frontend route extensions are only supported by HTTP frontend mode"
-        )
     frontend_route_extensions = load_frontend_route_extensions(
         config.frontend_route_extensions
     )

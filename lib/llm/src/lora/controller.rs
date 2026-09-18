@@ -72,6 +72,7 @@ pub struct LoraController {
     prev_workers: HashSet<WorkerWithDpRank>,
     prev_worker_capacities: HashMap<WorkerWithDpRank, u32>,
     prev_replica_counts: HashMap<String, usize>,
+    last_overflow_count: usize,
 }
 
 impl LoraController {
@@ -115,6 +116,7 @@ impl LoraController {
             prev_workers: HashSet::new(),
             prev_worker_capacities: HashMap::new(),
             prev_replica_counts: HashMap::new(),
+            last_overflow_count: 0,
         }
     }
 
@@ -219,7 +221,7 @@ impl LoraController {
                         // self-heals). `&mut controller` across the unwind boundary needs
                         // AssertUnwindSafe.
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            controller.recompute_allocations();
+                            controller.recompute_allocations(Instant::now());
                         }));
                         if let Err(panic) = outcome {
                             let msg = panic
@@ -240,10 +242,27 @@ impl LoraController {
     }
 
     pub fn recompute_now(&mut self) {
-        self.recompute_allocations();
+        self.recompute_now_at(Instant::now());
     }
 
-    fn recompute_allocations(&mut self) {
+    /// Recompute allocations using an explicitly supplied instant.
+    ///
+    /// Production callers should use [`Self::recompute_now`]. This entrypoint is retained for
+    /// deterministic simulation and test harnesses that need the estimator and controller to
+    /// observe the same clock.
+    #[doc(hidden)]
+    pub fn recompute_now_at(&mut self, now: Instant) {
+        self.recompute_allocations(now);
+    }
+
+    /// Return the overflow placements reported by the most recent recompute.
+    #[doc(hidden)]
+    pub fn last_overflow_count(&self) -> usize {
+        self.last_overflow_count
+    }
+
+    fn recompute_allocations(&mut self, now: Instant) {
+        self.last_overflow_count = 0;
         self.tick += 1;
         let observed = self.state_tracker.snapshot();
         let incarnation = observed.incarnation();
@@ -308,8 +327,8 @@ impl LoraController {
             // other LoRA gauges) don't stay stale while capacity remains zero. No allocation ran
             // this tick, so churn/overflow are zero.
             let table_snapshot = self.routing_table.snapshot_configs();
-            let loads = self.load_estimator.get_current_load();
-            let raw_arrival_counts = self.load_estimator.get_raw_arrival_counts();
+            let loads = self.load_estimator.get_current_load_at(now);
+            let raw_arrival_counts = self.load_estimator.get_raw_arrival_counts_at(now);
             self.update_prometheus_metrics(&table_snapshot, &loads, &raw_arrival_counts);
             self.update_churn_metrics(0, 0, 0);
             tracing::debug!(
@@ -320,7 +339,7 @@ impl LoraController {
         }
 
         let worker_slot_usage = self.observed.get_worker_slot_usage();
-        let loads = self.load_estimator.get_current_load();
+        let loads = self.load_estimator.get_current_load_at(now);
         let total_load: usize = loads.values().sum();
 
         if !loads.is_empty() {
@@ -490,7 +509,7 @@ impl LoraController {
 
         // Prune the load estimator of LoRAs that are no longer loaded (and any
         // unknown/typo request names), bounding its memory over time (F12).
-        self.load_estimator.retain_known(&known_set);
+        self.load_estimator.retain_known_at(&known_set, now);
 
         tracing::debug!(
             tick = self.tick,
@@ -522,7 +541,7 @@ impl LoraController {
             }
         }
 
-        let raw_arrival_counts = self.load_estimator.get_raw_arrival_counts();
+        let raw_arrival_counts = self.load_estimator.get_raw_arrival_counts_at(now);
         self.update_prometheus_metrics(&table_snapshot, &loads, &raw_arrival_counts);
     }
 
@@ -755,6 +774,7 @@ impl LoraController {
 
         match solve_result {
             Ok(result) => {
+                self.last_overflow_count = result.overflow_count;
                 let total_loads: usize = result.loads.values().map(|s| s.len()).sum();
                 let total_unloads: usize = result.unloads.values().map(|s| s.len()).sum();
 
@@ -1975,6 +1995,8 @@ mod tests {
         assert_eq!(st.total_lora_slots(), 2, "two cap=1 workers => two slots");
 
         controller.recompute_now();
+
+        assert_eq!(controller.last_overflow_count(), 1);
 
         let entries = rt.snapshot_configs();
         assert_eq!(

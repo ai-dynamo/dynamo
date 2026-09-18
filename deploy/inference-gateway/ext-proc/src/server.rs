@@ -3,9 +3,8 @@
 
 //! Envoy `ExternalProcessor.Process` bidirectional streaming implementation.
 //!
-//! Mirrors the Go LW-EPP `StreamingServer` from GAIE `pkg/epp-light/server.go`
-//! (issue #2834 / PR #2842). The server handles the ext-proc protocol and
-//! delegates endpoint selection to an `EndpointPicker` implementation.
+//! Handles the ext-proc protocol and delegates endpoint selection to an
+//! `EndpointPicker` implementation.
 //!
 //! The state machine enforces ordered responses:
 //! `RequestHeaders → RequestBody → RequestTrailers → ResponseHeaders → ResponseBody → ResponseTrailers`
@@ -20,15 +19,18 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::envoy_helpers::{self, metadata};
-use crate::picker::{Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage};
+use crate::picker::{
+    CacheSaltForwarding, Endpoint, EndpointPicker, PickError, RequestInfo, ResponseUsage,
+};
 use crate::proto::envoy::service::ext_proc::v3::{
     self as ext_proc, ProcessingRequest, ProcessingResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request,
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
+use dynamo_kv_router::zmq_wire::DYNAMO_CACHE_SALT_PREFIX;
 
-/// State machine phases for the ext_proc stream, matching the Go LW-EPP.
+/// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamState {
     RequestReceived,
@@ -114,7 +116,6 @@ impl RequestContext {
     }
 
     /// Advance the state machine and collect responses that are ready to send.
-    /// Mirrors Go LW-EPP `sendPendingResponses`.
     fn drain_pending_responses(&mut self) -> Vec<ProcessingResponse> {
         let mut out = Vec::new();
 
@@ -192,15 +193,13 @@ impl RequestContext {
     }
 }
 
-/// The ext_proc gRPC server. Mirrors Go LW-EPP `StreamingServer`.
+/// The ext_proc gRPC server.
 ///
 /// Takes an `EndpointPicker` for endpoint selection, decoupling the ext-proc
-/// protocol handling from the routing decision — exactly as the Go LW-EPP
-/// separates `StreamingServer` from `EndpointPicker`.
+/// protocol handling from the routing decision.
 ///
 /// Endpoints are resolved internally by the picker (the `Router` uses a K8s
-/// pod reflector). Pickers receive an empty endpoint slice; this matches the
-/// LW-EPP trait contract while removing the unused `Datastore` plumbing.
+/// pod reflector), so pickers always receive an empty endpoint slice.
 pub struct ExtProcServer<P: EndpointPicker> {
     picker: Arc<P>,
 }
@@ -216,7 +215,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle request headers phase.
-    /// Mirrors Go LW-EPP `handleRequestHeaders` in `server.go`.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
         // Collect headers and resolve the request ID for every request,
         // including header-only (end_of_stream) requests such as GET /v1/models.
@@ -226,6 +224,10 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         // picker and for the stream-end bookkeeping keyed on the request ID.
         if let Some(header_map) = &hdr.headers {
             ctx.request_headers = envoy_helpers::collect_headers(header_map);
+            // Client-owned routing metadata must not influence selection. A
+            // trusted replacement can only come back through `PickResult`.
+            ctx.request_headers
+                .retain(|(key, _)| !envoy_helpers::is_prefiller_host_port_header(key));
 
             if let Some(id) =
                 envoy_helpers::extract_header_value(header_map, metadata::REQUEST_ID_HEADER_KEY)
@@ -245,7 +247,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle a header-only request (EndOfStream on headers, no body).
-    /// Mirrors Go LW-EPP `handleHeaderOnlyRequest`.
     async fn handle_header_only_request(
         picker: &P,
         ctx: &mut RequestContext,
@@ -270,12 +271,12 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             None,
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
         Ok(())
     }
 
     /// Handle request body phase: extract model, call picker.
-    /// Mirrors Go LW-EPP `handleRequestBody`.
     async fn handle_request_body(
         picker: &P,
         ctx: &mut RequestContext,
@@ -324,25 +325,32 @@ impl<P: EndpointPicker> ExtProcServer<P> {
             &result.endpoint,
             Some(ctx.request_size),
             &result.headers,
+            result.selected_prefill_endpoint.as_deref(),
         ));
 
-        // Inject nvext.token_data into the request body JSON so the backend
-        // skips redundant tokenization. Mirrors Go EPP's setTokenizedPrompt.
-        // Only the injection path allocates a new body; forwarding the unchanged
-        // body is a cheap `Bytes` clone (no copy).
-        let forwarded_body: Bytes = if let Some(ref token_ids) = result.token_ids {
-            match inject_token_data(&raw_body, token_ids) {
+        // Inject routing extensions into the request body JSON.
+        // `nvext.token_data` lets the backend skip redundant tokenization.
+        // `cache_salt` is written only under the `NativeVllm` forwarding
+        // policy (see `CacheSaltForwarding`); `Preserve` leaves the body
+        // untouched. Only the injection path allocates a new body — otherwise
+        // the unchanged body is a cheap `Bytes` clone (no copy).
+        let cache_salt = match result.cache_salt_forwarding {
+            CacheSaltForwarding::NativeVllm => result.cache_namespace.as_deref(),
+            CacheSaltForwarding::Preserve => None,
+        };
+        let forwarded_body: Bytes = if result.token_ids.is_some() || cache_salt.is_some() {
+            match inject_body_extensions(&raw_body, result.token_ids.as_deref(), cache_salt) {
                 Ok(modified) => {
-                    tracing::debug!(
-                        token_count = token_ids.len(),
-                        body_size_before = raw_body.len(),
-                        body_size_after = modified.len(),
-                        "Injected nvext.token_data into request body"
+                    tracing::trace!(
+                        request_id = %ctx.request_id,
+                        has_cache_namespace = result.cache_namespace.is_some(),
+                        cache_salt_forwarding = ?result.cache_salt_forwarding,
+                        "Forwarded body with routing extensions"
                     );
                     Bytes::from(modified)
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to inject token_data, forwarding original body");
+                    tracing::warn!(error = %e, "Failed to inject routing extensions, forwarding original body");
                     raw_body.clone()
                 }
             }
@@ -738,8 +746,8 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
             // TODO(epp-disconnect-semantics): Define how Envoy retries and backend
             // work continuing after an ext_proc disconnect affect booking ownership.
-            // Notify the picker that this request is complete so it can free router
-            // bookkeeping state (mirrors Go EPP PostResponse).
+            // Notify the picker that this request is complete so it can free
+            // router bookkeeping state.
             if ctx.body_routed && !ctx.request_id.is_empty() {
                 let booking_id = ctx
                     .booking_id
@@ -760,7 +768,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 }
 
 // ---------------------------------------------------------------------------
-// Request helpers (mirrors Go LW-EPP request.go)
+// Request helpers
 // ---------------------------------------------------------------------------
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
@@ -841,39 +849,56 @@ fn validate_protocol_config(
     Err(Status::failed_precondition(detail))
 }
 
-/// Inject pre-computed token IDs into the request body JSON as
-/// `nvext.token_data`. This lets the backend skip redundant tokenization.
-/// Mirrors Go EPP's `setTokenizedPrompt` in `shared.go`.
-fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> {
+/// Inject routing helpers into the request body JSON:
+/// - `nvext.token_data`: lets the backend skip re-tokenization.
+/// - top-level `cache_salt` = `dynamo-cache-salt:` + namespace, only under
+///   [`CacheSaltForwarding::NativeVllm`]. Native vLLM reads the top-level
+///   field; `Preserve` backends (Dynamo runtime) skip this rewrite because
+///   their handler applies the tag itself.
+fn inject_body_extensions(
+    body: &[u8],
+    token_ids: Option<&[u32]>,
+    cache_salt: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
     let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
 
     let obj = parsed
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("body is not a JSON object"))?;
 
-    let nvext = obj
-        .entry("nvext")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(token_ids) = token_ids {
+        let nvext = obj
+            .entry("nvext")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
 
-    let nvext_obj = nvext
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
+        let nvext_obj = nvext
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("nvext is not a JSON object"))?;
 
-    nvext_obj.insert(
-        "token_data".to_string(),
-        serde_json::Value::Array(
-            token_ids
-                .iter()
-                .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
-                .collect(),
-        ),
-    );
+        nvext_obj.insert(
+            "token_data".to_string(),
+            serde_json::Value::Array(
+                token_ids
+                    .iter()
+                    .map(|&t| serde_json::Value::Number(serde_json::Number::from(t)))
+                    .collect(),
+            ),
+        );
+    }
+
+    if let Some(cache_salt) = cache_salt {
+        // Top-level `cache_salt` is the canonical field native vLLM reads; the
+        // Dynamo tag keeps the namespace unambiguous in KV event extra_keys.
+        obj.insert(
+            "cache_salt".to_string(),
+            serde_json::Value::String(format!("{}{}", DYNAMO_CACHE_SALT_PREFIX, cache_salt)),
+        );
+    }
 
     Ok(serde_json::to_vec(&parsed)?)
 }
 
 /// Extract the "model" field from a JSON request body.
-/// Mirrors Go LW-EPP `extractModelFromBody`.
 fn extract_model_from_body(body: &[u8]) -> String {
     #[derive(serde::Deserialize)]
     struct ModelField {
@@ -887,7 +912,6 @@ fn extract_model_from_body(body: &[u8]) -> String {
 }
 
 /// Extract the candidate endpoint subset from ext-proc request metadata.
-/// Mirrors Go LW-EPP `extractCandidateSubset`.
 fn extract_candidate_subset(
     request_metadata: &HashMap<String, prost_types::Struct>,
 ) -> Vec<String> {
@@ -945,9 +969,13 @@ impl ExtProcError {
                 status_code: StatusCode::ServiceUnavailable,
                 message: msg,
             },
-            PickError::TokenizationFailed(msg) => Self {
+            PickError::InvalidRequest(msg) => Self {
                 status_code: StatusCode::BadRequest,
                 message: msg,
+            },
+            PickError::MetadataHeadersTooLarge(err) => Self {
+                status_code: StatusCode::RequestHeaderFieldsTooLarge,
+                message: err.to_string(),
             },
             // Upstream tokenizer failures are not client errors: preserve their
             // semantics so clients retry appropriately. `e.to_string()` is the
@@ -1591,5 +1619,106 @@ mod tests {
     fn overloaded_pick_error_maps_to_503() {
         let err = ExtProcError::from_pick_error(PickError::Overloaded);
         assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
+    }
+
+    #[test]
+    fn metadata_headers_too_large_maps_to_431() {
+        let err = ExtProcError::from_pick_error(PickError::MetadataHeadersTooLarge(
+            dynamo_llm::http::service::metadata::MetadataHeaderError::TooManyEntries { limit: 64 },
+        ));
+        assert_eq!(err.status_code, StatusCode::RequestHeaderFieldsTooLarge);
+    }
+
+    /// Cache salt is injected as a top-level field and tagged with the Dynamo
+    /// cache-salt prefix so the backend's KV-event extra_keys carry an
+    /// unambiguous namespace marker.
+    #[test]
+    fn inject_body_extensions_adds_cache_salt() {
+        let body = br#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#;
+        let modified = inject_body_extensions(body, None, Some("salt-a")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+        assert_eq!(
+            parsed.get("cache_salt").and_then(|v| v.as_str()),
+            Some("dynamo-cache-salt:salt-a")
+        );
+    }
+
+    /// Injecting both token_data and cache_salt preserves existing nvext fields.
+    #[test]
+    fn inject_body_extensions_preserves_existing_fields() {
+        let body = br#"{"model":"m","nvext":{"extra_fields":["engine_data"]}}"#;
+        let modified = inject_body_extensions(body, Some(&[10, 20, 30]), Some("salt-b")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+
+        assert_eq!(
+            parsed.get("cache_salt").and_then(|v| v.as_str()),
+            Some("dynamo-cache-salt:salt-b")
+        );
+
+        let nvext = parsed.get("nvext").expect("nvext preserved");
+        assert_eq!(
+            nvext
+                .get("extra_fields")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1)
+        );
+        let token_data: Vec<u64> = nvext
+            .get("token_data")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_u64())
+            .collect();
+        assert_eq!(token_data, vec![10, 20, 30]);
+    }
+
+    /// Cross-salt isolation: different salts produce different body values.
+    #[test]
+    fn inject_body_extensions_isolates_salts() {
+        let body = br#"{}"#;
+        let a = inject_body_extensions(body, None, Some("salt-a")).unwrap();
+        let b = inject_body_extensions(body, None, Some("salt-b")).unwrap();
+        let parsed_a: serde_json::Value = serde_json::from_slice(&a).unwrap();
+        let parsed_b: serde_json::Value = serde_json::from_slice(&b).unwrap();
+        assert_eq!(parsed_a["cache_salt"], "dynamo-cache-salt:salt-a");
+        assert_eq!(parsed_b["cache_salt"], "dynamo-cache-salt:salt-b");
+        assert_ne!(parsed_a["cache_salt"], parsed_b["cache_salt"]);
+    }
+
+    /// Native-vLLM forwarding writes only the top-level `cache_salt`; nvext is
+    /// not read by native vLLM, so a body `nvext.cache_salt` is left untouched
+    /// (Dynamo-runtime backends use `Preserve`, which skips the salt rewrite).
+    #[test]
+    fn inject_body_extensions_leaves_nvext_cache_salt_untouched() {
+        let body = br#"{"nvext":{"cache_salt":"body-salt","extra_fields":["engine_data"]}}"#;
+        let modified =
+            inject_body_extensions(body, Some(&[10, 20, 30]), Some("header-salt")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&modified).unwrap();
+
+        assert_eq!(parsed["cache_salt"], "dynamo-cache-salt:header-salt");
+
+        let nvext = parsed.get("nvext").expect("nvext preserved");
+        assert_eq!(nvext["cache_salt"], "body-salt");
+
+        let extra_fields = nvext
+            .get("extra_fields")
+            .and_then(|v| v.as_array())
+            .expect("extra_fields preserved");
+        assert_eq!(extra_fields.len(), 1);
+    }
+
+    /// Malformed bodies are rejected rather than silently forwarded unchanged.
+    #[test]
+    fn inject_body_extensions_rejects_non_object_body() {
+        let body = br#"["not", "an", "object"]"#;
+        assert!(inject_body_extensions(body, Some(&[1]), Some("salt")).is_err());
+    }
+
+    /// A body with a non-object `nvext` cannot accept token_data.
+    #[test]
+    fn inject_body_extensions_rejects_non_object_nvext() {
+        let body = br#"{"nvext": "bad"}"#;
+        assert!(inject_body_extensions(body, Some(&[1]), None).is_err());
     }
 }

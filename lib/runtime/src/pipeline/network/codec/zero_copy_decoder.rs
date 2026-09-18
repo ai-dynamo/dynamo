@@ -13,6 +13,7 @@ use super::{
     check_tcp_request_max_message_size, parse_tcp_request_frame_header, tcp_request_endpoint_len,
     tcp_request_header_size, tcp_request_headers_len,
 };
+use crate::config::environment_names::request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE;
 use crate::pipeline::network::get_tcp_max_message_size;
 use bytes::{Bytes, BytesMut};
 use std::io;
@@ -29,11 +30,11 @@ fn get_shrink_message_size() -> usize {
     *SHRINK_MESSAGE_SIZE.get_or_init(|| {
         let max_size = get_tcp_max_message_size();
         // Check for environment variable override
-        let env_result = std::env::var("DYN_TCP_SHRINK_MESSAGE_SIZE");
+        let env_result = std::env::var(DYN_TCP_SHRINK_MESSAGE_SIZE);
         let env_shrink_size = env_result.as_ref().ok().and_then(|s| {
             s.parse::<usize>().ok().or_else(|| {
                 tracing::warn!(
-                    env_var = "DYN_TCP_SHRINK_MESSAGE_SIZE",
+                    env_var = DYN_TCP_SHRINK_MESSAGE_SIZE,
                     value = %s,
                     "Invalid value for DYN_TCP_SHRINK_MESSAGE_SIZE, using default"
                 );

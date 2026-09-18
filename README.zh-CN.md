@@ -58,7 +58,7 @@ limitations under the License.
 | [**分离式服务**](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) | ✅ | ✅ | ✅ |
 | [**KV 感知路由**](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md) | ✅ | ✅ | ✅ |
 | [**基于 SLA 的 Planner**](docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) | ✅ | ✅ | ✅ |
-| [**KVBM**](docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md) | 🚧 | ✅ | ✅ |
+| [**KVBM**](https://docs.nvidia.com/dynamo/components/kvbm) | 🚧 | ✅ | ✅ |
 | [**多模态**](https://docs.nvidia.com/dynamo/user-guides/multimodal) | ✅ | ✅ | ✅ |
 | [**工具调用**](docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx) | ✅ | ✅ | ✅ |
 
@@ -91,16 +91,16 @@ limitations under the License.
 |------|------|------|
 | [**分离式预填充/解码**](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/disaggregated-serving.md) | 将预填充和解码拆分为可独立扩缩容的 GPU 池 | 最大化 GPU 利用率；每个阶段都运行在针对其工作负载调优的硬件上 |
 | [**KV 感知路由**](docs/fern/pages/developer-guide/knowledge-base/modular-components/router/overview.md) | 根据 worker 负载和 KV 缓存重叠度路由请求 | 消除冗余预填充计算，TTFT 快 2x |
-| [**KV Block Manager (KVBM)**](docs/fern/pages/developer-guide/knowledge-base/modular-components/kvbm/overview.md) | 在 GPU → CPU → SSD → 远程存储之间卸载 KV 缓存 | 将有效上下文长度扩展到 GPU 显存之外 |
+| [**KV Block Manager (KVBM)**](https://docs.nvidia.com/dynamo/components/kvbm) | 在 GPU → CPU → SSD → 远程存储之间卸载 KV 缓存 | 将有效上下文长度扩展到 GPU 显存之外 |
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | 通过 NIXL/NVLink 在 GPU 之间流式传输模型权重 | 新副本冷启动快 7x |
 | [**Planner**](docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) | 由 SLA 驱动的自动扩缩容器，可分析工作负载并调整资源池规模 | 以最低总体拥有成本（TCO）满足延迟目标 |
 | [**Grove**](https://github.com/ai-dynamo/grove) | 面向拓扑感知 gang scheduling 的 K8s operator（NVL72） | 在机架、主机和 NUMA 节点之间优化放置工作负载 |
-| [**AIConfigurator**](https://github.com/ai-dynamo/aiconfigurator) | 在数秒内模拟 10K+ 部署配置 | 无需消耗 GPU 小时即可找到最优服务配置 |
+| [**AISimulate**](https://pypi.org/project/aisimulate/) | 离线预测服务行为并搜索部署配置 | 无需启动 GPU 集群即可找到高质量的服务配置 |
 | [**容错**](docs/fern/pages/kubernetes/fault-tolerance/request-migration.md) | 金丝雀健康检查 + 运行中请求迁移 | worker 可以失败，但用户请求不应失败 |
 
 ### 1.0 新功能
 
-- **零配置部署（[DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference)）** *(beta)：* 在一个 YAML 中指定模型、硬件和 SLA；AIConfigurator 自动分析工作负载，Planner 优化拓扑，然后由 Dynamo 完成部署
+- **零配置部署（[DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference)）** *(beta)：* 在一个 YAML 中指定模型、硬件和 SLA；AISimulate 性能模型估算候选配置，Planner 优化拓扑，然后由 Dynamo 完成部署
 - **Agentic inference：** 按请求提供延迟优先级、预期输出长度和缓存固定 TTL 等提示。集成 [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit)
 - **多模态 E/P/D：** 带 embedding cache 的分离式 encode/prefill/decode；图像工作负载 TTFT 快 30%
 - **视频生成：** 原生支持 [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/)；单张 B200 上实现实时 1080p
@@ -164,9 +164,9 @@ spec:
 
 | 模型 | 框架 | 模式 | 配方 |
 |------|------|------|------|
-| Llama-3-70B | vLLM | 聚合式 | [查看](recipes/llama-3-70b/vllm/) |
-| DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
 | Qwen3-32B-FP8 | TensorRT-LLM | 聚合式 | [查看](recipes/qwen3-32b-fp8/trtllm/) |
+| DeepSeek-R1 | SGLang | 分离式 | [查看](recipes/deepseek-r1/sglang/) |
+| Kimi-K3 | vLLM | 聚合式 | [查看](recipes/kimi-k3/vllm/) |
 
 完整列表见 [recipes/](recipes/README.md)。云平台专用指南：[AWS EKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) · [Google GKE](docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx) · [Azure AKS](docs/fern/pages/kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx) · [Amazon ECS](docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx)
 
@@ -231,7 +231,7 @@ cargo run -p dynamo-llm --bin generate-frontend-openapi
 
 ## 服务发现与消息传递
 
-Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md)）负责服务发现。对大多数部署来说，外部服务是可选的：
+Dynamo 使用 TCP 进行组件间通信。在 Kubernetes 上，原生资源（[CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)）负责服务发现。对大多数部署来说，外部服务是可选的：
 
 | 部署 | etcd | NATS | 说明 |
 |------|------|------|------|

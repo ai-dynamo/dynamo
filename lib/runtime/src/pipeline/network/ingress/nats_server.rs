@@ -36,6 +36,13 @@ struct EndpointTask {
     join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// NATS subject and handler-map key for one endpoint instance. Several instances in one
+/// process can register the same endpoint name, so the key must carry the instance id;
+/// register and unregister must agree on it or a teardown removes the wrong task, or none.
+fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
+    format!("{endpoint_name}-{instance_id:x}")
+}
+
 impl NatsMultiplexedServer {
     /// Create a new multiplexed NATS server
     ///
@@ -60,10 +67,9 @@ impl NatsMultiplexedServer {
     fn remove_reservation(&self, endpoint_with_id: &str, registration: &Arc<()>) {
         if let dashmap::mapref::entry::Entry::Occupied(entry) =
             self.handlers.entry(endpoint_with_id.to_string())
+            && Arc::ptr_eq(&entry.get().registration, registration)
         {
-            if Arc::ptr_eq(&entry.get().registration, registration) {
-                entry.remove();
-            }
+            entry.remove();
         }
     }
 }
@@ -87,7 +93,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "NatsMultiplexedServer::register_endpoint called"
         );
 
-        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
+        let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
         let registration = Arc::new(());
         let endpoint_cancel = CancellationToken::new();
 
@@ -222,10 +228,11 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
-        let endpoint_with_id = format!("{endpoint_name}-{instance_id:x}");
+        let endpoint_with_id = instance_subject(endpoint_name, instance_id);
         if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
+                endpoint_with_id = %endpoint_with_id,
                 "Unregistering NATS endpoint"
             );
             task.cancel_token.cancel();
@@ -234,14 +241,14 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
                 endpoint_name = %endpoint_name,
                 "Waiting for NATS endpoint task to complete"
             );
-            if let Some(join_handle) = task.join_handle {
-                if let Err(e) = join_handle.await {
-                    tracing::warn!(
-                        endpoint_name = %endpoint_name,
-                        error = %e,
-                        "NATS endpoint task panicked during shutdown"
-                    );
-                }
+            if let Some(join_handle) = task.join_handle
+                && let Err(e) = join_handle.await
+            {
+                tracing::warn!(
+                    endpoint_name = %endpoint_name,
+                    error = %e,
+                    "NATS endpoint task panicked during shutdown"
+                );
             }
             tracing::info!(
                 endpoint_name = %endpoint_name,
@@ -261,5 +268,20 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
     fn is_healthy(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_subject_is_the_client_subject_and_unique_per_instance() {
+        assert_eq!(instance_subject("generate", 0xa), "generate-a");
+        assert_ne!(
+            instance_subject("generate", 0xa),
+            instance_subject("generate", 0xb),
+            "two instances of one endpoint name must not share a handler-map key"
+        );
     }
 }

@@ -31,13 +31,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -47,7 +50,21 @@ const (
 	// NvidiaAnnotationGenerationKey indicates annotation name for last applied generation by the operator
 	// This is used to detect manual changes to resources
 	NvidiaAnnotationGenerationKey = "nvidia.com/last-applied-generation"
+	// EventReasonOwnershipConflict identifies a parent resource with a child-resource ownership collision.
+	EventReasonOwnershipConflict = "OwnershipConflict"
 )
+
+type OwnershipConflictError struct {
+	Cause error
+}
+
+func (e *OwnershipConflictError) Error() string {
+	return e.Cause.Error()
+}
+
+func (e *OwnershipConflictError) Unwrap() error {
+	return e.Cause
+}
 
 type Reconciler interface {
 	client.Client
@@ -59,9 +76,74 @@ type Reconciler interface {
 // if the resource should be deleted, the returned resource must contain the necessary information to delete it (name and namespace)
 type ResourceGenerator[T client.Object] func(ctx context.Context) (T, bool, error)
 
+// SyncOption configures an exceptional SyncResource ownership policy.
+type SyncOption func(*syncOptions)
+
+type syncOptions struct {
+	sharedOwnership bool
+}
+
+// WithSharedOwnership permits a caller to reconcile a resource whose controller
+// owner is another resource. Callers must use this only for a documented,
+// intentional shared-resource lifecycle.
+func WithSharedOwnership() SyncOption {
+	return func(options *syncOptions) {
+		options.sharedOwnership = true
+	}
+}
+
+func resolveSyncOptions(opts []SyncOption) syncOptions {
+	var options syncOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
+	return options
+}
+
+// checkControllerOwnership verifies that existing is controlled by parentResource.
+// A namespaced name is not sufficient evidence of ownership: a resource with no
+// controller owner or one owned by a different parent is a collision.
+func checkControllerOwnership(existing, parentResource client.Object, scheme *runtime.Scheme) error {
+	if parentResource == nil {
+		return nil
+	}
+
+	existingOwner := metav1.GetControllerOf(existing)
+	if existingOwner == nil {
+		return &OwnershipConflictError{Cause: fmt.Errorf(
+			"%T %s/%s has no controller owner; refusing to reconcile it for %T %s/%s",
+			existing,
+			existing.GetNamespace(),
+			existing.GetName(),
+			parentResource,
+			parentResource.GetNamespace(),
+			parentResource.GetName(),
+		)}
+	}
+
+	parentGVK, err := apiutil.GVKForObject(parentResource, scheme)
+	if err != nil {
+		return fmt.Errorf("get parent GVK: %w", err)
+	}
+	existingOwnerGV, err := schema.ParseGroupVersion(existingOwner.APIVersion)
+	if err != nil ||
+		existingOwnerGV.Group != parentGVK.Group ||
+		existingOwner.Kind != parentGVK.Kind ||
+		existingOwner.Name != parentResource.GetName() ||
+		existingOwner.UID != parentResource.GetUID() {
+		return &OwnershipConflictError{Cause: &controllerutil.AlreadyOwnedError{Object: existing, Owner: *existingOwner}}
+	}
+
+	return nil
+}
+
+// SyncResource synchronizes a generated resource with the API server. parentResource may be nil;
+// when it is nil, SyncResource neither sets nor validates controller ownership.
+//
 //nolint:nakedret
-func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T]) (modified bool, res T, err error) {
+func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentResource client.Object, generateResource ResourceGenerator[T], opts ...SyncOption) (modified bool, res T, err error) {
 	logs := log.FromContext(ctx)
+	options := resolveSyncOptions(opts)
 
 	resource, toDelete, err := generateResource(ctx)
 	if err != nil {
@@ -107,114 +189,176 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			return
 		}
 		logs.Info("Resource not found. Creating a new one.")
+		var observed T
+		return SyncObservedResource(ctx, r, parentResource, observed, resource, opts...)
+	}
 
-		// Only set controller reference if parentResource is provided
-		// Passing nil as parentResource creates an independent resource (no owner reference)
-		if parentResource != nil {
-			err = ctrl.SetControllerReference(parentResource, resource, r.Scheme())
+	logs.Info(fmt.Sprintf("%s found.", resourceType))
+	if toDelete {
+		if !options.sharedOwnership {
+			err = checkControllerOwnership(oldResource, parentResource, r.Scheme())
 			if err != nil {
-				logs.Error(err, "Failed to set controller reference.")
-				r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, "SetControllerReference", "Update", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+				logs.Error(err, "Refusing to delete a resource with conflicting controller ownership")
 				return
+			}
+		}
+		logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
+		uid := oldResource.GetUID()
+		resourceVersion := oldResource.GetResourceVersion()
+		err = r.Delete(ctx, oldResource, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion})
+		if err != nil {
+			logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
+			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Delete", "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
+			return
+		}
+		logs.Info(fmt.Sprintf("%s deleted.", resourceType))
+		r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Delete", "Deleted %s %s", resourceType, resourceNamespace)
+		modified = true
+		return
+	}
+
+	return SyncObservedResource(ctx, r, parentResource, oldResource, resource, opts...)
+}
+
+// SyncObservedResource synchronizes a desired resource against the exact
+// object previously observed by its caller. Unlike SyncResource, it does not
+// read from the API server. parentResource may be nil; when it is nil,
+// SyncObservedResource neither sets nor validates controller ownership. Create
+// and update conflicts must be retried from a fresh observation so render-time
+// decisions remain tied to the written object.
+func SyncObservedResource[T client.Object](
+	ctx context.Context,
+	r Reconciler,
+	parentResource client.Object,
+	observed T,
+	desired T,
+	opts ...SyncOption,
+) (bool, T, error) {
+	resourceNamespace := desired.GetNamespace()
+	resourceName := desired.GetName()
+	resourceType := reflect.TypeOf(desired).Elem().Name()
+	logs := log.FromContext(ctx).WithValues(
+		"namespace", resourceNamespace,
+		"resourceName", resourceName,
+		"resourceType", resourceType,
+	)
+
+	if isNilClientObject(observed) {
+		if parentResource != nil {
+			if err := ctrl.SetControllerReference(parentResource, desired, r.Scheme()); err != nil {
+				logs.Error(err, "Failed to set controller reference.")
+				recordResourceEvent(r, desired, corev1.EventTypeWarning, "SetControllerReference", "Update", "Failed to set controller reference for %s %s: %s", resourceType, resourceNamespace, err)
+				var zero T
+				return false, zero, err
 			}
 		} else {
 			logs.Info("No parent resource provided, creating resource without owner reference (independent lifecycle)")
 		}
 
-		var hash string
-		hash, err = GetSpecHash(resource)
+		hash, err := GetSpecHash(desired)
 		if err != nil {
 			logs.Error(err, "Failed to get spec hash.")
-			r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, "GetSpecHash", "Get", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
-			return
+			recordResourceEvent(r, desired, corev1.EventTypeWarning, "GetSpecHash", "Get", "Failed to get spec hash for %s %s: %s", resourceType, resourceNamespace, err)
+			var zero T
+			return false, zero, err
 		}
+		updateAnnotations(desired, hash, 1)
 
-		// On create, set generation to 1 (new resources start at generation 1)
-		updateAnnotations(resource, hash, 1)
-
-		r.GetRecorder().Eventf(resource, nil, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Creating a new %s %s", resourceType, resourceNamespace)
-		err = r.Create(ctx, resource)
-		if err != nil {
+		recordResourceEvent(r, desired, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Creating a new %s %s", resourceType, resourceNamespace)
+		if err := r.Create(ctx, desired); err != nil {
 			logs.Error(err, "Failed to create Resource.")
-			r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Create", "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
-			return
+			recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("Create%s", resourceType), "Create", "Failed to create %s %s: %s", resourceType, resourceNamespace, err)
+			var zero T
+			return false, zero, err
 		}
 		logs.Info(fmt.Sprintf("%s created.", resourceType))
-		r.GetRecorder().Eventf(resource, nil, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
-		modified = true
-		res = resource
-	} else {
-		logs.Info(fmt.Sprintf("%s found.", resourceType))
-		if toDelete {
-			logs.Info(fmt.Sprintf("%s found. Deleting the existing one.", resourceType))
-			err = r.Delete(ctx, oldResource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to delete %s.", resourceType))
-				r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Delete%s", resourceType), "Delete", "Failed to delete %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-			logs.Info(fmt.Sprintf("%s deleted.", resourceType))
-			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Delete%s", resourceType), "Delete", "Deleted %s %s", resourceType, resourceNamespace)
-			modified = true
-			return
-		}
-
-		// Check if the Spec has changed and update if necessary
-		var changeResult SpecChangeResult
-		changeResult, err = GetSpecChangeResult(oldResource, resource)
-		if err != nil {
-			r.GetRecorder().Eventf(resource, nil, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Update", "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
-			return false, resource, fmt.Errorf("failed to check if spec has changed: %w", err)
-		}
-
-		if !changeResult.NeedsUpdate {
-			logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
-			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Skipping update %s %s", resourceType, resourceNamespace)
-			res = oldResource
-			return
-		}
-
-		// Log if manual changes were detected
-		if changeResult.ManualChangeDetected {
-			logs.Info(fmt.Sprintf("Manual changes detected on %s, will be overwritten", resourceType),
-				"currentGeneration", oldResource.GetGeneration(),
-				"lastAppliedGeneration", getAnnotation(oldResource, NvidiaAnnotationGenerationKey))
-		}
-
-		if changeResult.SpecNeedsUpdate {
-			// Generate and log diff before updating
-			diff, diffErr := generateSpecDiff(oldResource, resource)
-			if diffErr != nil {
-				logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
-			} else if diff != "" {
-				logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
-			}
-
-			// Update the spec of the current object with the desired spec
-			err = CopySpec(resource, oldResource)
-			if err != nil {
-				logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
-				r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Update", "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
-				return
-			}
-		} else {
-			logs.Info(fmt.Sprintf("%s spec is equivalent. Updating bookkeeping annotations only.", resourceType))
-		}
-
-		updateAnnotations(oldResource, *changeResult.NewHash, changeResult.NewGeneration)
-
-		err = r.Update(ctx, oldResource)
-		if err != nil {
-			logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
-			r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Update", "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
-			return
-		}
-		logs.Info(fmt.Sprintf("%s updated.", resourceType))
-		r.GetRecorder().Eventf(oldResource, nil, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Updated %s %s", resourceType, resourceNamespace)
-		modified = true
-		res = oldResource
+		recordResourceEvent(r, desired, corev1.EventTypeNormal, fmt.Sprintf("Create%s", resourceType), "Create", "Created %s %s", resourceType, resourceNamespace)
+		return true, desired, nil
 	}
-	return
+
+	if !resolveSyncOptions(opts).sharedOwnership {
+		if err := checkControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
+			logs.Error(err, "Refusing to reconcile a resource with conflicting controller ownership")
+			var zero T
+			return false, zero, err
+		}
+	}
+
+	changeResult, err := GetSpecChangeResult(observed, desired)
+	if err != nil {
+		recordResourceEvent(r, desired, corev1.EventTypeWarning, fmt.Sprintf("CalculatePatch%s", resourceType), "Update", "Failed to calculate patch for %s %s: %s", resourceType, resourceNamespace, err)
+		return false, desired, fmt.Errorf("failed to check if spec has changed: %w", err)
+	}
+	if !changeResult.NeedsUpdate {
+		logs.Info(fmt.Sprintf("%s spec is the same. Skipping update.", resourceType))
+		recordResourceEvent(r, observed, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Skipping update %s %s", resourceType, resourceNamespace)
+		return false, observed, nil
+	}
+	if changeResult.NewHash == nil {
+		var zero T
+		return false, zero, fmt.Errorf("%s update has no desired spec hash", resourceType)
+	}
+
+	if changeResult.ManualChangeDetected {
+		logs.Info(fmt.Sprintf("Manual changes detected on %s, will be overwritten", resourceType),
+			"currentGeneration", observed.GetGeneration(),
+			"lastAppliedGeneration", getAnnotation(observed, NvidiaAnnotationGenerationKey))
+	}
+
+	synced, ok := observed.DeepCopyObject().(T)
+	if !ok {
+		var zero T
+		return false, zero, fmt.Errorf("deep copy observed %s as %T", resourceType, observed)
+	}
+	if changeResult.SpecNeedsUpdate {
+		diff, diffErr := generateSpecDiff(observed, desired)
+		if diffErr != nil {
+			logs.V(1).Info(fmt.Sprintf("Failed to generate diff for %s: %v", resourceType, diffErr))
+		} else if diff != "" {
+			logs.Info(fmt.Sprintf("%s spec changes detected", resourceType), "diff", diff)
+		}
+
+		if err := CopySpec(desired, synced); err != nil {
+			logs.Error(err, fmt.Sprintf("Failed to copy spec for %s.", resourceType))
+			recordResourceEvent(r, observed, corev1.EventTypeWarning, fmt.Sprintf("CopySpec%s", resourceType), "Update", "Failed to copy spec for %s %s: %s", resourceType, resourceNamespace, err)
+			var zero T
+			return false, zero, err
+		}
+	} else {
+		logs.Info(fmt.Sprintf("%s spec is equivalent. Updating bookkeeping annotations only.", resourceType))
+	}
+
+	updateAnnotations(synced, *changeResult.NewHash, changeResult.NewGeneration)
+	if err := r.Update(ctx, synced); err != nil {
+		logs.Error(err, fmt.Sprintf("Failed to update %s.", resourceType))
+		recordResourceEvent(r, observed, corev1.EventTypeWarning, fmt.Sprintf("Update%s", resourceType), "Update", "Failed to update %s %s: %s", resourceType, resourceNamespace, err)
+		var zero T
+		return false, zero, err
+	}
+	logs.Info(fmt.Sprintf("%s updated.", resourceType))
+	recordResourceEvent(r, observed, corev1.EventTypeNormal, fmt.Sprintf("Update%s", resourceType), "Update", "Updated %s %s", resourceType, resourceNamespace)
+	return true, synced, nil
+}
+
+func isNilClientObject[T client.Object](object T) bool {
+	value := reflect.ValueOf(object)
+	return !value.IsValid() || ((value.Kind() == reflect.Chan ||
+		value.Kind() == reflect.Func ||
+		value.Kind() == reflect.Interface ||
+		value.Kind() == reflect.Map ||
+		value.Kind() == reflect.Ptr ||
+		value.Kind() == reflect.Slice) && value.IsNil())
+}
+
+func recordResourceEvent(
+	r Reconciler,
+	object client.Object,
+	eventType, reason, action, messageFmt string,
+	args ...interface{},
+) {
+	if recorder := r.GetRecorder(); recorder != nil {
+		recorder.Eventf(object, nil, eventType, reason, action, messageFmt, args...)
+	}
 }
 
 // CopySpec copies only the Spec field from source to destination using Unstructured
@@ -273,6 +417,10 @@ func CopySpec(source, destination client.Object) error {
 	destUnstructured := &unstructured.Unstructured{Object: destMap}
 
 	if spec, found, err := unstructured.NestedFieldCopy(sourceUnstructured.Object, "spec"); err == nil && found {
+		// Keep unstructured destinations opaque so unknown provider fields survive.
+		if destinationUnstructured, ok := destination.(*unstructured.Unstructured); ok {
+			return unstructured.SetNestedField(destinationUnstructured.Object, spec, "spec")
+		}
 		if err := unstructured.SetNestedField(destUnstructured.Object, spec, "spec"); err != nil {
 			return err
 		}
