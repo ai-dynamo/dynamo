@@ -249,16 +249,16 @@ def test_tp_reservation_window_amortizes_successful_collectives(monkeypatch):
         release=lambda _leases: None,
     )
     allocator = SimpleNamespace(
-        free_pages=torch.tensor([3, 1, 2]), _gms_tp_consistency=cohort
+        free_pages=torch.tensor([3, 1, 2, 4, 5, 6]), _gms_tp_consistency=cohort
     )
     state = {"client": client, "leases_by_page": {}, "retained_pages": set()}
     monkeypatch.setattr(hooks, "torch", torch)
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
 
-    first = hooks._reserve_pages(allocator, [3], local_free=3, operation="test")
+    first = hooks._reserve_pages(allocator, [3], local_free=6, operation="test")
     first_gathers = len(gathers)
     allocator.free_pages = allocator.free_pages[1:]
-    second = hooks._reserve_pages(allocator, [1], local_free=2, operation="test")
+    second = hooks._reserve_pages(allocator, [1], local_free=5, operation="test")
 
     assert [lease.block_id for lease in first] == [3]
     assert [lease.block_id for lease in second] == [1]
