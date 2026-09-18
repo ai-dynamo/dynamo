@@ -19,6 +19,7 @@ use dynamo_backend_common::{
     RlWorkerMetadata, SamplingOptions, StopConditions,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::protocols::common::preprocessed_mm_routing_hash;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -3531,6 +3532,188 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
         .expect("cancelled terminal")
         .expect("cancelled output");
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+const ALTERNATE_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgSlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
+fn request_with_preprocessed_features(features: serde_json::Value) -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": features
+        }
+    }));
+    request
+}
+
+fn image_features(kwargs: &str) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["producer-image-hash"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+fn image_routing_marker(encoded_kwargs: &str) -> String {
+    use base64::Engine as _;
+    let kwargs = base64::engine::general_purpose::STANDARD
+        .decode(encoded_kwargs)
+        .expect("valid test kwargs");
+    preprocessed_mm_routing_hash("image", &kwargs)
+}
+
+#[test]
+fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
+    let request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("preprocessed features should be forwarded");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert!(feature.identifier.starts_with("grpc-mm:"));
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
+    assert_eq!((feature.offset, feature.length), (1, 2));
+    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+}
+
+#[test]
+fn preprocessed_routing_identity_matches_inline_content() {
+    let marker = image_routing_marker(VALID_MM_KWARGS_BASE64);
+    let mut request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+    build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("matching content-derived routing identity");
+
+    let mut mismatched =
+        request_with_preprocessed_features(image_features(ALTERNATE_MM_KWARGS_BASE64));
+    mismatched
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "dynamo_mm_routing_hashes".to_string(),
+            json!([image_routing_marker(VALID_MM_KWARGS_BASE64)]),
+        );
+    let error = build_generate_request(
+        mismatched,
+        "request-2".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("routing identity from different content must be rejected");
+    assert!(error.to_string().contains("does not match"));
+}
+
+#[test]
+fn preprocessed_multimodal_identifier_is_bound_to_inline_content() {
+    let first = build_generate_request(
+        request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64)),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("first feature should be forwarded");
+    let second = build_generate_request(
+        request_with_preprocessed_features(image_features(ALTERNATE_MM_KWARGS_BASE64)),
+        "request-2".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("second feature should be forwarded");
+
+    let cache_key = |request: &pb::GenerateRequest| match request.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature.mm_hash.clone().unwrap(),
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_ne!(cache_key(&first), cache_key(&second));
+}
+
+#[test]
+fn preprocessed_features_reject_routing_metadata_without_payload() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "dynamo_mm_routing_hashes".to_string(),
+            json!([image_routing_marker(VALID_MM_KWARGS_BASE64)]),
+        );
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("routing metadata without features must be rejected");
+    assert!(error.to_string().contains("requires preprocessed"));
+}
+
+#[test]
+fn preprocessed_features_cannot_mix_with_raw_media() {
+    let mut request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("raw media and preprocessed features must not be mixed");
+    assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64)),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise multimodal support")
+    );
 }
 
 #[tokio::test]
