@@ -1079,7 +1079,7 @@ class TestReasoningParserOutputCapability:
                 "fake", WrongSignatureParser, object(), {}, None
             )
 
-    def test_real_gptoss_parser_rejected(self, tokenizer):
+    def test_real_gptoss_parser_rejected(self):
         pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
         from vllm.reasoning import ReasoningParserManager
 
@@ -1087,10 +1087,24 @@ class TestReasoningParserOutputCapability:
             _ensure_reasoning_parser_output_capable,
         )
 
+        class GptOssTokenizer:
+            vocab = {"<|end|>": 1}
+            encoded = {
+                "<|channel|>final": [2],
+                "<|message|>": [3],
+                "<|start|>assistant<|channel|>final<|message|>": [4],
+            }
+
+            def encode(self, text, *args, **kwargs):
+                return self.encoded[text]
+
+            def get_vocab(self):
+                return self.vocab
+
         parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
         with pytest.raises(RuntimeError, match="openai_gptoss"):
             _ensure_reasoning_parser_output_capable(
-                "openai_gptoss", parser_class, tokenizer, {}, None
+                "openai_gptoss", parser_class, GptOssTokenizer(), {}, None
             )
 
 
