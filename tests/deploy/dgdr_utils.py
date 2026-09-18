@@ -122,20 +122,6 @@ def _deep_setdefault(target: dict[str, Any], defaults: dict[str, Any]) -> None:
             _deep_setdefault(target[key], value)
 
 
-def _find_profiler_container(
-    containers: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    profiler = next(
-        (container for container in containers if container.get("name") == "profiler"),
-        None,
-    )
-    if profiler is not None:
-        return profiler
-    return next(
-        (container for container in containers if not container.get("name")), None
-    )
-
-
 def _set_ci_profiling_job_defaults(spec: dict[str, Any]) -> None:
     """Keep DGDR profiling CI jobs bounded and eligible for one fresh Pod."""
 
@@ -144,18 +130,9 @@ def _set_ci_profiling_job_defaults(spec: dict[str, Any]) -> None:
     pod_spec = profiling_job.setdefault("template", {}).setdefault("spec", {})
 
     containers = pod_spec.setdefault("containers", [])
+    containers_by_name = {container.get("name"): container for container in containers}
     for name, defaults in _CI_PROFILING_CONTAINER_DEFAULTS.items():
-        if name == "profiler":
-            container = _find_profiler_container(containers)
-        else:
-            container = next(
-                (
-                    container
-                    for container in containers
-                    if container.get("name") == name
-                ),
-                None,
-            )
+        container = containers_by_name.get(name)
         if container is None:
             container = {"name": name}
             containers.append(container)
@@ -237,7 +214,14 @@ def build_dgdr(
                 .setdefault("spec", {})
                 .setdefault("containers", [])
             )
-            profiler = _find_profiler_container(containers)
+            profiler = next(
+                (
+                    container
+                    for container in containers
+                    if container.get("name") == "profiler"
+                ),
+                None,
+            )
             if profiler is None:
                 profiler = {"name": "profiler"}
                 containers.append(profiler)
