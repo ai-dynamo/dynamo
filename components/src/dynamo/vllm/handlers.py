@@ -125,6 +125,8 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+# Keep in sync with MAX_MAINTENANCE_SECONDS in lib/bindings/python/rust/lib.rs;
+# the binding rejects larger values before the rendezvous RPC can run.
 _RL_INIT_WEIGHTS_TIMEOUT_MAX_S = 86_400.0
 # Ceiling on the Ray GCS round-trips behind get_ep_capacity. The reconciler polls
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control

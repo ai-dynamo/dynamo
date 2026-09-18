@@ -1448,6 +1448,10 @@ impl DistributedRuntime {
         // Bounding it here keeps `Duration::from_secs_f64` and the `Instant`
         // addition behind it away from the values that make them panic — a PyO3
         // panic surfaces as PanicException, which `except Exception` misses.
+        // Keep this limit in sync with _RL_INIT_WEIGHTS_TIMEOUT_MAX_S in
+        // components/src/dynamo/vllm/handlers.py, its timeout regression test in
+        // components/src/dynamo/vllm/tests/test_vllm_worker_handler.py, and the API
+        // documentation in lib/bindings/python/src/dynamo/_core.pyi.
         const MAX_MAINTENANCE_SECONDS: f64 = 86_400.0;
         if !max_seconds.is_finite() || max_seconds <= 0.0 || max_seconds > MAX_MAINTENANCE_SECONDS {
             return Err(PyValueError::new_err(format!(
