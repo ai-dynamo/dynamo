@@ -2009,17 +2009,6 @@ class TestRLAdminRouteHardening:
         handler.engine_client.reset_prefix_cache = AsyncMock()
         return handler
 
-    @staticmethod
-    async def _declare_via_update(handler, version):
-        return await handler.update_weights_from_distributed(
-            {
-                "allow_unpaused": True,
-                "reset_prefix_cache": False,
-                "engine_rpc": "update_weights",
-                "weight_version": version,
-            }
-        )
-
     @pytest.mark.asyncio
     async def test_get_weight_version_reports_undeclared_before_any_update(self):
         config = _make_config(enable_multimodal=False)
@@ -2038,21 +2027,6 @@ class TestRLAdminRouteHardening:
         assert resp["status"] == "ok"
         assert resp["version_declared"] is False
         assert resp["version"] is None
-
-    @pytest.mark.asyncio
-    async def test_declared_initial_is_distinguishable_from_never_declared(self):
-        never_declared = self._make_rl_handler()
-        declared_initial = self._make_rl_handler()
-
-        await self._declare_via_update(declared_initial, "initial")
-
-        undeclared_resp = await never_declared.get_weight_version({})
-        declared_resp = await declared_initial.get_weight_version({})
-
-        assert undeclared_resp != declared_resp
-        assert undeclared_resp["version_declared"] is False
-        assert declared_resp["version_declared"] is True
-        assert declared_resp["version"] == "initial"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("version", [None, 7, "policy-43"])
@@ -2082,7 +2056,7 @@ class TestRLAdminRouteHardening:
         assert (await handler.get_weight_version({}))["version_declared"] is False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", [None, 7, "policy-42"])
+    @pytest.mark.parametrize("version", [None, 7, "initial"])
     @pytest.mark.parametrize(
         ("route", "body"),
         [

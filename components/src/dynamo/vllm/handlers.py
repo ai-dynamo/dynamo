@@ -2002,9 +2002,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(f"[RL] Failed to abort request {request_id}: {e}")
             return {"status": "error", "message": str(e)}
 
-    def _declare_weight_version(self, version: Any) -> None:
-        self._weight_version = version
-
     async def get_weight_version(self, body: dict) -> dict:
         """Report the worker's current declared weight-version state."""
         if body is None:
@@ -2015,11 +2012,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": "request body must be a JSON object",
             }
         version = self._weight_version
-        declared = version is not _WEIGHT_VERSION_UNDECLARED
+        is_declared = version is not _WEIGHT_VERSION_UNDECLARED
         return {
             "status": "ok",
-            "version": version if declared else None,
-            "version_declared": declared,
+            "version": version if is_declared else None,
+            "version_declared": is_declared,
         }
 
     async def set_weight_version(self, body: dict) -> dict:
@@ -2034,7 +2031,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         if "weight_version" not in body:
             return {"status": "error", "message": "Missing 'weight_version' in body"}
         version = body["weight_version"]
-        self._declare_weight_version(version)
+        self._weight_version = version
         logger.info("[RL] Weight version declared (version=%s)", version)
         return {"status": "ok", "version": version}
 
@@ -2076,7 +2073,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # while still holding _pause_lock (generation is paused).
                 await self.engine_client.reset_prefix_cache()
                 if "weight_version" in body:
-                    self._declare_weight_version(version)
+                    self._weight_version = version
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
@@ -2140,7 +2137,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # before resume so it is not reused under the new weights.
                     await self.engine_client.reset_prefix_cache()
                 if "weight_version" in body:
-                    self._declare_weight_version(version)
+                    self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
