@@ -33,6 +33,7 @@
 .github/scripts/*
 !.github/scripts/apply_dev_version.py
 !.github/scripts/retry_kubectl.sh
+!.github/scripts/verify_runtime_sources.py
 !.github/scripts/collect_vcluster_diagnostics.sh
 **/*backup*/
 .dockerignore
