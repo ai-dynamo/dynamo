@@ -284,10 +284,10 @@ command.
 The vLLM engine runs as `main`, alongside the restartable Dynamo sidecar
 `dynamo`. The operator injects sidecar probes: `/live` for startup and liveness,
 and `/health` for runtime readiness, independent of engine loading.
-Kubernetes-native gRPC probes on port `50051` gate pod readiness on engine
-health, with a 30-minute startup budget; increase this for larger models. The
-engine listens on `0.0.0.0` for kubelet probes, while the sidecar connects over
-loopback.
+Kubernetes-native gRPC probes on port `50051` gate pod readiness and restart
+unhealthy engine containers, with a 30-minute startup budget; increase this for
+larger models. The engine listens on `0.0.0.0` for kubelet probes, while the
+sidecar connects over loopback.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that
@@ -324,6 +324,11 @@ In `deploy/agg.yaml` (and `deploy/disagg.yaml`), set the image of
 in `containers[name=main]`. Add `imagePullSecrets` if your registry is private.
 For a custom image tag without a semantic version, set `runtimeVersionOverride`
 to the Dynamo version built into the sidecar image.
+
+For custom mounts on the Dynamo sidecar, declare matching entries in
+`podTemplate.spec.volumes`; the operator does not infer PVC volumes from
+init-container mounts. `compilationCache` configures the engine (`main`) and
+creates its pod volume; it does not mount the cache into the Dynamo sidecar.
 
 ### 3. Deploy
 
