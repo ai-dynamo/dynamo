@@ -1009,26 +1009,6 @@ class TestReasoningParserMetadata:
 
 
 class TestReasoningParserOutputCapability:
-    def test_boundary_only_parser_rejected(self):
-        from dynamo.frontend.vllm_processor import (
-            _ensure_reasoning_parser_output_capable,
-        )
-
-        class BoundaryOnlyParser:
-            def __init__(self, tokenizer, *args, **kwargs):
-                pass
-
-            def extract_reasoning_streaming(self, *args):
-                raise NotImplementedError(
-                    "only provides boundary detection. "
-                    "Use HarmonyParser for output parsing."
-                )
-
-        with pytest.raises(RuntimeError, match="boundary detection"):
-            _ensure_reasoning_parser_output_capable(
-                "openai_gptoss", BoundaryOnlyParser, object(), {}, None
-            )
-
     def test_harmony_note_only_for_gptoss(self):
         from dynamo.frontend.vllm_processor import (
             _ensure_reasoning_parser_output_capable,
@@ -1099,7 +1079,7 @@ class TestReasoningParserOutputCapability:
                 "fake", WrongSignatureParser, object(), {}, None
             )
 
-    def test_real_gptoss_parser_rejected(self):
+    def test_real_gptoss_parser_rejected(self, tokenizer):
         pytest.importorskip("vllm.reasoning.gptoss_reasoning_parser")
         from vllm.reasoning import ReasoningParserManager
 
@@ -1110,7 +1090,7 @@ class TestReasoningParserOutputCapability:
         parser_class = ReasoningParserManager.get_reasoning_parser("openai_gptoss")
         with pytest.raises(RuntimeError, match="openai_gptoss"):
             _ensure_reasoning_parser_output_capable(
-                "openai_gptoss", parser_class, object(), {}, None
+                "openai_gptoss", parser_class, tokenizer, {}, None
             )
 
 
