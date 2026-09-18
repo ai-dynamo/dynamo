@@ -592,6 +592,10 @@ def _refill_tp_reservation(self, count: int, operation: str) -> list[KVLease] | 
         candidates = available_candidates()
         if len(candidates) < needed:
             return None
+    # Speculation must not monopolize a small pool before a standby can warm
+    # up. Leave half the eligible pages unreserved unless actual request demand
+    # needs them; this is a batching limit, not a permanent capacity partition.
+    target = max(needed, min(target, len(candidates) // 2))
     candidates = candidates[:target]
     leases = _reserve_tp_pages(self, candidates, f"{operation}:window", reclaim=False)
     if leases is None and len(candidates) > needed:
