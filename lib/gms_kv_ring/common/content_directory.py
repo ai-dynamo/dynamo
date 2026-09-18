@@ -16,6 +16,7 @@ import os
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 from typing import Callable, Optional, TypeVar
 
 from gms_kv_ring.daemon.client import DaemonClient
@@ -218,7 +219,7 @@ class ContentDirectory:
             return 0
         if not self.async_publish_enabled:
             return self.publish(items)
-        self._defer_mutation("publish", [dict(item) for item in items])
+        self._defer_mutation("publish", deepcopy(items))
         return len(items)
 
     def mark_hbm_dormant_deferred(self, content_hashes: list[bytes]) -> int:
@@ -264,6 +265,26 @@ class ContentDirectory:
             self.mark_hbm_dormant(content_hashes)
             return True
 
+    @staticmethod
+    def _publication_keys(items: list[dict]) -> Optional[set[tuple]]:
+        # The daemon validates each batch atomically: repeated content hashes
+        # or reused physical slots must remain separate, ordered publications.
+        # Malformed items stay isolated so normal RPC error handling can skip
+        # them without terminating the background worker during coalescing.
+        try:
+            keys = set()
+            for item in items:
+                keys.add(("hash", bytes(item["content_hash"])))
+                slots = item.get("slot_ids")
+                if slots is None:
+                    slots = [item["slot_id"]]
+                keys.update(
+                    ("slot", str(item["engine_id"]), int(slot)) for slot in slots
+                )
+            return keys
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def _mutation_loop(self) -> None:
         while True:
             with self._mutation_condition:
@@ -273,13 +294,24 @@ class ContentDirectory:
                     return
                 sequence, kind, payload = self._mutations.popleft()
                 payload = list(payload)
-                # One completed request can enqueue many pages, and concurrent
-                # completions can enqueue many adjacent batches while the first
-                # daemon RPC is in flight. Preserve mutation order while folding
-                # adjacent operations of the same kind into one RPC.
+                # Coalesce disjoint publications only. Turning two sequential
+                # updates of one hash/slot into an atomic batch makes the daemon
+                # reject both. Bound coalescing to avoid monopolizing the queue.
+                keys = self._publication_keys(payload) if kind == "publish" else set()
                 while self._mutations and self._mutations[0][1] == kind:
+                    following = self._mutations[0][2]
+                    if len(payload) + len(following) > 4096:
+                        break
+                    following_keys = (
+                        self._publication_keys(following)
+                        if kind == "publish"
+                        else set()
+                    )
+                    if keys is None or following_keys is None or keys & following_keys:
+                        break
                     sequence, _same_kind, following = self._mutations.popleft()
                     payload.extend(following)
+                    keys.update(following_keys)
             try:
                 if kind == "publish":
                     self.publish(payload)
