@@ -281,7 +281,7 @@ spec:
             image: <conductor-runtime-image>
 ```
 
-For LP20 and LP30, supply compatible builds and images, static arguments and environment settings, init containers, health probes, volumes, and mounts in the role templates. The operator uses the image's entrypoint unless the template supplies `command`; it does not generate runtime launchers, SSH-key preparation, or probes. Hardware policy still replaces the main-container `securityContext` for XT agents and direct-hybrid agents with privileged root settings, discarding other authored container security fields. Direct-hybrid Pods also force root user and group settings.
+For LP20 and LP30, supply compatible builds and images, static arguments and environment settings, init containers, health probes, volumes, and mounts in the role templates. The operator uses the image's entrypoint unless the template supplies `command`; it does not generate runtime launchers, SSH-key preparation, or probes. Supply the Pod and container security contexts required for device access in the role templates; the operator preserves these settings.
 
 The operator supplies generated configuration, model and hardware bindings, and the LPU conductor's `LPX_ALLOCATION` value. A Nova conductor must include `--allocation` and `$(LPX_ALLOCATION)` in its authored arguments, along with its other runtime options. Mount the generated `config` volume and model storage where the selected runtime expects them. SSH-based startup must declare its own Secret volume, key preparation, and mounts.
 
