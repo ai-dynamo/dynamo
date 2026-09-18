@@ -702,6 +702,7 @@ pub struct RouterQueueMetricHandles {
     pub request_limit_rejections: IntCounter,
     pub raw_isl_limit_rejections: IntCounter,
     pub cached_token_limit_rejections: IntCounter,
+    pub uncached_token_limit_rejections: IntCounter,
 }
 
 pub static ROUTER_QUEUE_METRICS: LazyLock<RouterQueueMetrics> =
@@ -766,6 +767,7 @@ impl RouterQueueMetrics {
             request_limit_rejections: rejection("request_limit"),
             raw_isl_limit_rejections: rejection("raw_isl_token_limit"),
             cached_token_limit_rejections: rejection("cached_token_limit"),
+            uncached_token_limit_rejections: rejection("uncached_token_limit"),
         }
     }
 }
@@ -1587,6 +1589,7 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"cached_token_limit\",worker_type=\"decode\"} 0
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"raw_isl_token_limit\",worker_type=\"decode\"} 0
 dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"request_limit\",worker_type=\"decode\"} 0
+dynamo_frontend_router_queue_backpressure_total{model=\"model\",policy_class=\"default\",reason=\"uncached_token_limit\",worker_type=\"decode\"} 0
 # HELP dynamo_frontend_router_queue_pending_cached_tokens Estimated cached tokens for requests pending in the router scheduler queue
 # TYPE dynamo_frontend_router_queue_pending_cached_tokens gauge
 dynamo_frontend_router_queue_pending_cached_tokens{model=\"model\",policy_class=\"default\",worker_type=\"decode\"} 512

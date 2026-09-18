@@ -41,6 +41,7 @@ pub enum QueueLimitKind {
     Requests,
     RawIslTokens,
     CachedTokens,
+    UncachedTokens,
 }
 
 impl std::fmt::Display for QueueLimitKind {
@@ -49,6 +50,7 @@ impl std::fmt::Display for QueueLimitKind {
             Self::Requests => formatter.write_str("requests"),
             Self::RawIslTokens => formatter.write_str("raw_isl_tokens"),
             Self::CachedTokens => formatter.write_str("cached_tokens"),
+            Self::UncachedTokens => formatter.write_str("uncached_tokens"),
         }
     }
 }
@@ -70,6 +72,7 @@ pub struct PolicyQueueStats {
     pub requests: usize,
     pub raw_isl_tokens: usize,
     pub cached_tokens: usize,
+    pub uncached_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -799,6 +802,11 @@ fn queue_rejection<T>(class: &PolicyClassQueue<T>, worker_count: usize) -> Optio
             class.stats.cached_tokens,
             class.config.cached_token_queue_limit_per_worker,
         ),
+        (
+            QueueLimitKind::UncachedTokens,
+            class.stats.uncached_tokens,
+            class.config.uncached_token_queue_limit_per_worker,
+        ),
     ] {
         let limit = limit_per_worker.map(|limit| limit.saturating_mul(worker_count));
         if limit.is_some_and(|limit| current >= limit) {
@@ -818,12 +826,18 @@ fn add_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
     stats.requests += 1;
     stats.raw_isl_tokens = stats.raw_isl_tokens.saturating_add(snapshot.raw_isl_tokens);
     stats.cached_tokens = stats.cached_tokens.saturating_add(snapshot.cached_tokens);
+    stats.uncached_tokens = stats
+        .uncached_tokens
+        .saturating_add(snapshot.uncached_tokens);
 }
 
 fn subtract_stats(stats: &mut PolicyQueueStats, snapshot: QueueSnapshot) {
     stats.requests = stats.requests.saturating_sub(1);
     stats.raw_isl_tokens = stats.raw_isl_tokens.saturating_sub(snapshot.raw_isl_tokens);
     stats.cached_tokens = stats.cached_tokens.saturating_sub(snapshot.cached_tokens);
+    stats.uncached_tokens = stats
+        .uncached_tokens
+        .saturating_sub(snapshot.uncached_tokens);
 }
 
 #[cfg(test)]
@@ -1348,6 +1362,228 @@ policy_classes:
             .unwrap_err();
         assert_eq!(no_workers_rejection.current, 0);
         assert_eq!(no_workers_rejection.limit, 0);
+    }
+
+    #[test]
+    fn uncached_token_cap_charges_uncached_work_only() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 10
+    uncached_token_queue_limit_per_worker: 3
+"#,
+        ));
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(10, 8),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "uncached-queued",
+            )
+            .unwrap();
+        // Cache-rich work consumes none of the uncached budget.
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(100, 100),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "cache-rich",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).uncached_tokens, 2);
+
+        // Pre-add: the entry crossing the cap is admitted...
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(4, 0),
+                2.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "crossing",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).uncached_tokens, 6);
+
+        // ...and the next arrival is rejected against existing usage only.
+        let (rejection, payload) = queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                3.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "rejected",
+            )
+            .unwrap_err();
+        assert_eq!(payload, "rejected");
+        assert_eq!(rejection.limit_kind, QueueLimitKind::UncachedTokens);
+        assert_eq!(rejection.current, 6);
+        assert_eq!(rejection.limit, 6);
+        assert_eq!(queue.class_stats(0).uncached_tokens, 6);
+
+        // Draining the earliest entry returns its 2 uncached tokens, so the
+        // same request shape is admitted again.
+        assert_eq!(
+            queue.pop_next(|_, _, _| true).unwrap().into_payload(),
+            "uncached-queued"
+        );
+        assert_eq!(queue.class_stats(0).uncached_tokens, 4);
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(1, 0),
+                4.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "readmitted",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).uncached_tokens, 5);
+    }
+
+    #[test]
+    fn uncached_token_cap_scales_with_worker_count() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 10
+    uncached_token_queue_limit_per_worker: 5
+"#,
+        ));
+        queue
+            .enqueue(
+                0,
+                2,
+                QueueSnapshot::new(10, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "at-cap",
+            )
+            .unwrap();
+        let (shrunk, _) = queue
+            .enqueue(
+                0,
+                1,
+                QueueSnapshot::new(1, 0),
+                1.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "shrunk",
+            )
+            .unwrap_err();
+        assert_eq!(shrunk.limit_kind, QueueLimitKind::UncachedTokens);
+        assert_eq!(shrunk.current, 10);
+        assert_eq!(shrunk.limit, 5);
+
+        // One more discovered worker grows the cap without evicting, and the
+        // crossing entry is still admitted under the pre-add comparison.
+        queue
+            .enqueue(
+                0,
+                3,
+                QueueSnapshot::new(4, 0),
+                2.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "grown-cap",
+            )
+            .unwrap();
+        queue
+            .enqueue(
+                0,
+                3,
+                QueueSnapshot::new(1, 0),
+                3.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "crossing-grown",
+            )
+            .unwrap();
+        assert_eq!(queue.class_stats(0).uncached_tokens, 15);
+        let (at_grown, _) = queue
+            .enqueue(
+                0,
+                3,
+                QueueSnapshot::new(1, 0),
+                4.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "at-grown",
+            )
+            .unwrap_err();
+        assert_eq!(at_grown.limit_kind, QueueLimitKind::UncachedTokens);
+        assert_eq!(at_grown.current, 15);
+        assert_eq!(at_grown.limit, 15);
+    }
+
+    #[test]
+    fn uncached_token_zero_limit_sheds_immediately() {
+        let mut queue = PolicyQueue::new(profile(
+            r#"
+default_policy_family: shed
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: shed
+    policy_family: shed
+    cache_bucket: all
+    quantum: 10
+    uncached_token_queue_limit_per_worker: 0
+"#,
+        ));
+        let (rejection, payload) = queue
+            .enqueue(
+                0,
+                4,
+                QueueSnapshot::new(1, 0),
+                0.0,
+                0.0,
+                0,
+                WorkerPlacement::Any,
+                "shed",
+            )
+            .unwrap_err();
+        assert_eq!(payload, "shed");
+        assert_eq!(rejection.limit_kind, QueueLimitKind::UncachedTokens);
+        assert_eq!(rejection.current, 0);
+        assert_eq!(rejection.limit, 0);
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]

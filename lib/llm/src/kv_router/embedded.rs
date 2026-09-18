@@ -84,6 +84,7 @@ fn record_queue_rejection(
         QueueLimitKind::Requests => handles.request_limit_rejections.inc(),
         QueueLimitKind::RawIslTokens => handles.raw_isl_limit_rejections.inc(),
         QueueLimitKind::CachedTokens => handles.cached_token_limit_rejections.inc(),
+        QueueLimitKind::UncachedTokens => handles.uncached_token_limit_rejections.inc(),
     }
 }
 
