@@ -4,6 +4,7 @@
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
 import asyncio
+import builtins
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -297,7 +298,16 @@ async def test_discovery_capture_and_cleanup(
 
 @pytest.mark.parametrize(
     "has_dgd_labels, failure_stage",
-    [(True, None), (False, None), (False, "jobs"), (False, "pods")],
+    [
+        (True, None),
+        (False, None),
+        (False, "jobs"),
+        (False, "pods"),
+        (True, "manifest"),
+        (True, "logs"),
+        (True, "write"),
+        (True, "previous_logs"),
+    ],
 )
 async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
     tmp_path, monkeypatch, has_dgd_labels, failure_stage
@@ -331,9 +341,30 @@ async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
             }
         )
     pod.to_yaml.return_value = yaml.safe_dump(pod.raw)
-    pod.logs.side_effect = lambda **kwargs: [
-        "previous instance" if kwargs.get("previous") else "source startup error"
-    ]
+
+    def pod_logs(**kwargs):
+        if kwargs.get("previous"):
+            if failure_stage == "previous_logs":
+                raise kr8s.ServerError("no previous terminated container")
+            return ["previous instance"]
+        if failure_stage == "logs" and pod.logs.call_count == 1:
+            raise kr8s.ServerError("temporary log fetch failure")
+        return ["source startup error"]
+
+    pod.logs.side_effect = pod_logs
+    if failure_stage == "manifest":
+        pod.to_yaml.side_effect = [
+            RuntimeError("temporary manifest failure"),
+            pod.to_yaml.return_value,
+        ]
+    if failure_stage == "write":
+
+        def open_artifact(path, *args, **kwargs):
+            if path == str(tmp_path / "checkpoint" / f"{pod.name}.main.log"):
+                raise OSError("checkpoint log write failed")
+            return builtins.open(path, *args, **kwargs)
+
+        monkeypatch.setattr("tests.deploy.dgd_utils.open", open_artifact, raising=False)
 
     monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", Mock())
     if failure_stage == "jobs":
@@ -365,22 +396,28 @@ async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
         return []
 
     monkeypatch.setattr("tests.deploy.dgd_utils.kr8s.get", get_pods)
-    metrics = Mock(side_effect=AssertionError("source pods must not scrape metrics"))
+    metrics = Mock()
     monkeypatch.setattr(deployment, "_get_pod_metrics", metrics)
-    directory = tmp_path / "checkpoint"
+    needs_fallback = failure_stage in {"manifest", "logs", "write"}
+    directory = tmp_path / ("worker" if needs_fallback else "checkpoint")
 
     async def delete_deployment():
         assert (
             directory / f"{pod.name}.main.log"
         ).read_text() == "source startup error"
-        assert (
-            directory / f"{pod.name}.main.previous.log"
-        ).read_text() == "previous instance"
+        previous_log = directory / f"{pod.name}.main.previous.log"
+        if failure_stage == "previous_logs":
+            assert not previous_log.exists()
+        else:
+            assert previous_log.read_text() == "previous instance"
         assert yaml.safe_load((directory / f"{pod.name}.yaml").read_text()) == pod.raw
 
     delete = AsyncMock(side_effect=delete_deployment)
     monkeypatch.setattr(deployment, "_delete_deployment", delete)
-    await deployment._cleanup()
+    result = await deployment.__aexit__(
+        AssertionError, AssertionError("test failed"), None
+    )
+    assert result is False
     assert list_jobs.call_count == (2 if failure_stage == "jobs" else 1)
     assert pod_attempts == (2 if failure_stage == "pods" else 1)
     list_jobs.assert_called_with(
@@ -388,8 +425,11 @@ async def test_cleanup_preserves_checkpoint_pod_logs_before_deletion(
         label_selector="nvidia.com/dynamo-graph-deployment-name=test-deployment",
     )
     delete.assert_awaited_once()
-    metrics.assert_not_called()
-    assert pod.logs.call_count == 2
+    if needs_fallback:
+        metrics.assert_called_once_with(pod, "worker", "")
+    else:
+        metrics.assert_not_called()
+    assert pod.logs.call_count == (4 if needs_fallback else 2)
 
 
 @pytest.mark.parametrize("status", [404, 403])

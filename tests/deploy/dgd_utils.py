@@ -1544,14 +1544,20 @@ class ManagedDeployment:
         suffix="",
         *,
         collect_metrics: bool = True,
-    ):
+    ) -> bool:
+        """Return whether the manifest and all current container logs were saved.
+
+        Previous-instance logs are optional and metrics do not affect the result.
+        """
         directory = os.path.join(self.log_dir, service_name)
         os.makedirs(directory, exist_ok=True)
+        diagnostics_saved = True
 
         try:
             with open(os.path.join(directory, f"{pod.name}{suffix}.yaml"), "w") as f:
                 f.write(pod.to_yaml())
         except Exception as e:
+            diagnostics_saved = False
             self._logger.error(e)
 
         # Resolve the container list from the pod manifest. Multi-container pods
@@ -1570,6 +1576,7 @@ class ManagedDeployment:
                 if c.get("name"):
                     container_names.append(c["name"])
         except Exception as e:
+            diagnostics_saved = False
             self._logger.debug(f"Failed to resolve containers for {pod.name}: {e}")
 
         if not container_names:
@@ -1585,6 +1592,7 @@ class ManagedDeployment:
                 ) as f:
                     f.write("\n".join(logs))
             except Exception as e:
+                diagnostics_saved = False
                 self._logger.error(
                     f"Failed to fetch logs for {pod.name} container={container or '<default>'}: {e}"
                 )
@@ -1613,6 +1621,8 @@ class ManagedDeployment:
         if collect_metrics:
             self._get_pod_metrics(pod, service_name, suffix)
 
+        return diagnostics_saved
+
     def _get_checkpoint_pods(self, name: str, uid: str) -> list[Pod]:
         # Match the SnapshotJob incarnation, not just its reusable name.
         return retry_vcluster_api(
@@ -1632,7 +1642,6 @@ class ManagedDeployment:
         )
 
     def _get_checkpoint_pod_logs(self) -> set[str]:
-        """Preserve source pod diagnostics and return pods handled by this path."""
         collected_pods: set[str] = set()
         try:
             jobs = retry_vcluster_api(
@@ -1684,10 +1693,10 @@ class ManagedDeployment:
                 self._logger.info("No source pods remain for checkpoint job %s", name)
             for pod in pods:
                 try:
-                    self.get_pod_manifest_logs_metrics(
+                    if self.get_pod_manifest_logs_metrics(
                         "checkpoint", pod, collect_metrics=False
-                    )
-                    collected_pods.add(pod.name)
+                    ):
+                        collected_pods.add(pod.name)
                 except OSError as exc:
                     self._logger.warning(
                         "Failed to save checkpoint pod %s diagnostics: %s",
