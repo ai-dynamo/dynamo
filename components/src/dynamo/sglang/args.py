@@ -38,12 +38,23 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     get_sglang_model_config,
     resolved_server_args,
+    sglang_uses_mla_backend,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 from dynamo.sglang.elastic_ep_preflight import check_elastic_ep_backend
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
+
+# Non-MLA attention backends that read the DCP parallel state in their forward
+# path. `aiter` is here because SGLang itself allows dcp_size > 1 on ROCm.
+DCP_CAPABLE_ATTENTION_BACKENDS = frozenset({"triton", "aiter"})
+
+ATTENTION_BACKEND_CLI_FIELDS = (
+    "attention_backend",
+    "prefill_attention_backend",
+    "decode_attention_backend",
+)
 
 
 class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
@@ -67,9 +78,19 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 class Config:
     """Combined configuration container for SGLang server and Dynamo args."""
 
-    def __init__(self, server_args: ServerArgs, dynamo_args: DynamoConfig) -> None:
+    def __init__(
+        self,
+        server_args: ServerArgs,
+        dynamo_args: DynamoConfig,
+        *,
+        attention_backend_from_cli: bool = False,
+    ) -> None:
         self.server_args = server_args
         self.dynamo_args = dynamo_args
+        # Whether the launch named an attention backend itself. Only the CLI
+        # knows this; the resolved configuration reports the same field whether
+        # SGLang chose the value or the user did.
+        self.attention_backend_from_cli = attention_backend_from_cli
         self.serving_mode = self._set_serving_strategy()
 
     def _set_serving_strategy(self):
@@ -82,8 +103,19 @@ class Config:
         else:
             return DisaggregationMode.AGGREGATED
 
+    def validate_engine_server_args(self, server_args: Any) -> None:
+        """Re-run the launch checks a built engine's configuration can answer.
+
+        Call this on ``engine.server_args`` before the engine takes a request
+        of any kind, including a warmup one.
+        """
+        _validate_dcp_attention_backend(
+            server_args, backend_from_cli=self.attention_backend_from_cli
+        )
+
     def use_resolved_server_args(self, server_args: Any) -> Any:
         """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        self.validate_engine_server_args(server_args)
         self.server_args = resolved_server_args(server_args)
         return self.server_args
 
@@ -191,6 +223,84 @@ def _validate_parser_flags(
     if sglang_val and dynamo_val:
         logging.error(f"Cannot use both --{name} and --dyn-{name}.")
         sys.exit(1)
+
+
+def _attention_backend_from_cli(parsed_args: Namespace) -> bool:
+    """Return whether the launch named an attention backend on the command line.
+
+    The phase-specific flags take priority over --attention-backend, so any one
+    of the three means the backend in force was chosen by the user.
+    """
+    return any(
+        getattr(parsed_args, field, None) for field in ATTENTION_BACKEND_CLI_FIELDS
+    )
+
+
+def _validate_dcp_attention_backend(
+    server_args: Any, *, backend_from_cli: bool
+) -> None:
+    """Reject --dcp-size > 1 on an attention backend that never reads it.
+
+    SGLang sizes the KV cache pool the DCP way: DCP ranks replicate the KV
+    heads instead of splitting them, and partition the context dimension. Only
+    some attention backends honor that in their forward path; the rest still do
+    a plain tensor-parallel head split, so the two disagree on the KV row width
+    and the scheduler dies on the first real request. Fail here instead, before
+    the worker registers and starts taking traffic.
+
+    Call this twice: once on the arguments the CLI produced, which catches a
+    backend the user named, and once on the engine's own configuration, which
+    is the only place a backend SGLang chose for itself can be read. SGLang
+    0.5.19 keeps ``ServerArgs`` at what the caller asked for and resolves in a
+    separate pass, so at CLI time an automatic backend is still ``None``.
+    """
+    # Diffusion/video argument stubs and older SGLang releases omit dcp_size.
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    if dcp_size <= 1:
+        return
+
+    # MLA KV pools have no per-rank KV head split to disagree about, and every
+    # MLA attention backend consumes the DCP parallel state.
+    if sglang_uses_mla_backend(server_args):
+        return
+
+    # Read the effective backend, not the flag the user typed: fa3 is the
+    # automatic choice for an MHA model on Hopper with no --attention-backend.
+    resolved = resolved_server_args(server_args)
+    base_backend = getattr(resolved, "attention_backend", None)
+    phase_backends = {
+        "prefill": getattr(resolved, "prefill_attention_backend", None) or base_backend,
+        "decode": getattr(resolved, "decode_attention_backend", None) or base_backend,
+    }
+
+    unsupported = sorted(
+        (phase, backend)
+        for phase, backend in phase_backends.items()
+        # A backend SGLang has not decided yet is unknown, not unsupported. At
+        # CLI time that is every automatic backend; the engine's configuration
+        # carries the decision, and this runs again there.
+        if backend is not None and backend not in DCP_CAPABLE_ATTENTION_BACKENDS
+    )
+    if not unsupported:
+        return
+
+    named = ", ".join(
+        f"{phase} attention backend '{backend}'" for phase, backend in unsupported
+    )
+    automatic = (
+        ""
+        if backend_from_cli
+        else " SGLang selected it automatically because no attention backend was passed."
+    )
+    raise ValueError(
+        f"--dcp-size {dcp_size} is not supported with the {named}.{automatic} "
+        "Decode context parallel replicates the KV heads across DCP ranks when "
+        "it sizes the KV cache pool, but this backend still splits them across "
+        "tensor-parallel ranks, so the worker crashes on its first request. "
+        "Use --dcp-size 1, or an attention backend that implements decode "
+        "context parallel (--attention-backend triton), or an MLA model with "
+        "one of SGLang's MLA attention backends."
+    )
 
 
 def _has_cli_flag(args: list[str], flag: str) -> bool:
@@ -664,6 +774,9 @@ async def parse_args(args: list[str]) -> Config:
             "values are always higher priority at the API layer."
         )
 
+    backend_from_cli = _attention_backend_from_cli(parsed_args)
+    _validate_dcp_attention_backend(server_args, backend_from_cli=backend_from_cli)
+
     if dynamo_config.use_sglang_tokenizer:
         warnings.warn(
             "--use-sglang-tokenizer is deprecated and will be removed in a future "
@@ -704,7 +817,9 @@ async def parse_args(args: list[str]) -> Config:
 
     logging.debug(f"Dynamo configs: {dynamo_config}")
 
-    return Config(server_args, dynamo_config)
+    return Config(
+        server_args, dynamo_config, attention_backend_from_cli=backend_from_cli
+    )
 
 
 @contextlib.contextmanager
