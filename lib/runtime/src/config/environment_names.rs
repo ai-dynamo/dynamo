@@ -798,6 +798,15 @@ pub mod request_plane {
 
     /// Buffer size above which the TCP decoder shrinks an empty buffer, in bytes.
     pub const DYN_TCP_SHRINK_MESSAGE_SIZE: &str = "DYN_TCP_SHRINK_MESSAGE_SIZE";
+
+    /// Host or interface for the TCP request-plane server.
+    /// The server resolves the value once at startup. A loopback fallback
+    /// persists until restart, and an enumeration error fails server startup.
+    pub const DYN_TCP_RPC_HOST: &str = "DYN_TCP_RPC_HOST";
+
+    /// Port for the TCP request-plane server.
+    /// If unset, the OS assigns a free ephemeral port.
+    pub const DYN_TCP_RPC_PORT: &str = "DYN_TCP_RPC_PORT";
 }
 
 /// Response plane transport configuration.
@@ -813,10 +822,17 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// IP address or exact interface shared by the TCP request callback and QUIC response
-    /// listeners.
-    /// Unspecified addresses are rejected.
-    /// If unset, the server auto-detects a routable local IP.
+    /// Host or interface for the TCP response stream server and QUIC response listener.
+    ///
+    /// Accepts IPv4 and IPv6 literals, bracketed IPv6 literals, IPv4 or IPv6
+    /// wildcards, and interface names. Interface aliases such as `eth0:1` are
+    /// also accepted. If unset, the server selects the first usable
+    /// non-loopback IPv4 address, then IPv6, then IPv4 loopback, then IPv6
+    /// loopback. A wildcard uses a reachable address in its requested family.
+    /// If only the other family has a usable non-loopback address, the server
+    /// switches the bind wildcard to that family. The server resolves the value
+    /// once at startup. A loopback fallback persists until restart, and an
+    /// enumeration error fails server startup.
     pub const DYN_TCP_RESPONSE_STREAM_HOST: &str = "DYN_TCP_RESPONSE_STREAM_HOST";
 
     /// TCP request-plane TLS configuration
@@ -1142,6 +1158,8 @@ mod tests {
             response_plane::DYN_RESPONSE_PLANE,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
+            request_plane::DYN_TCP_RPC_HOST,
+            request_plane::DYN_TCP_RPC_PORT,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,

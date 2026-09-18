@@ -49,7 +49,7 @@ dynamo:
   # and uv rejects cache entries written by a newer version.
   uv_version: "0.12.0"
 
-  nats_version: v2.12.14
+  nats_version: v2.14.7
   etcd_version: v3.5.33
 
   nixl_ref: v1.3.2
@@ -91,6 +91,8 @@ vllm:
     runtime_image: vllm/vllm-openai-xpu
     base_image_tag: v0.27.1
     runtime_image_tag: v0.27.1
+    # Cross-reference: BaseOmniHandler filters unsupported parallel fields for
+    # this older Omni schema. Remove that workaround when bumping this pin.
     vllm_omni_ref: "v0.27.0rc1"
     baseline_sbom: vllm-openai-xpu@3309c2e1
   cpu:

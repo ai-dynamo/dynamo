@@ -56,6 +56,9 @@ class OmniDiffusionKwargs:
     cache_config: Optional[str] = None
     enable_cache_dit_summary: bool = False
     enable_cpu_offload: bool = False
+    task_type: Optional[str] = None
+    lora_path: Optional[list[str]] = None
+    diffusion_attention_backend: Optional[str] = None
     enforce_eager: bool = False
 
 
@@ -69,6 +72,7 @@ class OmniParallelKwargs:
     """
 
     ulysses_degree: int = 1
+    ulysses_a2a_permute: bool = False
     ring_degree: int = 1
     allgather_degree: int = 1
     cfg_parallel_size: int = 1
@@ -191,6 +195,32 @@ class OmniArgGroup(ArgGroup):
             default=False,
             help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
         )
+        add_argument(
+            g,
+            flag_name="--task-type",
+            env_var="DYN_OMNI_TASK_TYPE",
+            default=None,
+            help="Model-defined task or checkpoint partition selected at startup.",
+        )
+        add_argument(
+            g,
+            flag_name="--lora-path",
+            env_var="DYN_OMNI_LORA_PATH",
+            default=None,
+            nargs="+",
+            env_value_type=list,
+            help=(
+                "Diffusion checkpoint adapter path(s) fused by vLLM-Omni at "
+                "startup. This is separate from request-time LoRA loading."
+            ),
+        )
+        add_argument(
+            g,
+            flag_name="--diffusion-attention-backend",
+            env_var="DYN_OMNI_DIFFUSION_ATTENTION_BACKEND",
+            default=None,
+            help="vLLM-Omni diffusion attention backend.",
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--enforce-eager",
@@ -253,6 +283,17 @@ class OmniArgGroup(ArgGroup):
             default=1,
             arg_type=int,
             help="Number of GPUs used for Ulysses sequence parallelism in diffusion.",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--ulysses-a2a-permute",
+            env_var="DYN_OMNI_ULYSSES_A2A_PERMUTE",
+            default=False,
+            help=(
+                "Use vLLM-Omni's fused permute-free all-to-all for eligible "
+                "Ulysses exchanges. Requires --ulysses-degree > 1; enabling "
+                "it JIT-compiles a CUDA kernel at worker start."
+            ),
         )
         add_argument(
             g,

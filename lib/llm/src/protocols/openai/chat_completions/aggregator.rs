@@ -2649,6 +2649,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepseek_v41_batch_recovers_malformed_closed_arguments_as_text() {
+        let text = concat!(
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
+            "<｜DSML｜ parameter name=\"count\" string=\"false\">not-json</｜DSML｜ parameter>",
+            "</｜DSML｜ invoke></｜DSML｜ calls>"
+        );
+        let annotated_delta = create_test_delta(
+            0,
+            text,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+
+        let result = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(
+                Some("deepseek_v41".to_string()),
+                Some("deepseek_v41".to_string()),
+            ),
+        )
+        .await;
+
+        let response = result.expect("malformed parser output should fall back to text");
+        let choice = &response.inner.choices[0];
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string()))
+        );
+        assert!(choice.message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
     async fn test_disabled_tool_parsing_preserves_structured_content_with_name() {
         let json = r#"{"name":"Science Fair","date":"Friday","participants":["Alice","Bob"]}"#;
         let annotated_delta = create_test_delta(

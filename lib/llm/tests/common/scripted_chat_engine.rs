@@ -14,7 +14,8 @@ use dynamo_llm::protocols::{
 };
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
+    AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+    async_trait,
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -55,6 +56,7 @@ impl ScriptGate {
 pub struct ScriptedChatEngine {
     scripts: Mutex<VecDeque<QueuedScript>>,
     requests: Mutex<Vec<NvCreateChatCompletionRequest>>,
+    contexts: Mutex<Vec<std::sync::Arc<dyn AsyncEngineContext>>>,
 }
 
 impl ScriptedChatEngine {
@@ -68,6 +70,7 @@ impl ScriptedChatEngine {
                 kill_after_stop,
             }])),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
@@ -83,6 +86,7 @@ impl ScriptedChatEngine {
                     .collect(),
             ),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
@@ -100,6 +104,7 @@ impl ScriptedChatEngine {
                     release: release.clone(),
                 }])),
                 requests: Mutex::new(Vec::new()),
+                contexts: Mutex::new(Vec::new()),
             },
             ScriptGate { release },
         )
@@ -113,12 +118,18 @@ impl ScriptedChatEngine {
                 error,
             }])),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
     /// Remove and return all requests observed so far, in arrival order.
     pub async fn take_requests(&self) -> Vec<NvCreateChatCompletionRequest> {
         std::mem::take(&mut *self.requests.lock().await)
+    }
+
+    #[allow(dead_code)]
+    pub async fn take_contexts(&self) -> Vec<std::sync::Arc<dyn AsyncEngineContext>> {
+        std::mem::take(&mut *self.contexts.lock().await)
     }
 
     pub async fn remaining_scripts(&self) -> usize {
@@ -142,6 +153,7 @@ impl
         let ctx = context.context();
 
         self.requests.lock().await.push(request);
+        self.contexts.lock().await.push(ctx.clone());
         let script = self
             .scripts
             .lock()
