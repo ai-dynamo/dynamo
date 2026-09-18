@@ -1634,7 +1634,9 @@ class TestLoadQwenGridParams:
             pytest.param({}, 2048, id="missing"),
         ],
     )
-    def test_decode_embedding_dim(self, deepstack_config, expected_decode_embedding_dim):
+    def test_decode_embedding_dim(
+        self, deepstack_config, expected_decode_embedding_dim
+    ):
         processor = SimpleNamespace(
             patch_size=16, merge_size=2, min_pixels=65536, max_pixels=16777216
         )
