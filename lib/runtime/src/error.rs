@@ -570,6 +570,18 @@ impl PublicDetails {
     }
 }
 
+fn bounded_message(mut message: String) -> String {
+    if message.len() > Diagnostic::MAX_BYTES {
+        let mut end = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push_str(Diagnostic::TRUNCATION_SUFFIX);
+    }
+    message
+}
+
 /// Bounded operator-only diagnostic text.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostic {
@@ -582,17 +594,8 @@ impl Diagnostic {
     pub const TRUNCATION_SUFFIX: &'static str = "...[truncated]";
 
     pub fn new(value: impl Into<String>) -> Self {
-        let mut message = value.into();
-        if message.len() > Self::MAX_BYTES {
-            let mut end = Self::MAX_BYTES - Self::TRUNCATION_SUFFIX.len();
-            while !message.is_char_boundary(end) {
-                end -= 1;
-            }
-            message.truncate(end);
-            message.push_str(Self::TRUNCATION_SUFFIX);
-        }
         Self {
-            message,
+            message: bounded_message(value.into()),
             source: None,
         }
     }
@@ -1004,11 +1007,10 @@ impl DynamoErrorBuilder {
         self.diagnostic(message)
     }
 
-    /// Set a client-safe rejection message.
+    /// Set a bounded client-safe rejection message.
     pub fn public_message(mut self, message: impl Into<String>) -> Self {
-        self.public = Some(PublicDetails::Message {
-            message: message.into(),
-        });
+        let message = bounded_message(message.into());
+        self.public = Some(PublicDetails::Message { message });
         self
     }
 
@@ -1352,6 +1354,21 @@ mod tests {
                 .is_char_boundary(diagnostic.as_str().len())
         );
         assert!(diagnostic.as_str().ends_with(Diagnostic::TRUNCATION_SUFFIX));
+    }
+
+    #[test]
+    fn public_message_is_bounded_at_utf8_boundary() {
+        let truncation_index = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
+        let message = "x".repeat(truncation_index - 1) + "é" + &"x".repeat(Diagnostic::MAX_BYTES);
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .public_message(message)
+            .build();
+        let public_message = error.public_message().unwrap();
+
+        assert!(public_message.len() <= Diagnostic::MAX_BYTES);
+        assert!(public_message.is_char_boundary(public_message.len()));
+        assert!(public_message.ends_with(Diagnostic::TRUNCATION_SUFFIX));
     }
 
     #[test]

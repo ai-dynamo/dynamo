@@ -804,8 +804,38 @@ impl KvRouter {
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let client_for_availability = client.clone();
-        let available_worker_provider: WorkerAvailabilityProvider =
-            Arc::new(move || client_for_availability.available_instance_ids());
+        let workers_for_availability = workers_with_configs.clone();
+        let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
+            let available = client_for_availability.available_instance_ids();
+            let (Some(filter), Some(lora_name)) =
+                (lora_filter.as_ref(), request.lora_name.as_deref())
+            else {
+                return available;
+            };
+            let candidates: Vec<_> = match (&request.allowed_worker_ids, available.as_ref()) {
+                (Some(allowed), _) => allowed
+                    .iter()
+                    .filter(|id| {
+                        available
+                            .as_ref()
+                            .is_none_or(|workers| workers.contains(*id))
+                    })
+                    .copied()
+                    .collect(),
+                (None, Some(available)) => available.iter().copied().collect(),
+                (None, None) => workers_for_availability.borrow().keys().copied().collect(),
+            };
+            Some(Arc::new(
+                filter
+                    .filter_worker_ids_for_lora_with_pin(
+                        Some(lora_name),
+                        &candidates,
+                        request.pinned_worker.map(|worker| worker.worker_id),
+                    )
+                    .into_iter()
+                    .collect(),
+            ))
+        });
 
         let request_leases =
             request_lease::RequestLeaseManager::new(cancellation_token.child_token());
@@ -821,9 +851,8 @@ impl KvRouter {
                 overloaded_worker_provider,
                 available_worker_provider,
                 shared_cache: shared_cache.clone(),
-                lora_worker_filter: lora_filter.map(|filter| {
-                    filter as Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>
-                }),
+                // The availability provider refreshes LoRA eligibility at admission.
+                lora_worker_filter: None,
                 ingress: Arc::clone(&ingress)
                     as Arc<dyn dynamo_kv_router::services::selection::KvEventIngress>,
                 scheduler_load,
@@ -2875,6 +2904,161 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn queued_lora_requests_refresh_registration_without_widening_constraints() {
+        use crate::lora::state_tracker::LoraWorkerProjection;
+        use crate::lora::{LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker};
+        use crate::model_card::LoraInfo;
+
+        let tracker = LoraStateTracker::new();
+        let publish = |loaded: &[u64]| {
+            tracker.replace_endpoint_projection(
+                [1, 2]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            WorkerWithDpRank::new(id, 0),
+                            LoraWorkerProjection {
+                                capacity: 4,
+                                loras: loaded
+                                    .contains(&id)
+                                    .then(|| LoraInfo {
+                                        name: "adapter".into(),
+                                        max_gpu_lora_count: Some(4),
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                                is_registration_required: true,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+        };
+        let routing = LoraRoutingTable::new();
+        routing.update_allocation(
+            "adapter".into(),
+            LoraReplicaConfig {
+                lora_name: "adapter".into(),
+                replica_factor: 1,
+                replica_set: vec![WorkerWithDpRank::new(1, 0)],
+                updated_at: Instant::now(),
+                is_active: false,
+            },
+        );
+        let component = make_test_component("queued-lora-router").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(
+            [1, 2]
+                .into_iter()
+                .map(|id| (id, ModelRuntimeConfig::default()))
+                .collect(),
+        );
+        let router = KvRouter::new(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                overlap_score_credit: 0.0,
+                router_temperature: 0.0,
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                skip_initial_worker_wait: true,
+                router_queue_threshold: Some(0.0),
+                ..Default::default()
+            }),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            Some(Arc::new(LoraFilter::new(routing, tracker.clone()))),
+        )
+        .await
+        .unwrap();
+        let route = |id, lora_name, pinned_worker, allowed_worker_ids| {
+            router.find_best_match_details_with_policy_class(
+                Some(id),
+                &[1, 2],
+                None,
+                None,
+                true,
+                false,
+                lora_name,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                pinned_worker,
+                allowed_worker_ids,
+                RoutingConstraints::default(),
+            )
+        };
+
+        for (pin, allowed, retained, expected) in [
+            (None, Some(HashSet::from([1, 2])), vec![2], Some(2)),
+            (Some(WorkerWithDpRank::new(1, 0)), None, vec![2], None),
+            (None, Some(HashSet::from([1])), vec![2], None),
+            (None, None, vec![], None),
+        ] {
+            publish(&[1, 2]);
+            for (id, worker) in [("busy-a", 1), ("busy-b", 2)] {
+                route(id, None, Some(WorkerWithDpRank::new(worker, 0)), None)
+                    .await
+                    .unwrap();
+            }
+            let queued = route("queued", Some("adapter".into()), pin, allowed);
+            tokio::pin!(queued);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::select! {
+                    _ = &mut queued => panic!("request bypassed queue"),
+                    _ = async {
+                        while router.pending_count() != 1 {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap();
+
+            publish(&retained);
+            router.mark_prefill_completed("busy-a").await.unwrap();
+            if expected.is_some() {
+                assert_eq!(router.pending_count(), 1, "remaining replica is still busy");
+            }
+            router.mark_prefill_completed("busy-b").await.unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+                .await
+                .unwrap();
+            match expected {
+                Some(id) => {
+                    assert!(
+                        matches!(result.unwrap(), FindBestMatchOutcome::Routed { worker, .. } if worker.worker_id == id)
+                    );
+                    router.free("queued").await.unwrap();
+                }
+                None => assert!(matches!(
+                    result
+                        .err()
+                        .expect("no eligible worker")
+                        .downcast_ref::<KvSchedulerError>(),
+                    Some(KvSchedulerError::NoEndpoints)
+                )),
+            }
+            assert_eq!(router.pending_count(), 0);
+            for id in ["busy-a", "busy-b"] {
+                router.free(id).await.unwrap();
+            }
+        }
     }
 
     /// Picks worker 0 and records which construction it belongs to. Its
