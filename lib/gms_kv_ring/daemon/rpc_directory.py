@@ -957,9 +957,9 @@ def handle_directory_publish_batch(
             daemon._content_directory[key] = entry
             _directory_touch_locked(daemon, entry)
             for slot_id in slot_ids:
-                daemon._content_directory_by_slot[(manifest_id, engine_id, slot_id)] = (
-                    content_hash
-                )
+                daemon._content_directory_by_slot[
+                    (manifest_id, engine_id, slot_id)
+                ] = content_hash
             _directory_record_change_locked(daemon, key, entry)
             published += 1
         epoch = int(daemon._content_directory_epoch)
