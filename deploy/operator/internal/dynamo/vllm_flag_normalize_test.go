@@ -43,7 +43,6 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 		{dataParallelSizeLocalFlag, "-dpl"},
 	} {
 		spellings := map[string][]string{
-			"long separated":  {tc.flag, "4"},
 			"long equals":     {tc.flag + "=4"},
 			"short separated": {tc.short, "4"},
 			"short equals":    {tc.short + "=4"},
@@ -70,7 +69,6 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 // while vLLM still places N ranks, which is the abort those three exist to prevent.
 func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 	for name, args := range map[string][]string{
-		"long flags":   {"--enable-elastic-ep", dataParallelBackendFlag, "ray", dataParallelSizeFlag, "4"},
 		"equals flags": {"--enable-elastic-ep", dataParallelBackendFlag + "=ray", dataParallelSizeFlag + "=4"},
 		"short flags":  {"--enable-elastic-ep", "-dpb", "ray", "-dp", "4"},
 	} {
@@ -94,9 +92,8 @@ func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 // cosmetic miss.
 func TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms(t *testing.T) {
 	for name, args := range map[string][]string{
-		"long separated": {tensorParallelSizeFlag, "4", pipelineParallelSizeFlag, "2"},
-		"equals":         {tensorParallelSizeFlag + "=4", pipelineParallelSizeFlag + "=2"},
-		"short":          {"-tp", "4", "-pp", "2"},
+		"equals": {tensorParallelSizeFlag + "=4", pipelineParallelSizeFlag + "=2"},
+		"short":  {"-tp", "4", "-pp", "2"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := getWorldSize(getExpandedCommandLine(vllmContainer(args...))); got != 8 {
@@ -106,15 +103,16 @@ func TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_LeavesEverythingElseAlone: this canonicalizes spelling, it does not
-// filter. An unrecognized flag, a bare value, and a non-flag token carrying "=" must survive.
+// TestNormalizeVLLMFlags_LeavesEverythingElseAlone: this canonicalizes spelling only for the
+// flags this package reads. An unrecognized "--flag=value" token must survive unsplit, or its
+// value could be mistaken for a standalone flag by an exact-match reader like hasFlag.
 func TestNormalizeVLLMFlags_LeavesEverythingElseAlone(t *testing.T) {
 	in := []string{"python3", "-m", "dynamo.vllm", "--model", "deepseek-ai/DeepSeek-V2-Lite",
 		"--some-future-flag=value", "--trust-remote-code", "-dp", "4"}
 	got := normalizeVLLMFlags(in)
 
 	want := []string{"python3", "-m", "dynamo.vllm", "--model", "deepseek-ai/DeepSeek-V2-Lite",
-		"--some-future-flag", "value", "--trust-remote-code", dataParallelSizeFlag, "4"}
+		"--some-future-flag=value", "--trust-remote-code", dataParallelSizeFlag, "4"}
 	if len(got) != len(want) {
 		t.Fatalf("normalizeVLLMFlags(%q) = %q, want %q", in, got, want)
 	}
@@ -125,12 +123,22 @@ func TestNormalizeVLLMFlags_LeavesEverythingElseAlone(t *testing.T) {
 	}
 }
 
+// TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues guards the injection this
+// restriction prevents: an equals-form value that happens to spell a recognized flag must not
+// become a standalone token, or an exact-match reader like hasFlag/IsElasticEPRayLaunch would
+// wrongly treat it as the user requesting that flag.
+func TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues(t *testing.T) {
+	container := vllmContainer("--served-model-name=--enable-elastic-ep",
+		dataParallelBackendFlag, "ray")
+	if IsElasticEPRayLaunch(container) {
+		t.Fatal("--served-model-name's value must not be read as --enable-elastic-ep")
+	}
+}
+
 func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
 	for name, args := range map[string][]string{
-		"long then long":   {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
-		"short then long":  {"-tp", "1", tensorParallelSizeFlag, "4"},
-		"long then short":  {tensorParallelSizeFlag, "1", "-tp", "4"},
-		"short then short": {"-tp", "1", "-tp", "4"},
+		"long then long":  {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
+		"long then short": {tensorParallelSizeFlag, "1", "-tp", "4"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)

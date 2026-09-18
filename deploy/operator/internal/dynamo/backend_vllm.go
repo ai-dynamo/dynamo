@@ -597,10 +597,23 @@ var vllmShortFlagAliases = map[string]string{
 	"-dpb": dataParallelBackendFlag,
 }
 
+// vllmNormalizedFlags is the set of canonical long flags this package's readers (hasFlag,
+// hasArg, getFlagValue) actually look for. Equals-form splitting in normalizeVLLMFlags is
+// restricted to these so an unrelated option's value can never be mistaken for one of them
+// after normalization -- e.g. "--served-model-name=--enable-elastic-ep" must stay one token,
+// not become a standalone "--enable-elastic-ep" that IsElasticEPRayLaunch would match.
+var vllmNormalizedFlags = map[string]bool{
+	tensorParallelSizeFlag:    true,
+	pipelineParallelSizeFlag:  true,
+	dataParallelSizeFlag:      true,
+	dataParallelSizeLocalFlag: true,
+	dataParallelBackendFlag:   true,
+}
+
 // normalizeVLLMFlags standardizes tokenized command-line arguments into a
 // single format: "--long-flag" followed by a separate "value" token. It
 // expands short aliases (e.g., "-dp" to "--data-parallel-size") and splits
-// combined pairs (e.g., "--flag=value").
+// combined pairs (e.g., "--flag=value") for the flags this package reads.
 //
 // Motivation:
 // vLLM accepts multiple flag formats ("--flag 4", "--flag=4", "-f 4").
@@ -610,14 +623,20 @@ var vllmShortFlagAliases = map[string]string{
 // silently defaulting to 1 and causing critical downstream bugs.
 //
 // Normalizing early at the tokenizer ensures all downstream readers receive
-// a single, predictable format, eliminating parser drift. Unrecognized flags
-// are passed through untouched.
+// a single, predictable format, eliminating parser drift. Everything else,
+// including equals-form options this package does not read, is passed
+// through untouched -- splitting every token on "=" would risk turning an
+// unrelated option's value into an apparent flag.
 func normalizeVLLMFlags(expanded []string) []string {
 	normalized := make([]string, 0, len(expanded))
 	for _, arg := range expanded {
 		flag, value, hasEquals := strings.Cut(arg, "=")
 		if canonical, ok := vllmShortFlagAliases[flag]; ok {
 			flag = canonical
+		}
+		if hasEquals && !vllmNormalizedFlags[flag] {
+			normalized = append(normalized, arg)
+			continue
 		}
 		normalized = append(normalized, flag)
 		if hasEquals {
