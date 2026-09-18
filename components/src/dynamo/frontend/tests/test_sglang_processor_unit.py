@@ -864,11 +864,15 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
         assert tcp is not None
         assert rp is not None
 
-    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(self, monkeypatch):
+    @pytest.mark.parametrize("tokenizer", [None, object()])
+    def test_minimax_m3_dynamo_aliases_are_normalized_for_sglang(
+        self, monkeypatch, tokenizer
+    ):
         """Dynamo parser aliases should not leak into SGLang parser lookup."""
 
         # Test double: capture the parser name Dynamo passes to SGLang without
-        # depending on SGLang's real parser implementation.
+        # depending on SGLang's real parser implementation. Their signatures
+        # also cover SGLang versions without checkpoint-tokenizer support.
         class FakeFunctionCallParser:
             def __init__(self, *, tools, tool_call_parser):
                 self.tools = tools
@@ -906,6 +910,7 @@ class TestCreateParsers:  # FRONTEND.2 — tool/reasoning parser dispatch
             },
             tool_call_parser_name="minimax-m3-nom",
             reasoning_parser_name="minimax_m3",
+            tokenizer=tokenizer,
         )
 
         assert tcp.tool_call_parser == "minimax-m3"
@@ -1550,7 +1555,10 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             is None
         )
 
-    def test_auto_tool_guidance_normalizes_minimax_m3_alias(self, monkeypatch):
+    @pytest.mark.parametrize("tokenizer", [None, object()])
+    def test_auto_tool_guidance_normalizes_minimax_m3_alias(
+        self, monkeypatch, tokenizer
+    ):
         tools = convert_tools(
             [
                 {
@@ -1583,6 +1591,7 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
             {"tool_choice": "auto"},
             tool_call_parser_name="minimax_m3_nom",
             sglang_tools=tools,
+            tokenizer=tokenizer,
         )
 
         assert seen["tool_call_parser"] == "minimax-m3"
