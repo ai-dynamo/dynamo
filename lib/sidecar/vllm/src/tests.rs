@@ -1071,6 +1071,7 @@ fn compatibility_envelope_preserves_typed_controls() {
             })
             .sampling_options(SamplingOptions {
                 n: Some(1),
+                temperature: Some(1.0),
                 ..Default::default()
             })
             .output_options(OutputOptions::default())
@@ -1205,40 +1206,58 @@ fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
     assert_eq!(legacy.output_options.prompt_logprobs, Some(3));
     assert_eq!(legacy.output_options.skip_special_tokens, Some(false));
 
-    let mut canonical = legacy;
+    let mut canonical = legacy.clone();
     canonical.sampling_options.temperature = Some(0.4);
     canonical.stop_conditions.stop_token_ids = Some(vec![7]);
     let canonical = normalize_response_options(canonical).expect("keep canonical controls");
     assert_eq!(canonical.sampling_options.temperature, Some(0.4));
     assert_eq!(canonical.stop_conditions.stop_token_ids, Some(vec![7]));
+
+    let mut canonical_hidden = legacy;
+    canonical_hidden.stop_conditions.stop_token_ids = None;
+    canonical_hidden.stop_conditions.stop_token_ids_hidden = Some(vec![7]);
+    let canonical_hidden =
+        normalize_response_options(canonical_hidden).expect("keep canonical hidden stops");
+    assert_eq!(canonical_hidden.stop_conditions.stop_token_ids, None);
+    assert_eq!(
+        canonical_hidden.stop_conditions.stop_token_ids_hidden,
+        Some(vec![7])
+    );
 }
 
 #[test]
-fn native_generate_normalizes_disabled_sampling_controls() {
+fn native_generate_rejects_unrepresentable_sampling_controls() {
     let mut defaults = request();
     defaults.sampling_options.temperature = None;
-    let wire = build_generate_request(
+    let error = build_generate_request(
         defaults,
         "defaults".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect("native Generate defaults temperature to HTTP semantics");
-    assert_eq!(wire.temperature, Some(1.0));
+    .expect_err("omitted temperature cannot preserve model defaults over proto 0.3");
+    assert!(error.to_string().contains("temperature"));
 
     for top_k in [-1, 0] {
         let mut disabled = request();
         disabled.sampling_options.top_k = Some(top_k);
-        disabled.sampling_options.min_p = Some(0.0);
-        let wire = build_generate_request(
+        let error = build_generate_request(
             disabled,
             "disabled".to_string(),
             DisaggregationMode::Aggregated,
         )
-        .expect("disabled sampling controls map to protobuf defaults");
-        let sampling = wire.sampling.expect("sampling parameters");
-        assert_eq!(sampling.top_k, 0);
-        assert_eq!(sampling.min_p, 0.0);
+        .expect_err("disabled top_k cannot be represented by proto 0.3");
+        assert!(error.to_string().contains("top_k"));
     }
+
+    let mut disabled = request();
+    disabled.sampling_options.min_p = Some(0.0);
+    let error = build_generate_request(
+        disabled,
+        "disabled".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("disabled min_p cannot be represented by proto 0.3");
+    assert!(error.to_string().contains("min_p"));
 }
 
 #[test]
@@ -3827,7 +3846,7 @@ fn preprocessed_multimodal_identifier_is_scoped_by_lora() {
 }
 
 #[test]
-fn renderer_null_mm_metadata_is_accepted_but_non_null_metadata_fails_closed() {
+fn renderer_mm_metadata_is_accepted_with_complete_inline_kwargs() {
     let mut with_null = image_features(VALID_MM_KWARGS_BASE64);
     with_null["mm_metadata"] = serde_json::Value::Null;
     build_generate_request(
@@ -3838,14 +3857,27 @@ fn renderer_null_mm_metadata_is_accepted_but_non_null_metadata_fails_closed() {
     .expect("the vLLM renderer serializes mm_metadata as null");
 
     let mut with_metadata = image_features(VALID_MM_KWARGS_BASE64);
-    with_metadata["mm_metadata"] = json!({"image": [{"cache_only": true}]});
-    let error = build_generate_request(
+    with_metadata["mm_metadata"] = json!({"image": [{"image_grid_thw": [1, 2, 3]}]});
+    build_generate_request(
         request_with_preprocessed_features(with_metadata),
         "request-non-null-metadata".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect_err("unsupported metadata-only inputs must fail closed");
-    assert!(error.to_string().contains("mm_metadata"));
+    .expect("redundant renderer metadata is allowed with complete inline kwargs");
+
+    let mut metadata_only = image_features(VALID_MM_KWARGS_BASE64);
+    metadata_only["mm_metadata"] = json!({"image": [{"image_grid_thw": [1, 2, 3]}]});
+    metadata_only
+        .as_object_mut()
+        .expect("feature object")
+        .remove("kwargs_data");
+    let error = build_generate_request(
+        request_with_preprocessed_features(metadata_only),
+        "request-metadata-only".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("renderer metadata without inline kwargs must fail closed");
+    assert!(error.to_string().contains("kwargs_data"));
 }
 
 #[test]

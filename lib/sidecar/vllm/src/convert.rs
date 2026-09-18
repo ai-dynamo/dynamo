@@ -32,8 +32,8 @@ struct VllmTitoFeatures {
     mm_hashes: BTreeMap<String, Vec<String>>,
     mm_placeholders: BTreeMap<String, Vec<VllmTitoPlaceholder>>,
     kwargs_data: BTreeMap<String, Vec<String>>,
-    #[serde(default)]
-    mm_metadata: Option<serde_json::Value>,
+    #[serde(default, rename = "mm_metadata")]
+    _mm_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,11 +332,15 @@ pub(crate) fn normalize_response_options(
         &sampling,
         "min_tokens",
     )?;
-    hydrate_option(
-        &mut request.stop_conditions.stop_token_ids,
-        &sampling,
-        "stop_token_ids",
-    )?;
+    if request.stop_conditions.stop_token_ids.is_none()
+        && request.stop_conditions.stop_token_ids_hidden.is_none()
+    {
+        hydrate_option(
+            &mut request.stop_conditions.stop_token_ids,
+            &sampling,
+            "stop_token_ids",
+        )?;
+    }
     hydrate_option(
         &mut request.stop_conditions.ignore_eos,
         &sampling,
@@ -768,11 +772,6 @@ fn build_preprocessed_media(
     routing_hashes: Option<&[String]>,
     lora_name: &str,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
-    if features.mm_metadata.is_some() {
-        return Err(client::invalid_argument(
-            "preprocessed multimodal mm_metadata is not supported by vLLM gRPC",
-        ));
-    }
     if features.mm_hashes.is_empty() {
         return Err(client::invalid_argument(
             "preprocessed multimodal features must not be empty",
@@ -1209,6 +1208,23 @@ fn validate_request(
     }
     if sampling.use_beam_search.unwrap_or(false) {
         return Err(client::invalid_argument("beam search is not supported"));
+    }
+    if !mode.is_prefill() && !mode.is_encode() {
+        if sampling.temperature.is_none() {
+            return Err(client::invalid_argument(
+                "temperature must be explicit because vllm-proto 0.3 cannot preserve model defaults",
+            ));
+        }
+        if matches!(sampling.top_k, Some(-1 | 0)) {
+            return Err(client::invalid_argument(
+                "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.3",
+            ));
+        }
+        if sampling.min_p == Some(0.0) {
+            return Err(client::invalid_argument(
+                "min_p=0 cannot be represented by vllm-proto 0.3",
+            ));
+        }
     }
     if let Some(length_penalty) = sampling.length_penalty
         && (length_penalty - 1.0).abs() > f32::EPSILON
