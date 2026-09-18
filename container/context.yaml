@@ -47,7 +47,7 @@ dynamo:
   # Planner-scoped interpreter. The planner uses a separate, newer CPython line
   # from the global python_version below because it is the only stage whose
   # interpreter is decoupled from the framework/runtime bases: the build stage
-  # FROMs python:${planner_build_image_tag}-slim (Docker Hub), and the runtime
+  # FROMs python:${planner_build_image_tag} (Docker Hub), and the runtime
   # stage FROMs nvcr.io/nvidia/distroless/python:${planner_runtime_image_tag}.
   # Neither of those images pin the frontend or framework stacks. The global
   # python_version cannot follow because (a) frontend.Dockerfile apt-installs
