@@ -606,12 +606,10 @@ mod tests {
         .expect("a 20ms deadline is not expired, so a timer is armed");
 
         assert!(
-            matches!(
-                record.backend,
-                SleepBackend::Timerfd | SleepBackend::TimeDriver
-            ),
-            "the default path returned unresolved backend {}",
-            record.backend.label()
+            record.actual >= record.requested,
+            "sleep returned early (actual {:?}, requested {:?})",
+            record.actual,
+            record.requested
         );
     }
 
