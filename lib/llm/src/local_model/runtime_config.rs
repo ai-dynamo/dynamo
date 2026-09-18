@@ -624,6 +624,18 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
         ));
     }
 
+    // Range validation alone accepts NaN. Enforce finite routing weights
+    // here so every configuration source receives the same validation.
+    if config
+        .kv_transfer_preferred_weight
+        .is_some_and(|weight| !weight.is_finite())
+    {
+        return Err(validation_error(
+            "invalid_kv_transfer_preferred_weight",
+            "kv_transfer_preferred_weight must be finite",
+        ));
+    }
+
     if config.kv_transfer_preferred_weight.is_some()
         && !matches!(
             config.kv_transfer_enforcement,
@@ -1286,6 +1298,13 @@ mod tests {
     fn test_validate_config_rejects_invalid_topology_components() {
         for config in [
             ModelRuntimeConfig {
+                topology_domains: HashMap::from([(
+                    "zone".to_string(),
+                    "invalid=value".to_string(),
+                )]),
+                ..Default::default()
+            },
+            ModelRuntimeConfig {
                 topology_domains: HashMap::from([("".to_string(), "us-east-1a".to_string())]),
                 ..Default::default()
             },
@@ -1298,6 +1317,23 @@ mod tests {
             },
         ] {
             assert!(config.validate_config().is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_invalid_kv_transfer_weights() {
+        for weight in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 1.1] {
+            let config = ModelRuntimeConfig {
+                topology_domains: HashMap::from([("zone".to_string(), "zone-a".to_string())]),
+                kv_transfer_domain: Some("zone".to_string()),
+                kv_transfer_enforcement: Some(KvTransferEnforcement::Preferred),
+                kv_transfer_preferred_weight: Some(weight),
+                ..Default::default()
+            };
+            assert!(
+                config.validate_config().is_err(),
+                "invalid preferred weight {weight} must be rejected"
+            );
         }
     }
 
