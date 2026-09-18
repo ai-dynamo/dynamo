@@ -6,13 +6,14 @@
 # from lib/sidecar/Dockerfile and replace <your-registry> before applying.
 #
 # main owns the GPU and engine. The operator injects Dynamo configuration into
-# initContainers[name=dynamo]. The unauthenticated engine gRPC stays on loopback;
-# exec probes check SERVING for both vllm.Control and vllm.Inference.
-# The setup init downloads a pinned, checksum-verified grpc_health_probe binary.
+# initContainers[name=dynamo]. Native gRPC probes check aggregate engine health
+# (both vllm.Control and vllm.Inference) on port 50051 with an empty service name.
+# The engine listens on 0.0.0.0 for kubelet probes to the pod IP; the sidecar uses
+# loopback. Keep the unauthenticated engine endpoint on a trusted pod network.
 #
 # Requires the early HTTP/probe behavior from https://github.com/ai-dynamo/dynamo/pull/15051.
 # The operator injects startup/liveness on /live and readiness on /health.
-# Sidecar probes are independent of engine loading; engine exec probes gate pod
+# Sidecar probes are independent of engine loading; engine gRPC probes gate pod
 # readiness. Raise only the engine startup budget for larger models.
 # Engine restart recovery remains deferred to DEP #14897.
 
@@ -37,24 +38,6 @@ spec:
     podTemplate:
       spec:
         initContainers:
-        - name: install-health-probe
-          image: busybox:1.37.0
-          command:
-          - /bin/sh
-          - -c
-          - |
-            set -eu
-            case "$(uname -m)" in
-              x86_64) arch=amd64; checksum=1844b07e78a40cb713f55f1a5d2eb717c777ffd2c79a3c8fc696e8b62046e239 ;;
-              aarch64) arch=arm64; checksum=98b10a42ad9d3442fef01d235284ca753088391c7dd593aca10bd04ec50333d9 ;;
-              *) echo "Unsupported architecture" >&2; exit 1 ;;
-            esac
-            wget -q -O /health-probes/grpc_health_probe "https://github.com/grpc-ecosystem/grpc-health-probe/releases/download/v0.4.38/grpc_health_probe-linux-${arch}"
-            echo "${checksum}  /health-probes/grpc_health_probe" | sha256sum -c -
-            chmod 0555 /health-probes/grpc_health_probe
-          volumeMounts:
-          - name: health-probes
-            mountPath: /health-probes
         - name: dynamo
           image: <your-registry>/dynamo-sidecar:1.6.0
           command:
@@ -70,24 +53,14 @@ spec:
         - name: main
           image: vllm/vllm-openai:v0.28.0
           startupProbe:
-            exec:
-              command:
-              - /bin/sh
-              - -c
-              - /health-probes/grpc_health_probe -addr=127.0.0.1:50051 -service=vllm.Control -connect-timeout=1s
-                -rpc-timeout=1s && exec /health-probes/grpc_health_probe -addr=127.0.0.1:50051 -service=vllm.Inference
-                -connect-timeout=1s -rpc-timeout=1s
+            grpc:
+              port: 50051
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 60
           readinessProbe:
-            exec:
-              command:
-              - /bin/sh
-              - -c
-              - /health-probes/grpc_health_probe -addr=127.0.0.1:50051 -service=vllm.Control -connect-timeout=1s
-                -rpc-timeout=1s && exec /health-probes/grpc_health_probe -addr=127.0.0.1:50051 -service=vllm.Inference
-                -connect-timeout=1s -rpc-timeout=1s
+            grpc:
+              port: 50051
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -103,12 +76,5 @@ spec:
           - /bin/sh
           - -c
           - exec "$(python3 -c 'import os,vllm; print(os.path.join(os.path.dirname(vllm.__file__), "vllm-rs"))')"
-            serve Qwen/Qwen3-0.6B --host 127.0.0.1 --grpc-port 50051
-          volumeMounts:
-          - name: health-probes
-            mountPath: /health-probes
-            readOnly: true
-        volumes:
-        - name: health-probes
-          emptyDir: {}
+            serve Qwen/Qwen3-0.6B --host 0.0.0.0 --grpc-port 50051
   backendFramework: vllm
