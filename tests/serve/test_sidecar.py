@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""E2E coverage for lib/sidecar/{vllm,sglang,trtllm}/launch/agg.sh (native-gRPC sidecar + engine)."""
+"""E2E coverage for lib/sidecar/{vllm,sglang,trtllm}/launch/*.sh (native-gRPC sidecar + engine).
+
+Aggregated for all three sidecars; disaggregated for TensorRT-LLM, which is the
+only one whose prefill/decode launcher this suite drives so far.
+"""
 
 import dataclasses
 import importlib.util
@@ -121,6 +125,38 @@ sidecar_configs = {
             # Kept for parity with the dynamo.trtllm scenario in test_trtllm.py,
             # though this sidecar rejects `n > 1` in `validate_request` before
             # the engine ever sees it.
+            "TLLM_ALLOW_N_GREEDY_DECODING": "1",
+            "PYTHONUNBUFFERED": "1",
+        },
+        request_payloads=[
+            chat_payload_default(),
+        ],
+    ),
+    # The disaggregated launcher runs two engines and two sidecars, so it is
+    # the only config here that uses both DYN_SYSTEM_PORT1 and _PORT2 -- which
+    # is what `num_system_ports=2` on the test is sized for. A green run proves
+    # the prefill worker produced a `KvSessionRef` handoff and the decode worker
+    # replayed it: with the handoff broken, the decode leg has no KV to resume
+    # and the request fails rather than returning a short answer.
+    "trtllm_disaggregated": EngineConfig(
+        name="trtllm_disaggregated",
+        directory=trtllm_sidecar_dir,
+        script_name="disagg.sh",
+        marks=[
+            pytest.mark.trtllm,
+            # Prefill on GPU 0, decode on GPU 1 -- the launcher's defaults.
+            pytest.mark.gpu_2,
+            # Two engines load serially before either sidecar can register, so
+            # this needs longer than the single-engine configs above.
+            pytest.mark.timeout(1200),
+            pytest.mark.pre_merge,
+            pytest.mark.skipif(
+                not _trtllm_serves_openengine(),
+                reason=TRTLLM_OPENENGINE_SKIP_REASON,
+            ),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        env={
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
         },
