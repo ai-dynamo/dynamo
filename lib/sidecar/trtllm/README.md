@@ -138,6 +138,15 @@ dynamo-trtllm-sidecar --disaggregation-mode decode \
   --grpc-endpoint 127.0.0.1:50052 --model-path <model>
 ```
 
+`launch/disagg.sh` brings up the whole topology on two GPUs — frontend, both
+engines with a cache transceiver, and both sidecars:
+
+```bash
+./lib/sidecar/trtllm/launch/disagg.sh --model <model>
+```
+
+Run `--help` for the ports, GPU assignment, and transceiver backend it accepts.
+
 Both engines must be started with a KV cache transceiver so they can move KV
 cache between themselves (`cache_transceiver_config`); without it the engines
 cannot complete the handoff. Use the default `NIXL` backend — it picks its own
@@ -207,6 +216,10 @@ single-architecture build.
 In `deploy/agg.yaml`, set the `main` worker image to the one you just pushed.
 If your registry is private, add `imagePullSecrets` to the worker pod spec.
 
+Set both images in `deploy/disagg.yaml` instead to deploy disaggregated, and
+read its header first: it requests `rdma/ib` on both engines for the KV
+transfer, which you drop if your fabric does not need it.
+
 ### 3. Create the Hugging Face token secret
 
 Read the token from an env var so it stays out of your shell history (or use
@@ -221,9 +234,12 @@ kubectl create secret generic hf-token-secret \
 
 ```bash
 kubectl apply -f lib/sidecar/trtllm/deploy/agg.yaml -n <namespace>
+# ...or, for prefill/decode on two GPUs:
+kubectl apply -f lib/sidecar/trtllm/deploy/disagg.yaml -n <namespace>
 ```
 
-Wait for the worker pod to reach `2/2 Running`:
+Wait for the worker pod to reach `2/2 Running` (both of them, deploying
+disaggregated):
 
 ```bash
 kubectl get pods -n <namespace> -w
@@ -235,6 +251,7 @@ Port-forward the frontend and call it:
 
 ```bash
 kubectl port-forward -n <namespace> svc/trtllm-sidecar-agg-frontend 8000:8000 &
+# disaggregated: svc/trtllm-sidecar-disagg-frontend
 
 curl -s localhost:8000/v1/models | jq .
 
