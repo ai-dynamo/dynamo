@@ -1,30 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# InfiniBand fabric attachment for the NIXL KV transfer between prefill and decode.
-#
-# This is cluster networking, not model configuration. Both settings are
-# site-specific and must be checked against your own cluster before use:
-#
-#   - The RDMA extended-resource name. `rdma/shared_ib` is one common spelling;
-#     others expose `rdma/ib` or `rdma/rdma_shared_device_a`. Prefer a shared
-#     flavour: with an exclusive-mode resource, two co-located workers each
-#     claiming HCAs can deadlock NCCL bootstrap.
-#   - UCX_TLS. `rc_x`/`rc` are the InfiniBand verbs transports and are wrong on
-#     a RoCE or EFA fabric. `tcp` is omitted on purpose so a misconfigured
-#     fabric fails loudly rather than silently falling back to a slow transport.
-#
-# Verify the transport engaged before trusting any measurement: read
-# `vllm:nixl_xfer_time_seconds` from a decode worker and divide _sum by _count.
-# A KV transfer should take milliseconds, not seconds.
-#
-# These are JSON 6902 patches rather than a strategic merge because of `spec.env`.
-# The bundled OpenAPI document gives `spec.components` a merge key of `name`, so a
-# strategic merge would target the right component -- but `spec.env` has no merge
-# key, so merging a single variable REPLACES the whole list and silently drops
-# MODEL_NAME, HF_HOME and the rest. One JSON patch keeps both halves correct, and
-# is also immune to the alphabetical reordering kustomize applies to the
-# components list.
+# Merging `spec.env` by name needs the merge key that ai-dynamo/dynamo#15064 adds to
+# the generated Kustomize OpenAPI document. Without it kustomize treats `spec.env` as
+# an atomic list, and this patch would REPLACE the base environment rather than add to
+# it -- silently dropping MODEL_NAME and HF_HOME. `render --check` catches that.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 patches:
@@ -33,25 +12,4 @@ patches:
       version: v1beta1
       kind: DynamoGraphDeployment
       name: k-exaone-2-disagg
-    patch: |-
-      - op: add
-        path: /spec/env/-
-        value: {name: UCX_TLS, value: "rc_x,rc,cuda_copy,cuda_ipc"}
-      # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the two
-      # fabrics stay separated by role.
-      - op: add
-        path: /spec/env/-
-        value: {name: NCCL_IB_DISABLE, value: "1"}
-      # components: 0 Frontend, 1 PrefillWorker, 2 DecodeWorker
-      - op: add
-        path: /spec/components/1/podTemplate/spec/containers/0/resources/requests/rdma~1shared_ib
-        value: "4"
-      - op: add
-        path: /spec/components/1/podTemplate/spec/containers/0/resources/limits/rdma~1shared_ib
-        value: "4"
-      - op: add
-        path: /spec/components/2/podTemplate/spec/containers/0/resources/requests/rdma~1shared_ib
-        value: "4"
-      - op: add
-        path: /spec/components/2/podTemplate/spec/containers/0/resources/limits/rdma~1shared_ib
-        value: "4"
+    path: patch-dgd.yaml
