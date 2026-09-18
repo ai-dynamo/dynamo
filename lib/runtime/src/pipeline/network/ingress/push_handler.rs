@@ -1307,21 +1307,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_engine_shutdown_counts_as_engine_stream_error() {
-        let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-            .message("engine process crashed")
-            .build();
-        let metrics = run_response_frames(vec![Annotated::from_err(shutdown)]).await;
+    async fn test_engine_crash_counts_but_controlled_worker_shutdown_does_not() {
+        for (error_type, expected) in [
+            (ErrorType::Backend(BackendError::EngineShutdown), 1),
+            (ErrorType::WorkerUnavailable, 0),
+        ] {
+            let shutdown = DynamoError::builder()
+                .error_type(error_type)
+                .message("worker stopped")
+                .build();
+            // Preserve the retry policy's identity across the wire as well as
+            // the encoder's local accounting classification.
+            let encoded = serde_json::to_vec(&shutdown).unwrap();
+            let decoded: DynamoError = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded.error_type(), error_type);
+            let metrics = run_response_frames(vec![Annotated::from_err(decoded)]).await;
 
-        assert_eq!(
-            metrics
-                .error_counter
-                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
-                .get(),
-            1,
-            "engine crashes must not be classified as cancellation"
-        );
+            assert_eq!(
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                    .get(),
+                expected,
+            );
+        }
     }
 
     #[tokio::test]

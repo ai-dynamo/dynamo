@@ -632,9 +632,10 @@ class work_handler:
         # Generation setup error: `generate()` returned an error instead of a
         # response stream, so no response frame was ever produced
         GENERATE = "generate"
-        # The engine returned a typed error after the response stream had
-        # already opened. Counted at most once per request, and not counted
-        # for user cancellation or worker shutdown
+        # The engine returned a typed error or an untyped error envelope after
+        # the response stream opened. Counted at most once per request;
+        # excludes cancellation, explicit worker shutdown, and serialization
+        # failures. Engine crashes remain counted
         ENGINE_STREAM = "engine_stream"
         # Response serialization error
         SERIALIZATION = "serialization"

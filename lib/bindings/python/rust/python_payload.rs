@@ -434,7 +434,7 @@ mod tests {
         Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
         encode_annotated_response, terminal_frame_bytes,
     };
-    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+    use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::protocols::maybe_error::MaybeError;
 
     /// Each codec's terminal frame must decode back to `data: None,
@@ -525,8 +525,8 @@ mod tests {
     #[test]
     fn encode_annotated_response_classifies_controlled_drain_as_cancellation() {
         let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::Cancelled))
-            .message("Python generator closed")
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("worker shutting down")
             .build();
         let (_, kind) = encode_annotated_response(
             RequestPlanePayloadCodec::Json,

@@ -1078,6 +1078,9 @@ pub enum ResponseFrameKind {
 const TEARDOWN_ERROR_TYPES: &[crate::error::ErrorType] = &[
     crate::error::ErrorType::Cancelled,
     crate::error::ErrorType::Backend(crate::error::BackendError::Cancelled),
+    // Explicit worker shutdown preserves migration and inhibition through the
+    // existing worker-unavailable policy, without reporting an engine crash.
+    crate::error::ErrorType::WorkerUnavailable,
 ];
 
 impl ResponseFrameKind {

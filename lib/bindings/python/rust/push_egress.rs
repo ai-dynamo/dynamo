@@ -744,7 +744,7 @@ mod tests {
     use super::{EncodeBuffer, PushFrame};
     use crate::engine::RESPONSE_CHANNEL_DEPTH;
     use bytes::BufMut;
-    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+    use dynamo_runtime::error::{DynamoError, ErrorType};
     use dynamo_runtime::pipeline::network::{
         NetworkStreamWrapper, RequestPlanePayloadCodec, ResponseFrameKind,
     };
@@ -974,8 +974,8 @@ mod tests {
     #[test]
     fn terminal_frame_from_controlled_drain_is_a_cancellation() {
         let shutdown = DynamoError::builder()
-            .error_type(ErrorType::Backend(BackendError::Cancelled))
-            .message("Python generator closed")
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("worker shutting down")
             .build();
         let frame = PushFrame::error(Annotated::from_err(shutdown));
         assert_eq!(frame.kind, ResponseFrameKind::Cancellation);

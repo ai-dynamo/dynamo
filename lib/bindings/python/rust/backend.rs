@@ -44,7 +44,9 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
+use crate::errors::{
+    http_like_error_to_dynamo, py_exception_to_backend_error, worker_shutdown_to_dynamo,
+};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -1686,6 +1688,10 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
     }
 
     Python::with_gil(|py| {
+        if let Some(error) = worker_shutdown_to_dynamo(py, &err) {
+            return error;
+        }
+
         if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
             let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend))

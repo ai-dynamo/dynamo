@@ -81,7 +81,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -2284,7 +2284,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             # Check which event triggered and raise EngineShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during generation.")
+                raise WorkerShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
@@ -4167,7 +4167,7 @@ class EmbeddingWorkerHandler:
                 )
 
             if shutdown_task is not None and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during embedding.")
+                raise WorkerShutdown("Engine was shut down during embedding.")
         except asyncio.CancelledError:
             pass
         except EngineShutdown:

@@ -41,7 +41,7 @@ from dynamo.common.constants import DisaggregationMode as CommonDisaggregationMo
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerShutdown
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -497,7 +497,7 @@ class HandlerBase(BaseGenerativeHandler):
 
             # Raise EngineShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during generation.")
+                raise WorkerShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
