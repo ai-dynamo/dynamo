@@ -174,7 +174,8 @@ runs:
         # --build-arg (it would clear the ARG and reintroduce the failure).
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        docker buildx build \
+        .github/scripts/run_with_pypi_fallback.py \
+            docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target compliance_artifact \
@@ -385,7 +386,8 @@ runs:
         # resolves the GC'd default staging tag. Empty for non-frontend targets.
         EPP_IMAGE_ARG=""
         [ -n "${EPP_IMAGE:-}" ] && EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
-        docker buildx build \
+        .github/scripts/run_with_pypi_fallback.py \
+            docker buildx build \
             --builder ${{ inputs.builder_name }} \
             --platform ${{ inputs.platform }} \
             --target sources_archive \
