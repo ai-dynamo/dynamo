@@ -2496,6 +2496,93 @@ mod tests {
     }
 
     #[rstest]
+    #[case::round_robin(ReplayRouterMode::RoundRobin)]
+    #[case::kv_router(ReplayRouterMode::KvRouter)]
+    fn disagg_attention_dp_routes_across_asymmetric_rank_pools(
+        #[case] router_mode: ReplayRouterMode,
+    ) {
+        use aisimulate_core::replay::ReplayRequestPool;
+        use std::collections::BTreeSet;
+
+        const PREFILL_DP_SIZE: u32 = 2;
+        const DECODE_DP_SIZE: u32 = 4;
+
+        let role_args = |worker_type: WorkerType, dp_size: u32| {
+            MockEngineArgs::builder()
+                .worker_type(worker_type)
+                .dp_size(dp_size)
+                .block_size(4)
+                .num_gpu_blocks(64)
+                .speedup_ratio(1000.0)
+                .build()
+                .unwrap()
+        };
+        let config = OfflineDisaggReplayConfig {
+            prefill_args: role_args(WorkerType::Prefill, PREFILL_DP_SIZE),
+            decode_args: role_args(WorkerType::Decode, DECODE_DP_SIZE),
+            num_prefill_workers: 1,
+            num_decode_workers: 1,
+        };
+        // Distinct prompts so KV-aware routing has no prefix affinity pulling
+        // every request onto one rank.
+        let requests = (0..8u32)
+            .map(|index| DirectRequest {
+                tokens: (index * 16..(index + 1) * 16).collect(),
+                max_output_tokens: 2,
+                uuid: Some(Uuid::from_u128(u128::from(index) + 1)),
+                arrival_timestamp_ms: Some(f64::from(index) * 10.0),
+                ..Default::default()
+            })
+            .collect();
+
+        let report = simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
+            config,
+            None,
+            None,
+            requests,
+            1.0,
+            router_mode,
+            true,
+            SlaThresholds::default(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(report.request_counts.completed_requests, 8);
+
+        // Every route must resolve to a concrete (logical worker, dp_rank) whose
+        // scheduler id encodes that pair without aliasing across ranks.
+        let ranks_for = |pool: ReplayRequestPool, dp_size: u32| -> BTreeSet<u32> {
+            report
+                .per_request
+                .iter()
+                .flat_map(|record| record.routing_history.iter())
+                .filter(|route| route.pool == pool)
+                .map(|route| {
+                    let worker = route.logical_worker_id.expect("logical worker id");
+                    let dp_rank = route.dp_rank.expect("dp rank");
+                    assert!(dp_rank < dp_size, "{pool:?} dp_rank {dp_rank} out of range");
+                    assert_eq!(
+                        route.scheduler_id,
+                        Some(worker * dp_size as usize + dp_rank as usize),
+                        "{pool:?} scheduler id must encode (worker, dp_rank)"
+                    );
+                    dp_rank
+                })
+                .collect()
+        };
+        let prefill_ranks = ranks_for(ReplayRequestPool::Prefill, PREFILL_DP_SIZE);
+        let decode_ranks = ranks_for(ReplayRequestPool::Decode, DECODE_DP_SIZE);
+        assert!(!prefill_ranks.is_empty());
+        assert!(!decode_ranks.is_empty());
+
+        if router_mode == ReplayRouterMode::RoundRobin {
+            assert_eq!(prefill_ranks, BTreeSet::from([0, 1]));
+            assert_eq!(decode_ranks, BTreeSet::from([0, 1, 2, 3]));
+        }
+    }
+
+    #[rstest]
     #[case::vllm(EngineType::Vllm)]
     #[case::trtllm(EngineType::Trtllm)]
     fn native_g1_runs_through_offline_replay_entrypoint(#[case] engine_type: EngineType) {
