@@ -568,8 +568,8 @@ where
             isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks,
-                effective_overlap_blocks,
-                effective_cached_tokens,
+                effective_overlap_blocks: effective_overlap_blocks.into_iter().collect(),
+                effective_cached_tokens: effective_cached_tokens.into_iter().collect(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -778,9 +778,10 @@ where
         booking: &SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.queue
-            .add_output_block_if_booking(booking.clone(), decay_fraction)
-            .await
+        self.queue.ensure_running()?;
+        self.add_output_block_if_booking_sync(booking, decay_fraction)
+            .map(|_| ())
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
     /// `add_output_block_if_booking` applied inline, like `add_output_block`,
@@ -799,14 +800,14 @@ where
         )
     }
 
+    /// Apply an output update before returning, without waiting for admission.
     #[doc(hidden)]
     pub async fn enqueue_output_block_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.queue
-            .enqueue_output_block_if_booking(booking.clone(), decay_fraction)
+        self.add_output_block_if_booking(booking, decay_fraction)
             .await
     }
 
@@ -890,6 +891,56 @@ mod tests {
 
     struct FixedPrefillLoadEstimator {
         duration: Duration,
+    }
+
+    fn poll_once<F: std::future::Future>(future: F) -> std::task::Poll<F::Output> {
+        std::pin::pin!(future).poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn output_updates_do_not_wait_for_the_actor_in_either_queueing_mode() {
+        let worker = WorkerWithDpRank::new(0, 0);
+        for threshold in [None, Some(0.5)] {
+            let (scheduler, slots, _configs, cancellation) = make_scheduler(
+                HashMap::from([(0, SimpleWorkerConfig::default())]),
+                threshold,
+                false,
+                None,
+            );
+            let booking = scheduler
+                .add_request_if_registered_guarded(SequenceRequest {
+                    request_id: "output".into(),
+                    token_sequence: None,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                })
+                .unwrap()
+                .commit();
+            let before = slots.active_blocks()[&worker];
+            // A single poll on this current-thread runtime cannot run the actor.
+            assert!(matches!(
+                poll_once(scheduler.enqueue_output_block_if_booking(&booking, None)),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            assert!(slots.active_blocks()[&worker] > before);
+            slots
+                .free_if_booking(
+                    &booking.request_id,
+                    worker,
+                    booking.attempt_id,
+                    Instant::now(),
+                )
+                .unwrap();
+            assert!(matches!(
+                poll_once(scheduler.add_output_block_if_booking(&booking, None)),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            slots.assert_completely_drained(Instant::now());
+            cancellation.cancel();
+        }
     }
 
     impl PrefillLoadEstimator for FixedPrefillLoadEstimator {
