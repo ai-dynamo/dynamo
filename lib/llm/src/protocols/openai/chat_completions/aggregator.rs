@@ -74,10 +74,24 @@ async fn parse_complete_tool_output(
     content: &str,
     parser: &str,
     constraint: &crate::protocols::openai::GuidedToolConstraint,
+    tools: &[dynamo_parsers::tool_calling::ToolDefinition],
 ) -> anyhow::Result<(
     Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
     Option<String>,
 )> {
+    let parser = match parser {
+        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+        parser => parser,
+    };
+    let version = super::tool_parser_v2::selected_version()?;
+    if version == dynamo_runtime::config::ParserVersion::V2
+        && !super::tool_parser_v2::supports_family(parser)
+    {
+        anyhow::bail!(
+            "{}=v2 was requested, but parser {parser:?} has no compatible v2 implementation",
+            dynamo_runtime::config::environment_names::llm::DYN_PARSER_VERSION
+        );
+    }
     if constraint.installs_guided_json() {
         match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
             Ok(calls) => return Ok((calls, Some(String::new()))),
@@ -95,13 +109,16 @@ async fn parse_complete_tool_output(
         }
     }
 
-    let result =
-        if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
-            super::tool_parser_v2::parse_complete(content, None, parser)
-                .map(|(calls, normal)| (calls, Some(normal)))
-        } else {
-            try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
-        };
+    let result = if matches!(
+        version,
+        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2
+    ) && super::tool_parser_v2::supports_family(parser)
+    {
+        super::tool_parser_v2::parse_complete(content, Some(tools), parser)
+            .map(|(calls, normal)| (calls, Some(normal)))
+    } else {
+        try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+    };
 
     result.and_then(|(calls, normal)| {
         let filtered = filter_calls_to_forced_tool_name(calls, constraint);
@@ -537,8 +554,7 @@ impl DeltaAggregator {
         // Two independent families each own ONE unified parser (topology B: raw
         // model text reaches the frontend un-split) that replaces the split
         // reasoning/tool-call finalize below outright: Qwen3 (`unified_parser`,
-        // gated on DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) and muse (`tool_parser_v2`,
-        // default-on). This is the safety net for output that reached the
+        // and muse (`tool_parser_v2`). This is the safety net for output that reached the
         // aggregator unparsed; a request the worker already streamed through the
         // matching `apply_stream`/`apply_unified_stream` arrives with `tool_calls`
         // populated and is skipped by each guard below.
@@ -652,7 +668,7 @@ impl DeltaAggregator {
                             Err(guided_error) => {
                                 match super::tool_parser_v2::parse_complete_unified(
                                     &choice.text,
-                                    None,
+                                    Some(&parsing_options.tools),
                                     family,
                                 ) {
                                     Ok((calls, reasoning, content)) => {
@@ -687,7 +703,11 @@ impl DeltaAggregator {
                             }
                         }
                     } else {
-                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                        super::tool_parser_v2::parse_complete_unified(
+                            &choice.text,
+                            Some(&parsing_options.tools),
+                            family,
+                        )
                     };
                     match parse_result {
                         Ok((calls, reasoning, content)) => {
@@ -737,15 +757,16 @@ impl DeltaAggregator {
                     continue;
                 };
 
-                // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
-                // v2 parser for batch too (no jail / no aggregate-finalize):
+                // Supported families use the v2 parser for batch too (no jail / no
+                // aggregate-finalize) unless the explicit v1 rollback is set:
                 // parse_complete drops a value truncated at EOF instead of guessing it.
-                // Other families and the flag-off path keep the v1 finalize path.
+                // Other families and the rollback path keep the v1 finalize path.
                 // Guided JSON is handled above from the exact carried constraint.
                 let parse_result = parse_complete_tool_output(
                     &choice.text,
                     parser,
                     &parsing_options.guided_tool_constraint,
+                    &parsing_options.tools,
                 )
                 .await;
                 let (tool_calls, content) = match parse_result {
@@ -987,6 +1008,40 @@ mod tests {
     use super::*;
     use crate::protocols::openai::token_to_utf8_bytes;
     use futures::stream;
+
+    #[tokio::test]
+    async fn v2_batch_parser_uses_request_tool_schema() {
+        let tools = vec![dynamo_parsers::tool_calling::ToolDefinition {
+            name: "set_state".to_string(),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": {"type": "integer"},
+                    "enabled": {"type": "boolean"}
+                }
+            })),
+            strict: None,
+        }];
+        let content = concat!(
+            "<tool_call>\n<function=set_state>\n",
+            "<parameter=count>42</parameter>\n",
+            "<parameter=enabled>true</parameter>\n",
+            "</function>\n</tool_call>"
+        );
+        let (calls, _) = parse_complete_tool_output(
+            content,
+            "qwen3_coder",
+            &crate::protocols::openai::GuidedToolConstraint::None,
+            &tools,
+        )
+        .await
+        .unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&calls[0].function.arguments).unwrap(),
+            serde_json::json!({"count": 42, "enabled": true})
+        );
+    }
 
     #[allow(deprecated)]
     fn create_test_delta(
