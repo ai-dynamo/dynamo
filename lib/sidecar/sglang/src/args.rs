@@ -15,10 +15,6 @@ pub struct Args {
     #[command(flatten)]
     pub sidecar: SidecarArgs,
 
-    /// Relay a follower node's local KV events without registering a request endpoint.
-    #[arg(long)]
-    pub telemetry_only: bool,
-
     /// Maximum wait for a matching leader registration in telemetry mode.
     #[arg(long, default_value_t = 1800, value_parser = clap::value_parser!(u64).range(1..))]
     pub leader_discovery_timeout_secs: u64,

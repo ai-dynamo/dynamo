@@ -86,10 +86,6 @@ case "$ROLE" in
         ;;
     *) echo "ROLE must be aggregated, prefill or decode" >&2; exit 1 ;;
 esac
-if (( NODE_RANK > 0 )); then
-    SIDECAR_ARGS+=(--telemetry-only)
-fi
-
 print_launch_banner --no-curl "SGLang multinode KV sidecar ($ROLE, node $NODE_RANK)" "$MODEL" "$HTTP_PORT" \
     "Topology: NNODES=$NNODES, TP_SIZE=$TP_SIZE, DP_SIZE=$DP_SIZE (attention DP)" \
     "Rendezvous: $DIST_INIT_ADDR; local gRPC: $SGLANG_GRPC_PORT" \

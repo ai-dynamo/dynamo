@@ -40,36 +40,24 @@ pub use engine::SglangSidecarEngine;
 /// distinguish invalid configuration from runtime failures.
 pub fn run(argv: Vec<String>) -> anyhow::Result<()> {
     let args = Args::try_parse_from(argv).map_err(SidecarStartupError::from)?;
-    if args.telemetry_only {
-        HeadlessSidecar::from_args(args)
+    let discovery =
+        client::bootstrap_discover(&args.sidecar.grpc_endpoint, &args.sidecar.grpc.config())
+            .map_err(SidecarStartupError::from)?;
+    match discovery {
+        client::StartupDiscovery::Follower => HeadlessSidecar::from_args(args)
             .map_err(SidecarStartupError::from)?
-            .run()
-    } else {
-        let (engine, config) =
-            SglangSidecarEngine::from_parsed(args).map_err(SidecarStartupError::from)?;
-        dynamo_backend_common::run(Arc::new(engine), config)
+            .run(),
+        client::StartupDiscovery::Leader(discovery) => {
+            let (engine, config) = SglangSidecarEngine::from_discovery(args, discovery)
+                .map_err(SidecarStartupError::from)?;
+            dynamo_backend_common::run(Arc::new(engine), config)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn telemetry_uses_headless_validation_before_grpc() {
-        let error = run(vec![
-            "sidecar".into(),
-            "--telemetry-only".into(),
-            "--grpc-endpoint".into(),
-            "not-a-grpc-address".into(),
-            // Stop at headless validation, before starting a runtime.
-            "--route-to-encoder".into(),
-        ])
-        .unwrap_err();
-        let error = error.downcast::<SidecarStartupError>().unwrap();
-        assert!(matches!(error, SidecarStartupError::Dynamo(ref error)
-            if error.to_string().contains("telemetry mode cannot register encoder or RL request routes")));
-    }
 
     #[test]
     fn help_retains_structured_cli_exit() {

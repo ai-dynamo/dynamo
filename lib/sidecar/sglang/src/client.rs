@@ -201,6 +201,36 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
+#[derive(Debug)]
+pub(crate) enum StartupDiscovery {
+    Leader(Discovery),
+    Follower,
+}
+
+pub(crate) fn bootstrap_discover(
+    endpoint: &GrpcEndpoint,
+    transport: &GrpcTransportConfig,
+) -> Result<StartupDiscovery, DynamoError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| engine_shutdown(format!("bootstrap runtime: {err}")))?;
+    runtime.block_on(async {
+        let deadline = Instant::now() + transport.startup_deadline;
+        let mut client = connect(endpoint, transport, deadline).await?;
+        let server_info = get_server_info(&mut client, deadline).await?;
+        if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
+            // Followers expose metadata only. Their local KV sources are
+            // validated by the headless startup path before relaying.
+            Ok(StartupDiscovery::Follower)
+        } else {
+            discover_with_server_info(&mut client, server_info, deadline)
+                .await
+                .map(StartupDiscovery::Leader)
+        }
+    })
+}
+
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
@@ -292,9 +322,17 @@ impl Pool {
 
 pub async fn discover(client: &mut Client, deadline: Instant) -> Result<Discovery, DynamoError> {
     let server_info = get_server_info(client, deadline).await?;
+    discover_with_server_info(client, server_info, deadline).await
+}
+
+async fn discover_with_server_info(
+    client: &mut Client,
+    server_info: Value,
+    deadline: Instant,
+) -> Result<Discovery, DynamoError> {
     if json_u32(&server_info, "node_rank").is_some_and(|rank| rank > 0) {
         return Err(invalid_arg(
-            "full sidecar requires node_rank=0; use --telemetry-only for a follower with local KV sources",
+            "inference discovery requires node_rank=0; followers expose only GetServerInfo",
         ));
     }
     let model = rpc_with_deadline(

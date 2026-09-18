@@ -62,12 +62,13 @@ same mode dispatcher as the standalone executable.
 ## Multinode DP and KV routing
 
 For multinode deployments with multiple data-parallel (DP) replicas and KV-aware
-routing, run a full sidecar on the leader (`node_rank=0`) and a separate
-`--telemetry-only` sidecar on each follower node that owns a DP scheduler/KV
-publisher. Each DP rank has its own KV cache; follower sidecars publish those
-local KV events to Dynamo without accepting inference requests. A TP-only
-follower that holds part of a replica but has no local KV publisher does not
-need a sidecar.
+routing, launch the sidecar on the leader (`node_rank=0`) and on each follower
+node that owns a DP scheduler/KV publisher. The sidecar automatically selects
+inference or telemetry-only mode from the local engine's `GetServerInfo` metadata.
+Each DP rank has its own KV cache; follower sidecars publish those local KV events
+to Dynamo without accepting inference requests.
+A TP-only follower that holds part of a replica but has no local KV publisher
+does not need a sidecar.
 
 Launch each sidecar separately with `--grpc-endpoint` pointing to its local
 SGLang server. This requires an SGLang build exposing node-local

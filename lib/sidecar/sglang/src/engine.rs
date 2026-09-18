@@ -70,11 +70,18 @@ impl SglangSidecarEngine {
     }
 
     pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        if args.telemetry_only {
-            return Err(client::invalid_arg(
-                "--telemetry-only requires the headless sidecar entry point",
-            ));
-        }
+        let discovery =
+            client::bootstrap_discover(&args.sidecar.grpc_endpoint, &args.sidecar.grpc.config())?;
+        let client::StartupDiscovery::Leader(discovery) = discovery else {
+            return Err(client::invalid_arg("inference engine requires node_rank=0"));
+        };
+        Self::from_discovery(args, discovery)
+    }
+
+    pub(crate) fn from_discovery(
+        args: Args,
+        discovery: Discovery,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
@@ -83,7 +90,6 @@ impl SglangSidecarEngine {
 
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
-        let discovery = bootstrap_discover(&endpoint, &transport)?;
         let disaggregation_mode = client::discovery_mode(&discovery.server_info)?;
         let bootstrap_host = if disaggregation_mode.is_prefill() {
             resolve_bootstrap_host(
@@ -482,21 +488,6 @@ impl LLMEngine for SglangSidecarEngine {
             })
             .collect())
     }
-}
-
-fn bootstrap_discover(
-    endpoint: &GrpcEndpoint,
-    transport: &GrpcTransportConfig,
-) -> Result<Discovery, DynamoError> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
-    runtime.block_on(async {
-        let deadline = Instant::now() + transport.startup_deadline;
-        let mut grpc_client = client::connect(endpoint, transport, deadline).await?;
-        client::discover(&mut grpc_client, deadline).await
-    })
 }
 
 fn discovery_string(value: &Value, key: &str) -> Option<String> {

@@ -157,7 +157,7 @@ fn follower_metadata(info: &Value) -> Result<(NodeMetadata, DisaggregationMode)>
         .context("telemetry-only mode requires GetServerInfo.kv_event_sources; upgrade SGLang")?;
     ensure!(
         metadata.node_rank > 0 && metadata.nnodes > 1,
-        "--telemetry-only requires a follower node; run the leader sidecar without this flag"
+        "KV relay requires a follower node"
     );
     ensure!(
         !metadata.kv_event_sources.is_empty(),
@@ -446,11 +446,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_selects_mode_from_server_info() {
+        let server = MetadataServer::start().await;
+        // A follower needs only metadata; leaders (including legacy metadata)
+        // must continue to model discovery, which this follower server rejects.
+        for (info, follower) in [
+            (follower_info(), true),
+            (json!({"node_rank": 0}), false),
+            (json!({}), false),
+        ] {
+            *server.service.info.lock().unwrap() = info;
+            server.service.calls.lock().unwrap().clear();
+            let endpoint = GrpcEndpoint::parse(&server.endpoint, "test").unwrap();
+            let result = tokio::task::spawn_blocking(move || {
+                let transport = GrpcTransportConfig {
+                    startup_deadline: Duration::from_secs(5),
+                    ..Default::default()
+                };
+                client::bootstrap_discover(&endpoint, &transport)
+            })
+            .await
+            .unwrap();
+            let mut expected = vec!["/sglang.runtime.v1.SglangService/GetServerInfo"];
+            if follower {
+                assert!(matches!(
+                    result.unwrap(),
+                    client::StartupDiscovery::Follower
+                ));
+            } else {
+                assert!(result.unwrap_err().to_string().contains("GetModelInfo"));
+                expected.push("/sglang.runtime.v1.SglangService/GetModelInfo");
+            }
+            assert_eq!(*server.service.calls.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn follower_discovers_and_monitors_using_only_server_info() {
         let server = MetadataServer::start().await;
         let args = Args::try_parse_from([
             "sidecar",
-            "--telemetry-only",
             "--grpc-endpoint",
             &server.endpoint,
             "--grpc-startup-deadline-secs",
@@ -461,12 +496,16 @@ mod tests {
         let (mut client, original, mode) = sidecar.connect_local_engine().await.unwrap();
         assert_eq!(mode, DisaggregationMode::Prefill);
         let timeout = Duration::from_secs(1);
-        // A misplaced full sidecar fails with an actionable mode error, without
-        // asking the follower for any of the unsupported inference RPCs.
+        // Full inference discovery still rejects a follower without asking
+        // for any of its unsupported model RPCs.
         let error = client::discover(&mut client, Instant::now() + timeout)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("use --telemetry-only"));
+        assert!(
+            error
+                .to_string()
+                .contains("inference discovery requires node_rank=0")
+        );
         check_local_engine(&mut client, &original, mode, timeout)
             .await
             .unwrap();
