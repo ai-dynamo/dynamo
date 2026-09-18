@@ -230,7 +230,7 @@ jobs:
         with:
           ref: ${{ inputs.sidecar_backend != '' && github.sha || inputs.source_ref || github.sha }}
       - name: Verify runtime source provenance
-        if: ${{ inputs.framework == 'dynamo' && inputs.sidecar_backend == '' }}
+        if: ${{ inputs.framework == 'dynamo' && inputs.test_suite_name == 'dynamo' && inputs.sidecar_backend == '' }}
         shell: bash
         env:
           EXPECTED_SOURCE_SHA: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
