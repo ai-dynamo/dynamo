@@ -1087,7 +1087,8 @@ fn compatibility_envelope_preserves_typed_controls() {
                         "ignore_eos": true,
                         "logprobs": 2,
                         "prompt_logprobs": 3,
-                        "skip_special_tokens": false
+                        "skip_special_tokens": false,
+                        "return_token_ids": true
                     }
                 }
             })))
@@ -1111,6 +1112,7 @@ fn compatibility_envelope_preserves_typed_controls() {
             Some(pb::candidate_tokens::Select::TopN(3))
         );
         assert_eq!(response.skip_special_tokens, Some(false));
+        assert!(response.output_token_ids);
     }
 }
 
@@ -1155,6 +1157,27 @@ fn compatibility_envelope_accepts_sampling_projected_to_proto() {
         assert_eq!(decoding.frequency_penalty, 0.4);
         assert_eq!(decoding.repetition_penalty, 1.1);
         assert_eq!(wire.stopping.expect("stopping").stop_token_ids, vec![2]);
+    }
+}
+
+#[test]
+fn compatibility_envelope_rejects_disabled_token_ids() {
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let mut request = request();
+        request.extra_args = Some(json!({
+            "vllm_tito": {"sampling_params": {"return_token_ids": false}}
+        }));
+        let error = build_generate_request(request, "native".to_string(), mode)
+            .expect_err("the gRPC response always requires output token ids");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("sampling_params.return_token_ids must be true")
+        );
     }
 }
 
