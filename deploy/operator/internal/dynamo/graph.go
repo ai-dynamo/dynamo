@@ -1765,7 +1765,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	// Native-sidecar single-node engines are launched entirely by the user.
+	// Native-sidecar mode does not yet support multi-node deployments.
+	// Single-node engines are launched entirely by the user.
 	if component.DynamoSidecar == nil {
 		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 			return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
@@ -2267,7 +2268,7 @@ func applyDGDTemplateDefaults(
 			main := ensureMainContainer(podTemplate)
 			main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
 
-			// Materialize global env on both processes before a DGD creates its DCDs.
+			// When configured, apply global env to the Dynamo sidecar as well as main.
 			if component.DynamoSidecar != nil {
 				for i := range podTemplate.Spec.InitContainers {
 					runtime := &podTemplate.Spec.InitContainers[i]
