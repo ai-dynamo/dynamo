@@ -43,6 +43,10 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.sglang.request_handlers.llm.response import (
+    extract_sglang_stop_reason,
+    project_sglang_terminal,
+)
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -142,7 +146,7 @@ def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
-def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
+def _user_stop_token_ids(request: Mapping[str, Any]) -> set[int]:
     stop_conditions = request.get("stop_conditions")
     if isinstance(stop_conditions, dict):
         return {
@@ -184,36 +188,6 @@ def _openai_stop_sampling_params(request: Dict[str, Any]) -> Dict[str, Any]:
     if stop_token_ids:
         return {"stop_token_ids": stop_token_ids}
     return {}
-
-
-def _extract_sglang_stop_reason(
-    finish_reason: Dict[str, Any] | None,
-    user_stop_token_ids: set[int] | None = None,
-) -> Any | None:
-    """Extract SGLang's matched stop value for Dynamo's stop_reason field."""
-
-    if not finish_reason:
-        return None
-
-    matched = finish_reason.get("matched")
-    if isinstance(matched, bool):
-        return None
-    if isinstance(matched, str):
-        return matched
-    if isinstance(matched, int):
-        if user_stop_token_ids is not None and matched not in user_stop_token_ids:
-            return None
-        return matched
-    if isinstance(matched, list) and all(
-        isinstance(item, int) and not isinstance(item, bool) for item in matched
-    ):
-        if user_stop_token_ids is not None and any(
-            item not in user_stop_token_ids for item in matched
-        ):
-            return None
-        return matched
-
-    return None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -496,7 +470,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context,
                 priority,
             )
-            async for output in self._process_native_generate_stream(stream, context):
+            sampling_params = native_payload.get("sampling_params")
+            native_user_stop_token_ids = (
+                _user_stop_token_ids(sampling_params)
+                if isinstance(sampling_params, Mapping)
+                else set()
+            )
+            async for output in self._process_native_generate_stream(
+                stream,
+                context,
+                user_stop_token_ids=native_user_stop_token_ids,
+            ):
                 yield output
             return
 
@@ -668,20 +652,33 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
+        user_stop_token_ids: set[int] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """Forward opaque SGLang chunks while retaining engine cancellation."""
+        """Forward opaque chunks and project common internal observability fields."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
         first_output_seen = False
         async with self._cancellation_monitor(request_id_future, context):
             async for chunk in stream_source:
                 native_response = chunk["engine_data"]["sglang_response"]
+                meta_info = native_response.get("meta_info", {})
                 if not request_id_future.done():
-                    sglang_request_id = native_response.get("meta_info", {}).get("id")
+                    sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+
+                # These top-level fields are consumed only by Dynamo's shared router and
+                # request-end observers. The public /generate renderer removes and emits
+                # sglang_response verbatim, so its SSE payload stays engine-native.
+                output_ids = native_response.get("output_ids") or []
+                chunk["token_ids"] = output_ids
+                chunk["index"] = native_response.get("index", 0)
+                chunk.update(
+                    project_sglang_terminal(meta_info, user_stop_token_ids, opaque=True)
+                )
+
                 if not first_output_seen and (
-                    native_response.get("output_ids") or native_response.get("text")
+                    output_ids or native_response.get("text")
                 ):
                     first_output_seen = True
                     context.notify_first_token()
@@ -748,14 +745,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         raise EngineShutdown(
                             "Engine was shut down during token generation"
                         )
-                    out["finish_reason"] = normalize_finish_reason(
-                        finish_reason["type"]
-                    )
-                    stop_reason = _extract_sglang_stop_reason(
-                        finish_reason, user_stop_token_ids
-                    )
-                    if stop_reason is not None:
-                        out["stop_reason"] = stop_reason
+                    out.update(project_sglang_terminal(meta_info, user_stop_token_ids))
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
@@ -797,23 +787,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     )
                     if prompt_payload is not None and metadata_uploader is None:
                         engine_data["prompt_logprobs"] = prompt_payload
-                    input_tokens = meta_info.get("prompt_tokens")
-                    completion_tokens = meta_info.get("completion_tokens")
-                    cached_tokens = meta_info.get("cached_tokens")
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    if input_tokens is not None and completion_tokens is not None:
-                        completion_usage = {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": completion_tokens,
-                            "total_tokens": input_tokens + completion_tokens,
-                        }
-                        if prefill_prompt_tokens_details is not None:
-                            completion_usage[
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
-                        out["completion_usage"] = completion_usage
                     if metadata_uploader is not None:
                         try:
                             await metadata_uploader.upload_choice(output_idx, meta_info)
@@ -909,7 +882,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "delta": {"role": "assistant", "content": delta},
                     "finish_reason": finish_reason_type,
                 }
-                stop_reason = _extract_sglang_stop_reason(
+                stop_reason = extract_sglang_stop_reason(
                     finish_reason, user_stop_token_ids
                 )
 

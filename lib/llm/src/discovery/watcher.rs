@@ -32,7 +32,7 @@ use crate::{
         EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
     },
     local_model::runtime_config::{
-        TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+        SGLANG_GENERATE_CAPABILITY, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     },
     model_card::ModelDeploymentCard,
@@ -151,6 +151,11 @@ fn supports_enabled_engine_generate(card: &ModelDeploymentCard, capabilities: &[
     capabilities
         .iter()
         .any(|capability| supports_generate_capability(card, capability))
+}
+
+fn supports_enabled_sglang_generate(card: &ModelDeploymentCard, capabilities: &[&str]) -> bool {
+    capabilities.contains(&SGLANG_GENERATE_CAPABILITY)
+        && supports_generate_capability(card, SGLANG_GENERATE_CAPABILITY)
 }
 
 // Generate's opaque request state is not yet verified for migration replay.
@@ -533,20 +538,40 @@ impl ModelWatcher {
             let needs_local_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_none();
             let needs_local_completions_pipeline = card.model_type.supports_completions();
-            let tokenizer = if (needs_local_chat_pipeline || needs_local_completions_pipeline)
-                && card.has_tokenizer()
-            {
+            let needs_generate_pipeline =
+                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
+            // Tool traces need Dynamo to decode token-only SGLang output.
+            let needs_generate_trace_tokenizer =
+                supports_enabled_sglang_generate(card, &self.generate_engine_capabilities)
+                    && crate::request_trace::policy().emit_request_end_records()
+                    && card.runtime_config.tool_call_parser.is_some();
+            let needs_local_tokenizer =
+                needs_local_chat_pipeline || needs_local_completions_pipeline;
+            let tokenizer = if needs_local_tokenizer && card.has_tokenizer() {
                 Some(card.tokenizer().context("tokenizer")?)
+            } else if needs_generate_trace_tokenizer && card.has_tokenizer() {
+                match card.tokenizer() {
+                    Ok(tokenizer) => Some(tokenizer),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            model_name = card.name(),
+                            "tool-call metadata will be omitted from native SGLang request traces because the tokenizer could not be loaded"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
+            if needs_generate_trace_tokenizer {
+                worker_set.generate_trace_tokenizer = tokenizer.clone();
+            }
 
             // Routing is required whenever any pipeline (factory chat or local) will exist.
-            // tokenizer.is_some() implies a local chat or completions pipeline will be built.
+            // A tokenizer may also be loaded only to enrich native SGLang traces.
             let needs_factory_chat_pipeline =
                 card.model_type.supports_chat() && self.chat_engine_factory.is_some();
-            let needs_generate_pipeline =
-                supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
 
@@ -2036,6 +2061,29 @@ mod tests {
         assert!(!supports_enabled_engine_generate(
             &card,
             &[OTHER_GENERATE_CAPABILITY]
+        ));
+    }
+
+    #[test]
+    fn sglang_trace_tokenizer_requires_sglang_generate_capability() {
+        let mut vllm_card = ModelDeploymentCard::with_name_only("model");
+        vllm_card
+            .runtime_config
+            .set_engine_specific(VLLM_INFERENCE_V1_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert!(!supports_enabled_sglang_generate(
+            &vllm_card,
+            &[VLLM_INFERENCE_V1_GENERATE_CAPABILITY]
+        ));
+
+        let mut sglang_card = ModelDeploymentCard::with_name_only("model");
+        sglang_card
+            .runtime_config
+            .set_engine_specific(SGLANG_GENERATE_CAPABILITY, true)
+            .unwrap();
+        assert!(supports_enabled_sglang_generate(
+            &sglang_card,
+            &[SGLANG_GENERATE_CAPABILITY]
         ));
     }
 
