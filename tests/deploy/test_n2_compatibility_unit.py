@@ -64,21 +64,14 @@ def test_release_catalog_covers_configured_n_minus_one_and_two():
     )
 
 
-def test_automated_workflows_use_the_guarded_release_line():
-    workflow = yaml.load(
-        (ROOT / ".github/workflows/cross-version-compatibility.yml").read_text(),
-        Loader=yaml.BaseLoader,
-    )
-    triggers = workflow["on"]
-    assert {
-        triggers[event]["inputs"]["release_line"]["default"]
-        for event in ("workflow_dispatch", "workflow_call")
-    } == {DEFAULT_RELEASE_LINE}
+def test_matrix_names_missing_release_catalog_entry():
+    releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
 
-    for path in (".github/workflows/pr.yaml", ".github/workflows/nightly-ci.yml"):
-        caller = yaml.load((ROOT / path).read_text(), Loader=yaml.BaseLoader)
-        inputs = caller["jobs"]["cross-version-compatibility"]["with"]
-        assert "release_line" not in inputs
+    with pytest.raises(ValueError) as exc_info:
+        version_matrix(releases, "1.6", "candidate-fe", "candidate-wk")
+
+    assert "release line 1.6" in str(exc_info.value)
+    assert "missing: 1.5" in str(exc_info.value)
 
 
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])

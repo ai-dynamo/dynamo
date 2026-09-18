@@ -33,9 +33,16 @@ def version_matrix(
     major, minor = map(int, line.split("."))
     if minor < 2:
         raise ValueError("N-2 requires two preceding minor versions in the same major")
+    required = [f"{major}.{minor - age}" for age in (1, 2)]
+    missing = [release for release in required if release not in releases]
+    if missing:
+        raise ValueError(
+            f"N-2 release catalog for release line {line} is missing: "
+            f"{', '.join(missing)}"
+        )
     pairs = []
-    for age in (1, 2):
-        previous = releases[f"{major}.{minor - age}"]
+    for age, release in enumerate(required, start=1):
+        previous = releases[release]
         pairs.extend(
             [
                 VersionPair(f"old-frontend-{age}", previous["frontend"], worker),

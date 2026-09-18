@@ -17,9 +17,9 @@ on:
         type: string
         required: true
       release_line:
-        description: Compatibility baseline; advance only after its release images publish
+        description: Optional compatibility baseline override; leave empty to use the suite default
         type: string
-        default: '1.5'
+        required: false
   workflow_call:
     inputs:
       frontend_tag:
@@ -32,8 +32,9 @@ on:
         type: string
         required: true
       release_line:
+        description: Optional compatibility baseline override; leave empty to use the suite default
         type: string
-        default: '1.5'
+        required: false
       source_ref:
         type: string
         default: ''
