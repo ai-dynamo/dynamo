@@ -568,15 +568,23 @@ class ContentDirectory:
                 break
         raise RuntimeError(f"GMS KV directory rejected stale writer {self.writer_id!r}")
 
-    def promote(self) -> int:
-        """Claim writer ownership after the external failover lock is held."""
+    def promote(self, *, force_new_epoch: bool = False) -> int:
+        """Claim writer ownership after the external failover lock is held.
+
+        Force a new epoch only at a proven external-fence boundary. Normal
+        calls remain idempotent for clients in the same live engine cohort.
+        """
         epoch, active = self.status()
-        if active == self.writer_id:
+        if active == self.writer_id and not force_new_epoch:
             self._writer_epoch = int(epoch)
             self._has_owned = True
             return epoch
         promoted, observed_epoch, observed = self._call(
-            lambda client: client.directory_promote(epoch, self.writer_id)
+            lambda client: client.directory_promote(
+                epoch,
+                self.writer_id,
+                force_new_epoch=force_new_epoch,
+            )
         )
         if not promoted or observed != self.writer_id:
             raise RuntimeError(

@@ -201,10 +201,10 @@ def _directory_entry_ready(daemon: "GmsKvCacheManager", entry: dict) -> bool:
 def handle_directory_promote(daemon: "GmsKvCacheManager", msg: Message) -> Response:
     """CAS-promote a writer after the external failover fence is held.
 
-    Repeating the call for the active writer is idempotent so TP ranks can
-    safely execute the same post-lock hook. A different writer must present
-    the current epoch; a successful promotion increments it and immediately
-    fences publications from the former writer.
+    Repeating a normal call for the active writer is idempotent. A different
+    writer, or a forced same-writer restart after an external fence, must
+    present the current epoch; a successful promotion increments it and
+    immediately fences publications from the former process.
     """
     writer_id = str(msg.get("writer_id", "")).strip()
     if not writer_id:
@@ -213,10 +213,13 @@ def handle_directory_promote(daemon: "GmsKvCacheManager", msg: Message) -> Respo
         expected_epoch = int(msg["expected_epoch"])
     except (KeyError, TypeError, ValueError):
         return {"ok": False, "error": "expected_epoch is required"}
+    force_new_epoch = msg.get("force_new_epoch", False)
+    if not isinstance(force_new_epoch, bool):
+        return {"ok": False, "error": "force_new_epoch must be a boolean"}
     with daemon._content_hash_lock:
         current = int(daemon._content_directory_epoch)
         active = daemon._content_directory_writer_id
-        if active == writer_id:
+        if active == writer_id and not force_new_epoch:
             return {
                 "ok": True,
                 "promoted": True,
@@ -255,6 +258,9 @@ def handle_directory_promote(daemon: "GmsKvCacheManager", msg: Message) -> Respo
         _directory_release_writer_claims_locked(daemon, active)
         daemon._content_directory_epoch = current + 1
         daemon._content_directory_writer_id = writer_id
+        # Promotion need not mutate an entry or advance the revision. Wake
+        # delta readers so they promptly observe the new writer fence.
+        daemon._content_hash_lock.notify_all()
         return {
             "ok": True,
             "promoted": True,

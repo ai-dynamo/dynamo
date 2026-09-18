@@ -210,13 +210,21 @@ class DaemonClient:
         self,
         expected_epoch: int,
         writer_id: str,
+        *,
+        force_new_epoch: bool = False,
     ) -> tuple[bool, int, Optional[str]]:
-        """CAS-promote ``writer_id`` and return its resulting epoch."""
+        """CAS-promote ``writer_id`` and return its resulting epoch.
+
+        ``force_new_epoch`` is only for a caller that already holds an external
+        failover fence. It distinguishes a restarted process from another live
+        client sharing the same stable engine identity.
+        """
         resp = self._ok(
             {
                 "op": "directory_promote",
                 "expected_epoch": int(expected_epoch),
                 "writer_id": str(writer_id),
+                "force_new_epoch": bool(force_new_epoch),
             }
         )
         active = resp.get("writer_id")
