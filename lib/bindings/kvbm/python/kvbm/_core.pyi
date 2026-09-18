@@ -616,6 +616,23 @@ class PyTrtllmKvConnectorLeader:
         """
         ...
 
+    def on_rewind(self, request_id: str, live_block_ids: List[int], num_tokens: int) -> None:
+        """
+        Trim per-request slot state after speculative-decoding rewind.
+
+        Parameters:
+        -----------
+        request_id: str
+            The request identifier
+        live_block_ids: List[int]
+            Post-rewind live cache block IDs for the request
+        num_tokens: int
+            Exact post-rewind token count (may be less than
+            ``len(live_block_ids) * block_size`` when the rewind lands
+            inside the last live block)
+        """
+        ...
+
     def build_connector_metadata(self, scheduler_output: SchedulerOutput) -> bytes:
         """
         Build connector metadata from scheduler output.
