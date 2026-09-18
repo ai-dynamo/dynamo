@@ -33,10 +33,10 @@ func TestNativeSidecarRendering(t *testing.T) {
 				ComponentName: "worker", ComponentType: componentType, DynamoSidecar: ptr.To("runtime"), FrontendSidecar: ptr.To("frontend"),
 				CompilationCache: &v1beta1.CompilationCacheConfig{PVCName: "cache", MountPath: "/cache"},
 				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: "container"}, Labels: map[string]string{commonconsts.KubeLabelDynamoWorkerHash: "abc123"}}, Spec: corev1.PodSpec{
-					Containers: []corev1.Container{engine, {Name: "frontend", Image: "frontend:1.5.0"}},
+					Containers: []corev1.Container{engine, {Name: "frontend", Image: "frontend:1.5.0", Env: []corev1.EnvVar{{Name: "ETCD_ENDPOINTS", Value: "frontend-etcd:2379"}}}},
 					InitContainers: []corev1.Container{{Name: "setup", Image: "setup:latest"}, {
 						Name: "runtime", Image: "runtime:1.5.0", RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
-						Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "runtime"}, {Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"}},
+						Env:          []corev1.EnvVar{{Name: "GLOBAL", Value: "runtime"}, {Name: "NATS_TLS_CA_CERT_PATH", Value: "/runtime/ca.crt"}, {Name: commonconsts.EnvKvTransferEnforcement, Value: "preferred"}},
 						StartupProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"true"}}}},
 					}},
 				}},
@@ -46,6 +46,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 			config.Infrastructure.NATSAddress = "nats://nats:4222"
 			config.Infrastructure.ETCDAddress = "http://etcd:2379"
 			config.Infrastructure.TCPTLSCertPath = "/certs/tls.crt"
+			config.Infrastructure.NATSTLSCAPath = "/certs/ca.crt"
 			secrets := &nativeSidecarSecretsRetriever{}
 
 			t.Log("Render with graph defaults and verify runtime ownership without mutating the source")
@@ -66,6 +67,7 @@ func TestNativeSidecarRendering(t *testing.T) {
 			require.Equal(t, "nats://nats:4222", env["NATS_SERVER"])
 			require.Equal(t, "http://etcd:2379", env["ETCD_ENDPOINTS"])
 			require.Equal(t, "/certs/tls.crt", env["DYN_TCP_TLS_CERT_PATH"])
+			require.Equal(t, "/runtime/ca.crt", env["NATS_TLS_CA_CERT_PATH"])
 			require.ElementsMatch(t, []string{"vllm/vllm-openai:latest", "frontend:1.5.0", "setup:latest", "runtime:1.5.0"}, secrets.images)
 			require.Equal(t, []corev1.LocalObjectReference{{Name: "runtime-pull-secret"}}, pod.ImagePullSecrets)
 			require.Equal(t, string(componentType), env[commonconsts.DynamoComponentEnvVar])
@@ -90,11 +92,19 @@ func TestNativeSidecarRendering(t *testing.T) {
 			require.Empty(t, main.Ports)
 			require.Equal(t, "engine", envVarsToMap(main.Env)["GLOBAL"])
 			require.NotContains(t, envVarsToMap(main.Env), commonconsts.DynamoNamespaceEnvVar)
+			for _, name := range []string{"NATS_SERVER", "ETCD_ENDPOINTS", "DYN_TCP_TLS_CERT_PATH", "NATS_TLS_CA_CERT_PATH"} {
+				require.NotContains(t, envVarsToMap(main.Env), name)
+			}
 			require.NotContains(t, main.VolumeMounts, TopologyLabelVolumeMount())
 			require.GreaterOrEqual(t, len(main.VolumeMounts), 2)
 			require.Equal(t, "frontend", pod.Containers[1].Name)
 			require.NotNil(t, pod.Containers[1].ReadinessProbe)
 			require.Equal(t, "frontend", envVarsToMap(pod.Containers[1].Env)["CONTAINER_NAME"])
+			frontendEnv := envVarsToMap(pod.Containers[1].Env)
+			require.Equal(t, "nats://nats:4222", frontendEnv["NATS_SERVER"])
+			require.Equal(t, "frontend-etcd:2379", frontendEnv["ETCD_ENDPOINTS"])
+			require.Equal(t, "/certs/tls.crt", frontendEnv["DYN_TCP_TLS_CERT_PATH"])
+			require.Equal(t, "/certs/ca.crt", frontendEnv["NATS_TLS_CA_CERT_PATH"])
 
 			t.Log("Materialize DCDs and retain sidecar selection, global env, and topology")
 			dgd.Spec.BackendFramework = "vllm"
