@@ -272,7 +272,24 @@ def _new_decode_handler(
 @pytest.mark.parametrize(
     "processor_name", ["_process_token_stream", "_process_text_stream"]
 )
-async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
+@pytest.mark.parametrize(
+    "finish_reason",
+    [
+        pytest.param({"type": "abort"}, id="cancellation"),
+        pytest.param(
+            {
+                "type": "abort",
+                "message": "Failed to compile json grammar",
+                "status_code": 400,
+                "err_type": "BadRequestError",
+            },
+            id="validation-error",
+        ),
+    ],
+)
+async def test_shutdown_abort_chunk_raises_engine_shutdown(
+    processor_name, finish_reason
+):
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
@@ -284,13 +301,176 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
             "output_ids": [],
             "meta_info": {
                 "id": "sglang-request-id",
-                "finish_reason": {"type": "abort"},
+                "finish_reason": finish_reason,
             },
         }
 
     with pytest.raises(EngineShutdown, match="shut down during token generation"):
         async for _ in getattr(handler, processor_name)(stream(), context):
             pass
+
+
+@pytest.fixture
+def abort_context():
+    return SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=Mock(),
+    )
+
+
+def _abort_chunk(finish_reason):
+    # SGLang can return a placeholder token and text even when grammar setup failed.
+    return {
+        "output_ids": [101],
+        "text": "_color",
+        "meta_info": {
+            "id": "sglang-request-id",
+            "finish_reason": finish_reason,
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    ("status_code", "message", "err_type"),
+    [
+        pytest.param(
+            400,
+            "Failed to compile json grammar: [04:33:48] "
+            '/project/cpp/json_schema_converter.cc:2999: Unsupported type "invalid_type"\n',
+            "BadRequestError",
+            id="invalid-schema-type",
+        ),
+        pytest.param(
+            400,
+            "Failed to compile json grammar: [04:33:49] "
+            "/project/cpp/regex_converter.cc:75: "
+            "Regex parsing error at position 11: Unclosed '['\n",
+            "BadRequestError",
+            id="malformed-schema-pattern",
+        ),
+        pytest.param(
+            422,
+            "Request validation failed",
+            "UnprocessableEntityError",
+            id="other-client-error",
+        ),
+        pytest.param(
+            500,
+            "Grammar compiler failed internally",
+            "InternalServerError",
+            id="backend-server-error",
+        ),
+    ],
+)
+async def test_error_abort_preserves_http_error_before_output(
+    processor_name, status_code, message, err_type, abort_context
+):
+    handler = _new_decode_handler()
+    finish_reason = {
+        "type": "abort",
+        "message": message,
+        "status_code": status_code,
+        "err_type": err_type,
+    }
+    stream = getattr(handler, processor_name)(
+        _stream([_abort_chunk(finish_reason)]), abort_context
+    )
+
+    expected_error = InvalidArgument if status_code == 400 else HttpError
+    with pytest.raises(expected_error) as error:
+        await anext(stream)
+
+    if status_code == 400:
+        assert str(error.value) == message
+    else:
+        assert error.value.code == status_code
+        assert error.value.message == message
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "status_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"status_code": None}, id="null"),
+        pytest.param({"status_code": "400"}, id="string"),
+        pytest.param({"status_code": True}, id="boolean"),
+        pytest.param({"status_code": 400.0}, id="float"),
+        pytest.param({"status_code": 200}, id="success-status"),
+        pytest.param({"status_code": 302}, id="redirect-status"),
+        pytest.param({"status_code": 600}, id="out-of-range"),
+    ],
+)
+async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
+    processor_name, status_fields, abort_context
+):
+    handler = _new_decode_handler()
+    message = "Failed to compile json grammar"
+    finish_reason = {
+        "type": "abort",
+        "message": message,
+        "err_type": "BadRequestError",
+        **status_fields,
+    }
+    stream = getattr(handler, processor_name)(
+        _stream([_abort_chunk(finish_reason)]), abort_context
+    )
+
+    with pytest.raises(HttpError) as error:
+        await anext(stream)
+
+    assert error.value.code == 500
+    assert error.value.message == message
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "finish_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"message": None}, id="null"),
+        pytest.param({"message": ""}, id="empty"),
+        pytest.param(
+            {"message": "Aborted", "status_code": None, "err_type": None},
+            id="sglang-cancellation",
+        ),
+    ],
+)
+async def test_abort_without_error_details_remains_cancelled(
+    processor_name, finish_fields, abort_context
+):
+    handler = _new_decode_handler()
+    chunk = _abort_chunk({"type": "abort", **finish_fields})
+    chunk["output_ids"] = []
+    chunk["text"] = ""
+
+    chunks = await _collect(
+        getattr(handler, processor_name)(_stream([chunk]), abort_context)
+    )
+
+    assert len(chunks) == 1
+    if processor_name == "_process_token_stream":
+        assert chunks[0]["finish_reason"] == "cancelled"
+        assert chunks[0]["token_ids"] == []
+    else:
+        assert chunks[0]["choices"][0]["finish_reason"] == "cancelled"
+        assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    abort_context.notify_first_token.assert_not_called()
 
 
 @pytest.mark.asyncio
