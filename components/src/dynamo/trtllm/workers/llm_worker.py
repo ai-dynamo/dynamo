@@ -442,7 +442,9 @@ async def init_llm_worker(
         # override, and a post-merge diff would flag every normal start).
         # Stock recipe YAMLs intentionally override several of these defaults,
         # so this path logs at INFO; --override-engine-args (an explicit
-        # operator action) keeps the WARNING level.
+        # operator action) keeps the WARNING level. update_llm_args_with_
+        # extra_options merges into model-valued entries per key, so
+        # recurse_models=True is safe (and accurate) only on this path.
         with open(config.extra_engine_args) as f:
             extra_options = yaml.safe_load(f)
         if not isinstance(extra_options, dict):
@@ -450,7 +452,11 @@ async def init_llm_worker(
             # by update_llm_args_with_extra_options below.
             extra_options = {}
         warn_override_collisions(
-            arg_map, extra_options, source_name="extra_engine_args", level=logging.INFO
+            arg_map,
+            extra_options,
+            source_name="extra_engine_args",
+            level=logging.INFO,
+            recurse_models=True,
         )
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
 

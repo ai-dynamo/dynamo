@@ -45,19 +45,40 @@ def warn_override_collisions(
     path: str = "",
     source_name: str = "override_engine_args",
     level: int = logging.WARNING,
+    recurse_models: bool = False,
 ) -> None:
-    """Log collisions for keys in *source* that will overwrite existing values in *target*."""
+    """Log collisions for keys in *source* that will overwrite existing values in *target*.
+
+    ``recurse_models`` walks mapping-like values (pydantic models, plain
+    objects) through ``_as_mapping`` so they report per-key dotted paths.
+    Only set it where the merge itself is per key (TRT-LLM's
+    ``update_llm_args_with_extra_options`` merges into the model);
+    ``deep_update`` replaces a non-dict target whole, so on that path the
+    warning must stay whole-object to reflect what reaches the engine.
+    """
     for key, new_val in source.items():
         full_key = f"{path}.{key}" if path else key
         if key in target:
             old_val = target[key]
-            new_map = _as_mapping(new_val)
-            old_map = _as_mapping(old_val)
-            if new_map is not None and old_map is not None:
+            if recurse_models:
+                new_map = _as_mapping(new_val)
+                old_map = _as_mapping(old_val)
+                if new_map is not None and old_map is not None:
+                    warn_override_collisions(
+                        old_map,
+                        new_map,
+                        full_key,
+                        source_name=source_name,
+                        level=level,
+                        recurse_models=True,
+                    )
+                    continue
+            elif isinstance(new_val, dict) and isinstance(old_val, dict):
                 warn_override_collisions(
-                    old_map, new_map, full_key, source_name=source_name, level=level
+                    old_val, new_val, full_key, source_name=source_name, level=level
                 )
-            elif old_val != new_val:
+                continue
+            if old_val != new_val:
                 logging.log(
                     level,
                     "%s will replace %s: %r -> %r",

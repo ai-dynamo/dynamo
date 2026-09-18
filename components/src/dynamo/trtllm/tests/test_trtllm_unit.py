@@ -771,7 +771,7 @@ def test_warn_override_collisions_names_the_source(caplog):
 
 @pytest.mark.core
 def test_warn_override_collisions_recurses_into_model_objects(caplog):
-    """Mapping-like old values (e.g. KvCacheConfig) report per-key dotted paths."""
+    """Per-key reporting for model-valued targets only where the merge is per key."""
     class FakeKvCacheConfig:
         def __init__(self):
             self.max_tokens = 1000
@@ -779,11 +779,27 @@ def test_warn_override_collisions_recurses_into_model_objects(caplog):
 
     target = {"kv_cache_config": FakeKvCacheConfig()}
     source = {"kv_cache_config": {"max_tokens": 2592}}
+
+    # Override path (default): deep_update replaces the model whole, so the
+    # warning must stay whole-object — a per-key line would understate that
+    # the engine receives a plain dict with the other fields dropped.
     with caplog.at_level("WARNING"):
         warn_override_collisions(target, source)
+    assert any(
+        "kv_cache_config" in r.message and "FakeKvCacheConfig" in r.message
+        for r in caplog.records
+    )
+    assert not any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+
+    caplog.clear()
+
+    # Extra-args path: update_llm_args_with_extra_options merges into the
+    # model per key, so recurse_models=True reports per-key dotted paths.
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source, recurse_models=True)
     assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
     # Untouched keys inside the model are not reported; the whole object is
-    # never dumped as a single opaque value.
+    # never dumped as a single opaque value on the per-key path.
     assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
 
 
