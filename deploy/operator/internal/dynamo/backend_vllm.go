@@ -344,8 +344,6 @@ func getExpandedArgs(container *corev1.Container) []string {
 	for _, arg := range container.Args {
 		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
 	}
-	// Same canonicalization as getExpandedCommandLine -- see normalizeVLLMFlags. The
-	// multinode launch path reads through this one, and getWorldSize is one of its consumers.
 	return normalizeVLLMFlags(expandedArgs)
 }
 
@@ -719,15 +717,18 @@ func needsDataParallelMultinodeLaunch(expandedArgs []string, containerGPUs int64
 	return getWorldSize(expandedArgs)*dataParallelSize > containerGPUs
 }
 
+// getFlagValue returns the value of the last occurrence of flag in expandedArgs,
+// matching vLLM's FlexibleArgumentParser precedence: when a flag (or one of its
+// canonicalized aliases) is repeated, the final occurrence wins.
 func getFlagValue(expandedArgs []string, flag string) int64 {
 	var flagValue int64 = 1
 	for i, arg := range expandedArgs {
 		if arg == flag && (i+1 < len(expandedArgs)) {
-			flagValue, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
+			parsed, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
 			if err != nil {
 				continue
 			}
-			return flagValue
+			flagValue = parsed
 		}
 	}
 	return flagValue

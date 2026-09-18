@@ -35,9 +35,6 @@ func vllmContainer(args ...string) *corev1.Container {
 // TestNormalizeVLLMFlags_EverySpellingReadsTheSame is the point of this change: a flag vLLM
 // accepts must read identically however it is spelled. Before normalization, getFlagValue
 // matched only "--flag value" and silently returned its default of 1 for the other two forms.
-//
-// Mutation check: drop the normalizeVLLMFlags call from getExpandedCommandLine and every
-// equals-form and short-form subtest below fails on the value assertion.
 func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 	for _, tc := range []struct {
 		flag  string
@@ -74,13 +71,6 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 // getFlagValue, which did not. So a command line could qualify as elastic EP and read as one
 // rank -- and a one-rank reading renders no extra pods, no local-rank pin and no width gate
 // while vLLM still places N ranks, which is the abort those three exist to prevent.
-//
-// Asserted on getFlagValue rather than on the Phase 4 sizing helper because that helper
-// (ElasticEPFollowerReplicas, #13580) is not on this branch. It calls getFlagValue, so it
-// inherits this fix.
-//
-// Mutation check: drop the normalizeVLLMFlags call from getExpandedCommandLine and the
-// equals-form and short-form subtests fail with dp read as 1.
 func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 	for name, args := range map[string][]string{
 		"long flags":           {"--enable-elastic-ep", dataParallelBackendFlag, "ray", dataParallelSizeFlag, "4"},
@@ -136,6 +126,27 @@ func TestNormalizeVLLMFlags_LeavesEverythingElseAlone(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("token %d = %q, want %q (full: %q)", i, got[i], want[i], got)
 		}
+	}
+}
+
+// TestGetFlagValue_RepeatedFlagUsesLastOccurrence pins getFlagValue to vLLM's
+// FlexibleArgumentParser precedence: when the same option is supplied more than
+// once, the last occurrence wins, even after normalizeVLLMFlags canonicalizes a
+// mix of short and long spellings onto the same flag.
+func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
+	for name, args := range map[string][]string{
+		"long then long":   {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
+		"short then long":  {"-tp", "1", tensorParallelSizeFlag, "4"},
+		"long then short":  {tensorParallelSizeFlag, "1", "-tp", "4"},
+		"short then short": {"-tp", "1", "-tp", "4"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			if got != 4 {
+				t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
+					"applies the last value when a flag is repeated", args, got)
+			}
+		})
 	}
 }
 
