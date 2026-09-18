@@ -1383,14 +1383,16 @@ mod tests {
             .await;
         drop(publisher);
 
-        let bytes = rx.recv().await.expect("fallback frame must be forwarded");
-        let frame: NetworkStreamWrapper<TestResponse> =
-            RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+        let message = rx.recv().await.expect("fallback frame must be forwarded");
+        let frame: NetworkStreamWrapper<TestResponse> = RequestPlanePayloadCodec::Json
+            .decode(&message.data)
+            .unwrap();
         assert!(!frame.complete_final);
         assert!(frame.data.unwrap().is_error());
-        let bytes = rx.recv().await.expect("clean terminal frame must follow");
-        let frame: NetworkStreamWrapper<TestResponse> =
-            RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+        let message = rx.recv().await.expect("clean terminal frame must follow");
+        let frame: NetworkStreamWrapper<TestResponse> = RequestPlanePayloadCodec::Json
+            .decode(&message.data)
+            .unwrap();
         assert!(frame.complete_final);
         assert!(frame.data.is_none());
         assert!(rx.recv().await.is_none(), "fallback must end the stream");
