@@ -11,6 +11,7 @@ use super::*;
 use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::pipeline::network::ingress::push_endpoint::PushEndpoint;
+use crate::protocols::EndpointId;
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -26,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 pub struct NatsMultiplexedServer {
     nats_client: async_nats::Client,
     component_registry: crate::component::Registry,
-    handlers: Arc<DashMap<String, EndpointTask>>,
+    handlers: Arc<DashMap<(EndpointId, u64), EndpointTask>>,
     cancellation_token: CancellationToken,
 }
 
@@ -36,9 +37,7 @@ struct EndpointTask {
     join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// NATS subject and handler-map key for one endpoint instance. Several instances in one
-/// process can register the same endpoint name, so the key must carry the instance id;
-/// register and unregister must agree on it or a teardown removes the wrong task, or none.
+/// NATS subject within a namespace/component service group for one endpoint instance.
 fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
     format!("{endpoint_name}-{instance_id:x}")
 }
@@ -64,9 +63,9 @@ impl NatsMultiplexedServer {
         })
     }
 
-    fn remove_reservation(&self, endpoint_with_id: &str, registration: &Arc<()>) {
+    fn remove_reservation(&self, endpoint_key: &(EndpointId, u64), registration: &Arc<()>) {
         if let dashmap::mapref::entry::Entry::Occupied(entry) =
-            self.handlers.entry(endpoint_with_id.to_string())
+            self.handlers.entry(endpoint_key.clone())
             && Arc::ptr_eq(&entry.get().registration, registration)
         {
             entry.remove();
@@ -94,10 +93,18 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         );
 
         let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
+        let endpoint_key = (
+            EndpointId {
+                namespace: namespace.clone(),
+                component: component_name.clone(),
+                name: endpoint_name.clone(),
+            },
+            instance_id,
+        );
         let registration = Arc::new(());
         let endpoint_cancel = CancellationToken::new();
 
-        match self.handlers.entry(endpoint_with_id.clone()) {
+        match self.handlers.entry(endpoint_key.clone()) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(EndpointTask {
                     registration: Arc::clone(&registration),
@@ -157,7 +164,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         let (service_endpoint, push_endpoint) = match setup {
             Ok(result) => result,
             Err(error) => {
-                self.remove_reservation(&endpoint_with_id, &registration);
+                self.remove_reservation(&endpoint_key, &registration);
                 return Err(error);
             }
         };
@@ -207,7 +214,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
-        match self.handlers.entry(endpoint_with_id.clone()) {
+        match self.handlers.entry(endpoint_key.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut entry)
                 if Arc::ptr_eq(&entry.get().registration, &registration) =>
             {
@@ -227,9 +234,10 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+    async fn unregister_endpoint(&self, endpoint: &EndpointId, instance_id: u64) -> Result<()> {
+        let endpoint_name = &endpoint.name;
         let endpoint_with_id = instance_subject(endpoint_name, instance_id);
-        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
+        if let Some((_, task)) = self.handlers.remove(&(endpoint.clone(), instance_id)) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 endpoint_with_id = %endpoint_with_id,

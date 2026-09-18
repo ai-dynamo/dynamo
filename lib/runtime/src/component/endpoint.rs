@@ -318,7 +318,7 @@ impl EndpointConfigBuilder {
                     "Unable to register service for discovery"
                 );
                 let _ = server
-                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                    .unregister_endpoint(&endpoint_id, connection_id)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
@@ -353,7 +353,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup, connection_id)
+                .unregister_endpoint(&endpoint_id, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -385,7 +385,7 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
+/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/namespace/component/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -412,7 +412,11 @@ fn tcp_transport_type(
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> TransportType {
-    TransportType::Tcp(format!("{address}/{connection_id:x}/{}", endpoint_id.name))
+    let path = crate::pipeline::network::ingress::shared_tcp_endpoint::instance_path(
+        endpoint_id,
+        connection_id,
+    );
+    TransportType::Tcp(format!("{address}/{path}"))
 }
 
 /// Build transport type, ensuring TCP server is initialized when needed.
@@ -542,8 +546,11 @@ mod tests {
         };
 
         for (address, expected) in [
-            ("192.0.2.10:1234", "192.0.2.10:1234/2a/generate"),
-            ("[2001:db8::10]:1234", "[2001:db8::10]:1234/2a/generate"),
+            ("192.0.2.10:1234", "192.0.2.10:1234/2a/ns/worker/generate"),
+            (
+                "[2001:db8::10]:1234",
+                "[2001:db8::10]:1234/2a/ns/worker/generate",
+            ),
         ] {
             let transport = tcp_transport_type(address.parse().unwrap(), &endpoint_id, 0x2a);
             assert_eq!(transport.address(), expected);
@@ -839,6 +846,7 @@ mod integration_tests {
 
     struct TestHandler {
         refuse_notifier: bool,
+        received: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[async_trait]
@@ -848,6 +856,9 @@ mod integration_tests {
             _payload: Bytes,
             _request_id: Option<String>,
         ) -> Result<(), PipelineError> {
+            if let Some(received) = &self.received {
+                received.notify_one();
+            }
             Ok(())
         }
 
@@ -871,7 +882,10 @@ mod integration_tests {
     }
 
     fn handler(refuse_notifier: bool) -> Arc<dyn PushWorkHandler> {
-        Arc::new(TestHandler { refuse_notifier })
+        Arc::new(TestHandler {
+            refuse_notifier,
+            received: None,
+        })
     }
 
     fn assert_no_endpoint_state(
@@ -1003,5 +1017,85 @@ mod integration_tests {
             "the restart counts towards worker health again"
         );
         assert!(guard.get_endpoint_health_check_notifier(ENDPOINT).is_some());
+    }
+
+    async fn check_same_named_endpoint_isolation(request_plane: RequestPlaneMode) {
+        use crate::distributed::DistributedConfig;
+        use crate::pipeline::network::egress::unified_client::Headers;
+        use std::time::Duration;
+
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = request_plane;
+        if request_plane == RequestPlaneMode::Nats {
+            config.nats_config = Some(nats::ClientOptions::default());
+        }
+        let drt = crate::DistributedRuntime::new(crate::Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let client = drt.network_manager().create_client().unwrap();
+        let mut endpoints = Vec::new();
+        for (namespace, component) in [
+            ("isolation", "backend"),
+            ("other", "backend"),
+            ("isolation", "other"),
+        ] {
+            let received = Arc::new(tokio::sync::Notify::new());
+            let endpoint = drt
+                .namespace(namespace)
+                .unwrap()
+                .component(component)
+                .unwrap()
+                .endpoint(ENDPOINT);
+            let started = endpoint
+                .endpoint_builder()
+                .handler(Arc::new(TestHandler {
+                    refuse_notifier: false,
+                    received: Some(received.clone()),
+                }))
+                .start_with_registration()
+                .await
+                .unwrap();
+            endpoints.push((started, received));
+        }
+
+        // Exercise discovery's advertised addresses before and after selective shutdown.
+        for pass in 0..2 {
+            for (started, received) in &endpoints {
+                let ack = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    client.send_request(
+                        started.instance().transport.address().to_string(),
+                        Bytes::from_static(b"probe"),
+                        Headers::new(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    ack.is_empty(),
+                    "the live endpoint must acknowledge the request"
+                );
+                tokio::time::timeout(Duration::from_secs(5), received.notified())
+                    .await
+                    .expect("the addressed handler must receive the request");
+            }
+            if pass == 0 {
+                endpoints.remove(1).0.shutdown().await.unwrap();
+            }
+        }
+        for (started, _) in endpoints {
+            started.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_same_names_are_isolated_by_namespace_and_component() {
+        check_same_named_endpoint_isolation(RequestPlaneMode::Tcp).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nats_same_names_are_isolated_by_namespace_and_component() {
+        check_same_named_endpoint_isolation(RequestPlaneMode::Nats).await;
     }
 }

@@ -13,6 +13,7 @@ use crate::metrics::work_handler_pool::{
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
+use crate::protocols::EndpointId;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -89,11 +90,10 @@ struct WorkItem {
     endpoint_name: String,
 }
 
-/// Handler-map key and request path for one endpoint instance. Several instances in one process
-/// share this server, so the key must carry the instance id; register and unregister must agree on
-/// the format or a teardown removes the wrong handler, or none.
-fn instance_path(endpoint_name: &str, instance_id: u64) -> String {
-    format!("{instance_id:x}/{endpoint_name}")
+/// Shared by registration, discovery, and cleanup. Names may repeat across namespaces,
+/// components, and runtime instances sharing this server.
+pub(crate) fn instance_path(endpoint: &EndpointId, instance_id: u64) -> String {
+    format!("{instance_id:x}/{endpoint}")
 }
 
 /// Shared TCP server that handles multiple endpoints on a single port
@@ -758,21 +758,25 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
+        let endpoint = EndpointId {
+            namespace,
+            component: component_name,
+            name: endpoint_name,
+        };
         self.register_endpoint(
-            instance_path(&endpoint_name, instance_id),
+            instance_path(&endpoint, instance_id),
             service_handler,
             instance_id,
-            namespace,
-            component_name,
-            endpoint_name,
+            endpoint.namespace,
+            endpoint.component,
+            endpoint.name,
             system_health,
         )
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
-        // Other instances in this process may serve the same endpoint name; remove only ours.
-        self.remove_handler(&instance_path(endpoint_name, instance_id), endpoint_name)
+    async fn unregister_endpoint(&self, endpoint: &EndpointId, instance_id: u64) -> Result<()> {
+        self.remove_handler(&instance_path(endpoint, instance_id), &endpoint.name)
             .await;
         Ok(())
     }
@@ -907,7 +911,7 @@ mod tests {
             Arc::new(SlowMockHandler::new(Duration::ZERO)),
             2,
             "test".to_string(),
-            "other-component".to_string(),
+            "component".to_string(),
             Arc::clone(&system_health),
         )
         .await;
@@ -916,14 +920,14 @@ mod tests {
 
         crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
             server.as_ref(),
-            "shared",
+            &EndpointId::from("test/component/shared"),
             1,
         )
         .await
         .unwrap();
 
-        assert!(!server.handlers.contains_key("1/shared"));
-        assert!(server.handlers.contains_key("2/shared"));
+        assert!(!server.handlers.contains_key("1/test/component/shared"));
+        assert!(server.handlers.contains_key("2/test/component/shared"));
         assert_eq!(
             system_health.lock().get_endpoint_health_status("shared"),
             Some(crate::HealthStatus::Ready)
@@ -931,7 +935,7 @@ mod tests {
 
         crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
             server.as_ref(),
-            "shared",
+            &EndpointId::from("test/component/shared"),
             2,
         )
         .await
@@ -1127,11 +1131,17 @@ mod tests {
                 .unwrap();
         }
 
-        plane.unregister_endpoint("generate", 0xa).await.unwrap();
+        plane
+            .unregister_endpoint(
+                &EndpointId::from("test_namespace/test_component/generate"),
+                0xa,
+            )
+            .await
+            .unwrap();
 
         let client = TcpRequestClient::new().unwrap();
 
-        let ack = send_ack(&client, addr, "b/generate").await;
+        let ack = send_ack(&client, addr, "b/test_namespace/test_component/generate").await;
         assert!(
             ack.is_empty(),
             "surviving instance should return the success ACK, got {:?}",
@@ -1141,7 +1151,7 @@ mod tests {
             .await
             .expect("surviving instance's handler should still receive requests");
 
-        let ack = send_ack(&client, addr, "a/generate").await;
+        let ack = send_ack(&client, addr, "a/test_namespace/test_component/generate").await;
         assert!(
             ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
             "removed instance should be rejected on the ACK, got {:?}",
