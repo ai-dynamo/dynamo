@@ -170,6 +170,16 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
+        Self::new_with_sidecar_status(runtime, config, None).await
+    }
+
+    /// Reuse the sidecar's HTTP listener, which is bound before runtime connections.
+    /// Ordinary workers continue to construct their system server in `new`.
+    pub async fn new_with_sidecar_status(
+        runtime: Runtime,
+        config: DistributedConfig,
+        sidecar_status: Option<&system_status_server::SidecarStatusServer>,
+    ) -> Result<Self> {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
@@ -342,7 +352,16 @@ impl DistributedRuntime {
         }
 
         // Handle system status server initialization
-        if let Some(cancel_token) = cancel_token {
+        if let Some(server) = sidecar_status {
+            server.attach(
+                Arc::new(distributed_runtime.clone()),
+                distributed_runtime.discovery_metadata.clone(),
+            )?;
+            distributed_runtime
+                .system_status_server
+                .set(server.info())
+                .map_err(|_| anyhow::anyhow!("system status server already initialized"))?;
+        } else if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
             let port = config.system_port as u16;
@@ -415,6 +434,27 @@ impl DistributedRuntime {
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
         let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
+    }
+
+    /// Check configured runtime dependencies, independently of model registration.
+    /// The HTTP caller bounds this operation; it never performs inference.
+    pub(crate) async fn check_dependencies(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.runtime.primary_token().is_cancelled(),
+            "runtime is shutting down"
+        );
+        if let Some(client) = &self.nats_client {
+            anyhow::ensure!(
+                client.client().connection_state() == async_nats::connection::State::Connected,
+                "NATS is disconnected"
+            );
+        }
+        self.discovery_client.check_connection().await?;
+        anyhow::ensure!(
+            !self.runtime.primary_token().is_cancelled(),
+            "runtime is shutting down"
+        );
+        Ok(())
     }
 
     pub fn runtime(&self) -> &Runtime {

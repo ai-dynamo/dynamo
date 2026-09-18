@@ -3040,6 +3040,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tonic 0.14.6",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
@@ -3098,13 +3099,16 @@ dependencies = [
 name = "dynamo-sidecar-common"
 version = "1.6.0"
 dependencies = [
+ "anyhow",
  "clap",
  "dynamo-backend-common",
+ "dynamo-runtime",
  "futures",
  "prost-types 0.13.5",
  "prost-types 0.14.3",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tracing",
@@ -3222,6 +3226,7 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.3",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",

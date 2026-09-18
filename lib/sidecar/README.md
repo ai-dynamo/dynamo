@@ -15,6 +15,31 @@ dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
 
 Engine protocols and request conversion remain in each engine's crate.
 
+## Health and startup
+
+Set `DYN_SYSTEM_PORT` to enable the sidecar HTTP server. The standalone sidecar
+executables bind this listener before connecting to runtime dependencies or
+waiting for engine metadata:
+
+- `/live` returns HTTP 200 whenever the listener can respond, including while
+  the engine is absent or loading and while discovery is unavailable.
+- `/health` returns HTTP 503 until runtime initialization completes, while a
+  required discovery or NATS connection is unavailable, and once shutdown starts.
+  It returns HTTP 200 when those dependencies are reachable, independently of
+  engine readiness and model registration. Discovery reads have a one-second
+  timeout; NATS readiness follows the client connection state. Neither check
+  issues inference requests.
+
+The existing `DYN_SYSTEM_LIVE_PATH` and `DYN_SYSTEM_HEALTH_PATH` settings also
+apply. Metrics, metadata, and engine routes become available on the same listener
+once the runtime connects. Keep a separate engine startup/readiness probe: a
+healthy sidecar alone does not mean the engine can serve requests.
+
+This implements the probe portion of [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+Continuous engine health reconciliation, engine replacement and KV recovery, and
+changes to shutdown drain policy remain separate work. The synchronous engine
+constructors used by embedded callers retain their existing behavior.
+
 ## Build the image
 
 There is no published sidecar image yet. `Dockerfile` builds one CPU-only image
