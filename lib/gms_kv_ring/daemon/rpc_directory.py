@@ -132,6 +132,17 @@ def _directory_release_writer_claims_locked(
     return len(tokens)
 
 
+def _directory_release_reader_claims_locked(daemon: "GmsKvCacheManager") -> int:
+    tokens = [
+        token
+        for token, claim in daemon._content_directory_claims.items()
+        if claim.get("reader_only")
+    ]
+    for token in tokens:
+        _directory_release_claim_locked(daemon, token)
+    return len(tokens)
+
+
 def release_directory_connection_claims(
     daemon: "GmsKvCacheManager",
     connection_id: str,
@@ -142,6 +153,8 @@ def release_directory_connection_claims(
             token
             for token, claim in daemon._content_directory_claims.items()
             if claim.get("connection_id") == connection_id
+            # A crashed reader may still have in-flight GPU work.
+            and not claim.get("reader_only")
         ]
         for token in tokens:
             _directory_release_claim_locked(daemon, token)
@@ -256,6 +269,7 @@ def handle_directory_promote(daemon: "GmsKvCacheManager", msg: Message) -> Respo
         # Drop abandoned lookup claims so a crashed engine cannot pin HBM
         # forever.
         _directory_release_writer_claims_locked(daemon, active)
+        _directory_release_reader_claims_locked(daemon)
         daemon._content_directory_epoch = current + 1
         daemon._content_directory_writer_id = writer_id
         # Promotion need not mutate an entry or advance the revision. Wake
@@ -334,10 +348,15 @@ def handle_directory_changes(daemon: "GmsKvCacheManager", msg: Message) -> Respo
         selected = []
         next_revision = after
         exhausted = True
-        for change in changes_log:
+        # Readers normally trail the tip by one batch. Avoid scanning retained
+        # history under the writer lock on every long-poll wakeup.
+        pending = []
+        for change in reversed(changes_log):
+            if int(change["revision"]) <= after:
+                break
+            pending.append(change)
+        for change in reversed(pending):
             revision = int(change["revision"])
-            if revision <= after:
-                continue
             next_revision = revision
             if change["manifest_id"] == manifest_id and (
                 not scope or change.get("scope") == scope
@@ -405,17 +424,23 @@ def handle_directory_lookup_claim(
     """Lookup READY entries and pin every hit under one opaque claim."""
     manifest_id = str(msg.get("manifest_id", "")).strip()
     writer_id = str(msg.get("writer_id", "")).strip()
+    reader_only = bool(msg.get("reader_only", False))
     connection_id = _directory_connection_id(msg)
     try:
-        expected_epoch = int(msg["expected_epoch"])
+        expected_epoch = int(msg.get("expected_epoch", 0))
         content_hashes = [bytes.fromhex(str(h)) for h in msg.get("hashes", [])]
-    except (KeyError, TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exc:
         return {"ok": False, "error": f"malformed lookup claim: {exc}"}
-    if not manifest_id or not writer_id:
-        return {"ok": False, "error": "manifest_id and writer_id are required"}
+    if not manifest_id or (not reader_only and not writer_id):
+        return {
+            "ok": False,
+            "error": "manifest_id and writer_id are required for writer claims",
+        }
 
     with daemon._content_hash_lock:
-        if not _directory_writer_matches(daemon, writer_id, expected_epoch):
+        if not reader_only and not _directory_writer_matches(
+            daemon, writer_id, expected_epoch
+        ):
             return {
                 "ok": True,
                 "entries": [None] * len(content_hashes),
@@ -442,7 +467,8 @@ def handle_directory_lookup_claim(
             claimable = entry is not None and (
                 entry.get("state") == "ready"
                 or (
-                    entry.get("state") == "active"
+                    not reader_only
+                    and entry.get("state") == "active"
                     and entry.get("_owner_writer") == writer_id
                     and entry.get("_pending_generations") is not None
                 )
@@ -457,10 +483,11 @@ def handle_directory_lookup_claim(
         claim_token = uuid.uuid4().hex if claimed else None
         if claim_token is not None:
             daemon._content_directory_claims[claim_token] = {
-                "writer_id": writer_id,
+                "writer_id": writer_id or None,
                 "epoch": expected_epoch,
                 "connection_id": connection_id,
                 "entries": claimed,
+                "reader_only": reader_only,
             }
         if os.environ.get("GMS_KV_DIRECTORY_DIAGNOSTICS"):
             count = int(getattr(daemon, "_content_directory_diag_claims", 0))
@@ -685,7 +712,7 @@ def handle_directory_ensure_hbm_capacity(
 def handle_directory_hbm_inventory(
     daemon: "GmsKvCacheManager", msg: Message
 ) -> Response:
-    """Return HBM slot ids that selective post-fence reclaim must preserve."""
+    """Return exact HBM leases that post-fence reclaim must preserve."""
     writer_id = str(msg.get("writer_id", "")).strip()
     scope = str(msg.get("scope", ""))
     try:
@@ -700,6 +727,7 @@ def handle_directory_hbm_inventory(
                 "rejected_stale_writer": True,
             }
         protected: dict[str, set[int]] = {}
+        protected_leases: dict[str, set[tuple[int, int]]] = {}
         for entry in daemon._content_directory.values():
             if scope and entry.get("_scope") != scope:
                 continue
@@ -708,13 +736,22 @@ def handle_directory_hbm_inventory(
                 "active",
             ):
                 continue
-            protected.setdefault(str(entry["engine_id"]), set()).update(
-                int(slot_id) for slot_id in entry["slot_ids"]
-            )
+            engine_id = str(entry["engine_id"])
+            slot_ids = [int(value) for value in entry["slot_ids"]]
+            generations = [int(value) for value in entry.get("generations") or []]
+            protected.setdefault(engine_id, set()).update(slot_ids)
+            if len(generations) == len(slot_ids):
+                protected_leases.setdefault(engine_id, set()).update(
+                    zip(slot_ids, generations)
+                )
         return {
             "ok": True,
             "protected": {
                 engine_id: sorted(slot_ids) for engine_id, slot_ids in protected.items()
+            },
+            "protected_leases": {
+                engine_id: [list(lease) for lease in sorted(leases)]
+                for engine_id, leases in protected_leases.items()
             },
             "rejected_stale_writer": False,
         }
@@ -928,6 +965,12 @@ def handle_directory_publish_batch(
         epoch = int(daemon._content_directory_epoch)
     return {
         "ok": True,
+        # ``published`` and ``removed`` describe mutations that changed the
+        # current directory. ``accepted`` instead acknowledges every item in
+        # the atomically validated batch, including an already-absent or stale
+        # generation-conditional tombstone. Clients use this count to detect
+        # truncated mixed publication/retirement frames.
+        "accepted": len(parsed),
         "published": published,
         "removed": removed,
         "rejected_stale_writer": False,
