@@ -4073,6 +4073,7 @@ async fn responses(
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
+        let producer_ctx = ctx.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -4117,7 +4118,23 @@ async fn responses(
                     continue;
                 };
 
-                converter.append_chunk_events(&stream_resp, &mut events);
+                let terminal_failure = converter.append_chunk_events(&stream_resp, &mut events);
+                if terminal_failure {
+                    producer_error_signal.set(ErrorType::Internal);
+                    producer_ctx.kill();
+
+                    let terminal_event = events
+                        .pop()
+                        .expect("terminal failure is missing response.failed");
+                    for event in events.drain(..) {
+                        yield event.map_err(axum::Error::new);
+                    }
+                    if terminal_event.is_ok() {
+                        producer_error_signal.mark_terminal_event_emitted();
+                    }
+                    yield terminal_event.map_err(axum::Error::new);
+                    return;
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
@@ -7177,6 +7194,22 @@ mod tests {
             BACKUP_ERROR_MESSAGE,
         );
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn test_video_fold_preserves_backend_invalid_argument() {
+        use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("unsupported video control")
+            .build();
+        let response =
+            non_streaming_aggregation_error_response(error, "Failed to fold videos stream");
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
+        assert_eq!(response.1.message, "Invalid request");
     }
 
     #[test]

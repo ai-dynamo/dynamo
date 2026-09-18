@@ -188,7 +188,7 @@ fn validate_legacy_jail_nvext_choice_count(
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ToolProcessingRoute {
     MuseUnified(String),
-    QwenUnified(&'static str),
+    Unified(&'static str),
     ParserV2(String),
     LegacyJail(Option<String>),
     PassThrough,
@@ -2036,9 +2036,9 @@ impl OpenAIPreprocessor {
             Some("deepseek_v3" | "deepseek_v3_1") => {
                 Self::deepseek_renderer_reasoning_enabled(chat_template_args, false)
             }
-            Some("deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4") => {
-                Self::deepseek_renderer_reasoning_enabled(chat_template_args, true)
-            }
+            Some(
+                "deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4" | "deepseek_v41",
+            ) => Self::deepseek_renderer_reasoning_enabled(chat_template_args, true),
             Some("gemma4" | "gemma-4") => thinking_enabled == Some(true),
 
             // SGLang's Mistral reasoner is active only for a concrete effort.
@@ -4777,7 +4777,7 @@ impl OpenAIPreprocessor {
             self.tool_call_parser.as_deref(),
             self.runtime_config.reasoning_parser.as_deref(),
         ) {
-            return Ok(ToolProcessingRoute::QwenUnified(family));
+            return Ok(ToolProcessingRoute::Unified(family));
         }
 
         let effective_tool_call_parser = self.tool_call_parser.clone().or_else(|| {
@@ -4926,7 +4926,7 @@ impl OpenAIPreprocessor {
             ));
         }
 
-        if let ToolProcessingRoute::QwenUnified(family) = &tool_processing_route {
+        if let ToolProcessingRoute::Unified(family) = &tool_processing_route {
             let tool_definitions = request.inner.tools.as_ref().map(|tools| {
                 tools
                     .iter()
@@ -5092,7 +5092,7 @@ impl OpenAIPreprocessor {
                     ))
                 }
                 ToolProcessingRoute::PassThrough => Box::pin(stream),
-                ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::QwenUnified(_) => {
+                ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::Unified(_) => {
                     unreachable!("unified routes return before legacy response processing")
                 }
             };
@@ -6041,6 +6041,7 @@ impl OpenAIPreprocessor {
                 | Some("inkling")
                 | Some("muse_glimmer")
                 | Some("muse")
+                | Some("deepseek_v41")
         ) || matches!(
             reasoning_parser,
             Some("gemma4")
@@ -6055,6 +6056,7 @@ impl OpenAIPreprocessor {
                 | Some("inkling")
                 | Some("muse_glimmer")
                 | Some("muse")
+                | Some("deepseek_v41")
         )
     }
 
@@ -6214,6 +6216,7 @@ impl OpenAIPreprocessor {
             reasoning_parser,
             Some(
                 "deepseek_v4"
+                    | "deepseek_v41"
                     | "deepseek-v4"
                     | "deepseekv4"
                     | "glm45"
@@ -6249,7 +6252,9 @@ impl OpenAIPreprocessor {
     ) -> Option<bool> {
         let should_forward = matches!(
             reasoning_parser,
-            Some("minimax_m2" | "minimax_m3" | "minimax-m3" | "kimi_k3" | "kimi-k3")
+            Some(
+                "minimax_m2" | "minimax_m3" | "minimax-m3" | "kimi_k3" | "kimi-k3" | "deepseek_v41"
+            )
         );
         if should_forward
             && Self::prompt_injected_reasoning_start(reasoning_parser, formatted_prompt)
@@ -6306,7 +6311,7 @@ impl OpenAIPreprocessor {
             }
             Some(
                 "deepseek_r1" | "deepseek_v3_2" | "deepseek_v4" | "deepseek-v4" | "deepseekv4"
-                | "minimax_m2",
+                | "deepseek_v41" | "minimax_m2",
             ) => !Self::deepseek_renderer_reasoning_enabled(chat_template_args, true),
             Some("gemma4") | Some("gemma-4") => {
                 dynamo_renderer::thinking_bool_from_args(chat_template_args) != Some(true)
@@ -7667,6 +7672,34 @@ mod tests {
     };
 
     #[test]
+    fn deepseek_v41_preserves_markers_and_initializes_backend_reasoning() {
+        for (tool, reasoning) in [(Some("deepseek_v41"), None), (None, Some("deepseek_v41"))] {
+            assert!(OpenAIPreprocessor::parser_requires_special_tokens(
+                tool, reasoning
+            ));
+        }
+        assert_eq!(
+            OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(
+                Some("deepseek_v41"),
+                Some("<｜Assistant｜><think>"),
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            OpenAIPreprocessor::prompt_injected_reasoning_ended_arg(
+                Some("deepseek_v41"),
+                Some("<｜Assistant｜></think>"),
+            ),
+            None
+        );
+        let disabled = HashMap::from([("thinking".to_string(), serde_json::json!(false))]);
+        assert!(OpenAIPreprocessor::is_reasoning_disabled_by_request(
+            Some("deepseek_v41"),
+            Some(&disabled)
+        ));
+    }
+
+    #[test]
     fn guided_tool_streaming_release_only_when_guided_json_and_not_rolled_back() {
         assert!(
             OpenAIPreprocessor::guided_tool_streaming_release(true, false),
@@ -7698,7 +7731,7 @@ mod tests {
 
         for route in [
             ToolProcessingRoute::MuseUnified("muse_glimmer".to_string()),
-            ToolProcessingRoute::QwenUnified("qwen3"),
+            ToolProcessingRoute::Unified("qwen3"),
             ToolProcessingRoute::ParserV2("qwen3_coder".to_string()),
             ToolProcessingRoute::PassThrough,
         ] {

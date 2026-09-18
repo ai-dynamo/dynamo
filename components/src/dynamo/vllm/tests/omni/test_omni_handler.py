@@ -52,6 +52,7 @@ def _make_handler(stage_types=("diffusion",)):
     config.model = "test-model"
     config.served_model_name = None
     config.output_modalities = ["text"]
+    config.default_video_fps = 16
     config.enable_lora = False  # Disable LoRA for tests unless explicitly set
     config.engine_args = SimpleNamespace(enable_lora=False)
     handler.config = config
@@ -224,6 +225,30 @@ class TestBuildEngineInputs:
             req, RequestType.VIDEO_GENERATION, image=img
         )
         assert i2v.response_format == response_format
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("fps", [0, -1])
+    async def test_video_generation_rejects_non_positive_fps(self, fps):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone",
+            model="test-model",
+            nvext=VideoNvExt(num_frames=24, fps=fps),
+        )
+
+        with pytest.raises(ValueError, match="fps must be greater than zero"):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.asyncio
+    async def test_video_generation_normalizes_mp4_output_format(self):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="a drone", model="test-model", output_format="MP4"
+        )
+
+        inputs = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+        assert inputs.output_format == "mp4"
 
     @pytest.mark.asyncio
     async def test_audio_generation_delegates_toaudio(self):
@@ -505,6 +530,189 @@ class TestI2VEngineInputs:
         assert sp.boundary_ratio == 0.875
         assert sp.guidance_scale_2 == 1.0
         assert sp.num_inference_steps == 40
+
+    @pytest.mark.asyncio
+    async def test_video_preserves_each_stage_default_and_merges_passthrough(self):
+        handler = _make_handler(stage_types=("diffusion", "diffusion"))
+        (
+            first_default,
+            second_default,
+        ) = handler.engine_client.default_sampling_params_list
+        first_default.num_frames = 209
+        first_default.seed = 7
+        first_default.extra_args = {"stage": "first", "flow_shift": 11.0}
+        second_default.num_frames = 243
+        second_default.seed = 8
+        second_default.extra_args = {"stage": "second", "flow_shift": 10.0}
+        req = NvCreateVideoRequest(
+            prompt="cat playing piano",
+            model="video-model",
+            nvext=VideoNvExt(num_inference_steps=50),
+            extra_args={
+                "media_passthrough": {
+                    "task": "t2va",
+                    "duration": 10.0,
+                    "flow_shift": 12.0,
+                    "audio_flow_shift": 3.0,
+                }
+            },
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        first, second = result.sampling_params_list
+
+        assert (first.num_frames, first.seed) == (209, 7)
+        assert (second.num_frames, second.seed) == (243, 8)
+        assert first.extra_args == {
+            "stage": "first",
+            "flow_shift": 12.0,
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert second.extra_args == {
+            "stage": "second",
+            "flow_shift": 12.0,
+            "task": "t2va",
+            "duration": 10.0,
+            "audio_flow_shift": 3.0,
+        }
+        assert first_default.extra_args == {"stage": "first", "flow_shift": 11.0}
+        assert second_default.extra_args == {"stage": "second", "flow_shift": 10.0}
+
+    @pytest.mark.asyncio
+    async def test_video_passthrough_does_not_leak_between_requests(self):
+        handler = _make_handler()
+        first = NvCreateVideoRequest(
+            prompt="first",
+            model="video-model",
+            extra_args={"media_passthrough": {"task": "t2va"}},
+        )
+        second = NvCreateVideoRequest(prompt="second", model="video-model")
+
+        first_inputs = await handler.build_engine_inputs(
+            first, RequestType.VIDEO_GENERATION
+        )
+        second_inputs = await handler.build_engine_inputs(
+            second, RequestType.VIDEO_GENERATION
+        )
+
+        assert first_inputs.sampling_params_list[0].extra_args == {"task": "t2va"}
+        assert second_inputs.sampling_params_list[0].extra_args == {}
+
+    @pytest.mark.asyncio
+    async def test_video_fps_only_preserves_model_num_frames(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.num_frames = 33
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(fps=8)
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.num_frames == 33
+        assert sp.fps == 8
+        assert sp.frame_rate == 8.0
+
+    @pytest.mark.asyncio
+    async def test_explicit_video_fields_override_model_defaults(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.width = 1024
+        model_defaults.height = 576
+        model_defaults.num_frames = 209
+        model_defaults.fps = None
+        model_defaults.seed = 7
+        req = NvCreateVideoRequest(
+            prompt="cat",
+            model="video-model",
+            size="448x256",
+            seconds=10,
+            nvext=VideoNvExt(fps=24, seed=42),
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert (sp.width, sp.height) == (448, 256)
+        assert sp.num_frames == 240
+        assert sp.fps == 24
+        assert sp.frame_rate == 24.0
+        assert sp.seed == 42
+        assert result.fps == 24
+
+    @pytest.mark.parametrize("fps", [None, 8])
+    @pytest.mark.asyncio
+    async def test_video_uses_video_default_for_image_num_frames_sentinel(self, fps):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(fps=fps)
+        )
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+        assert result.sampling_params_list[0].num_frames == 97
+
+    @pytest.mark.asyncio
+    async def test_video_resolves_fractional_frame_rate(self):
+        handler = _make_handler()
+        model_defaults = handler.engine_client.default_sampling_params_list[0]
+        model_defaults.fps = 16
+        model_defaults.frame_rate = 23.976
+        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=10)
+
+        result = await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+        sp = result.sampling_params_list[0]
+
+        assert sp.num_frames == 240
+        assert isinstance(sp.num_frames, int)
+        assert result.fps == 24
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("num_frames", 0, "nvext.num_frames must be greater than zero"),
+            ("num_frames", -1, "nvext.num_frames must be greater than zero"),
+            ("fps", 0, "nvext.fps must be greater than zero"),
+            ("fps", -1, "nvext.fps must be greater than zero"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_video_rejects_non_positive_overrides(self, field, value, message):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(
+            prompt="cat", model="video-model", nvext=VideoNvExt(**{field: value})
+        )
+
+        with pytest.raises(ValueError, match=message):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.parametrize("seconds", [0, -1])
+    @pytest.mark.asyncio
+    async def test_video_rejects_non_positive_duration(self, seconds):
+        handler = _make_handler()
+        req = NvCreateVideoRequest(prompt="cat", model="video-model", seconds=seconds)
+
+        with pytest.raises(ValueError, match="seconds must be greater than zero"):
+            await handler.build_engine_inputs(req, RequestType.VIDEO_GENERATION)
+
+    @pytest.mark.asyncio
+    async def test_video_rejection_propagates_as_invalid_argument(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        request = {
+            "prompt": "cat",
+            "model": "video-model",
+            "nvext": {"fps": 0},
+        }
+
+        with pytest.raises(InvalidArgument) as excinfo:
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        assert str(excinfo.value) == "nvext.fps must be greater than zero"
 
     async def test_media_passthrough_reaches_sampling_params(self):
         """A top-level SDK extra_body field, nested by the frontend under
@@ -1075,6 +1283,27 @@ class TestImageEndpointSizeValidation:
         assert str(excinfo.value) == (
             "width in size='99999x99999' must be between 1 and 4096"
         )
+
+
+class TestVideoEndpointValidation:
+    """Video requests reject invalid controls before generation."""
+
+    @pytest.mark.asyncio
+    async def test_video_rejection_propagates_before_generation(self):
+        handler = _make_handler()
+        handler.config.output_modalities = ["video"]
+        handler.engine_client.generate = MagicMock(
+            side_effect=AssertionError("engine must not run for a rejected request")
+        )
+        request = {
+            "prompt": "a drone",
+            "model": "test-model",
+            "output_format": "webm",
+        }
+
+        with pytest.raises(InvalidArgument, match="only 'mp4' is supported"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
 
 
 # ---------------------------------------------------------------------------
