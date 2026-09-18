@@ -12,15 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Optional
 
 import aiohttp
+from aiohttp.helpers import get_env_proxy_for_url
 from yarl import URL
 
 from ._ssrf_resolver import BlocklistResolver
 from .base import (
     HttpClient,
     HttpConnectionError,
+    HttpError,
     HttpStatusError,
     HttpTimeoutError,
     collect_capped,
@@ -39,6 +42,10 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 # Read granularity for the capped reader. Chunks are joined, so this only
 # bounds how far past the limit a single read can carry.
 _READ_CHUNK = 64 * 1024
+
+# Set to "1" to assert that the configured egress proxy enforces destination
+# policy itself. Spelled like DYN_MM_ALLOW_INTERNAL, which it sits beside.
+DYN_MM_TRUST_EGRESS_PROXY = "DYN_MM_TRUST_EGRESS_PROXY"
 
 
 class AiohttpClient(HttpClient):
@@ -83,6 +90,36 @@ class AiohttpClient(HttpClient):
             return env_allows
         return env_allows and policy.allow_private_ips
 
+    @staticmethod
+    def _require_trusted_egress_proxy(url: str) -> None:
+        """Refuse a protected fetch that a proxy would put out of our reach.
+
+        When a proxy applies, the connector dials the proxy and the proxy
+        resolves the origin, so the origin hostname never reaches the
+        connect-time check. Measured: the resolver sees only the proxy host,
+        while the proxy receives the absolute URI. Documenting that boundary
+        does not enforce it, so fail closed unless an operator asserts that
+        the proxy enforces destination policy itself.
+
+        Asks aiohttp which proxy applies to *this* URL rather than whether any
+        proxy variable is set, so ``NO_PROXY`` is honored and a fetch that
+        would go direct is not refused.
+        """
+        if os.getenv(DYN_MM_TRUST_EGRESS_PROXY, "").strip() == "1":
+            return
+        try:
+            get_env_proxy_for_url(URL(url))
+        except LookupError:
+            # No proxy for this URL, so aiohttp dials the origin and the
+            # connect-time check governs it.
+            return
+        raise HttpError(
+            f"{describe_media_source(url)} would be fetched through an egress "
+            "proxy, so the connect-time address check cannot govern the "
+            f"origin; set {DYN_MM_TRUST_EGRESS_PROXY}=1 to assert that the "
+            "proxy enforces destination policy, or unset the proxy"
+        )
+
     def _build_session(self, allow_private_ips: bool) -> aiohttp.ClientSession:
         resolver = BlocklistResolver(allow_private_ips=allow_private_ips)
         self._resolvers[allow_private_ips] = resolver
@@ -125,7 +162,12 @@ class AiohttpClient(HttpClient):
         max_bytes: Optional[int] = None,
         policy: Optional[UrlValidationPolicy] = None,
     ) -> bytes:
-        session = await self._get_session(self._connect_allows_private(policy))
+        allow_private = self._connect_allows_private(policy)
+        # Only when the check is meant to bite. If private destinations are
+        # already permitted for this fetch, the proxy gate protects nothing.
+        if not allow_private:
+            self._require_trusted_egress_proxy(url)
+        session = await self._get_session(allow_private)
         client_timeout = self._effective_timeout(timeout)
         try:
             async with session.get(
@@ -162,7 +204,12 @@ class AiohttpClient(HttpClient):
         max_bytes: Optional[int] = None,
         policy: Optional[UrlValidationPolicy] = None,
     ) -> tuple[bytes | None, str | None]:
-        session = await self._get_session(self._connect_allows_private(policy))
+        allow_private = self._connect_allows_private(policy)
+        # Only when the check is meant to bite. If private destinations are
+        # already permitted for this fetch, the proxy gate protects nothing.
+        if not allow_private:
+            self._require_trusted_egress_proxy(url)
+        session = await self._get_session(allow_private)
         client_timeout = self._effective_timeout(timeout)
         try:
             async with session.get(

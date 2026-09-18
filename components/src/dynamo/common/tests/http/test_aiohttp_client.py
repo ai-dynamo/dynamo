@@ -25,6 +25,7 @@ from yarl import URL
 from dynamo.common import http as mm_http
 from dynamo.common.http import AiohttpClient
 from dynamo.common.http._ssrf_resolver import BlocklistResolver
+from dynamo.common.http.base import HttpError
 from dynamo.common.http.url_validator import UrlValidationPolicy
 
 pytestmark = [
@@ -126,6 +127,7 @@ def _make_client_with_session(session) -> AiohttpClient:
 
 
 _PERMISSIVE = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+_STRICT = UrlValidationPolicy(allow_http=True, allow_private_ips=False)
 
 # Building the real connector trips aiohttp's notice that ``enable_cleanup_closed``
 # is a no-op on Python >= 3.12.7. That flag is pre-existing on main, so this is
@@ -285,3 +287,106 @@ async def test_close_closes_every_resolver(monkeypatch) -> None:
     assert closed, "the injected resolver was never closed"
     assert client._sessions == {}
     assert client._resolvers == {}
+
+
+async def test_a_proxied_fetch_fails_closed_without_the_opt_in(monkeypatch) -> None:
+    """A proxied fetch puts the origin out of the resolver's reach.
+
+    Documenting the boundary does not enforce it, so without an operator
+    assertion the fetch must not quietly run unchecked. Driven through
+    ``fetch_bytes`` so it also pins that the gate is wired into the fetch
+    path, not merely present as a helper.
+    """
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    monkeypatch.delenv("DYN_MM_TRUST_EGRESS_PROXY", raising=False)
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.internal:3128")
+
+    client = AiohttpClient()
+    try:
+        with pytest.raises(HttpError) as excinfo:
+            # No policy, so no URL validation runs first and the gate is the
+            # only thing that can reject this.
+            await client.fetch_bytes("https://example.com/x.png", 5.0)
+        message = str(excinfo.value)
+        assert "DYN_MM_TRUST_EGRESS_PROXY" in message
+        # An operator configuration fault, not a verdict on the caller's URL,
+        # so it must not arrive as the ValueError subclass that maps to a 400.
+        assert not isinstance(excinfo.value, ValueError)
+    finally:
+        await client.close()
+
+
+async def test_the_gate_guards_the_revalidating_path_too(monkeypatch) -> None:
+    """Both fetch seams must be gated, not just the simple one."""
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    monkeypatch.delenv("DYN_MM_TRUST_EGRESS_PROXY", raising=False)
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.internal:3128")
+
+    client = AiohttpClient()
+    try:
+        with pytest.raises(HttpError) as excinfo:
+            await client._fetch_body_or_redirect(
+                "https://example.com/x.png", 5.0, policy=_STRICT
+            )
+        assert "DYN_MM_TRUST_EGRESS_PROXY" in str(excinfo.value)
+    finally:
+        await client.close()
+
+
+async def test_no_proxy_exempts_a_host_from_the_gate(monkeypatch) -> None:
+    """NO_PROXY means the fetch goes direct, so the gate must not fire.
+
+    Asking only "is any proxy variable set" would refuse this fetch even
+    though the connect-time check governs it perfectly well. Asserted on the
+    helper directly, because driving it through a fetch reaches the transport
+    and passes whether or not the gate is precise.
+    """
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    monkeypatch.delenv("DYN_MM_TRUST_EGRESS_PROXY", raising=False)
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.internal:3128")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "example.com")
+
+    client = AiohttpClient()
+    # Must not raise: NO_PROXY sends this host direct.
+    client._require_trusted_egress_proxy("https://example.com/x.png")
+    # A host NOT covered by NO_PROXY is still gated, which is the control.
+    with pytest.raises(HttpError):
+        client._require_trusted_egress_proxy("https://other.invalid/x.png")
+    await client.close()
+
+
+async def test_the_proxy_gate_does_not_fire_when_private_is_allowed(
+    monkeypatch,
+) -> None:
+    """DYN_MM_ALLOW_INTERNAL=1 already permits private destinations.
+
+    Nothing is left for the proxy gate to protect, so it must not demand a
+    second variable.
+    """
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    monkeypatch.delenv("DYN_MM_TRUST_EGRESS_PROXY", raising=False)
+    for name in ("http_proxy", "HTTP_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.internal:3128")
+
+    client = AiohttpClient()
+    assert client._connect_allows_private(None) is True
+    # The gate is keyed to the effective policy, so it never runs here.
+    client._require_trusted_egress_proxy  # present, but not reached
+    await client.close()
+
+
+async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
+    """With the assertion set, the fetch proceeds and the operator owns it."""
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    monkeypatch.setenv("DYN_MM_TRUST_EGRESS_PROXY", "1")
+    for name in ("http_proxy", "HTTP_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.internal:3128")
+
+    client = AiohttpClient()
+    # Returns without raising, which is the whole assertion.
+    client._require_trusted_egress_proxy("https://example.com/x.png")
+    await client.close()

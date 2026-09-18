@@ -21,14 +21,20 @@ session per outcome and closes each resolver itself, because aiohttp closes
 only a resolver it created.
 
 > [!IMPORTANT]
-> The backstop governs **direct** connections only. With an egress proxy
-> configured (`HTTP_PROXY` / `HTTPS_PROXY` — the session runs `trust_env=True`),
-> the connector dials the proxy and the *proxy* resolves the origin, out of this
-> resolver's sight. The configured proxy is therefore exempt from filtering, so
-> a proxy on a private address keeps working; enforcement for proxied fetches
-> has to happen at the proxy or network layer. Note aiohttp never calls a
-> resolver for an IP literal, so literal blocked addresses are `validate_url`'s
-> job rather than the backstop's.
+> The backstop governs **direct** connections only. When a proxy applies
+> (`HTTP_PROXY` / `HTTPS_PROXY` — the session runs `trust_env=True`), the
+> connector dials the proxy and the *proxy* resolves the origin, out of this
+> resolver's sight, so the check cannot govern the destination.
+>
+> A policy-protected fetch that a proxy would carry therefore **fails closed**.
+> Set `DYN_MM_TRUST_EGRESS_PROXY=1` to assert that the proxy enforces
+> destination policy itself, and the fetch proceeds. The gate asks aiohttp
+> which proxy applies to that specific URL, so `NO_PROXY` is honored and a
+> fetch that goes direct is never refused. It does not apply when
+> `DYN_MM_ALLOW_INTERNAL=1`, which already permits private destinations.
+>
+> Note aiohttp never calls a resolver for an IP literal, so literal blocked
+> addresses are `validate_url`'s job rather than the backstop's.
 
 See the
 [NeMo Gym aiohttp vs httpx note](https://docs.nvidia.com/nemo/gym/latest/infrastructure/engineering-notes/aiohttp-vs-httpx.html)
