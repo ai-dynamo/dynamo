@@ -124,6 +124,24 @@ def get_request_logs(process, request_id: str) -> List[Dict[str, Any]]:
     return find_logs_by_request_id(parse_jsonl_logs(read_log_file(process)), request_id)
 
 
+def wait_for_request_logs(
+    process, request_id: str, expected_messages: set[str], timeout: float = 10.0
+) -> List[Dict[str, Any]]:
+    """Wait for request-scoped structured events to reach the process log."""
+    deadline = time.monotonic() + timeout
+    while True:
+        req_logs = get_request_logs(process, request_id)
+        messages = {e.get("message") for e in req_logs}
+        if expected_messages <= messages:
+            return req_logs
+        if time.monotonic() >= deadline:
+            pytest.fail(
+                f"Timed out waiting for request {request_id} log messages "
+                f"{expected_messages}; observed {messages}"
+            )
+        time.sleep(0.1)
+
+
 def assert_lifecycle_logs(req_logs, expected_status="success"):
     """Assert received/completed/http_sent exist and return them."""
     received = [e for e in req_logs if e.get("message") == "request received"]
@@ -317,9 +335,12 @@ def test_agg_unary_success(tracing_services) -> None:
 
     resp = _send_chat_completions(port, request_id=rid)
     assert resp.status_code == 200
-    time.sleep(1)
 
-    req_logs = get_request_logs(tracing_services["frontend"], rid)
+    req_logs = wait_for_request_logs(
+        tracing_services["frontend"],
+        rid,
+        {"request received", "request completed", "http response sent"},
+    )
     received, completed, http_sent = assert_lifecycle_logs(req_logs)
 
     assert received[0]["level"] == "DEBUG"
@@ -341,7 +362,9 @@ def test_agg_unary_success(tracing_services) -> None:
 
     # Worker lifecycle — verify both x_request_id and request_id propagated
     server_rid = received[0].get("request_id")
-    wk_logs = get_request_logs(tracing_services["worker"], rid)
+    wk_logs = wait_for_request_logs(
+        tracing_services["worker"], rid, {"request received", "request completed"}
+    )
     wk_received = [e for e in wk_logs if e.get("message") == "request received"]
     wk_completed = [e for e in wk_logs if e.get("message") == "request completed"]
     assert len(wk_received) == 1, "Worker should log 1 'request received'"
@@ -409,7 +432,9 @@ def test_agg_lifecycle_absent_at_info_level(tracing_services_info_level) -> None
 
     resp = _send_chat_completions(port, request_id=rid)
     assert resp.status_code == 200
-    time.sleep(1)
+    fe_logs = wait_for_request_logs(
+        tracing_services_info_level["frontend"], rid, {"http response sent"}
+    )
 
     for name in ("frontend", "worker"):
         req_logs = get_request_logs(tracing_services_info_level[name], rid)
@@ -423,7 +448,6 @@ def test_agg_lifecycle_absent_at_info_level(tracing_services_info_level) -> None
             f"{[(e.get('message'), e.get('level')) for e in lifecycle]}"
         )
 
-    fe_logs = get_request_logs(tracing_services_info_level["frontend"], rid)
     http_sent = [e for e in fe_logs if e.get("message") == "http response sent"]
     assert len(http_sent) == 1, (
         "Expected the INFO-level access log to still be present, got: "
