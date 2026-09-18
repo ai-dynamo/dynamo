@@ -9,6 +9,7 @@ import os
 import threading
 import time
 from collections import defaultdict
+from typing import cast
 
 from redis.asyncio.cluster import RedisCluster
 from redis.exceptions import RedisClusterException, RedisError
@@ -173,7 +174,9 @@ class SharedImageCache:
         else:
             outcome = "hit" if value is not None else "miss"
             size_bucket = _size_bucket(len(value) if value is not None else None)
-            return value
+            # RedisCluster.get() is typed for both decoded and binary clients,
+            # but this client is always configured with decode_responses=False.
+            return cast(bytes | None, value)
         finally:
             self.stats.record(
                 "get", outcome, size_bucket, time.perf_counter() - started
