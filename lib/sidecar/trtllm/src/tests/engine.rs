@@ -248,43 +248,29 @@ async fn pool_uses_each_configured_connection() {
 }
 
 /// A server with no Control service leaves the window unknown. Registering
-/// anyway is still useful -- requests that carry their own `max_tokens` are
-/// served -- so this warns rather than refusing to start, and only the requests
-/// that omit `max_tokens` are rejected.
+/// anyway would advertise capacity and then reject, with a non-migratable 4xx,
+/// every request that omits `max_tokens` -- most chat traffic. Fail at startup
+/// instead, naming the flag that fixes it.
 #[tokio::test]
-async fn start_without_a_context_length_registers_a_window_less_worker() {
+async fn start_without_a_context_length_fails() {
     let service = FakeTrtllm::default();
     service.no_control.store(true, Ordering::SeqCst);
     let server = FakeServer::start(service).await;
-    let engine = engine(&server.endpoint, 1);
+    let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
-    let config = engine.start(0).await.expect("start is not blocked");
-    assert_eq!(
-        config.llm.expect("llm registration").context_length,
-        None,
-        "an unknown window must not be registered as a real one"
-    );
-
-    let mut request = request();
-    request.stop_conditions.max_tokens = None;
-    let Err(error) = engine
-        .generate(
-            request,
-            GenerateContext::new(dynamo_backend_common::testing::mock_context(), None),
-        )
+    let error = engine
+        .start(0)
         .await
-    else {
-        panic!("a request that omits max_tokens has no budget to derive");
-    };
+        .expect_err("a worker with no window must not register");
     assert!(
-        error.to_string().contains("specify max_tokens explicitly"),
-        "unexpected error: {error}"
+        error.to_string().contains("--context-length"),
+        "the error must name the flag that supplies a window: {error}"
     );
 }
 
-/// A server that answers GetModelInfo but reports no context length is not
-/// ready yet -- TensorRT-LLM binds its port before the model finishes loading
-/// -- so the sidecar keeps asking until the operator's startup deadline.
+/// A server that answers GetModelInfo but reports no context length is still
+/// loading, so the sidecar keeps asking until the operator's startup deadline
+/// and only then gives up.
 #[tokio::test]
 async fn start_retries_until_the_deadline_when_the_server_reports_no_context_length() {
     let service = FakeTrtllm::default();
@@ -292,8 +278,10 @@ async fn start_retries_until_the_deadline_when_the_server_reports_no_context_len
     let server = FakeServer::start(service).await;
     let engine = engine_with(&server.endpoint, impatient_transport(), None, AGG);
 
-    let config = engine.start(0).await.expect("start is not blocked");
-    assert_eq!(config.llm.expect("llm registration").context_length, None);
+    engine
+        .start(0)
+        .await
+        .expect_err("a window is required to register");
     assert!(
         server.service.model_info_calls.load(Ordering::SeqCst) > 1,
         "a server that is still loading must be asked more than once"
