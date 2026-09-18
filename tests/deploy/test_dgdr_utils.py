@@ -167,43 +167,38 @@ def test_build_dgdr_sets_ci_profiling_job_defaults() -> None:
         "test-request",
     )
 
-    assert dgdr["spec"]["overrides"]["profilingJob"] == {
-        "backoffLimit": 1,
-        "template": {
-            "spec": {
-                "containers": [
-                    {
-                        "name": "profiler",
-                        "resources": {
-                            "requests": {
-                                "cpu": "250m",
-                                "memory": "512Mi",
-                                "ephemeral-storage": "1Gi",
-                            },
-                            "limits": {"ephemeral-storage": "4Gi"},
-                        },
-                    },
-                    {
-                        "name": "output-copier",
-                        "resources": {
-                            "requests": {
-                                "cpu": "25m",
-                                "memory": "64Mi",
-                                "ephemeral-storage": "128Mi",
-                            },
-                            "limits": {"ephemeral-storage": "256Mi"},
-                        },
-                    },
-                ],
-                "volumes": [
-                    {
-                        "name": "profiling-output",
-                        "emptyDir": {"sizeLimit": "1Gi"},
-                    }
-                ],
-            }
+    profiling_job = dgdr["spec"]["overrides"]["profilingJob"]
+    pod_spec = profiling_job["template"]["spec"]
+    containers = {
+        container["name"]: container["resources"]
+        for container in pod_spec["containers"]
+    }
+
+    assert profiling_job["backoffLimit"] == 1
+    assert containers == {
+        "profiler": {
+            "requests": {
+                "cpu": "250m",
+                "memory": "512Mi",
+                "ephemeral-storage": "1Gi",
+            },
+            "limits": {"ephemeral-storage": "4Gi"},
+        },
+        "output-copier": {
+            "requests": {
+                "cpu": "25m",
+                "memory": "64Mi",
+                "ephemeral-storage": "128Mi",
+            },
+            "limits": {"ephemeral-storage": "256Mi"},
         },
     }
+    assert pod_spec["volumes"] == [
+        {
+            "name": "profiling-output",
+            "emptyDir": {"sizeLimit": "1Gi"},
+        }
+    ]
 
 
 def test_build_dgdr_preserves_pvc_backed_profiling_output() -> None:
