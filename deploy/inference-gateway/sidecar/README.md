@@ -31,9 +31,10 @@ shutdown before their streams are forced closed. Configure this deadline with
 while the sidecar accepts requests and `503 Service Unavailable` once draining
 starts. Readiness does not indicate that EPP endpoint propagation is complete.
 
-Backend-specific P/D execution is implemented separately. Until an adapter is
-linked, requests containing a valid prefill endpoint return `501 Not
-Implemented`; decode-only passthrough remains available.
+Backend-specific P/D execution is implemented separately. With no adapter
+selected, which is the default, requests containing a valid prefill endpoint
+return `501 Not Implemented`; decode-only passthrough remains available in every
+mode. See the next section for the adapter that handles them.
 
 ## Disaggregated P/D: raw-vLLM NIXL adapter
 

@@ -64,8 +64,8 @@ impl Config {
             read_timeout: duration_from_env(READ_TIMEOUT_MS_ENV, DEFAULT_READ_TIMEOUT_MS)?,
             drain_timeout: duration_from_env(DRAIN_TIMEOUT_MS_ENV, DEFAULT_DRAIN_TIMEOUT_MS)?,
             adapter_mode: adapter_mode_from_env()?,
-            protocol_version: std::env::var(crate::vllm_nixl::PROTOCOL_VERSION_ENV)
-                .unwrap_or_else(|_| crate::vllm_nixl::SUPPORTED_PROTOCOL_VERSION.to_string()),
+            protocol_version: optional_env(crate::vllm_nixl::PROTOCOL_VERSION_ENV)?
+                .unwrap_or_else(|| crate::vllm_nixl::SUPPORTED_PROTOCOL_VERSION.to_string()),
             max_request_bytes: byte_limit_from_env(
                 crate::vllm_nixl::MAX_REQUEST_BYTES_ENV,
                 crate::vllm_nixl::DEFAULT_MAX_REQUEST_BYTES,
@@ -74,8 +74,21 @@ impl Config {
                 crate::vllm_nixl::MAX_PREFILL_RESPONSE_BYTES_ENV,
                 crate::vllm_nixl::DEFAULT_MAX_PREFILL_RESPONSE_BYTES,
             )?,
-            model: std::env::var(MODEL_NAME_ENV).unwrap_or_default(),
+            model: optional_env(MODEL_NAME_ENV)?.unwrap_or_default(),
         })
+    }
+}
+
+/// Read an optional environment value, treating a missing one as absent but a
+/// non-UTF-8 one as a configuration error rather than silently falling back to
+/// a default.
+fn optional_env(name: &str) -> Result<Option<String>> {
+    match std::env::var_os(name) {
+        None => Ok(None),
+        Some(raw) => raw
+            .into_string()
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("{name} must be valid UTF-8")),
     }
 }
 
