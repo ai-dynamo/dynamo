@@ -27,6 +27,10 @@ _KV_LEASE_SHM_HEADER_SIZE = 64
 # Per-block record: state (u32) | generation (u32) | owner_hash (u64).
 _KV_LEASE_SHM_RECORD_SIZE = 16
 _KV_LEASE_SHM_HEADER_STRUCT = struct.Struct("<IIIIQQ")
+_KV_LEASE_SHM_RECORD_PREFIX_STRUCT = struct.Struct("<II")
+_KV_LEASE_STATE_MASK = 0x7
+_KV_LEASE_STATE_SEALED = 2
+_KV_LEASE_STATE_TRANSITION = 4
 
 logger = logging.getLogger(__name__)
 _LEASE_PRESSURE_LOG_STATE: dict[str, tuple[float, int]] = {}
@@ -193,20 +197,19 @@ class KVLeaseClient(Protocol):
         preferred_blocks: list[int] | None = None,
         allow_partial: bool = False,
         strict_preferred: bool = False,
-    ) -> list[KVLease]:
-        ...
+    ) -> list[KVLease]: ...
 
-    def seal(self, leases: list[KVLease]) -> None:
-        ...
+    def seal(self, leases: list[KVLease]) -> None: ...
 
-    def adopt(self, leases: list[KVLease]) -> list[KVLease]:
-        ...
+    def pin_read(self, leases: list[KVLease]) -> bool: ...
 
-    def release(self, leases: list[KVLease]) -> None:
-        ...
+    def unpin_read(self, leases: list[KVLease]) -> None: ...
 
-    def free_count(self) -> int:
-        ...
+    def adopt(self, leases: list[KVLease]) -> list[KVLease]: ...
+
+    def release(self, leases: list[KVLease]) -> None: ...
+
+    def free_count(self) -> int: ...
 
 
 class SharedMemoryKVLeaseClient:
@@ -291,6 +294,8 @@ class SharedMemoryKVLeaseClient:
             "kv_lease_acquire",
             "kv_lease_acquire_lockless_if_unreserved",
             "kv_lease_seal",
+            "kv_lease_pin_read",
+            "kv_lease_unpin_read",
             "kv_lease_release",
             "kv_lease_reclaim_foreign",
         )
@@ -566,6 +571,38 @@ class SharedMemoryKVLeaseClient:
                 f"GMS KV lease seal committed {sealed}/{len(leases)} blocks"
             )
 
+    def pin_read(self, leases: list[KVLease]) -> bool:
+        """Pin exact sealed generations against eviction and reuse.
+
+        The caller must retain the returned claim until all GPU work reading
+        these blocks has completed. A false result leaves no partial pins.
+        """
+        if not leases:
+            return True
+        return bool(
+            self._rust.kv_lease_pin_read(
+                self._mmap,
+                [int(lease.block_id) for lease in leases],
+                [int(lease.generation) for lease in leases],
+            )
+        )
+
+    def unpin_read(self, leases: list[KVLease]) -> None:
+        """Release exact-generation reader claims after GPU completion."""
+        if not leases:
+            return
+        released = int(
+            self._rust.kv_lease_unpin_read(
+                self._mmap,
+                [int(lease.block_id) for lease in leases],
+                [int(lease.generation) for lease in leases],
+            )
+        )
+        if released != len(leases):
+            raise RuntimeError(
+                f"GMS KV read unpin released {released}/{len(leases)} blocks"
+            )
+
     def adopt(self, leases: list[KVLease]) -> list[KVLease]:
         if not leases:
             return []
@@ -658,12 +695,8 @@ class SharedMemoryKVLeaseClient:
         return self.free_count()
 
     def _supports_shm_reservation(self) -> bool:
-        return all(
-            hasattr(self._rust, name)
-            for name in (
-                "kv_lease_free_count_for_owner",
-                "kv_lease_set_reservation",
-            )
+        return hasattr(self._rust, "kv_lease_free_count_for_owner") and hasattr(
+            self._rust, "kv_lease_set_reservation"
         )
 
     def _sync_file_reservation_to_shm(self) -> None:
@@ -742,6 +775,7 @@ def reclaim_foreign_kv_leases_in_shm_dir(
     shm_dir: str | None = None,
     max_blocks_per_file: int = 0,
     protected_blocks: set[int] | None = None,
+    protected_leases: set[tuple[int, int]] | None = None,
     namespace_suffix: str = "kv",
 ) -> KVLeaseReclaimResult:
     """Reclaim non-self KV leases from THIS engine+device's lease mmap file.
@@ -758,9 +792,12 @@ def reclaim_foreign_kv_leases_in_shm_dir(
     namespace rule used by the client (``GMS_<ENGINE>_KV_LEASE_NAMESPACE`` ->
     ``GMS_KV_LEASE_NAMESPACE`` -> ``{engine}:gpu{device}:{namespace_suffix}``).
 
-    ``protected_blocks`` are READY HBM slots from the authoritative content
-    directory. They remain sealed for lazy adoption by the replacement owner;
-    all other foreign records are reclaimed as before.
+    ``protected_leases`` are exact READY HBM slot generations from the
+    authoritative content directory. Once the predecessor is fenced, each is
+    checked against this rank-local ring before selective reclaim. Stale
+    directory generations are reclaimed rather than leaking writable capacity.
+    ``protected_blocks`` is retained as a compatibility fallback for callers
+    that do not have generation metadata.
     """
 
     rust = _load_optional_rust_ring()
@@ -768,7 +805,17 @@ def reclaim_foreign_kv_leases_in_shm_dir(
         return KVLeaseReclaimResult()
 
     protected = sorted(int(block_id) for block_id in (protected_blocks or set()))
-    if protected and not hasattr(rust, "kv_lease_reclaim_foreign_except"):
+    requested_leases = (
+        None
+        if protected_leases is None
+        else {
+            (int(block_id), int(generation))
+            for block_id, generation in protected_leases
+        }
+    )
+    if (protected or requested_leases) and not hasattr(
+        rust, "kv_lease_reclaim_foreign_except"
+    ):
         logger.error(
             "GMS KV selective reclaim unavailable; preserving all foreign "
             "leases rather than discarding directory-owned HBM"
@@ -813,11 +860,34 @@ def reclaim_foreign_kv_leases_in_shm_dir(
             )
             buf = mmap.mmap(fd, map_size)
             try:
-                if protected:
+                file_protected = protected
+                if requested_leases is not None:
+                    total_blocks = int(header[2])
+                    file_protected = []
+                    for block_id, generation in requested_leases:
+                        if block_id < 0 or block_id >= total_blocks:
+                            continue
+                        state, observed_generation = (
+                            _KV_LEASE_SHM_RECORD_PREFIX_STRUCT.unpack_from(
+                                buf,
+                                _KV_LEASE_SHM_HEADER_SIZE
+                                + block_id * _KV_LEASE_SHM_RECORD_SIZE,
+                            )
+                        )
+                        if observed_generation != generation:
+                            continue
+                        if state & _KV_LEASE_STATE_MASK not in (
+                            _KV_LEASE_STATE_SEALED,
+                            _KV_LEASE_STATE_TRANSITION,
+                        ):
+                            continue
+                        file_protected.append(block_id)
+                    file_protected.sort()
+                if file_protected:
                     n = int(
                         rust.kv_lease_reclaim_foreign_except(
                             buf,
-                            protected,
+                            file_protected,
                             int(owner_hash),
                             max(0, int(max_blocks_per_file)),
                         )

@@ -160,6 +160,87 @@ def test_shared_memory_lease_adopt_transfers_without_free_window(tmp_path):
         shadow.close()
 
 
+def test_read_pin_blocks_release_and_adoption_until_unpinned(tmp_path):
+    path = str(tmp_path / "leases-read-pin.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="read-pin", owner_id="primary", total_blocks=4
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="read-pin", owner_id="shadow", total_blocks=4
+    )
+    try:
+        old = primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        primary.seal(old)
+        free_before = primary.raw_free_count()
+
+        assert shadow.pin_read(old)
+        primary.release(old)
+        assert primary.raw_free_count() == free_before
+        assert shadow.adopt(old) == []
+
+        shadow.unpin_read(old)
+        adopted = shadow.adopt(old)
+        assert adopted == [KVLease(1, old[0].generation + 1)]
+        primary.release(old)
+        assert shadow.raw_free_count() == free_before
+        shadow.release(adopted)
+        assert shadow.raw_free_count() == 4
+    finally:
+        primary.close()
+        shadow.close()
+
+
+def test_read_pin_batch_failure_rolls_back_every_partial_pin(tmp_path):
+    path = str(tmp_path / "leases-read-pin-rollback.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="read-pin-rollback", owner_id="primary", total_blocks=4
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="read-pin-rollback", owner_id="shadow", total_blocks=4
+    )
+    try:
+        leases = primary.acquire(2, preferred_blocks=[1, 2], strict_preferred=True)
+        primary.seal(leases)
+        stale = KVLease(leases[1].block_id, leases[1].generation + 1)
+
+        assert shadow.pin_read([leases[0], stale]) is False
+
+        # The first pin was rolled back when the second generation failed.
+        primary.release(leases)
+        assert primary.raw_free_count() == 4
+    finally:
+        primary.close()
+        shadow.close()
+
+
+def test_post_fence_recovery_clears_abandoned_read_pins(tmp_path):
+    path = str(tmp_path / "leases-abandoned-read-pin.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="abandoned-read-pin", owner_id="primary", total_blocks=4
+    )
+    dead_reader = SharedMemoryKVLeaseClient(
+        path, namespace="abandoned-read-pin", owner_id="reader", total_blocks=4
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="abandoned-read-pin", owner_id="shadow", total_blocks=4
+    )
+    try:
+        leases = primary.acquire(2, preferred_blocks=[1, 2], strict_preferred=True)
+        primary.seal(leases)
+        assert dead_reader.pin_read(leases)
+        dead_reader.close()
+
+        assert shadow.reclaim_foreign(protected_blocks={1}) == 1
+        assert shadow.raw_free_count() == 3
+        adopted = shadow.adopt([leases[0]])
+        assert len(adopted) == 1
+        shadow.release(adopted)
+        assert shadow.raw_free_count() == 4
+    finally:
+        primary.close()
+        shadow.close()
+
+
 def test_shared_memory_lease_reclaim_foreign_preserves_current_owner(tmp_path):
     path = tmp_path / "leases-reclaim.shm"
     first = SharedMemoryKVLeaseClient(
@@ -342,6 +423,53 @@ def test_reclaim_foreign_kv_leases_scoped_to_own_namespace(tmp_path, monkeypatch
         client.close()
         shadow.close()
         decoy.close()
+
+
+def test_post_fence_reclaim_preserves_only_exact_directory_generation(
+    tmp_path, monkeypatch
+):
+    from gpu_memory_service.integrations.common.kv_lease_client import (
+        reclaim_foreign_kv_leases_in_shm_dir,
+    )
+
+    path = str(tmp_path / "leases-exact-generation.shm")
+    monkeypatch.setenv("GMS_VLLM_KV_LEASE_SHM_PATH", path)
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="exact-generation", owner_id="primary", total_blocks=4
+    )
+    shadow = SharedMemoryKVLeaseClient(
+        path, namespace="exact-generation", owner_id="shadow", total_blocks=4
+    )
+    try:
+        old = primary.acquire(2, preferred_blocks=[1, 2], strict_preferred=True)
+        primary.seal(old)
+        # Page 2 was locally demoted after its directory publication. Its
+        # stale directory generation must not reserve the now-writable page.
+        successors = primary.adopt([old[1]])
+        assert successors[0].generation != old[1].generation
+
+        result = reclaim_foreign_kv_leases_in_shm_dir(
+            "vllm",
+            0,
+            owner_id="shadow",
+            protected_blocks={1, 2},
+            protected_leases={
+                (old[0].block_id, old[0].generation),
+                (old[1].block_id, old[1].generation),
+            },
+        )
+
+        assert result.files == 1
+        assert result.reclaimed_blocks == 1
+        assert result.errors == 0
+        assert shadow.raw_free_count() == 3
+        adopted = shadow.adopt([old[0]])
+        assert len(adopted) == 1
+        shadow.release(adopted)
+        assert shadow.raw_free_count() == 4
+    finally:
+        primary.close()
+        shadow.close()
 
 
 def test_read_kv_lease_namespace_total_blocks_is_read_only(tmp_path, monkeypatch):
