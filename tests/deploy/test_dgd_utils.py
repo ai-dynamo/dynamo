@@ -262,14 +262,13 @@ async def test_discovery_capture_and_cleanup(
     deployment._get_service_logs = MagicMock(
         side_effect=lambda: events.append("service-logs")
     )
-    monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", 0.01)
+    snapshot_timeout = 1 if capture_behavior == "cancel" else 0.01
+    monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", snapshot_timeout)
 
     async def capture():
         events.append("capture-start")
-        if capture_behavior == "timeout":
+        if capture_behavior in {"timeout", "cancel"}:
             await asyncio.Event().wait()
-        if capture_behavior == "cancel":
-            raise asyncio.CancelledError
         await asyncio.sleep(0)
         events.append("capture-done")
 
@@ -279,7 +278,12 @@ async def test_discovery_capture_and_cleanup(
     deployment._capture_discovery_state = capture
     deployment._delete_deployment = delete
 
-    if failed:
+    if capture_behavior == "cancel":
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.01):
+                async with deployment:
+                    raise ValueError("inference failed")
+    elif failed:
         with pytest.raises(ValueError, match="inference failed"):
             async with deployment:
                 raise ValueError("inference failed")

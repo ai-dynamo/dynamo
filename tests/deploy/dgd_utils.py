@@ -1857,11 +1857,18 @@ class ManagedDeployment:
                 )
 
     async def _cleanup(self, failed: bool = False):
+        pending_cancellation: asyncio.CancelledError | None = None
         try:
             if failed:
                 try:
                     async with asyncio.timeout(DISCOVERY_SNAPSHOT_TIMEOUT):
                         await self._capture_discovery_state()
+                except asyncio.CancelledError as error:
+                    pending_cancellation = error
+                    self._logger.warning(
+                        "Discovery snapshot cancelled; finishing cleanup before "
+                        "propagating cancellation"
+                    )
                 except BaseException as error:
                     # Snapshot capture is best-effort and must not replace the
                     # existing setup or test failure.
@@ -1884,6 +1891,8 @@ class ManagedDeployment:
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
+        if pending_cancellation is not None:
+            raise pending_cancellation
 
     async def __aenter__(self):
         try:
