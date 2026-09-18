@@ -314,6 +314,46 @@ def test_exclusive_steady_state_exposes_only_owned_writable_pages(monkeypatch):
     assert list(state["cpu_free_pages"]) == [1, 3]
 
 
+def test_exclusive_steady_state_preserves_one_page_for_standby(monkeypatch):
+    acquired = []
+
+    def acquire(count, *, preferred_blocks, allow_partial, strict_preferred):
+        assert count == 1
+        assert preferred_blocks == [3]
+        assert allow_partial is True
+        assert strict_preferred is True
+        leases = [KVLease(3, 5)]
+        acquired.extend(leases)
+        return leases
+
+    allocator = SimpleNamespace(
+        free_pages=torch.tensor([1, 2, 3, 4]),
+        need_sort=False,
+        page_size=64,
+        _gms_tp_consistency=TPConsistency(),
+        _gms_standby_headroom_pages=1,
+    )
+    state = {
+        "client": SimpleNamespace(acquire=acquire, release=lambda leases: None),
+        "leases_by_page": {1: KVLease(1, 3), 2: KVLease(2, 4)},
+        "retained_pages": {2},
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+        "steady_state": False,
+        "exclusive_steady_state": False,
+        "exclusive_hidden_pages": set(),
+        "standby_headroom_pages": set(),
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(hooks, "torch", torch)
+
+    assert hooks.enter_exclusive_steady_state(allocator) == 2
+    assert allocator.free_pages.tolist() == [1, 3]
+    assert state["standby_headroom_pages"] == {4}
+    assert state["exclusive_hidden_pages"] == {2}
+    assert hooks.hidden_recoverable_tokens(allocator) == 128
+
+
 def test_exclusive_extend_records_pages_without_device_read(monkeypatch):
     req = SimpleNamespace(_gms_kv_page_ids=[2])
     allocator = SimpleNamespace(

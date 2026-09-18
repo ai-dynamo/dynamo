@@ -238,14 +238,17 @@ def _state(self) -> dict[str, object] | None:
 
 
 def hidden_recoverable_tokens(allocator) -> int:
-    """Return externally recoverable capacity withheld from native allocation."""
+    """Return shared capacity withheld from this native allocator."""
     st = _STATE.get(id(allocator))
     if st is None:
         return 0
     hidden = st.get("exclusive_hidden_pages")
-    if not isinstance(hidden, set):
-        return 0
-    return len(hidden) * int(getattr(allocator, "page_size", 1))
+    standby = st.get("standby_headroom_pages")
+    hidden_count = len(hidden) if isinstance(hidden, set) else 0
+    standby_count = len(standby) if isinstance(standby, set) else 0
+    return (hidden_count + standby_count) * int(
+        getattr(allocator, "page_size", 1)
+    )
 
 
 def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
@@ -751,6 +754,15 @@ def enter_exclusive_steady_state(self) -> int:
     candidates = [
         page for page in common_free if page not in lease_map and page not in retained
     ]
+    headroom_count = min(
+        max(0, int(getattr(self, "_gms_standby_headroom_pages", 0))),
+        len(candidates),
+    )
+    standby_headroom = (
+        set(candidates[-headroom_count:]) if headroom_count else set()
+    )
+    if standby_headroom:
+        candidates = [page for page in candidates if page not in standby_headroom]
     acquired: list[KVLease] = []
     try:
 
@@ -784,7 +796,10 @@ def enter_exclusive_steady_state(self) -> int:
     )
     if len(local) != len(common) or set(local) != set(common):
         raise RuntimeError("SGLang TP writable-page ownership diverged")
-    st["exclusive_hidden_pages"] = set(common_free).difference(local)
+    st["standby_headroom_pages"] = standby_headroom
+    st["exclusive_hidden_pages"] = (
+        set(common_free).difference(local).difference(standby_headroom)
+    )
     self.free_pages = torch.tensor(
         local, dtype=self.free_pages.dtype, device=self.free_pages.device
     )
@@ -1342,6 +1357,7 @@ def _initialize_allocator(self) -> None:
         "steady_state": False,
         "exclusive_steady_state": False,
         "exclusive_hidden_pages": set(),
+        "standby_headroom_pages": set(),
         # Populated once the writer owns one stable native free-page set. The
         # mirror lets request-aware allocation record physical page ownership
         # without synchronizing SGLang's GPU allocator tensor back to Python.
@@ -1431,6 +1447,7 @@ def _revoke_allocator_fast_path(st) -> None:
     st["steady_state"] = False
     st["tp_reservation_aligned"] = False
     st["exclusive_hidden_pages"] = set()
+    st["standby_headroom_pages"] = set()
     st["cpu_free_pages"] = None
     for name in ("cpu_staged_pages", "cpu_release_pages", "tp_reserved_pages"):
         values = st.get(name)

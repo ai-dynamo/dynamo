@@ -195,6 +195,15 @@ def make_gms_unified_cache_class():
             self._gms_directory = _make_directory(self.page_size)
             self._gms_engine_id = _engine_id()
             self.token_to_kv_pool_allocator._gms_kv_directory = self._gms_directory
+            # An active writer otherwise leases every native-free page when it
+            # enters the lock-free steady state. In failover mode, keep exactly
+            # one shared-free page per rank for the current or next sleeping
+            # standbys bounded EXTEND warmup. Ordinary workers retain the full
+            # pool. This is based on topology, not the startup role: a sleeping
+            # standby becomes the active writer without reconstructing the cache.
+            self.token_to_kv_pool_allocator._gms_standby_headroom_pages = (
+                1 if _standby() is not None else 0
+            )
             self._gms_tp = TPConsistency(self.tp_group, self.tp_world_size)
             self.token_to_kv_pool_allocator._gms_tp_consistency = self._gms_tp
             self._gms_steady_state = False
