@@ -308,6 +308,8 @@ def tracing_services_disagg(
 # ---------------------------------------------------------------------------
 
 
+# Keep the DEBUG contract covered by the generic runtime CI selector.
+@pytest.mark.pre_merge
 def test_agg_unary_success(tracing_services) -> None:
     """Aggregated unary: full lifecycle logs + token counts + worker logs."""
     port = tracing_services["frontend_port"]
@@ -324,7 +326,7 @@ def test_agg_unary_success(tracing_services) -> None:
     assert completed[0]["level"] == "DEBUG"
     assert received[0].get("x_request_id") == rid
     assert received[0].get("request_id"), "request_id must survive the DEBUG demotion"
-    assert completed[0].get("request_id"), "request_id must survive the DEBUG demotion"
+    assert completed[0].get("request_id") == received[0]["request_id"]
     assert "model" in received[0]
     assert "endpoint" in received[0]
     assert "elapsed_ms" in completed[0]
@@ -350,9 +352,7 @@ def test_agg_unary_success(tracing_services) -> None:
     assert (
         wk_received[0].get("request_id") == server_rid
     ), "Worker request_id should match frontend"
-    assert wk_completed[0].get(
-        "request_id"
-    ), "Worker request_id must survive the DEBUG demotion"
+    assert wk_completed[0].get("request_id") == server_rid
 
 
 def test_agg_streaming_success(tracing_services) -> None:
@@ -400,6 +400,8 @@ def test_agg_404_error(tracing_services) -> None:
     assert http_sent[0].get("status") == "404"
 
 
+# The generic runtime jobs select pre_merge in both PR and post-merge CI.
+@pytest.mark.pre_merge
 def test_agg_lifecycle_absent_at_info_level(tracing_services_info_level) -> None:
     """Routine lifecycle events are filtered at DYN_LOG=info."""
     port = tracing_services_info_level["frontend_port"]
