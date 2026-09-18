@@ -103,6 +103,7 @@ The configuration file format depends on the mode. The `mode` field determines w
 {
     "mode": "disagg",                     // Optional, defaults to "disagg"
     "enable_priority_retry": false,        // Optional, retry failed requests on faster pools
+    "reserve_output_tokens_for_context": false, // Optional, route by prompt plus output budget
     "num_prefill_pools": <int>,
     "num_decode_pools": <int>,
     "prefill_pool_dynamo_namespaces": [],
@@ -205,14 +206,11 @@ The default pool selection uses a 2D grid lookup. Each dimension is divided into
    - `ttft_idx = clamp((ttft_target_ms - ttft_min_ms) / ttft_step_ms, 0, ttft_resolution - 1)`
 4. Lookup pool: `pool_index = prefill_pool_mapping[isl_idx][ttft_idx]`
 
+Set `reserve_output_tokens_for_context` to `true` when pools have different context limits. The router then uses the prompt length plus the largest valid completion estimate from `stop_conditions.max_tokens` and `routing.expected_output_tokens` for both prefill and decode bucket selection. The token-native `/inference/v1/generate` path preserves the original `sampling_params.max_tokens` as `routing.expected_output_tokens` when the disaggregated prefill request is clamped to one output token.
+
 **Decode Pool Selection** (disagg mode, based on request token count and ITL target):
 
-Valid `PreprocessedRequest` payloads require `token_ids`. The handler passes the
-length of that list into the strategy's `context_length` dimension and does not
-add subsequently generated tokens. Its `request.get("token_ids", [])` fallback
-only protects malformed direct calls; a missing field routes those calls with a
-request token count of `0`. The bucket calculation otherwise uses
-`context_length_*` and `itl_target` with `decode_pool_mapping`.
+Valid `PreprocessedRequest` payloads require `token_ids`. By default, the handler passes the length of that list into the strategy's `context_length` dimension and does not add subsequently generated tokens. With `reserve_output_tokens_for_context` enabled, it adds the requested completion estimate described above. Its `request.get("token_ids", [])` fallback only protects malformed direct calls; a missing field routes those calls with a request token count of `0`. The bucket calculation otherwise uses `context_length_*` and `itl_target` with `decode_pool_mapping`.
 
 **Agg Pool Selection** (agg mode, based on TTFT and ITL targets, with optional ISL):
 

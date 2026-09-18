@@ -24,15 +24,23 @@ logger = logging.getLogger(__name__)
 
 
 def _requested_output_tokens(request: Dict[str, Any]) -> int:
-    """Read the preprocessed completion budget without rejecting legacy requests."""
+    """Return the largest valid completion estimate carried by the request."""
+    candidates = []
     stop_conditions = request.get("stop_conditions") or {}
-    if not isinstance(stop_conditions, dict):
-        return 0
-    value = stop_conditions.get("max_tokens")
-    try:
-        return max(0, int(value)) if value is not None else 0
-    except (TypeError, ValueError):
-        return 0
+    if isinstance(stop_conditions, dict):
+        candidates.append(stop_conditions.get("max_tokens"))
+
+    routing = request.get("routing") or {}
+    if isinstance(routing, dict):
+        candidates.append(routing.get("expected_output_tokens"))
+
+    output_tokens = 0
+    for value in candidates:
+        try:
+            output_tokens = max(output_tokens, int(value))
+        except (TypeError, ValueError):
+            continue
+    return output_tokens
 
 
 class GlobalRouterHandler:
@@ -266,10 +274,17 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing prefill request: ISL={isl}, reserved_output={output_tokens}, "
-            f"routing_length={routing_length}, TTFT_target={ttft_target_ms}ms, "
-            f"priority={priority} -> pool {pool_idx} ({namespace}); "
-            f"retry_order={pool_order}"
+            "Routing prefill request: ISL=%s, reserved_output=%s, "
+            "routing_length=%s, TTFT_target=%sms, priority=%s -> pool %s (%s); "
+            "retry_order=%s",
+            isl,
+            output_tokens,
+            routing_length,
+            ttft_target_ms,
+            priority,
+            pool_idx,
+            namespace,
+            pool_order,
         )
 
         # Forward request to local router and stream back responses
@@ -331,10 +346,17 @@ class GlobalRouterHandler:
         )
 
         logger.info(
-            f"Routing decode request: input_tokens={input_tokens}, "
-            f"reserved_output={output_tokens}, context_length={context_length}, "
-            f"ITL_target={itl_target_ms}ms, priority={priority} -> "
-            f"pool {pool_idx} ({namespace}); retry_order={pool_order}"
+            "Routing decode request: input_tokens=%s, reserved_output=%s, "
+            "context_length=%s, ITL_target=%sms, priority=%s -> pool %s (%s); "
+            "retry_order=%s",
+            input_tokens,
+            output_tokens,
+            context_length,
+            itl_target_ms,
+            priority,
+            pool_idx,
+            namespace,
+            pool_order,
         )
 
         # Forward request to local router and stream back responses
