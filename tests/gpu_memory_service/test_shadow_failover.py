@@ -113,7 +113,11 @@ def _kill_process_group(process: ManagedProcess) -> None:
     # alive, which is unlike a pod/container crash and can route requests to a
     # dead cohort after the shadow is ready. Snapshot and SIGKILL the complete
     # descendant tree to emulate that containment boundary locally.
-    terminate_process_tree(pid, logger, immediate_kill=True, timeout=2)
+    # A crash trigger must not include process-reaping latency in the measured
+    # failover interval. ``timeout=0`` still snapshots and SIGKILLs the complete
+    # descendant tree; it only skips the two blocking wait phases. Managed
+    # process teardown reaps the already-signalled processes after assertions.
+    terminate_process_tree(pid, logger, immediate_kill=True, timeout=0)
 
 
 def _kill_launcher_only(process: ManagedProcess) -> None:
@@ -225,9 +229,9 @@ def _resume_shadow_after_primary_failover(
         result = resume_future.result(timeout=resume_timeout_s)
         kv_with_shadow = kv_cache_gms.get_runtime_state()
         assert kv_with_shadow.state == ServerState.RW
-        assert (
-            kv_with_shadow.allocation_count == kv_with_primary.allocation_count
-        ), "failover changed the committed shared KV allocation count"
+        assert kv_with_shadow.allocation_count == kv_with_primary.allocation_count, (
+            "failover changed the committed shared KV allocation count"
+        )
         return result
 
 

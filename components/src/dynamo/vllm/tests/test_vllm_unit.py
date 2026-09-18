@@ -2581,7 +2581,7 @@ async def test_gms_preinit_lock_owner_starts_rank_liveness_monitor(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
+async def test_gms_rank_loss_fences_engine_core_before_owner_exit(monkeypatch):
     import asyncio
     import signal
 
@@ -2598,10 +2598,17 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
         def start(self):
             pass
 
-
-    killed = []
+    events = []
     shutdown_event = asyncio.Event()
-    handler = SimpleNamespace(shutdown_event=shutdown_event)
+
+    class EngineCore:
+        def shutdown(self, *, timeout):
+            events.append(("engine_core_shutdown", timeout))
+
+    handler = SimpleNamespace(
+        shutdown_event=shutdown_event,
+        engine_client=SimpleNamespace(engine_core=EngineCore()),
+    )
     config = SimpleNamespace(
         gms_shadow_mode=True, engine_args=SimpleNamespace(nnodes=2)
     )
@@ -2616,7 +2623,7 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
     monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.os.kill",
-        lambda pid, sig: killed.append((pid, sig)),
+        lambda pid, sig: events.append(("kill", pid, sig)),
     )
 
     factory._maybe_start_rank_liveness_monitor(handler, config)
@@ -2624,7 +2631,10 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
 
     await asyncio.sleep(0)
     assert shutdown_event.is_set()
-    assert killed == [(os.getpid(), signal.SIGTERM)]
+    assert events == [
+        ("engine_core_shutdown", 0),
+        ("kill", os.getpid(), signal.SIGKILL),
+    ]
 
 
 @pytest.mark.asyncio
