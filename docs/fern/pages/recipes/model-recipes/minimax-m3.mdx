@@ -1,0 +1,201 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "MiniMax M3 NVFP4"
+subtitle: "Serve MiniMax M3 NVFP4 with Dynamo and vLLM on GB200, aggregated or with prefill/decode disaggregation."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+**Experimental.** These manifests serve `nvidia/MiniMax-M3-NVFP4` with NVIDIA Dynamo and vLLM on GB200. Choose two aggregated TP4 replicas or a disaggregated deployment with three TP4 prefill workers and three TP4 decode workers. No benchmark results are published for either target.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> nvidia/MiniMax-M3-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
+<span><b>GPUs</b> 8x GB200, two TP4 workers</span>
+<span><b>KV storage</b> OffloadingConnector with a 400,000,000,000-byte CPU budget setting</span>
+<span><b>Routing</b> KV-aware across replicas</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> nvidia/MiniMax-M3-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
+<span><b>GPUs</b> 12x GB200 prefill + 12x GB200 decode</span>
+<span><b>Workers</b> Three TP4 prefill + three TP4 decode</span>
+<span><b>Routing</b> KV-aware, NIXL KV transfer</span>
+<span><b>Context</b> Up to 1,048,576 tokens</span>
+</div>
+</div>
+
+## Prerequisites
+
+Both targets require:
+
+- A Kubernetes cluster with the Dynamo platform installed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- GB200 GPU nodes: 8 GPUs for aggregated serving or 24 GPUs for disaggregated serving.
+- A rack-scoped NVIDIA ComputeDomain channel `ResourceClaimTemplate`. Update the manifest's `resourceClaimTemplateName` fields to its name.
+- A ReadWriteMany storage class that can satisfy the recipe's 1,000 GiB `shared-model-cache` claim.
+- A Hugging Face token that can download `nvidia/MiniMax-M3-NVFP4` and `Inferact/MiniMax-M3-EAGLE3-GQA`.
+- A vLLM runtime image with the MiniMax M3 support and dependencies required by the selected manifest.
+
+<Warning>
+The checked-in manifests are cluster-qualified templates, not directly portable deployments. They contain cluster-specific scheduling, registry, networking, namespace, and ComputeDomain values. The referenced runtime image is not publicly accessible. Replace these values before applying either manifest.
+</Warning>
+
+<div data-variant="agg">
+
+The aggregated target also requires the `patch` utility in the runtime image. An init container applies two embedded vLLM scheduler patches and verifies the resulting file hash before workers start. A runtime image with a different vLLM source revision fails this check.
+
+</div>
+
+<div data-variant="disagg">
+
+The disaggregated target requires network-interface annotations and UCX/NCCL interface settings that match the target cluster. It also requires all six workers to use a compatible rack-scoped ComputeDomain channel.
+
+</div>
+
+## Deploy
+
+Set the namespace and create the Hugging Face token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace "${NAMESPACE}"
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n "${NAMESPACE}"
+```
+
+Before applying a deployment manifest, replace these cluster-specific fields:
+
+- Every container and init-container `image` with an image your cluster can pull.
+- `imagePullSecrets` with your registry secret, or remove the field when it is not required.
+- `priorityClassName`, node selectors, and tolerations with values supported by your cluster.
+- Every `resourceClaimTemplateName` with the target cluster's ComputeDomain channel claim template.
+- The disaggregated manifest's `metadata.namespace` and `metadata.name`. Set the name to `minimax-m3-disagg-gb200-agentic` for the smoke-test command below.
+- The disaggregated manifest's network annotations, topology constraint, `NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`, `UCX_TLS`, and `UCX_NET_DEVICES` values.
+
+Edit `storageClassName` in the model-cache manifest, then populate the cache:
+
+```bash
+kubectl apply -f recipes/minimax-m3/model-cache/model-cache.yaml -n "${NAMESPACE}"
+kubectl apply -f recipes/minimax-m3/model-cache/model-download.yaml -n "${NAMESPACE}"
+kubectl wait --for=condition=complete job/minimax-m3-model-download \
+  -n "${NAMESPACE}" --timeout=14400s
+```
+
+Apply the selected deployment.
+
+<div data-variant="agg">
+
+```bash
+kubectl apply \
+  -f recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml \
+  -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+kubectl apply \
+  -f recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml \
+  -n "${NAMESPACE}"
+```
+
+</div>
+
+Monitor the deployment until the frontend and every worker report ready:
+
+```bash
+kubectl get dynamographdeployments,pods -n "${NAMESPACE}"
+```
+
+## Smoke Test
+
+Forward the selected frontend service.
+
+<div data-variant="agg">
+
+```bash
+kubectl port-forward \
+  svc/minimax-m3-agg-gb200-agentic-frontend 8000:8000 \
+  -n "${NAMESPACE}"
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+kubectl port-forward \
+  svc/minimax-m3-disagg-gb200-agentic-frontend 8000:8000 \
+  -n "${NAMESPACE}"
+```
+
+</div>
+
+In another terminal, send a chat request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "nvidia/MiniMax-M3-NVFP4",
+    "messages": [{"role": "user", "content": "Respond with a short readiness message."}],
+    "max_tokens": 64
+  }'
+```
+
+A successful smoke test returns an HTTP 200 response containing a chat completion.
+
+## Benchmark
+
+No AIPerf manifest or benchmark dataset is checked in for these targets. The catalog does not publish latency, throughput, or concurrency expectations.
+
+## Compare All Targets
+
+Both targets use vLLM, TP4 workers, FP8 KV cache, prefix caching, KV events, KV-aware routing, and EAGLE3 speculative decoding with three speculative tokens.
+
+| | Aggregated | Disaggregated |
+| --- | --- | --- |
+| **GPUs** | 8x GB200 | 24x GB200 |
+| **Workers** | 2 aggregated | 3 prefill + 3 decode |
+| **Parallelism** | TP4 per worker | TP4 per worker |
+| **GPU memory utilization** | 0.90 | 0.80 prefill / 0.90 decode |
+| **Maximum sequences** | 256 | 32 prefill / 256 decode |
+| **Maximum batched tokens** | 16,384 | 24,576 prefill / 8,192 decode |
+| **KV path** | OffloadingConnector with a 400,000,000,000-byte CPU budget setting | NIXL transfer between prefill and decode |
+| **Maximum context** | 1,048,576 | 1,048,576 |
+
+## Related Feature Benchmarks
+
+No controlled feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx) for studies of KV-aware routing, disaggregated serving, and speculative decoding.
+
+## Notes
+
+- Both manifests set `--language-model-only`; these targets serve text requests only.
+- Both manifests pin the model checkpoint and the EAGLE3 checkpoint to specific Hugging Face revisions.
+- The aggregated target uses vLLM's `OffloadingConnector` with `CPUOffloadingSpec` and sets `cpu_bytes_to_use` to `400000000000`.
+- The disaggregated target uses `NixlConnector` with `kv_role=kv_both` on prefill and decode workers.
+- The manifests set `runtimeVersionOverride` to `1.5.0`. This value does not identify a publicly available container image.
+
+## Source
+
+- Recipe README: [recipes/minimax-m3/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/README.md)
+- Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml)
+- Disaggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml)
+- Model cache: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/model-cache/model-cache.yaml)
+- Model download: [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/minimax-m3/model-cache/model-download.yaml)
