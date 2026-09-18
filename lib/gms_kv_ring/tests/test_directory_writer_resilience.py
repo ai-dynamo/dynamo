@@ -42,8 +42,28 @@ def test_publish_worker_survives_a_failing_mutation():
             directory._mutation_sequence = 2
             directory._mutations.extend(
                 [
-                    (1, "publish", [{"a": 1}]),
-                    (2, "publish", [{"b": 2}]),
+                    (
+                        1,
+                        "publish",
+                        [
+                            {
+                                "content_hash": b"a",
+                                "engine_id": "engine",
+                                "slot_ids": [1],
+                            }
+                        ],
+                    ),
+                    (
+                        2,
+                        "publish",
+                        [
+                            {
+                                "content_hash": b"b",
+                                "engine_id": "engine",
+                                "slot_ids": [2],
+                            }
+                        ],
+                    ),
                 ]
             )
             directory._start_mutation_worker_locked()
@@ -52,9 +72,17 @@ def test_publish_worker_survives_a_failing_mutation():
 
         # A failed batch is a safe miss for every item in it. The worker must
         # remain available for the next independent mutation.
-        directory._defer_mutation("publish", [{"c": 3}])
+        directory._defer_mutation(
+            "publish", [{"content_hash": b"c", "engine_id": "engine", "slot_ids": [3]}]
+        )
         assert directory.flush_deferred(timeout=5.0) is True
-        assert calls == [[{"a": 1}, {"b": 2}], [{"c": 3}]]
+        assert calls == [
+            [
+                {"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]},
+                {"content_hash": b"b", "engine_id": "engine", "slot_ids": [2]},
+            ],
+            [{"content_hash": b"c", "engine_id": "engine", "slot_ids": [3]}],
+        ]
         assert directory._mutation_failed == 1
         assert (
             directory._mutation_error is None
@@ -80,16 +108,130 @@ def test_publish_worker_batches_adjacent_mutations_in_order():
         directory._mutation_sequence = 2
         directory._mutations.extend(
             [
-                (1, "publish", [{"a": 1}]),
-                (2, "publish", [{"b": 2}]),
+                (
+                    1,
+                    "publish",
+                    [{"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]}],
+                ),
+                (
+                    2,
+                    "publish",
+                    [{"content_hash": b"b", "engine_id": "engine", "slot_ids": [2]}],
+                ),
             ]
         )
         directory._mutation_stop = True
 
     directory._mutation_loop()
 
-    assert calls == [[{"a": 1}, {"b": 2}]]
+    assert calls == [
+        [
+            {"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]},
+            {"content_hash": b"b", "engine_id": "engine", "slot_ids": [2]},
+        ]
+    ]
     assert directory._mutation_committed == 2
+
+
+@pytest.mark.parametrize("collision", ["hash", "slot", "legacy-slot"])
+def test_adjacent_publications_preserve_sequential_daemon_semantics(
+    tmp_path, collision
+):
+    from gms_kv_ring.daemon.directory_server import DirectoryState
+    from gms_kv_ring.daemon.rpc_directory import handle_directory_publish_batch
+
+    daemon = DirectoryState()
+    daemon._content_directory_writer_id = "writer"
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    first = {
+        "content_hash": b"a" * 32,
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [1],
+        "tier": "hbm",
+    }
+    second = dict(first, content_hash=b"b" * 32, generations=[2])
+    if collision == "hash":
+        second.update(content_hash=first["content_hash"], slot_ids=[2])
+
+    if collision == "legacy-slot":
+        for item in (first, second):
+            item["slot_id"] = item.pop("slot_ids")[0]
+
+    def publish(items):
+        response = handle_directory_publish_batch(
+            daemon,
+            {
+                "writer_id": "writer",
+                "expected_epoch": 1,
+                "manifest_id": "manifest",
+                "items": [
+                    dict(item, content_hash=item["content_hash"].hex())
+                    for item in items
+                ],
+            },
+        )
+        if not response["ok"]:
+            raise RuntimeError(response["error"])
+        return response["published"]
+
+    directory.publish = publish
+    directory._mutations.extend([(1, "publish", [first]), (2, "publish", [second])])
+    directory._mutation_sequence = 2
+    directory._mutation_stop = True
+    directory._mutation_loop()
+    assert directory._mutation_failed == 0
+    recovered = daemon._content_directory[("manifest", second["content_hash"])]
+    assert recovered["slot_ids"] == second.get("slot_ids", [second.get("slot_id")])
+    assert recovered["generations"] == [2]
+
+
+def test_deferred_publish_owns_nested_metadata(tmp_path, monkeypatch):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    directory._async_publish = True
+    monkeypatch.setattr(directory, "_start_mutation_worker_locked", lambda: None)
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "ranges": [[0, 0, 16]],
+    }
+    assert directory.publish_deferred([item]) == 1
+    item["slot_ids"][0] = 9
+    item["generations"][0] = 10
+    item["ranges"][0][2] = 32
+    queued = directory._mutations[0][2][0]
+    assert queued["slot_ids"] == [1]
+    assert queued["generations"] == [2]
+    assert queued["ranges"] == [[0, 0, 16]]
+
+
+def test_malformed_publication_does_not_stop_writer(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    valid = {"content_hash": b"h", "engine_id": "e", "slot_ids": [1]}
+    calls = []
+
+    def publish(items):
+        calls.append(items)
+        if items == [{}]:
+            raise ValueError("malformed item")
+        return len(items)
+
+    directory.publish = publish
+    directory._mutations.extend([(1, "publish", [{}]), (2, "publish", [valid])])
+    directory._mutation_sequence = 2
+    directory._mutation_stop = True
+    directory._mutation_loop()
+    assert calls == [[{}], [valid]]
+    assert directory._mutation_committed == 2
+    assert directory._mutation_failed == 1
 
 
 def test_zero_capacity_request_preserves_ready_hbm_entry():
