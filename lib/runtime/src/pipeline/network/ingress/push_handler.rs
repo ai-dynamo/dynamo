@@ -1285,19 +1285,128 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancellation_frame_does_not_count_as_engine_stream_error() {
-        let cancellation = DynamoError::builder()
-            .error_type(ErrorType::Cancelled)
-            .message("client disconnected")
+        for error_type in [
+            ErrorType::Cancelled,
+            ErrorType::Backend(BackendError::Cancelled),
+        ] {
+            let cancellation = DynamoError::builder()
+                .error_type(error_type)
+                .message("request cancelled")
+                .build();
+            let metrics = run_response_frames(vec![Annotated::from_err(cancellation)]).await;
+
+            assert_eq!(
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                    .get(),
+                0,
+                "cancellation frames must not count as engine failures"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_engine_shutdown_counts_as_engine_stream_error() {
+        let shutdown = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+            .message("engine process crashed")
             .build();
-        let metrics = run_response_frames(vec![Annotated::from_err(cancellation)]).await;
+        let metrics = run_response_frames(vec![Annotated::from_err(shutdown)]).await;
 
         assert_eq!(
             metrics
                 .error_counter
                 .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
                 .get(),
-            0,
-            "cancellation frames must not count as engine failures"
+            1,
+            "engine crashes must not be classified as cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_serialization_fallback_is_counted_and_forwarded() {
+        use crate::pipeline::network::{EncodedResponseFrame, SerdeIngressPayloadAdapter};
+
+        struct SerializationFallbackAdapter;
+
+        impl IngressResponseEncoder<TestResponse> for SerializationFallbackAdapter {
+            async fn encode_response(
+                &self,
+                payload_codec: RequestPlanePayloadCodec,
+                response: Option<TestResponse>,
+                complete_final: bool,
+            ) -> Result<EncodedResponseFrame, PipelineError> {
+                SerdeIngressPayloadAdapter
+                    .encode_response(payload_codec, response, complete_final)
+                    .await
+            }
+
+            async fn encode_response_classified(
+                &self,
+                payload_codec: RequestPlanePayloadCodec,
+                _response: Option<TestResponse>,
+                complete_final: bool,
+            ) -> Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError> {
+                assert!(!complete_final);
+                // Match the Python encoder's successful fallback return: the
+                // client receives an error frame even though encoding failed.
+                let mut frame = self
+                    .encode_response(
+                        payload_codec,
+                        Some(Annotated::from_error("response serialization failed")),
+                        false,
+                    )
+                    .await?;
+                frame.stop_stream = true;
+                Ok((frame, ResponseFrameKind::SerializationError))
+            }
+        }
+
+        let ingress = Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>, _>::new_with_adapter(
+            SerializationFallbackAdapter,
+        );
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let publisher = StreamSender { tx, prologue: None };
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream = ResponseStream::new(
+            Box::pin(stream::iter(vec![Annotated::from_data(serde_json::json!(
+                {}
+            ))])),
+            ctx.context(),
+        );
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+        drop(publisher);
+
+        let bytes = rx.recv().await.expect("fallback frame must be forwarded");
+        let frame: NetworkStreamWrapper<TestResponse> =
+            RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+        assert!(!frame.complete_final);
+        assert!(frame.data.unwrap().is_error());
+        let bytes = rx.recv().await.expect("clean terminal frame must follow");
+        let frame: NetworkStreamWrapper<TestResponse> =
+            RequestPlanePayloadCodec::Json.decode(&bytes).unwrap();
+        assert!(frame.complete_final);
+        assert!(frame.data.is_none());
+        assert!(rx.recv().await.is_none(), "fallback must end the stream");
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                .get(),
+            0
         );
     }
 
