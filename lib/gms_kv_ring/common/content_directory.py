@@ -1036,10 +1036,7 @@ class ContentDirectory:
 
     def hbm_lease_inventory(
         self,
-    ) -> tuple[
-        dict[str, list[int]],
-        dict[str, list[tuple[int, int]]] | None,
-    ]:
+    ) -> tuple[dict[str, list[int]], dict[str, list[tuple[int, int]]] | None,]:
         def request(client, epoch):
             protected, leases, rejected = client.directory_hbm_lease_inventory(
                 self.writer_id, epoch, scope=self.engine

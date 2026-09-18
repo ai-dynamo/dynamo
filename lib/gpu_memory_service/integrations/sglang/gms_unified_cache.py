@@ -16,7 +16,6 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from gms_kv_ring.common.content_directory import ContentDirectory
-
 from gpu_memory_service.integrations.common.kv_lease_client import KVLease
 from gpu_memory_service.integrations.sglang.install_kv_leases import (
     adopt_hbm_pages,

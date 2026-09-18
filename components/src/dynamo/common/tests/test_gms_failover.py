@@ -474,8 +474,9 @@ def test_authoritative_failover_requires_explicit_directory_manifest(monkeypatch
 
 
 def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
-    from dynamo.common.gms_failover import _promote_content_directory_after_fence
     from gms_kv_ring.common import content_directory
+
+    from dynamo.common.gms_failover import _promote_content_directory_after_fence
 
     calls = []
 
@@ -508,8 +509,9 @@ def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
 
 
 def test_post_lock_directory_promotion_preserves_legacy_block_fallback(monkeypatch):
-    from dynamo.common.gms_failover import _promote_content_directory_after_fence
     from gms_kv_ring.common import content_directory
+
+    from dynamo.common.gms_failover import _promote_content_directory_after_fence
 
     class FakeDirectory:
         def __init__(self, _socket_path, **_kwargs):

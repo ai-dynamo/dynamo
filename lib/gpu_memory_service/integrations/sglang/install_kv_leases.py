@@ -246,9 +246,7 @@ def hidden_recoverable_tokens(allocator) -> int:
     standby = st.get("standby_headroom_pages")
     hidden_count = len(hidden) if isinstance(hidden, set) else 0
     standby_count = len(standby) if isinstance(standby, set) else 0
-    return (hidden_count + standby_count) * int(
-        getattr(allocator, "page_size", 1)
-    )
+    return (hidden_count + standby_count) * int(getattr(allocator, "page_size", 1))
 
 
 def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
@@ -758,9 +756,7 @@ def enter_exclusive_steady_state(self) -> int:
         max(0, int(getattr(self, "_gms_standby_headroom_pages", 0))),
         len(candidates),
     )
-    standby_headroom = (
-        set(candidates[-headroom_count:]) if headroom_count else set()
-    )
+    standby_headroom = set(candidates[-headroom_count:]) if headroom_count else set()
     if standby_headroom:
         candidates = [page for page in candidates if page not in standby_headroom]
     acquired: list[KVLease] = []
@@ -1988,9 +1984,9 @@ def install(factory: Callable[[object, int], KVLeaseClient] | None = None) -> bo
 
     try:
         import torch
+        from sglang.srt.managers import schedule_batch
         from sglang.srt.mem_cache import allocator as alloc_mod
         from sglang.srt.mem_cache import kv_cache_configurator
-        from sglang.srt.managers import schedule_batch
         from sglang.srt.utils import get_num_new_pages
     except Exception:
         logger.debug("[GMS-KVLease] SGLang allocator not importable", exc_info=True)
@@ -2034,8 +2030,8 @@ def install(factory: Callable[[object, int], KVLeaseClient] | None = None) -> bo
 def lease_hooks_installed() -> bool:
     """Verify the live SGLang allocator construction bindings."""
     try:
-        from sglang.srt.mem_cache import kv_cache_configurator
         from sglang.srt.managers import schedule_batch
+        from sglang.srt.mem_cache import kv_cache_configurator
     except Exception:  # noqa: BLE001
         return False
 

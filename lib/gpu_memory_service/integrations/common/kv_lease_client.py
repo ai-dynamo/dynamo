@@ -204,19 +204,26 @@ class KVLeaseClient(Protocol):
         preferred_blocks: list[int] | None = None,
         allow_partial: bool = False,
         strict_preferred: bool = False,
-    ) -> list[KVLease]: ...
+    ) -> list[KVLease]:
+        ...
 
-    def seal(self, leases: list[KVLease]) -> None: ...
+    def seal(self, leases: list[KVLease]) -> None:
+        ...
 
-    def pin_read(self, leases: list[KVLease]) -> KVReadClaim | None: ...
+    def pin_read(self, leases: list[KVLease]) -> KVReadClaim | None:
+        ...
 
-    def unpin_read(self, claim: KVReadClaim) -> None: ...
+    def unpin_read(self, claim: KVReadClaim) -> None:
+        ...
 
-    def adopt(self, leases: list[KVLease]) -> list[KVLease]: ...
+    def adopt(self, leases: list[KVLease]) -> list[KVLease]:
+        ...
 
-    def release(self, leases: list[KVLease]) -> None: ...
+    def release(self, leases: list[KVLease]) -> None:
+        ...
 
-    def free_count(self) -> int: ...
+    def free_count(self) -> int:
+        ...
 
 
 class SharedMemoryKVLeaseClient:
@@ -890,12 +897,13 @@ def reclaim_foreign_kv_leases_in_shm_dir(
                     for block_id, generation in requested_leases:
                         if block_id < 0 or block_id >= total_blocks:
                             continue
-                        state, observed_generation = (
-                            _KV_LEASE_SHM_RECORD_PREFIX_STRUCT.unpack_from(
-                                buf,
-                                _KV_LEASE_SHM_HEADER_SIZE
-                                + block_id * _KV_LEASE_SHM_RECORD_SIZE,
-                            )
+                        (
+                            state,
+                            observed_generation,
+                        ) = _KV_LEASE_SHM_RECORD_PREFIX_STRUCT.unpack_from(
+                            buf,
+                            _KV_LEASE_SHM_HEADER_SIZE
+                            + block_id * _KV_LEASE_SHM_RECORD_SIZE,
                         )
                         if observed_generation != generation:
                             continue

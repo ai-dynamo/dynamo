@@ -205,10 +205,7 @@ def cross_validate_config(
         backend = getattr(engine_config, "distributed_executor_backend", None)
         single_rank = not dynamo_config.headless and tp == pp == dp == nnodes == 1
         one_rank_per_node = (
-            nnodes > 1
-            and tp == nnodes
-            and pp == dp == 1
-            and backend == "mp"
+            nnodes > 1 and tp == nnodes and pp == dp == 1 and backend == "mp"
         )
         if not (single_rank or one_rank_per_node):
             raise ValueError(

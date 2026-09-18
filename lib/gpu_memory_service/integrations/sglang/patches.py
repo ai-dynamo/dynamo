@@ -370,9 +370,7 @@ def patch_shared_kv_pool_geometry() -> None:
 
     def patched_resolve_memory_pool_config(self, pre_model_load_memory):
         if shared_kv_enabled() and kv_leases_enabled("sglang"):
-            device_idx = _resolve_shared_kv_geometry_device(
-                self, resolve_lease_device
-            )
+            device_idx = _resolve_shared_kv_geometry_device(self, resolve_lease_device)
             suffix = default_kv_lease_namespace_suffix("sglang")
             namespace, existing_blocks = read_kv_lease_namespace_total_blocks(
                 "sglang", device_idx, namespace_suffix=suffix
@@ -398,9 +396,9 @@ def patch_shared_kv_pool_geometry() -> None:
                 config = configurator.calculate_pool_sizes_from_max_tokens(
                     target_tokens, page_size
                 )
-                resolve_reqs = getattr(
-                    self, "resolve_max_num_reqs", None
-                ) or getattr(self, "_resolve_max_num_reqs", None)
+                resolve_reqs = getattr(self, "resolve_max_num_reqs", None) or getattr(
+                    self, "_resolve_max_num_reqs", None
+                )
                 if resolve_reqs is not None:
                     config.max_running_requests = resolve_reqs(target_tokens)
                 finalize = getattr(
