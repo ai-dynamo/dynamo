@@ -413,7 +413,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let (row, selected_cost) = picker.pick_with_cost(&input.context, picker_input)?;
+                let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,
@@ -421,14 +421,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                let cost = selected_cost.unwrap_or(candidate.cost);
-                if !cost.is_finite() {
-                    return Err(WorkerSelectionPolicyError::failed(
-                        "picker returned non-finite cost",
-                    )
-                    .into());
-                }
-                Some((candidate.worker, cost))
+                Some((candidate.worker, candidate.cost))
             }
         }
     };

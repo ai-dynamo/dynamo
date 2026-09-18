@@ -86,3 +86,79 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
     assert!(core.free_reservation("request").await.is_err());
     core.shutdown();
 }
+
+#[tokio::test]
+async fn preparation_error_does_not_book_and_allows_retry() {
+    use dynamo_kv_router::{
+        WorkerCandidate, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+        WorkerSelectionPolicy, WorkerSelectionPolicyError,
+    };
+    use std::sync::Arc;
+
+    struct FailOnce(bool);
+    impl WorkerScorer for FailOnce {
+        fn prepare(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: &[WorkerCandidate],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            if std::mem::take(&mut self.0) {
+                return Err(WorkerSelectionPolicyError::failed("preparation failed"));
+            }
+            Ok(())
+        }
+        fn score(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: &WorkerCandidate,
+        ) -> Result<f64, WorkerSelectionPolicyError> {
+            Ok(0.0)
+        }
+    }
+    struct First;
+    impl WorkerPicker for First {
+        fn pick(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            Ok(0)
+        }
+    }
+    let core = SelectionCore::try_new_local(
+        KvRouterConfig {
+            use_kv_events: false,
+            router_queue_threshold: None,
+            ..Default::default()
+        },
+        1,
+        Default::default(),
+        SelectionCacheConfig::default(),
+        Arc::new(|config, role, _| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                role.default_selector_label(),
+                vec![Box::new(FailOnce(true))],
+                Box::new(First),
+            )
+        }),
+    )
+    .unwrap();
+    core.upsert_worker(worker(1)).await.unwrap();
+    let partition = core
+        .partition(&RoutingPartitionId::new("model", "default"))
+        .unwrap();
+    let error = core
+        .select_and_reserve(reserve_request("request"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("preparation failed"));
+    assert!(!partition.scheduler().has_request("request"));
+    core.select_and_reserve(reserve_request("request"))
+        .await
+        .unwrap();
+    assert!(partition.scheduler().has_request("request"));
+    core.free_reservation("request").await.unwrap();
+    assert!(!partition.scheduler().has_request("request"));
+    core.shutdown();
+}

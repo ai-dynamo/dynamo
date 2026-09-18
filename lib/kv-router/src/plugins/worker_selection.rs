@@ -128,6 +128,21 @@ pub trait WorkerScorer: Send {
         WorkerInputs::NONE
     }
 
+    /// Prepare once for this selection using every candidate that survived host eligibility
+    /// and policy filters. All scorers prepare before any candidate is scored. This is not
+    /// called for an empty candidate set; returning an error stops selection before picking.
+    ///
+    /// The slice borrows the same request snapshot and declared worker inputs used by `score`.
+    /// Its order is unspecified, and it cannot be retained after this call. Reset request-local
+    /// aggregates here rather than carrying them between selections. The default does no work.
+    fn prepare(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidates: &[WorkerCandidate],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        Ok(())
+    }
+
     /// Return one finite, lower-is-better cost contribution for an eligible worker row.
     fn score(
         &mut self,
@@ -155,16 +170,6 @@ pub trait WorkerFilter: Send {
 
 /// Selects one row after all filters and scorers run.
 pub trait WorkerPicker: Send {
-    /// Return a selected row and an optional policy-computed cost for host diagnostics.
-    /// The host validates both. Existing pickers use the summed scorer cost by default.
-    fn pick_with_cost(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        input: WorkerInputView<'_>,
-    ) -> Result<(usize, Option<f64>), WorkerSelectionPolicyError> {
-        self.pick(context, input).map(|row| (row, None))
-    }
-
     /// Declare the optional worker-signal columns needed by this picker.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::NONE

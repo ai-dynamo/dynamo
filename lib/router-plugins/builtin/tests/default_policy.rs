@@ -139,38 +139,6 @@ fn mandatory_pin_is_preserved() {
 }
 
 #[test]
-fn non_finite_picker_cost_is_rejected() {
-    struct Invalid;
-    impl WorkerPicker for Invalid {
-        fn pick(
-            &mut self,
-            _: &WorkerSelectionContext<'_>,
-            _: WorkerInputView<'_>,
-        ) -> Result<usize, WorkerSelectionPolicyError> {
-            Ok(0)
-        }
-        fn pick_with_cost(
-            &mut self,
-            _: &WorkerSelectionContext<'_>,
-            _: WorkerInputView<'_>,
-        ) -> Result<(usize, Option<f64>), WorkerSelectionPolicyError> {
-            Ok((0, Some(f64::NAN)))
-        }
-    }
-    let (workers, request) = fixture(1, 17);
-    let error =
-        WorkerSelectionPolicy::new(KvRouterConfig::default(), "test", vec![], Box::new(Invalid))
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
-            .unwrap_err();
-    assert!(error.to_string().contains("non-finite"));
-}
-
-#[test]
 fn configured_parameters_replace_request_score_overrides() {
     use dynamo_kv_router::RouterConfigOverride;
     let (workers, mut request) = fixture(2, 160);

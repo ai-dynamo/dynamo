@@ -5,7 +5,7 @@
 //!
 //! Routing hosts always link the default through `default_registry`. The optional custom
 //! catalog adds the named default and two-tier providers through `register`. The default
-//! itself uses the same public candidate inputs and picker dispatch as external policies.
+//! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
 //! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
 mod default;
