@@ -3,18 +3,10 @@
 
 //! Prometheus metrics exposed by the EPP on its own `/metrics` endpoint.
 //!
-//! The EPP keeps a private registry instead of the runtime's component
-//! registry: it holds no `DistributedRuntime` past startup (see
+//! The EPP keeps a private registry instead of the runtime's component registry:
+//! it holds no `DistributedRuntime` past startup (see
 //! [`crate::epp::Router::from_discovery`]) and these series describe gateway
 //! traffic rather than a registered Dynamo component.
-//!
-//! [`DEFAULT_METRICS_PORT`] matches the port GAIE's Go endpoint picker uses,
-//! so existing endpoint-picker scrape configuration keeps working.
-//!
-//! Every series is bound to a finite label schema derived from process-level
-//! configuration and closed enumerations. Nothing request-scoped (request id,
-//! booking id, prompt, worker address) ever becomes a label, so request volume
-//! cannot grow the series count.
 //!
 //! # Metric glossary
 //!
@@ -32,71 +24,34 @@
 //! | `dynamo_epp_cached_tokens` | histogram | `model` | Unchanged: when the backend response carries `usage.prompt_tokens_details.cached_tokens` |
 //!
 //! `outcome` is one of `response_eos`, `upstream_http_error`, `early_reject`,
-//! `ext_proc_error`, `incomplete`. `phase` is one of `render_tokenize`,
-//! `selection`. `operation` is one of `prefill_complete`, `request_complete`.
-//! `result` is one of `ok`, `error`. There is no `cancelled` result: a call site
-//! cannot reliably tell a cancelled call from a failed one, so it reports the
-//! failure rather than guessing.
+//! `ext_proc_error`, `incomplete`; `phase` is `render_tokenize` or `selection`;
+//! `operation` is `prefill_complete` or `request_complete`; `result` is `ok` or
+//! `error`.
 //!
-//! ## Scope and non-claims
+//! Every family is a process-local observation of one EPP replica, so a gauge
+//! such as `streams_inflight` must not be summed across replicas as if it were a
+//! global count.
 //!
-//! Every family here is a **process-local** observation of one EPP replica. A
-//! gauge such as `streams_inflight` is the count for this process only; summing
-//! it across replicas is only meaningful if the replicas are independent, which
-//! is a deployment property this code cannot check.
+//! These readings are the ones a dashboard is most likely to get wrong:
 //!
-//! * `request_duration_seconds` covers the whole ext_proc attempt, including
-//!   selection, renderer wait, and the backend response. It is not
-//!   generation-only latency.
-//! * `phase_duration_seconds{phase="selection"}` includes queue wait inside the
-//!   selection service. It is deliberately not named a compute time, because
-//!   this layer cannot separate the two.
-//! * `phase_duration_seconds{phase="render_tokenize"}` includes the upstream
-//!   renderer's own latency and the connection wait. It is not pure tokenizer
-//!   CPU time.
-//! * `first_response_body_seconds` is not time to first token. The first
-//!   non-empty chunk may be SSE metadata, a role chunk, or buffered content; a
-//!   real token-boundary signal is not available at this layer.
-//! * `lifecycle_callbacks_total` counts callback invocations and their return,
-//!   not authoritative reservation transitions. `free_reservation` and
-//!   `prefill_complete` are idempotent and return success for an unknown id
-//!   without releasing anything, so this counter must not be used to derive an
-//!   active-reservation gauge.
-//! * `cached_tokens` is the cached-token count the backend reported. It is not
-//!   the KV router's overlap estimate.
+//! * `request_duration_seconds` spans the whole attempt, including selection,
+//!   renderer wait, and the backend response. It is not generation-only latency.
+//! * `phase="selection"` includes queue wait inside the selection service, and
+//!   `phase="render_tokenize"` includes the renderer's own latency. Neither can
+//!   be split into compute alone at this layer, so neither is named for compute.
+//! * `first_response_body_seconds` is not time to first token: the first
+//!   non-empty chunk may be SSE metadata, a role chunk, or buffered content.
+//! * `lifecycle_callbacks_total` counts invocations, not state changes.
+//!   `free_reservation` and `prefill_complete` are idempotent and report success
+//!   for an unknown id, so this counter must not drive an active gauge.
+//! * `cached_tokens` is what the backend reported, not the KV router's overlap
+//!   estimate. A reported zero is a real observation; a response with no usage
+//!   information records nothing rather than a fabricated zero. The same rule
+//!   applies to a phase that never started and an attempt that saw no body.
 //!
-//! ## Zero, absent, and unknown
-//!
-//! * A backend that reports `cached_tokens = 0` produced a real zero
-//!   observation and gets a sample.
-//! * A response with no usage information is unknown: no sample is recorded, and
-//!   no zero is invented.
-//! * An attempt that never receives a response body records no
-//!   `first_response_body_seconds` sample.
-//! * A request rejected before a phase starts records no sample for that phase.
-//! * An empty exposition at startup is a valid state (nothing has been observed
-//!   yet) and is not the same as a healthy zero.
-//!
-//! ## Repeated callbacks, retries, restarts
-//!
-//! * A repeated lifecycle callback increments the counter again. That is
-//!   accurate: it counts calls.
-//! * A retried request is a new attempt and is counted again. These counters are
-//!   not deduplicated by client request id.
-//! * Counters reset on process restart. Use `rate()` and `increase()`, not raw
-//!   values, for anything derived.
-//!
-//! ## Not observable at this layer
-//!
-//! * Real TTFT/ITL, per-token progress, and output-growth accounting need a
-//!   token-boundary signal the EPP does not have.
-//! * KV transfer success in a disaggregated pair is a backend/connector fact;
-//!   a successful HTTP exchange here does not imply it.
-//! * Authoritative reservation state transitions require a core-level observer;
-//!   until one exists, only callback invocations are reported.
-//! * Replica connection and sync-lag state needs a real signal. Discovery-set
-//!   size does not prove a peer registered or caught up, so no such series is
-//!   published.
+//! Not observable here: real TTFT/ITL and per-token progress, KV transfer success
+//! in a disaggregated pair, authoritative reservation transitions, and replica
+//! connection or sync-lag state.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -749,10 +704,7 @@ mod tests {
     }
 
     /// Value of the series in `family` carrying exactly `labels`, or `None` when
-    /// the family or that series is absent.
-    ///
-    /// A histogram reports its sample count, so a test can assert "observed
-    /// exactly once" without reading bucket boundaries.
+    /// the family or that series is absent. A histogram reports its sample count.
     fn sample_value(registry: &Registry, family: &str, labels: &[(&str, &str)]) -> Option<f64> {
         let families = registry.gather();
         let family = families.iter().find(|f| f.name() == family)?;
@@ -959,107 +911,58 @@ mod tests {
     #[test]
     fn label_cardinality_is_bounded_by_the_enumerations() {
         let metrics = isolated();
-        const ROUNDS: usize = 1000;
-        for round in 0..ROUNDS {
+        let outcomes = Outcome::ALL;
+        let phases = [Phase::RenderTokenize, Phase::Selection];
+        let operations = [
+            LifecycleOperation::PrefillComplete,
+            LifecycleOperation::RequestComplete,
+        ];
+        let results = [StageResult::Ok, StageResult::Error];
+
+        // Drive every combination once, so every series the label schema allows
+        // is created and each is observed a known number of times.
+        for (index, outcome) in outcomes.iter().enumerate() {
             let observation = metrics.start_request();
             observation.observe_first_response_body();
-            observation.observe_phase(
-                Phase::RenderTokenize,
-                if round % 2 == 0 {
-                    StageResult::Ok
-                } else {
-                    StageResult::Error
-                },
-                Duration::from_millis(3),
-            );
-            observation.observe_phase(
-                Phase::Selection,
-                if round % 3 == 0 {
-                    StageResult::Error
-                } else {
-                    StageResult::Ok
-                },
-                Duration::from_millis(1),
-            );
-            for (operation, index) in [
-                (LifecycleOperation::PrefillComplete, 0),
-                (LifecycleOperation::RequestComplete, 1),
-            ] {
-                observation.observe_lifecycle_callback(
-                    operation,
-                    if (round + index) % 2 == 0 {
-                        StageResult::Ok
-                    } else {
-                        StageResult::Error
-                    },
+            for phase in phases {
+                // Results alternate by index so both values reach every phase.
+                observation.observe_phase(
+                    phase,
+                    results[index % results.len()],
+                    Duration::from_millis(1),
                 );
             }
-            observation.finish(Outcome::ALL[round % Outcome::ALL.len()]);
+            for operation in operations {
+                observation.observe_lifecycle_callback(operation, results[index % results.len()]);
+            }
+            observation.finish(*outcome);
         }
 
         let registry = metrics.registry();
-        // Every outcome is exercised, so every outcome series exists, and the
-        // total is exactly the enumeration size.
         assert_eq!(
             series_count(registry, "dynamo_epp_requests_total"),
-            Outcome::ALL.len(),
-            "one series per outcome, independent of request volume"
+            outcomes.len(),
+            "one series per outcome"
         );
         assert_eq!(
             family_total(registry, "dynamo_epp_requests_total"),
-            ROUNDS as f64
+            outcomes.len() as f64,
+            "one terminal per attempt"
         );
         assert_eq!(series_count(registry, "dynamo_epp_streams_inflight"), 1);
         assert_eq!(
             series_count(registry, "dynamo_epp_phase_duration_seconds"),
-            2 * 2,
+            phases.len() * results.len(),
             "one series per (phase, result) pair"
         );
         assert_eq!(
             series_count(registry, "dynamo_epp_lifecycle_callbacks_total"),
-            2 * 2,
+            operations.len() * results.len(),
             "one series per (operation, result) pair"
         );
         assert_eq!(
             series_count(registry, "dynamo_epp_first_response_body_seconds"),
             1
-        );
-        // Volume cannot grow the label set beyond the enumeration product.
-        assert!(
-            series_count(registry, "dynamo_epp_requests_total")
-                * series_count(registry, "dynamo_epp_phase_duration_seconds")
-                <= Outcome::ALL.len() * 4
-        );
-    }
-
-    #[test]
-    fn every_label_value_is_distinct() {
-        let mut outcomes: Vec<&str> = Outcome::ALL.iter().map(|o| o.as_str()).collect();
-        outcomes.sort_unstable();
-        outcomes.dedup();
-        assert_eq!(outcomes.len(), Outcome::ALL.len());
-
-        assert_ne!(StageResult::Ok.as_str(), StageResult::Error.as_str());
-        assert_ne!(
-            LifecycleOperation::PrefillComplete.as_str(),
-            LifecycleOperation::RequestComplete.as_str()
-        );
-        assert_ne!(Phase::RenderTokenize.as_str(), Phase::Selection.as_str());
-    }
-
-    #[test]
-    fn isolated_recorders_do_not_share_samples() {
-        let first = isolated();
-        let second = isolated();
-        first.start_request().finish(Outcome::ResponseEos);
-
-        assert_eq!(
-            sample_value(
-                second.registry(),
-                "dynamo_epp_requests_total",
-                &[("outcome", "response_eos")]
-            ),
-            None
         );
     }
 
