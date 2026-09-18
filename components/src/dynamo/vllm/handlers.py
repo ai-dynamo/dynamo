@@ -2017,7 +2017,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": str(e)}
 
     async def get_weight_version(self, body: dict) -> dict:
-        """Return the current weight version tag."""
+        """Return the weight version; paused is None if its query fails."""
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -2025,7 +2025,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
+        async with self._pause_lock:
+            paused: Optional[bool] = None
+            try:
+                paused = await self.engine_client.is_paused()
+                if not isinstance(paused, bool):
+                    raise ValueError("engine returned an invalid pause state")
+            except EngineDeadError as e:
+                self._shutdown_on_engine_dead(e)
+            except Exception as e:
+                logger.warning("[RL] get_weight_version pause query failed: %s", e)
+                paused = None
+            return {
+                "status": "ok",
+                "version": getattr(self, "_weight_version", "initial"),
+                "paused": paused,
+            }
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
