@@ -22,7 +22,10 @@ fn prefill_request_is_marked_context_only() {
     );
     let stopping = proto.stopping.expect("stopping options");
     assert_eq!(stopping.max_tokens, Some(1));
-    assert_eq!(stopping.min_tokens, None, "a minimum would force decoding");
+    // The minimum masks EOS rather than extending generation, so it must
+    // survive: without it the context phase can sample EOS on its single token
+    // and terminate with `Stop` instead of the `PrefillReady` handoff.
+    assert_eq!(stopping.min_tokens, Some(8));
     // The prefill worker surfaces no tokens, but it must still compute
     // logprobs: the first generated token comes from the context phase and its
     // logprob only reaches the decode worker through the handoff.
