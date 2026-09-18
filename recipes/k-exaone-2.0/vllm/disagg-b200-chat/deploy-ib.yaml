@@ -6,7 +6,7 @@
 #   scripts/kustomize-matrix.py unfold recipes/k-exaone-2.0/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 #   scripts/kustomize-matrix.py render recipes/k-exaone-2.0/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
-#   kustomize build recipes/k-exaone-2.0/vllm/disagg-b200-chat/kustomize/overlays/generic
+#   kustomize build recipes/k-exaone-2.0/vllm/disagg-b200-chat/kustomize/overlays/ib
 # You may edit a copy before applying it.
 
 apiVersion: nvidia.com/v1beta1
@@ -225,15 +225,13 @@ spec:
     value: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
   - name: VLLM_WORKER_MULTIPROC_METHOD
     value: spawn
-  # rc_x/rc are the IB RDMA transports; tcp is omitted on purpose.
-  - name: UCX_TLS
-    value: rc_x,rc,cuda_copy,cuda_ipc
   - name: UCX_MEMTYPE_CACHE
     value: "n"
   - name: UCX_RCACHE_MAX_UNRELEASED
     value: "1024"
   - name: UCX_NET_DEVICES
     value: all
-  # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the fabrics stay separated.
+  - name: UCX_TLS
+    value: rc_x,rc,cuda_copy,cuda_ipc
   - name: NCCL_IB_DISABLE
     value: "1"

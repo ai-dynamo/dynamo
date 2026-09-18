@@ -17,8 +17,9 @@
 #     --max-num-seqs is the deliberate exception: 32 on prefill, 256 on decode.
 #   - --kv-transfer-config must be passed to BOTH roles. Setting only the env var leaves
 #     NIXL unconfigured and the deployment serves without disaggregating.
-#   - UCX_TLS deliberately excludes tcp. The rdma/ extended-resource name is
-#     cluster-specific -- see the documentation before deploying.
+#   - This base carries NO fabric configuration. InfiniBand attachment (the RDMA
+#     extended resource and UCX_TLS) lives in kustomize/components/ib, because it is
+#     cluster networking rather than model configuration.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -32,13 +33,9 @@ spec:
     - {name: TRANSFORMERS_OFFLINE, value: "1"}
     - {name: MODEL_NAME, value: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4}
     - {name: VLLM_WORKER_MULTIPROC_METHOD, value: spawn}
-    # rc_x/rc are the IB RDMA transports; tcp is omitted on purpose.
-    - {name: UCX_TLS, value: "rc_x,rc,cuda_copy,cuda_ipc"}
     - {name: UCX_MEMTYPE_CACHE, value: "n"}
     - {name: UCX_RCACHE_MAX_UNRELEASED, value: "1024"}
     - {name: UCX_NET_DEVICES, value: all}
-    # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the fabrics stay separated.
-    - {name: NCCL_IB_DISABLE, value: "1"}
   components:
     - name: Frontend
       minAvailable: 1
@@ -105,8 +102,8 @@ spec:
                 runAsGroup: 0
                 capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
               resources:
-                requests: {memory: 200Gi, nvidia.com/gpu: "4", rdma/shared_ib: "4"}
-                limits: {nvidia.com/gpu: "4", rdma/shared_ib: "4"}
+                requests: {memory: 200Gi, nvidia.com/gpu: "4"}
+                limits: {nvidia.com/gpu: "4"}
               startupProbe:
                 failureThreshold: 60
                 httpGet:
@@ -176,8 +173,8 @@ spec:
                 runAsGroup: 0
                 capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
               resources:
-                requests: {memory: 200Gi, nvidia.com/gpu: "4", rdma/shared_ib: "4"}
-                limits: {nvidia.com/gpu: "4", rdma/shared_ib: "4"}
+                requests: {memory: 200Gi, nvidia.com/gpu: "4"}
+                limits: {nvidia.com/gpu: "4"}
               startupProbe:
                 failureThreshold: 60
                 httpGet:

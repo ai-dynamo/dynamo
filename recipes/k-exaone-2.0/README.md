@@ -15,6 +15,6 @@ limitations.
 | Target | GPUs | Manifest |
 | --- | --- | --- |
 | Aggregated, chat | 4x B200 | [`vllm/agg-b200-chat/deploy-generic.yaml`](vllm/agg-b200-chat/deploy-generic.yaml) |
-| Disaggregated 1P1D, chat | 8x B200 | [`vllm/disagg-b200-chat/deploy-generic.yaml`](vllm/disagg-b200-chat/deploy-generic.yaml) |
+| Disaggregated 1P1D, chat | 8x B200 | [`vllm/disagg-b200-chat/deploy-ib.yaml`](vllm/disagg-b200-chat/deploy-ib.yaml) |
 
 Model cache and download job: [`model-cache/`](model-cache). Benchmark job: [`perf/`](perf).
