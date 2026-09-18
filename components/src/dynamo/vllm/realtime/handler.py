@@ -407,6 +407,8 @@ class RealtimeTextHandler:
             raise ValueError("response.input items are not supported")
         if response.get("conversation") not in (None, "auto", "none"):
             raise ValueError("response.conversation must be 'auto' or 'none'")
+        if any(response.get(field) is not None for field in ("prompt", "reasoning")):
+            raise ValueError("prompt and reasoning configuration are not supported")
 
         instructions = response.get("instructions", session["instructions"])
         if not isinstance(instructions, str):
@@ -648,6 +650,10 @@ class RealtimeTextHandler:
                 try:
                     active_prefill.append(text)
                 except ValueError as exc:
+                    # A rejected first append must not activate the input buffer.
+                    if not active_prefill.text:
+                        await active_prefill.cancel()
+                        active_prefill = None
                     emit_error(event, "invalid_text", str(exc))
             elif event_type == "input_text.commit":
                 if active_prefill is None or not active_prefill.text:

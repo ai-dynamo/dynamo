@@ -274,7 +274,11 @@ def test_text_session_streams_canonical_response_and_preserves_usage():
     }
 
 
-def test_text_commit_cancels_warming_before_final_generation():
+@pytest.mark.parametrize("overflow", [False, True])
+def test_text_commit_cancels_warming_before_final_generation(monkeypatch, overflow):
+    monkeypatch.setattr(
+        "dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", len("Hello world")
+    )
     updates_seen = []
     prefill_messages = []
     prefill_done = asyncio.Event()
@@ -314,6 +318,7 @@ def test_text_commit_cancels_warming_before_final_generation():
                 {"type": "session.update", "session": _text_session()},
                 {"type": "input_text.append", "text": "Hello"},
                 {"type": "input_text.append", "text": " world"},
+                *([{"type": "input_text.append", "text": "!"}] if overflow else []),
                 {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
@@ -323,6 +328,10 @@ def test_text_commit_cancels_warming_before_final_generation():
 
     assert prefill_messages == [{"role": "system", "content": "Answer clearly."}]
     assert updates_seen == ["Hello world"]
+    errors = [event for event in result if event["type"] == "error"]
+    assert len(errors) == int(overflow)
+    if overflow:
+        assert errors[0]["error"]["code"] == "invalid_text"
     user_items = [
         event["item"]
         for event in result
@@ -496,8 +505,16 @@ def test_text_buffer_must_be_committed_before_response():
 def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message):
     monkeypatch.setattr("dynamo.vllm.realtime.handler.MAX_TEXT_BUFFER_BYTES", 8)
 
-    async def unused_chat_completion(messages, max_output_tokens):
-        raise AssertionError((messages, max_output_tokens))
+    async def chat_completion(messages, max_output_tokens):
+        assert messages == [
+            {"role": "system", "content": "Recovered"},
+            {"role": "user", "content": "Hi"},
+        ]
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+
+        return frames()
 
     async def unused_prefill(messages, updates):
         raise AssertionError((messages, updates))
@@ -506,16 +523,69 @@ def test_invalid_text_buffer_events_are_recoverable(monkeypatch, event, message)
         _drive(
             RealtimeTextHandler(
                 model_name=TEXT_MODEL,
-                chat_completion_factory=unused_chat_completion,
+                chat_completion_factory=chat_completion,
                 text_prefill_factory=unused_prefill,
             ),
-            [{"type": "session.update", "session": _text_session()}, event],
+            [
+                {"type": "session.update", "session": _text_session()},
+                event,
+                {
+                    "type": "session.update",
+                    "session": _text_session(instructions="Recovered"),
+                },
+                _text_item("Hi"),
+                {"type": "response.create"},
+            ],
         )
     )
 
     errors = [item for item in result if item["type"] == "error"]
     assert len(errors) == 1
     assert message in errors[0]["error"]["message"]
+    assert result[-1]["response"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        {"prompt": {"id": "pmpt_required", "variables": {"context": "required"}}},
+        {"reasoning": {"effort": "high"}},
+    ],
+)
+def test_response_rejects_unsupported_prompt_and_reasoning(option):
+    async def unused_chat_completion(messages, max_output_tokens):
+        raise AssertionError((messages, max_output_tokens))
+
+    # Supply a complete response object accepted by the frontend's typed decoder.
+    response = {
+        "audio": {
+            "output": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "voice": "alloy",
+            }
+        },
+        "conversation": "none",
+        "input": [],
+        "instructions": "Fallback instruction",
+        "max_output_tokens": 32,
+        "metadata": {},
+        "output_modalities": ["text"],
+        **option,
+    }
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=unused_chat_completion,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                {"type": "response.create", "response": response},
+            ],
+        )
+    )
+    assert [event["type"] for event in result] == ["session.updated", "error"]
+    assert result[-1]["error"]["code"] == "invalid_response"
 
 
 @pytest.mark.parametrize(
