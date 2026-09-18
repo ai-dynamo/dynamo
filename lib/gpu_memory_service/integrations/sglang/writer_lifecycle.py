@@ -11,7 +11,6 @@ flock before publishing its own boot identity or touching surviving KV.
 
 from __future__ import annotations
 
-import asyncio
 import fcntl
 import os
 import uuid
@@ -19,7 +18,9 @@ from functools import partial
 from pathlib import Path
 
 from gpu_memory_service.integrations.common.process_lifecycle import (
+    acquire_writer_guard,
     arm_parent_death_signal,
+    retire_writer_cohort,
 )
 
 _boot: tuple[int, Path] | None = None
@@ -30,12 +31,7 @@ _writer_fds: list[int] = []
 
 
 def _hold_writer_guard(path: Path) -> None:
-    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
-    except BaseException:
-        os.close(fd)
-        raise
+    fd = acquire_writer_guard(path)
     _writer_fds.append(fd)
 
 
@@ -75,18 +71,7 @@ async def fence_predecessor_writers() -> None:
     if previous is not None and previous != current.name:
         if uuid.UUID(hex=previous).hex != previous:
             raise RuntimeError("Invalid GMS writer-cohort identity")
-        fd = os.open(
-            current.parent / previous, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
-        )
-        try:
-            while True:
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    await asyncio.sleep(0.01)
-        finally:
-            os.close(fd)
+        await retire_writer_cohort(current.parent / previous)
     # A crash before atomic replace leaves the old identity; a crash after it
     # causes the next owner to fence this boot. The main flock serializes this.
     pending = current.parent / (current.name + ".active")
