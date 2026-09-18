@@ -153,6 +153,16 @@ impl SyncIndexer for ConcurrentRadixTreeCompressed {
                     );
                     let _ = sender.send(stats);
                 }
+                WorkerTask::ContainsWorkerBlock {
+                    worker,
+                    block_hash,
+                    resp,
+                } => {
+                    let resident = lookup
+                        .get(&worker)
+                        .is_some_and(|worker_lookup| worker_lookup.contains_key(&block_hash));
+                    let _ = resp.send(resident);
+                }
                 WorkerTask::Flush(sender) => {
                     let _ = sender.send(());
                 }

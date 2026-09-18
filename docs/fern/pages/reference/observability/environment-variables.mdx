@@ -281,7 +281,19 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mode`), which measures whole-model forward-pass latencies for the FPM performance database. They have no effect on serving.
 
 <ParamField path="DYN_BENCH_KV_WARMUP" type="string" default="on">
-  KV warm-up master switch. When on, decode benchmark points on expert-parallel MoE models read KV produced by real prefill chains instead of self-injected synthetic KV. Set `off` to force the legacy synthetic-KV path. Ineligible configurations (dense models, no expert parallelism, prefix caching disabled, or a seeding dataset that is unavailable, empty, too shallow for the model length, or without a loadable tokenizer) skip the warm-up automatically and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+  KV warm-up master switch. When on, eligible decode benchmark points read attention KV produced by real prefill chains. By default, eligibility requires a MoE model with expert parallelism and no recurrent-state layers. With `DYN_BENCHMARK_RANDOMIZE_KDA_STATE=true`, hybrid MoE models are also eligible without expert parallelism; their attention KV is real and their recurrent states remain synthetic. Set `off` to force the legacy synthetic-KV path.
+
+  All eligible configurations require prefix caching, a loadable tokenizer, and enough seeding dataset content for the model length. Configurations that do not meet these requirements skip warm-up and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+</ParamField>
+
+<ParamField path="DYN_BENCHMARK_RANDOMIZE_KDA_STATE" type="boolean" default="false">
+  **Experimental.** Equivalent to `--benchmark-randomize-kda-state`. Requires `--benchmark-mode decode` or `agg`, recurrent cache groups, and the standard vLLM GPU worker with either model runner V1 or V2; custom workers and GMS are unsupported. Applies to every node, including headless workers.
+
+  Initializes each decode measurement request's private KDA/Mamba state with deterministic uniform values in `[-0.01, 0.01]`, in the cache tensors' existing dtypes. The generator is seeded by request ID, layer, rank, and tensor index without changing the model's RNG stream. Initialization completes in the discarded admission step; steady decode steps update these states normally. Initialization is disabled before serving starts.
+
+  With `DYN_BENCH_KV_WARMUP=on`, hybrid MoE models can use real attention KV from prefill chains even without expert parallelism. Their recurrent states remain synthetic; the source chain's states are never borrowed or modified. Existing dataset, prefix-cache, and capacity requirements still apply. Without a usable chain, attention KV follows the existing synthetic fallback.
+
+  Artifacts distinguish `real_attention_kv_random_kda` from `fake_attention_kv_random_kda` and record the distribution in `recurrent_state`. These values are performance-test inputs, not valid context history or a guarantee of real-workload performance parity.
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_DATASET" type="string">
