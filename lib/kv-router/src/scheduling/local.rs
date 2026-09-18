@@ -623,6 +623,7 @@ where
         }))
     }
 
+    /// Apply completion and notify pending admission before returning.
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -634,14 +635,12 @@ where
         }
         self.slots.publish_prefill_completed(&request_id);
         if outcome.is_applied() {
-            match worker {
-                Some(worker) => self.queue.update_worker(worker).await,
-                None => self.queue.update().await,
-            }
+            self.queue.capacity_changed(worker);
         }
         Ok(())
     }
 
+    /// Release state and notify pending admission before returning.
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
         let worker = self.slots.request_worker(&request_id);
@@ -650,10 +649,7 @@ where
             return Err(SequenceError::RequestNotFound { request_id });
         }
         if outcome.is_applied() {
-            match worker {
-                Some(worker) => self.queue.update_worker(worker).await,
-                None => self.queue.update().await,
-            }
+            self.queue.capacity_changed(worker);
         }
         Ok(())
     }
@@ -672,7 +668,7 @@ where
             .slots
             .free_if_worker(&request_id, worker, Instant::now())?;
         if outcome.is_applied() {
-            self.queue.update_worker(worker).await;
+            self.queue.capacity_changed(Some(worker));
         }
         Ok(())
     }
@@ -698,7 +694,7 @@ where
     }
 
     /// Complete owner cleanup after a successful release (including a stale
-    /// booking's `NoChange`), before the cancellable queue-progress wait.
+    /// booking's `NoChange`), then notify pending admission before returning.
     pub(crate) async fn free_if_booking_with_cleanup(
         &self,
         booking: &SchedulerBookingDescriptor,
@@ -712,7 +708,7 @@ where
         )?;
         cleanup();
         if outcome.is_applied() {
-            self.queue.update_worker(booking.worker).await;
+            self.queue.capacity_changed(Some(booking.worker));
         }
         Ok(outcome)
     }
@@ -723,15 +719,27 @@ where
     }
 
     /// `NoChange` when the booking no longer matches or its prefill was
-    /// already marked complete.
+    /// already marked complete. Success confirms the state mutation and capacity
+    /// notification, not completion of pending admission.
     #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
     ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
-        self.queue
-            .mark_prefill_completed_if_booking(booking.clone())
-            .await
+        self.queue.ensure_running()?;
+        let outcome = self
+            .slots
+            .mark_prefill_completed_if_booking(
+                &booking.request_id,
+                booking.worker,
+                booking.attempt_id,
+                Instant::now(),
+            )
+            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))?;
+        if outcome.is_applied() {
+            self.queue.capacity_changed(Some(booking.worker));
+        }
+        Ok(outcome)
     }
 
     /// Republish the ordered prefill-completion event while `booking` is live.
@@ -741,6 +749,12 @@ where
         booking: &SchedulerBookingDescriptor,
     ) -> bool {
         self.slots.publish_prefill_completed_if_booking(booking)
+    }
+
+    /// Wait for an actor recheck of pending admission. This does not wait for
+    /// requests blocked on worker capacity to finish or for the queue to empty.
+    pub async fn update_queue(&self) {
+        self.queue.update().await;
     }
 
     pub fn pending_count(&self) -> usize {
@@ -898,7 +912,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_updates_do_not_wait_for_the_actor_in_either_queueing_mode() {
+    async fn lifecycle_updates_do_not_wait_for_the_actor_in_either_queueing_mode() {
         let worker = WorkerWithDpRank::new(0, 0);
         for threshold in [None, Some(0.5)] {
             let (scheduler, slots, _configs, cancellation) = make_scheduler(
@@ -911,9 +925,12 @@ mod tests {
                 .add_request_if_registered_guarded(SequenceRequest {
                     request_id: "output".into(),
                     token_sequence: None,
-                    track_prefill_tokens: false,
+                    track_prefill_tokens: true,
                     expected_output_tokens: None,
-                    prefill_load_hint: None,
+                    prefill_load_hint: Some(crate::protocols::PrefillLoadHint {
+                        initial_effective_prefill_tokens: 64,
+                        expected_prefill_duration: None,
+                    }),
                     worker,
                     lora_name: None,
                 })
@@ -926,19 +943,28 @@ mod tests {
                 std::task::Poll::Ready(Ok(()))
             ));
             assert!(slots.active_blocks()[&worker] > before);
-            slots
-                .free_if_booking(
-                    &booking.request_id,
-                    worker,
-                    booking.attempt_id,
-                    Instant::now(),
-                )
-                .unwrap();
+            assert!(matches!(
+                poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
+                std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
+            ));
+            assert_eq!(slots.active_tokens(Instant::now())[&worker], 0);
+            assert!(matches!(
+                poll_once(scheduler.mark_prefill_completed_if_booking(&booking)),
+                std::task::Poll::Ready(Ok(LifecycleMutationOutcome::NoChange))
+            ));
+            assert!(matches!(
+                poll_once(scheduler.free_if_booking(&booking)),
+                std::task::Poll::Ready(Ok(LifecycleMutationOutcome::Applied))
+            ));
             assert!(matches!(
                 poll_once(scheduler.add_output_block_if_booking(&booking, None)),
                 std::task::Poll::Ready(Ok(()))
             ));
             slots.assert_completely_drained(Instant::now());
+            if threshold.is_some() {
+                assert!(poll_once(scheduler.update_queue()).is_pending());
+                scheduler.update_queue().await;
+            }
             cancellation.cancel();
         }
     }
