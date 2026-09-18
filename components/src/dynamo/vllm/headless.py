@@ -117,6 +117,11 @@ def _maybe_start_vllm_rank_liveness_client(config: Config) -> None:
             rank,
             reason,
         )
-        os.kill(os.getpid(), signal.SIGTERM)
+        # This launcher owns no request-plane endpoint to drain. A graceful
+        # SIGTERM makes vLLM wait through its worker shutdown grace periods,
+        # keeping the CUDA-writer cohort live long after rank 0 has died. Its
+        # worker children arm PDEATHSIG before opening shared KV, so fail-stop
+        # the launcher and let kernel process death fence the complete tree.
+        os.kill(os.getpid(), signal.SIGKILL)
 
     rl.RankLivenessClient(leader_host, node_rank, on_leader_lost=on_leader_lost).start()
