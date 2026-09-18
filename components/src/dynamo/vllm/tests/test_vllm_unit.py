@@ -503,7 +503,7 @@ def test_headless_rank_fences_itself_when_leader_acknowledgements_stop(monkeypat
     captured["on_leader_lost"](0, "liveness-timeout")
     import signal
 
-    assert killed == [(os.getpid(), signal.SIGTERM)]
+    assert killed == [(os.getpid(), signal.SIGKILL)]
 
 
 def test_rl_logprobs_force_converts_raw_mode():
