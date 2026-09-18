@@ -525,6 +525,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
+        scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -533,6 +534,14 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     let error = DynamoError::builder()
         .error_type(error_type)
         .message(message.clone());
+    let error = if error_type == ErrorType::DeadlineExceeded {
+        error.reason(
+            dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                .expect("registered queue deadline reason"),
+        )
+    } else {
+        error
+    };
     if overloaded {
         error
             .cause(PipelineError::ServiceOverloaded(message))
@@ -1948,6 +1957,19 @@ mod tests {
             .expect("overloaded workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
+    }
+
+    #[test]
+    fn queue_deadline_keeps_its_reason_through_serialization() {
+        let error = map_scheduler_error(KvSchedulerError::DeadlineExceeded);
+        let error = error.downcast_ref::<DynamoError>().unwrap();
+        let decoded: DynamoError =
+            serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+        assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
+        assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
+        assert!(crate::http::service::metrics::request_deadline_exceeded(
+            &decoded
+        ));
     }
 
     #[test]
