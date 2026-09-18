@@ -3,8 +3,9 @@
 
 import asyncio
 import json
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -297,6 +298,68 @@ def _new_decode_handler(
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize("cancel_from_client", [False, True], ids=["close", "cancel"])
+async def test_stream_cancellation_aborts_unfinished_choices(
+    processor_name, cancel_from_client, caplog
+):
+    handler = _new_decode_handler()
+    # Exercise the real monitor, including closure before its task can run.
+    del handler._cancellation_monitor
+    cancellation = asyncio.get_running_loop().create_future()
+    first_abort = asyncio.Event()
+    abort_request = Mock(side_effect=lambda **_kwargs: first_abort.set())
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(abort_request=abort_request)
+    )
+    context = SimpleNamespace(
+        id=lambda: "context-request-id",
+        is_stopped=cancellation.done,
+        async_killed_or_stopped=lambda: cancellation,
+        notify_first_token=lambda: None,
+    )
+    caplog.set_level("INFO")
+
+    async def stream():
+        for index in range(4):
+            if index == 3:
+                # A new choice can first appear after the monitor has aborted
+                # the choices it already knows about.
+                await first_abort.wait()
+            yield {
+                "index": index,
+                "text": "hello",
+                "output_ids": [11],
+                "meta_info": {
+                    "id": f"choice-{index}",
+                    "finish_reason": {"type": "length"} if index == 2 else None,
+                },
+            }
+
+    async with aclosing(getattr(handler, processor_name)(stream(), context)) as output:
+        for _ in range(3):
+            await anext(output)
+        abort_request.assert_not_called()
+        if cancel_from_client:
+            cancellation.set_result(None)
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(output), timeout=5)
+
+    expected_ids = ["choice-0", "choice-1"]
+    if cancel_from_client:
+        expected_ids.append("choice-3")
+    abort_request.assert_has_calls(
+        [call(rid=request_id, abort_all=False) for request_id in expected_ids],
+        any_order=True,
+    )
+    assert abort_request.call_count == len(expected_ids)
+    # Preserve the context-ID log consumed by the GPU cancellation tests.
+    assert "Aborted Request ID: context-request-id" in caplog.messages
 
 
 @pytest.mark.asyncio

@@ -1201,7 +1201,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         return bootstrap_host, bootstrap_port
 
-    def _abort_requests(self, request_ids: set[str]) -> None:
+    def _abort_requests(self, request_ids: set[str], context: Context) -> None:
         if not request_ids:
             return
         if not getattr(self.engine, "tokenizer_manager", None):
@@ -1210,6 +1210,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         for request_id in request_ids:
             self.engine.tokenizer_manager.abort_request(rid=request_id, abort_all=False)
         request_ids.clear()
+        logging.info("Aborted Request ID: %s", context.id())
 
     async def _handle_cancellation(
         self,
@@ -1270,7 +1271,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             )
 
             self._abort_requests(
-                request_ids if request_ids is not None else {sglang_request_id}
+                request_ids if request_ids is not None else {sglang_request_id}, context
             )
 
             # Check which event triggered and raise EngineShutdown if shutdown
@@ -1334,7 +1335,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         finally:
             # Stream closure can beat the monitor's cancellation wake-up.
             if request_ids is not None:
-                self._abort_requests(request_ids)
+                self._abort_requests(request_ids, context)
             # Clean up the background cancellation task
             request_id = "unknown"
             if request_id_future.done() and not request_id_future.cancelled():
