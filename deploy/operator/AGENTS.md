@@ -26,6 +26,14 @@ SPDX-License-Identifier: Apache-2.0
   nested types, examples, and compatibility notes against the Go source and
   regenerated reference. Shared component fields belong in the DCD page; the
   DGD page links there rather than duplicating the field inventory.
+- When introducing CRD/admission or platform chart breaking changes, or dependency
+  compatibility changes that require migration, update the platform README's
+  `Upgrading` section in the same PR. Edit
+  `../helm/charts/platform/README.md.gotmpl` and run `make generate-helm-docs`
+  from `deploy/operator`; do not edit the generated `README.md` by hand. Place
+  the note under the release that introduces the change and the appropriate
+  category, stating affected deployments, required actions, and behavior for
+  existing deployments. Verify release attribution against the code and dependencies.
 - Follow the [Kubernetes API reference authoring guide](../../docs/fern/templates/guidelines/kubernetes-api-reference.md)
   for the source-of-truth order, page structure, and validation commands.
 
