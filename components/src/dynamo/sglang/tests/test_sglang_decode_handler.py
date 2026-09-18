@@ -242,12 +242,20 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
-def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
+def _new_decode_handler(
+    *,
+    use_sglang_tokenizer: bool = False,
+    skip_tokenizer_init: bool = False,
+    enable_rl: bool = False,
+):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model"),
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            skip_tokenizer_init=skip_tokenizer_init,
+        ),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
     handler._first_token_source = None
@@ -268,7 +276,7 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     async def stream():
         yield {
@@ -813,23 +821,55 @@ def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
     SamplingParams(**sampling_params)
 
 
-def test_build_sampling_params_maps_min_tokens_for_token_requests():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
+def test_build_sampling_params_holds_tokenizer_free_engine_open_for_min_tokens():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
 
     sampling_params = handler._build_sampling_params(
         {
             "sampling_options": {},
             "stop_conditions": {
                 "max_tokens": 64,
-                "min_tokens": 64,
-                "ignore_eos": True,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+                "stop_token_ids_hidden": [151643],
             },
         }
     )
 
-    assert sampling_params["min_new_tokens"] == 64
-    assert sampling_params["max_new_tokens"] == 64
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
     assert sampling_params["ignore_eos"] is True
+    assert sampling_params["max_new_tokens"] == 64
+
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    SamplingParams(**sampling_params).normalize(tokenizer=None)
+
+
+def test_build_sampling_params_forwards_min_tokens_when_engine_has_tokenizer():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=False,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+            },
+        }
+    )
+
+    assert sampling_params["min_new_tokens"] == 8
+    assert sampling_params["stop_token_ids"] == [7]
+    assert "ignore_eos" not in sampling_params
+    assert sampling_params["max_new_tokens"] == 64
 
 
 def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
@@ -844,7 +884,10 @@ def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
 
 
 def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
 
     sampling_params = handler._build_sampling_params(
         {"sampling_options": {}, "stop_conditions": {"max_tokens": 8}}
@@ -854,7 +897,10 @@ def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
 
 
 def test_build_sampling_params_forwards_explicit_zero_min_tokens():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
 
     sampling_params = handler._build_sampling_params(
         {"sampling_options": {}, "stop_conditions": {"max_tokens": 8, "min_tokens": 0}}

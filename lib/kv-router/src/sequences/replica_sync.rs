@@ -143,6 +143,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             }
 
             self.flush_replica_batch_effects(&mut effects);
+            subscriber.record_drain(batch_events);
 
             if exit_after_flush {
                 break;
