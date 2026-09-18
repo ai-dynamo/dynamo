@@ -1020,6 +1020,29 @@ func TestLPXEndpointLifecycle(t *testing.T) {
 		require.Equal(t, updated.ResourceVersion, unchanged.ResourceVersion)
 	}
 
+	t.Log("Preserve API-allocated Service fields when the endpoint selector changes")
+	require.NoError(t, r.Get(t.Context(), key, service))
+	service.Spec.ClusterIP = "10.96.0.10"
+	service.Spec.ClusterIPs = []string{"10.96.0.10", "fd00::10"}
+	service.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol, corev1.IPv6Protocol}
+	service.Spec.IPFamilyPolicy = ptr.To(corev1.IPFamilyPolicyPreferDualStack)
+	require.NoError(t, r.Update(t.Context(), service))
+	allocated := service.DeepCopy()
+	for _, global := range []bool{true, false} {
+		source.Spec.Components[0].GlobalDynamoNamespace = global
+		require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))
+		require.NoError(t, r.Get(t.Context(), key, service))
+		allocated.Spec.Selector[consts.KubeLabelDynamoNamespace] = source.GetDynamoNamespaceForComponent(&source.Spec.Components[0])
+		require.Equal(t, allocated.Spec, service.Spec)
+		require.Equal(t, allocated.OwnerReferences, service.OwnerReferences)
+
+		t.Log("Reconcile the unchanged endpoint without another write")
+		version := service.ResourceVersion
+		require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))
+		require.NoError(t, r.Get(t.Context(), key, service))
+		require.Equal(t, version, service.ResourceVersion)
+	}
+
 	t.Log("Remove the LPX-owned discovery endpoint when switching back to non-Kubernetes discovery")
 	delete(source.Annotations, consts.KubeAnnotationDynamoDiscoveryBackend)
 	require.NoError(t, r.reconcileEndpoint(t.Context(), child, source))

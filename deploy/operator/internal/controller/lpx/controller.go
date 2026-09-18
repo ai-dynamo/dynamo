@@ -521,6 +521,15 @@ func (r *graphReconciler) syncLPXResource(ctx context.Context, deployment *v1alp
 		return fmt.Errorf("refusing to adopt LPX resource %s/%s without its exact owner", live.GetNamespace(), live.GetName())
 	}
 
+	// Keep the endpoint's API-allocated addresses when replacing its rendered spec.
+	if service, ok := desired.(*corev1.Service); ok && live != nil {
+		observed := live.(*corev1.Service)
+		service.Spec.ClusterIP = observed.Spec.ClusterIP
+		service.Spec.ClusterIPs = observed.Spec.ClusterIPs
+		service.Spec.IPFamilies = observed.Spec.IPFamilies
+		service.Spec.IPFamilyPolicy = observed.Spec.IPFamilyPolicy
+	}
+
 	// Prepare LPX-owned metadata while preserving shared synchronization's bookkeeping.
 	metadataChanged := false
 	if live != nil {
