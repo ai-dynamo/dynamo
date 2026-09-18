@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strconv"
 
-	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -55,8 +54,8 @@ func (d *DynamoSidecarDefaults) GetBaseContainer(context ComponentContext) (core
 }
 
 // mergeDynamoSidecarDefaults merges defaults into the named native sidecar.
-// podSpec and operatorConfig must not be nil.
-func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, name string, context ComponentContext, operatorConfig *configv1alpha1.OperatorConfiguration) error {
+// podSpec must not be nil.
+func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, name string, context ComponentContext) error {
 	// Resolve the exact init container while preserving all other pod-template entries.
 	for i := range podSpec.InitContainers {
 		user := &podSpec.InitContainers[i]
@@ -76,8 +75,6 @@ func mergeDynamoSidecarDefaults(podSpec *corev1.PodSpec, name string, context Co
 		if err := mergeContainerByName(&base, user); err != nil {
 			return fmt.Errorf("merge dynamoSidecar %q: %w", name, err)
 		}
-		AddStandardEnvVars(&base, operatorConfig)
-		AddTransportTLSEnvVars(&base, operatorConfig)
 		podSpec.InitContainers[i] = base
 		return nil
 	}
