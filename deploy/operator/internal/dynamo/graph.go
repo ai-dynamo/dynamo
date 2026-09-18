@@ -2003,17 +2003,17 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if podSpec.Containers[i].Name != sidecarName {
 			continue
 		}
+
+		// Co-located frontend discovery uses its own identity in both worker layouts.
 		frontendContext := ComponentContext{
 			numberOfNodes:                  1,
+			RuntimeContainerName:           sidecarName,
 			ComponentType:                  commonconsts.ComponentTypeFrontend,
 			ParentGraphDeploymentName:      parentContext.ParentGraphDeploymentName,
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
 		}
-
-		// Co-located frontend discovery uses its own identity in both worker layouts.
-		frontendContext.ContainerName = sidecarName
 
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
@@ -2084,8 +2084,10 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 		return ComponentContext{}, fmt.Errorf("resolve runtime version override: %w", err)
 	}
 
+	// Main hosts the runtime unless the component selects a native Dynamo sidecar.
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
+		RuntimeContainerName:           commonconsts.MainContainerName,
 		ComponentType:                  string(component.ComponentType),
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
@@ -2098,7 +2100,7 @@ func generateComponentContext(component *v1beta1.DynamoComponentDeploymentShared
 
 	// A native sidecar owns the worker runtime identity.
 	if component.DynamoSidecar != nil {
-		componentContext.ContainerName = *component.DynamoSidecar
+		componentContext.RuntimeContainerName = *component.DynamoSidecar
 	}
 	return componentContext, nil
 }

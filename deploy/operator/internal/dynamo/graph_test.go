@@ -9636,9 +9636,10 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 
 	// With suffix
 	container, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace:  "ns-dgd",
-		ComponentType:    commonconsts.ComponentTypeWorker,
-		WorkerHashSuffix: "abc123",
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
+		WorkerHashSuffix:     "abc123",
 	})
 	assert.NoError(t, err)
 	found := false
@@ -9652,8 +9653,9 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 
 	// Without suffix — env var should NOT be present
 	container2, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "ns-dgd",
-		ComponentType:   commonconsts.ComponentTypeWorker,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
 	})
 	assert.NoError(t, err)
 	for _, env := range container2.Env {
@@ -9665,8 +9667,9 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {
 	f := NewFrontendDefaults()
 	container, err := f.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "myns-mydgd",
-		ComponentType:   commonconsts.ComponentTypeFrontend,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "myns-mydgd",
+		ComponentType:        commonconsts.ComponentTypeFrontend,
 	})
 	assert.NoError(t, err)
 	found := false
@@ -9683,8 +9686,9 @@ func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *test
 	w := NewWorkerDefaults()
 
 	podModeContainer, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "ns-dgd",
-		ComponentType:   commonconsts.ComponentTypeWorker,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
 		Discovery: DiscoveryContext{
 			Backend: configv1alpha1.DiscoveryBackendKubernetes,
 			Mode:    configv1alpha1.KubeDiscoveryModePod,
@@ -9696,8 +9700,9 @@ func TestBaseComponentDefaults_ContainerNameOnlyInContainerDiscoveryMode(t *test
 	assert.NotContains(t, podModeEnv, "DYN_KUBE_DISCOVERY_MODE")
 
 	containerModeContainer, err := w.GetBaseContainer(ComponentContext{
-		DynamoNamespace: "ns-dgd",
-		ComponentType:   commonconsts.ComponentTypeWorker,
+		RuntimeContainerName: commonconsts.MainContainerName,
+		DynamoNamespace:      "ns-dgd",
+		ComponentType:        commonconsts.ComponentTypeWorker,
 		Discovery: DiscoveryContext{
 			Backend: configv1alpha1.DiscoveryBackendKubernetes,
 			Mode:    configv1alpha1.KubeDiscoveryModeContainer,
