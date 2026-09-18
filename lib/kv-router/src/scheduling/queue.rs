@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
@@ -35,7 +36,7 @@ use crate::protocols::{
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, LifecycleMutationOutcome, SequenceError, SequencePublisher,
-    SequenceRequest,
+    SequenceRequest, WorkerLoadProjection,
 };
 
 /// Large default for max_num_batched_tokens when not configured (effectively disables queueing for that worker)
@@ -154,11 +155,6 @@ enum AdmissionCommand {
     },
     MarkPrefillCompleted {
         booking: SchedulerBookingDescriptor,
-        ack_tx: oneshot::Sender<Result<LifecycleMutationOutcome, SequenceError>>,
-    },
-    AddOutputBlock {
-        booking: SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
         ack_tx: oneshot::Sender<Result<LifecycleMutationOutcome, SequenceError>>,
     },
     Cleanup,
@@ -490,6 +486,7 @@ struct SchedulerQueueActor<
     class_counters: Arc<Vec<ClassQueueCounters>>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
+    projected_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
     block_size: u32,
     selector: Sel,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
@@ -635,6 +632,7 @@ impl<
             class_counters: Arc::clone(&class_counters),
             slots,
             workers_with_configs: workers_with_configs.clone(),
+            projected_loads: FxHashMap::default(),
             block_size,
             selector,
             prefill_load_estimator,
@@ -896,43 +894,12 @@ impl<
             .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
     }
 
-    pub(crate) async fn add_output_block_if_booking(
-        &self,
-        booking: SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.admission_tx
-            .send(AdmissionCommand::AddOutputBlock {
-                booking,
-                decay_fraction,
-                ack_tx,
-            })
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        ack_rx
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?
-            .map(|_| ())
-            .map_err(|error| KvSchedulerError::BookingFailed(error.to_string()))
-    }
-
-    /// Enqueue a booking-fenced output update without waiting for the actor to
-    /// apply it. The bounded command queue still supplies backpressure when full.
-    pub(crate) async fn enqueue_output_block_if_booking(
-        &self,
-        booking: SchedulerBookingDescriptor,
-        decay_fraction: Option<f64>,
-    ) -> Result<(), KvSchedulerError> {
-        let (ack_tx, _ack_rx) = oneshot::channel();
-        self.admission_tx
-            .send(AdmissionCommand::AddOutputBlock {
-                booking,
-                decay_fraction,
-                ack_tx,
-            })
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)
+    pub(crate) fn ensure_running(&self) -> Result<(), KvSchedulerError> {
+        if self.admission_tx.is_closed() {
+            Err(KvSchedulerError::SubscriberShutdown)
+        } else {
+            Ok(())
+        }
     }
 
     async fn update_after(&self, worker: Option<WorkerWithDpRank>) {
@@ -1069,22 +1036,6 @@ impl<
                         self.handle_update(None).await;
                     } else if mutation_ready {
                         self.handle_update(Some(booking.worker)).await;
-                    }
-                    let _ = ack_tx.send(result);
-                }
-                AdmissionCommand::AddOutputBlock {
-                    booking,
-                    decay_fraction,
-                    ack_tx,
-                } => {
-                    let result = self.slots.add_output_block_if_booking(
-                        &booking.request_id,
-                        booking.worker,
-                        booking.attempt_id,
-                        decay_fraction,
-                    );
-                    if drain_cleanup && self.drain_cleanup() {
-                        self.handle_update(None).await;
                     }
                     let _ = ack_tx.send(result);
                 }
@@ -1490,15 +1441,29 @@ impl<
         }
     }
 
+    /// Refresh derived load for every request, retaining the allocation through
+    /// selection, booking, and response-field capture, including error paths.
+    fn with_projected_loads<R>(
+        &mut self,
+        mut request: SchedulingRequest,
+        decay_now: Instant,
+        handle: impl FnOnce(&Self, &mut SchedulingRequest) -> R,
+    ) -> R {
+        request.worker_loads = std::mem::take(&mut self.projected_loads);
+        self.slots.project_worker_loads_into(
+            request.token_seq.as_deref(),
+            decay_now,
+            &mut request.worker_loads,
+        );
+        let result = handle(self, &mut request);
+        self.projected_loads = std::mem::take(&mut request.worker_loads);
+        result
+    }
+
     fn select_worker_for_request(
         &self,
-        request: &mut SchedulingRequest,
-        decay_now: Instant,
+        request: &SchedulingRequest,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
-        request.worker_loads = self
-            .slots
-            .project_worker_loads(request.token_seq.as_deref(), decay_now);
-
         let available_worker_ids = self
             .available_worker_provider
             .as_ref()
@@ -1569,25 +1534,27 @@ impl<
     }
 
     fn select_without_admission_inner(
-        &self,
-        mut request: SchedulingRequest,
+        &mut self,
+        request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let selected = self.select_worker_for_request(&mut request, decay_now)?;
-        let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&request, selected.selection.worker);
+        self.with_projected_loads(request, decay_now, |actor, request| {
+            let selected = actor.select_worker_for_request(request)?;
+            let target_cached_prefix_blocks =
+                target_cached_prefix_blocks(request, selected.selection.worker);
 
-        Ok(AdvisorySchedulingResponse {
-            selected_worker_load: selected.selected_worker_load,
-            response: SchedulingResponse {
-                best_worker: selected.selection.worker,
-                effective_overlap_blocks: selected.selection.effective_overlap_blocks,
-                cached_tokens: selected.selection.cached_tokens,
-                selected_worker_tiers: selected.selected_worker_tiers,
-                target_cached_prefix_blocks,
-                kv_transfer_candidates: request.kv_transfer_candidates.take(),
-                potential_decode_blocks: selected.selection.potential_decode_blocks,
-            },
+            Ok(AdvisorySchedulingResponse {
+                selected_worker_load: selected.selected_worker_load,
+                response: SchedulingResponse {
+                    best_worker: selected.selection.worker,
+                    effective_overlap_blocks: selected.selection.effective_overlap_blocks,
+                    cached_tokens: selected.selection.cached_tokens,
+                    selected_worker_tiers: selected.selected_worker_tiers,
+                    target_cached_prefix_blocks,
+                    kv_transfer_candidates: request.kv_transfer_candidates.take(),
+                    potential_decode_blocks: selected.selection.potential_decode_blocks,
+                },
+            })
         })
     }
 
@@ -1595,12 +1562,23 @@ impl<
     /// compute projected load -> select worker -> book tracked state -> respond.
     fn admit_one(
         &mut self,
-        mut request: SchedulingRequest,
+        request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         decay_now: Instant,
     ) -> bool {
-        let selected = match self.select_worker_for_request(&mut request, decay_now) {
+        self.with_projected_loads(request, decay_now, |actor, request| {
+            actor.admit_one_projected(request, attempt_tx, lifecycle_transfer)
+        })
+    }
+
+    fn admit_one_projected(
+        &self,
+        request: &mut SchedulingRequest,
+        attempt_tx: Option<oneshot::Sender<AttemptId>>,
+        lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
+    ) -> bool {
+        let selected = match self.select_worker_for_request(request) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("scheduling failed: {e}");
@@ -1610,7 +1588,7 @@ impl<
         };
 
         let target_cached_prefix_blocks =
-            target_cached_prefix_blocks(&request, selected.selection.worker);
+            target_cached_prefix_blocks(request, selected.selection.worker);
         let response = SchedulingResponse {
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
@@ -1665,7 +1643,7 @@ impl<
     /// delivery loses that race, roll back the booking here.
     fn book_and_respond(
         &self,
-        mut request: SchedulingRequest,
+        request: &mut SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         sequence_request: SequenceRequest,
@@ -2722,6 +2700,72 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
     }
 
+    #[tokio::test]
+    async fn projection_storage_survives_admission_and_errors_without_stale_entries() {
+        let (queue, slots, configs) = make_queue_with_sender(1, 16, 64, None, None);
+        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
+        let mut actor = SchedulerQueueActor {
+            pending: PolicyQueue::new(profile.clone()),
+            cleanup: Arc::clone(&queue.cleanup),
+            profile,
+            pending_count: Arc::clone(&queue.pending_count),
+            pending_isl_tokens: Arc::clone(&queue.pending_isl_tokens),
+            class_counters: Arc::clone(&queue.class_counters),
+            slots: Arc::clone(&slots),
+            workers_with_configs: configs.subscribe(),
+            projected_loads: FxHashMap::with_capacity_and_hasher(8, Default::default()),
+            block_size: 16,
+            selector: DefaultWorkerSelector::new(None, "test"),
+            prefill_load_estimator: None,
+            overlap_scores_refresh: None::<Arc<NoopOverlapScoresRefresh>>,
+            overlap_refresh_after: None,
+            overloaded_worker_provider: None,
+            available_worker_provider: None,
+            non_max_overlap_selection_observer: Arc::clone(
+                &queue.non_max_overlap_selection_observer,
+            ),
+        };
+        let worker = WorkerWithDpRank::new(0, 0);
+        let stale = WorkerWithDpRank::new(999, 0);
+        let capacity = actor.projected_loads.capacity();
+        // The second admission refreshes load after the first booking. The
+        // duplicate then exercises booking failure with the same allocation.
+        for (id, succeeds) in [("first", true), ("second", true), ("first", false)] {
+            actor
+                .projected_loads
+                .insert(stale, WorkerLoadProjection::default());
+            let now = Instant::now();
+            let expected = slots.project_worker_loads(None, now);
+            let (request, mut rx) = make_request(id, 64);
+            let storage = actor.with_projected_loads(request, now, |actor, request| {
+                assert_eq!(request.worker_loads, expected);
+                assert!(!request.worker_loads.contains_key(&stale));
+                let storage = request.worker_loads.get(&worker).unwrap() as *const _;
+                assert_eq!(actor.admit_one_projected(request, None, None), succeeds);
+                assert_eq!(rx.try_recv().unwrap().is_ok(), succeeds);
+                assert_eq!(request.worker_loads, expected);
+                storage
+            });
+            assert_eq!(actor.projected_loads.capacity(), capacity);
+            assert_eq!(
+                actor.projected_loads.get(&worker).unwrap() as *const _,
+                storage
+            );
+        }
+        let (mut request, _rx) = make_request("missing-worker", 64);
+        request.pinned_worker = Some(stale);
+        assert!(
+            actor
+                .select_without_admission_inner(request, Instant::now())
+                .is_err()
+        );
+        assert_eq!(actor.projected_loads.capacity(), capacity);
+        for id in ["first", "second"] {
+            slots.free(&id.to_owned(), Instant::now()).unwrap();
+        }
+        slots.assert_completely_drained(Instant::now());
+    }
+
     #[test]
     fn non_max_overlap_selection_ignores_ties_pins_and_ineligible_workers() {
         let workers = HashMap::from([
@@ -3717,7 +3761,7 @@ policy_classes:
         let (queue, _slots) = make_queue_with_providers(2, 16, 256, None, Some(provider));
         let (mut request, _response) = make_request("adapter-request", 256);
         request.lora_name = Some("adapter".to_string());
-        request.overlap.effective_cached_tokens = HashMap::from([
+        request.overlap.effective_cached_tokens = FxHashMap::from_iter([
             (WorkerWithDpRank::from_worker_id(0), 224),
             (WorkerWithDpRank::from_worker_id(1), 32),
         ]);
@@ -4062,11 +4106,11 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([
+                    effective_overlap_blocks: FxHashMap::from_iter([
                         (WorkerWithDpRank::new(0, 0), 1.0),
                         (WorkerWithDpRank::new(1, 0), 9.0),
                     ]),
-                    effective_cached_tokens: HashMap::from([
+                    effective_cached_tokens: FxHashMap::from_iter([
                         (WorkerWithDpRank::new(0, 0), 16),
                         (WorkerWithDpRank::new(1, 0), 144),
                     ]),
@@ -4160,8 +4204,8 @@ policy_classes:
                 }),
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::from([(worker, 5.0)]),
-                    effective_cached_tokens: HashMap::from([(worker, 80)]),
+                    effective_overlap_blocks: FxHashMap::from_iter([(worker, 5.0)]),
+                    effective_cached_tokens: FxHashMap::from_iter([(worker, 80)]),
                 },
             },
         });
@@ -4204,8 +4248,8 @@ policy_classes:
         let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::from_overlap(
             OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::from([(worker, 7.0)]),
-                effective_cached_tokens: HashMap::from([(worker, 56)]),
+                effective_overlap_blocks: FxHashMap::from_iter([(worker, 7.0)]),
+                effective_cached_tokens: FxHashMap::from_iter([(worker, 56)]),
             },
         )));
         let (queue, slots) = make_queue_with_blocking_refresher(
