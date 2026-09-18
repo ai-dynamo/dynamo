@@ -121,6 +121,23 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
+          env:
+          # TensorRT-LLM would otherwise start its TP=1 worker by spawning an
+          # MPI process, and that spawn fails inside a pod: PRTE reaches
+          # `VM READY` and then terminates its daemons with no diagnostic.
+          # Measured on release:1.3.0rc27.dev202609170000. Both of these run one
+          # GPU per engine, which is exactly the case this switch covers
+          # (`enable_worker_single_process_for_tp1`), so the worker runs
+          # in-process and never spawns. Revisit when an engine needs TP > 1.
+          - name: TLLM_WORKER_USE_SINGLE_PROCESS
+            value: "1"
+          # The release image runs as uid 0 and PRTE refuses to run as root
+          # unless told twice. Harmless with the switch above, and it keeps the
+          # engine from dying at startup if the spawn path is ever re-entered.
+          - name: PRTE_ALLOW_RUN_AS_ROOT
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret
@@ -224,6 +241,15 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
+          env:
+          # See the prefill engine above: run the TP=1 worker in-process rather
+          # than spawning it over MPI, which does not work inside a pod.
+          - name: TLLM_WORKER_USE_SINGLE_PROCESS
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT
+            value: "1"
+          - name: PRTE_ALLOW_RUN_AS_ROOT_CONFIRM
+            value: "1"
           envFrom:
           - secretRef:
               name: hf-token-secret

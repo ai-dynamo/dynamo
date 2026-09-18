@@ -21,8 +21,8 @@ architecture.
 
 | Deployment path | Aggregated | Disaggregated |
 |---|---|---|
-| Local launcher | Validated on one GPU | Validated on one GPU |
-| Kubernetes example | Validated | Manifest available, not yet validated on a cluster |
+| Local launcher | Validated on one GPU | Validated on one GPU, both engines co-located; the launcher defaults to two |
+| Kubernetes example | Validated | Validated, prefill and decode on separate pods |
 
 This table covers launch topology only. The
 [TensorRT-LLM feature matrix](overview.md#feature-support-matrix) describes the

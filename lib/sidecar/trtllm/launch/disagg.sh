@@ -88,6 +88,22 @@ TRTLLM_CACHE_TRANSCEIVER_BACKEND="${TRTLLM_CACHE_TRANSCEIVER_BACKEND:-NIXL}"
 # supplies `--max_seq_len`, theirs wins and the sidecars adopt the engines'
 # `Control.GetModelInfo` report rather than overriding it with a default they
 # were never told about.
+
+# `--extra_llm_api_options` is last-wins, not additive, so a forwarded copy
+# would drop the transceiver and leave the prefill worker producing a handoff
+# no decode worker can consume -- as an opaque engine-side transfer error, not
+# a launcher one. Refuse it rather than silently losing the setting.
+for arg in "${EXTRA_ARGS[@]}"; do
+    case "$arg" in
+        --extra_llm_api_options|--extra_llm_api_options=*)
+            echo "Cannot forward --extra_llm_api_options: this launcher needs it for" >&2
+            echo "cache_transceiver_config. Merge your settings into that file, or set" >&2
+            echo "TRTLLM_CACHE_TRANSCEIVER_BACKEND and run the engines yourself." >&2
+            exit 1
+            ;;
+    esac
+done
+
 TRTLLM_MAX_SEQ_LEN_ARGS=()
 TRTLLM_CONTEXT_LENGTH_ARGS=()
 trtllm_max_seq_len_supplied=0
