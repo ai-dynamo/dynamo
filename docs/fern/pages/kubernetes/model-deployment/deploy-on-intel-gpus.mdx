@@ -135,8 +135,7 @@ vLLM runtime image. The worker uses the XPU image and connects the claim at two 
 - `podTemplate.spec.resourceClaims` attaches a claim generated from `qwen3-xpu-gpu` to the pod.
 - `containers[].resources.claims` grants the `main` container access to that claim.
 
-The XPU worker also sets `VLLM_TARGET_DEVICE=xpu`. The `--block-size 64` argument matches the
-checked-in Intel XPU deployment examples.
+The XPU worker also sets `VLLM_TARGET_DEVICE=xpu`.
 
 ```yaml
 ---
@@ -172,8 +171,6 @@ spec:
           args:
           - --model
           - Qwen/Qwen3-0.6B
-          - --block-size
-          - "64"
           env:
           - name: VLLM_TARGET_DEVICE
             value: xpu

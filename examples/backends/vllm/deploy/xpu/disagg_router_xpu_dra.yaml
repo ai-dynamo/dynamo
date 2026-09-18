@@ -53,8 +53,6 @@ spec:
           - Qwen/Qwen3-0.6B
           - --disaggregation-mode
           - decode
-          - --block-size
-          - "64"
           command:
           - python3
           - -m
@@ -91,8 +89,6 @@ spec:
           - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"xpu"}'
-          - --block-size
-          - "64"
           - --enable-prefix-caching
           command:
           - python3
