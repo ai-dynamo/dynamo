@@ -68,6 +68,41 @@ def test_server_tags_from_env_rejects_invalid_values(monkeypatch, raw, match):
         server._tags_from_env()
 
 
+@pytest.mark.parametrize("tags", ["weights,kv_cache", "kv_cache,weights"])
+def test_v1_accepts_complete_tag_set_in_either_order(monkeypatch, tags):
+    monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    monkeypatch.setenv("GMS_SERVER_TAGS", tags)
+
+    def initialize(*_):
+        raise RuntimeError("passed tag validation")
+
+    monkeypatch.setattr(server, "init_vmm", initialize)
+    with pytest.raises(RuntimeError, match="passed tag validation"):
+        server.main([])
+
+
+def test_no_children_launched_before_signal_handlers_installed(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    monkeypatch.delenv("GMS_SERVER_TAGS", raising=False)
+    monkeypatch.setenv("GMS_DIRECTORY_SOCKET", "/run/gms/directory.sock")
+    monkeypatch.setattr(server, "init_vmm", lambda *_: None)
+    monkeypatch.setattr(
+        server, "get_vmm", lambda: SimpleNamespace(list_devices=lambda: [0])
+    )
+    monkeypatch.setattr(
+        server.subprocess, "Popen", lambda *_: pytest.fail("unprotected child")
+    )
+
+    def install_handler(*_):
+        raise RuntimeError("cannot install signal handlers")
+
+    monkeypatch.setattr(server.signal, "signal", install_handler)
+    with pytest.raises(RuntimeError, match="cannot install signal handlers"):
+        server.main([])
+
+
 def test_directory_command_uses_distinct_protocol_server():
     assert server._directory_command("/run/gms/directory.sock") == [
         sys.executable,

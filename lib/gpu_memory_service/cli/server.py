@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> None:
     if use_v1 and args.device_type != VMMDeviceType.CUDA.value:
         parser.error("DYN_GMS_USE_V1=true only supports --device-type=cuda")
     tags = _tags_from_env()
-    if use_v1 and tags != tuple(GMS_TAGS):
+    if use_v1 and set(tags) != set(GMS_TAGS):
         parser.error(
             "GMS_SERVER_TAGS subsets are not supported by GMS V1 because its "
             "weights and kv_cache domains share one checkpoint lifecycle"
@@ -165,16 +165,6 @@ def main(argv: list[str] | None = None) -> None:
     servers: list[subprocess.Popen] = []
     loaders: list[subprocess.Popen] = []
 
-    directory_socket = os.environ.get("GMS_DIRECTORY_SOCKET")
-    if directory_socket:
-        process = subprocess.Popen(_directory_command(directory_socket))
-        logger.info(
-            "Started GMS content directory socket=%s pid=%d",
-            directory_socket,
-            process.pid,
-        )
-        servers.append(process)
-
     def terminate(*_args) -> None:
         _terminate_all([*servers, *loaders])
         raise SystemExit(0)
@@ -183,6 +173,16 @@ def main(argv: list[str] | None = None) -> None:
     signal.signal(signal.SIGINT, terminate)
 
     try:
+        directory_socket = os.environ.get("GMS_DIRECTORY_SOCKET")
+        if directory_socket:
+            process = subprocess.Popen(_directory_command(directory_socket))
+            logger.info(
+                "Started GMS content directory socket=%s pid=%d",
+                directory_socket,
+                process.pid,
+            )
+            servers.append(process)
+
         for device in devices:
             command = [sys.executable, "-m", "gpu_memory_service"]
             command.extend(["--device", str(device)])
