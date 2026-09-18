@@ -125,6 +125,7 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+_RL_INIT_WEIGHTS_TIMEOUT_MAX_S = 86_400.0
 # Ceiling on the Ray GCS round-trips behind get_ep_capacity. The reconciler polls
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
@@ -165,12 +166,22 @@ def build_prompt_tokens_details(
 
 
 def _rl_init_weights_timeout_s() -> float:
-    return float(
+    timeout_s = float(
         os.environ.get(
             _RL_INIT_WEIGHTS_TIMEOUT_ENV,
             str(_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S),
         )
     )
+    # Keep the rendezvous watchdog within the runtime maintenance API's bound.
+    if math.isfinite(timeout_s) and timeout_s > _RL_INIT_WEIGHTS_TIMEOUT_MAX_S:
+        logger.warning(
+            "%s=%s exceeds the maximum of %s seconds; using the maximum",
+            _RL_INIT_WEIGHTS_TIMEOUT_ENV,
+            timeout_s,
+            _RL_INIT_WEIGHTS_TIMEOUT_MAX_S,
+        )
+        return _RL_INIT_WEIGHTS_TIMEOUT_MAX_S
+    return timeout_s
 
 
 class _DeferredAbort:
@@ -2230,8 +2241,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self._shutdown_worker()
 
                 await rpc_task
-                # The window deliberately stays open: the transaction continues
-                # until destroy_weights_update_group or finish_weight_update.
+                # The lease expires timeout_s seconds after initialization began.
+                # Later transfers do not renew it; finish or destroy releases it
+                # early if the transaction ends before that absolute deadline.
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:

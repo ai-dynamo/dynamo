@@ -2005,12 +2005,26 @@ class TestRLAdminRouteHardening:
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
 
     @pytest.mark.asyncio
-    async def test_init_weights_update_group_succeeds_within_timeout(self, monkeypatch):
-        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", "45")
+    @pytest.mark.parametrize(
+        "configured_timeout, expected_timeout", [(45, 45.0), (100000, 86400.0)]
+    )
+    async def test_init_weights_update_group_succeeds_within_timeout(
+        self, monkeypatch, configured_timeout, expected_timeout
+    ):
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", str(configured_timeout))
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler.engine_client = MagicMock()
         handler.engine_client.collective_rpc = AsyncMock()
+
+        def begin_maintenance(max_seconds, _endpoint):
+            # Match the binding's limit so an oversized setting cannot prevent
+            # the rendezvous RPC from running unnoticed by this handler test.
+            if not 0 < max_seconds <= 86400:
+                raise ValueError("max_seconds is outside the supported range")
+            return 1
+
+        handler.runtime.begin_health_check_maintenance.side_effect = begin_maintenance
 
         resp = await handler.init_weights_update_group(
             {
@@ -2033,7 +2047,7 @@ class TestRLAdminRouteHardening:
             },
         )
         handler.runtime.begin_health_check_maintenance.assert_called_once_with(
-            45.0, handler.config.endpoint
+            expected_timeout, handler.config.endpoint
         )
         handler.runtime.end_health_check_maintenance.assert_not_called()
         assert handler._rl_maintenance_lease == 1
@@ -2173,12 +2187,13 @@ class TestRLAdminRouteHardening:
         assert handler._rl_maintenance_lease is None
 
     @pytest.mark.asyncio
-    async def test_finish_weight_update_closes_maintenance_window(self):
+    @pytest.mark.parametrize("paused", [True, False])
+    async def test_finish_weight_update_closes_maintenance_window(self, paused):
         """finish_weight_update ends the transaction for controllers that never
-        call destroy, so it must release the lease init took."""
+        call destroy, including a finish rejected because the worker is unpaused."""
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
-        handler._paused = True
+        handler._paused = paused
         handler.engine_client = MagicMock()
         handler.engine_client.collective_rpc = AsyncMock()
         handler.engine_client.reset_prefix_cache = AsyncMock()
@@ -2186,11 +2201,21 @@ class TestRLAdminRouteHardening:
         await handler.init_weights_update_group(
             {"engine_rpc": "init_weight_transfer_engine"}
         )
+        handler.engine_client.collective_rpc.reset_mock()
         resp = await handler.update_weights_from_distributed(
             {"engine_rpc": "finish_weight_update"}
         )
 
-        assert resp["status"] == "ok"
+        if paused:
+            assert resp["status"] == "ok"
+            handler.engine_client.collective_rpc.assert_awaited_once_with(
+                "finish_weight_update", kwargs={}
+            )
+        else:
+            assert resp["status"] == "error"
+            assert "must be paused" in resp["message"]
+            handler.engine_client.collective_rpc.assert_not_awaited()
+            handler.engine_client.reset_prefix_cache.assert_not_awaited()
         handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
         assert handler._rl_maintenance_lease is None
 
