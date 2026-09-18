@@ -48,6 +48,8 @@ kubectl apply \
   -n "$NAMESPACE"
 ```
 
-These manifests omit cluster-specific scheduling, registry credentials, and
-network-interface bindings. Add those through the target cluster's
-Kustomization.
+These manifests currently contain cluster-specific scheduling, registry,
+networking, namespace, and ComputeDomain values. Replace those values for the
+target cluster before applying either manifest. The referenced runtime image is
+not publicly accessible; substitute an image that contains the required
+MiniMax M3 support and dependencies.

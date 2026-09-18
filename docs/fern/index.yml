@@ -823,6 +823,13 @@ navigation:
               - page: Kimi-K2.6
                 path: pages/recipes/model-recipes/kimi-k2-6.mdx
                 slug: kimi-k2-6
+          - section: MiniMax
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: MiniMax M3
+                path: pages/recipes/model-recipes/minimax-m3.mdx
+                slug: minimax-m3
           - section: DeepSeek
             skip-slug: true
             collapsed: true

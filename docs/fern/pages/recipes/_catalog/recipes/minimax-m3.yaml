@@ -1,0 +1,62 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: minimax-m3
+title: MiniMax M3 NVFP4
+page: pages/recipes/model-recipes/minimax-m3.mdx
+provider: minimax
+model:
+  name: MiniMax M3 NVFP4
+  hf_id: nvidia/MiniMax-M3-NVFP4
+  precision: NVFP4 weights, FP8 KV cache
+status: experimental
+targets:
+- id: vllm-agg-gb200-agentic
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - prefix-caching
+  - nvfp4
+  - fp8-kv-cache
+  - eagle3-speculative-decoding
+  - cpu-kv-offload
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/minimax-m3/vllm/agg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+- id: vllm-disagg-gb200-agentic
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 24
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - prefix-caching
+  - nvfp4
+  - fp8-kv-cache
+  - eagle3-speculative-decoding
+  - nixl
+  workload:
+    type: agentic
+  deploy:
+    asset: recipes/minimax-m3/vllm/disagg-gb200-agentic/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- The manifests require cluster-specific scheduling, networking, registry, and ComputeDomain substitutions before deployment.
+- The checked-in runtime image is not publicly accessible; no public replacement has been validated for these configurations.
+- No benchmark assets or expected-performance results are published.
