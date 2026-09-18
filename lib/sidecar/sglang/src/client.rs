@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
-use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
+use dynamo_sidecar_common::{
+    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig, format_error_chain,
+};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tonic::transport::{Channel, Endpoint};
@@ -17,6 +19,8 @@ use crate::proto as pb;
 use crate::proto::sglang_service_client::SglangServiceClient;
 
 pub type Client = SglangServiceClient<Channel>;
+
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Metadata exposed by SGLang's model/server discovery RPCs.
 #[derive(Clone, Debug)]
@@ -29,15 +33,24 @@ pub struct Discovery {
     pub server_info: Value,
 }
 
+/// `bootstrap`: true when called before `dynamo_backend_common::run` installs
+/// the global tracing subscriber (the `bootstrap_discover` path during
+/// `from_args()`), false once running inside `LLMEngine::start` (via
+/// `Pool::connect`) where the subscriber is live.
 pub async fn connect(
     uri: &GrpcEndpoint,
     cfg: &GrpcTransportConfig,
     deadline: Instant,
+    bootstrap: bool,
 ) -> Result<Client, DynamoError> {
     let endpoint = Endpoint::from_shared(uri.to_string())
         .map_err(|err| invalid_arg(format!("invalid SGLang gRPC endpoint `{uri}`: {err}")))?;
+    let started = Instant::now();
+    let mut attempt = 0_u64;
     let mut last_err;
+    let mut last_logged_at: Option<Instant> = None;
     loop {
+        attempt += 1;
         match try_connect_once(&endpoint, cfg, deadline).await {
             Ok(client) => return Ok(client),
             Err(err) => {
@@ -48,7 +61,35 @@ pub async fn connect(
                         cfg.startup_deadline
                     )));
                 }
-                tokio::time::sleep_until((Instant::now() + cfg.retry_interval).min(deadline)).await;
+                let now = Instant::now();
+                if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL)
+                {
+                    // eprintln! on the bootstrap path: tracing events emitted before
+                    // dynamo_backend_common::run() installs the global subscriber are
+                    // silently dropped, which would make this warning exactly as
+                    // invisible as the debug! it replaced. On the post-init path
+                    // (Pool::connect, called from LLMEngine::start), route through
+                    // tracing like everything else so the line gets levels,
+                    // timestamps, and filtering.
+                    if bootstrap {
+                        eprintln!(
+                            "SGLang gRPC connection attempt failed; retrying (endpoint={uri}, attempt={attempt}, elapsed={:?}, retry_interval={:?}, error={last_err})",
+                            started.elapsed(),
+                            cfg.retry_interval,
+                        );
+                    } else {
+                        tracing::warn!(
+                            endpoint = %uri,
+                            attempt,
+                            elapsed = ?started.elapsed(),
+                            retry_interval = ?cfg.retry_interval,
+                            error = %last_err,
+                            "SGLang gRPC connection attempt failed; retrying"
+                        );
+                    }
+                    last_logged_at = Some(now);
+                }
+                tokio::time::sleep_until((now + cfg.retry_interval).min(deadline)).await;
             }
         }
     }
@@ -69,7 +110,7 @@ async fn try_connect_once(
     let channel = timeout_at(deadline, endpoint.connect())
         .await
         .map_err(|_| "startup deadline elapsed while connecting".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_error_chain(&e))?;
     Ok(client_from_channel(channel))
 }
 
@@ -87,6 +128,9 @@ pub struct Pool {
 }
 
 impl Pool {
+    // bootstrap=false: Pool::connect's only call site is LLMEngine::start
+    // (lib/sidecar/sglang/src/engine.rs), after the tracing subscriber is
+    // installed. See connect()'s own doc comment.
     pub async fn connect(
         uri: &GrpcEndpoint,
         cfg: &GrpcTransportConfig,
@@ -95,7 +139,7 @@ impl Pool {
         let size = cfg.connections.get();
         let mut clients = Vec::with_capacity(size);
         for _ in 0..size {
-            clients.push(connect(uri, cfg, deadline).await?);
+            clients.push(connect(uri, cfg, deadline, false).await?);
         }
         Ok(Self {
             clients,

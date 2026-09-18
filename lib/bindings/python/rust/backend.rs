@@ -43,7 +43,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
+use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -230,6 +230,7 @@ impl LlmRegistration {
         bootstrap_host = None,
         bootstrap_port = None,
         enable_eagle = false,
+        max_gpu_lora_count = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -243,6 +244,7 @@ impl LlmRegistration {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
         enable_eagle: bool,
+        max_gpu_lora_count: Option<u32>,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -251,6 +253,7 @@ impl LlmRegistration {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                max_gpu_lora_count,
                 data_parallel_size,
                 data_parallel_start_rank,
                 enable_eagle,
@@ -279,6 +282,10 @@ impl LlmRegistration {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn max_gpu_lora_count(&self) -> Option<u32> {
+        self.inner.max_gpu_lora_count
     }
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
@@ -896,6 +903,7 @@ impl PyEngineCore {
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    max_gpu_lora_count: opt_attr::<u32>(&v, "max_gpu_lora_count")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
                     enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
@@ -1677,21 +1685,28 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
-    let (backend, message) = Python::with_gil(|py| {
-        if let Some(mapped) = py_exception_to_backend_error(py, &err) {
-            return mapped;
+    Python::with_gil(|py| {
+        if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
+            let mut builder = DynamoError::builder()
+                .error_type(ErrorType::Backend(backend))
+                .message(message.clone());
+            if backend == BackendError::InvalidArgument {
+                builder = builder.public_message(message);
+            }
+            return builder.build();
         }
-        // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
-        // frontend can read the status code instead of defaulting to 500.
-        if let Some((code, message)) = extract_http_like_error(py, &err) {
-            let backend = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
-            } else {
-                BackendError::Unknown
-            };
-            let json_msg = serde_json::json!({ "message": message, "code": code }).to_string();
-            return (backend, json_msg);
+
+        if let Some(error) = http_like_error_to_dynamo(py, &err) {
+            return error;
         }
+
+        if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
+            return DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shutting down")
+                .build();
+        }
+
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
             || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
         {
@@ -1707,15 +1722,13 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             BackendError::Disconnected
         } else if err.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
             BackendError::Cancelled
-        } else if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            BackendError::EngineShutdown
         } else {
             BackendError::Unknown
         };
-        (backend, err.to_string())
-    });
-    DynamoError::builder()
-        .error_type(ErrorType::Backend(backend))
-        .message(message)
-        .build()
+
+        DynamoError::builder()
+            .error_type(ErrorType::Backend(backend))
+            .message(err.to_string())
+            .build()
+    })
 }

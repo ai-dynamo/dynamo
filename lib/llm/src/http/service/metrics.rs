@@ -21,7 +21,7 @@ use prometheus::{
 };
 use serde::Serialize;
 use std::{
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -35,7 +35,41 @@ use crate::protocols::{
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
-use dynamo_runtime::error::ErrorType as DynamoErrorType;
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    IntCounterVec::new(
+        Opts::new(
+            format!("{}_{}", prefix, frontend_service::FAILURES_TOTAL),
+            "Total number of terminal semantic request failures",
+        ),
+        &["class", "reason"],
+    )
+    .expect("the fixed failure metric name and labels are valid")
+}
+
+/// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
+static FAILURE_METRICS_PREFIX: OnceLock<String> = OnceLock::new();
+pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
+        let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
+            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        sanitize_frontend_prometheus_prefix(&raw)
+    });
+    new_failure_counter(Some(prefix.as_str()))
+});
+
+fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
+    counter
+        .with_label_values(&[error.class().as_str(), error.reason().as_str()])
+        .inc();
+}
+
+pub(crate) fn record_failure(error: &DynamoError) {
+    record_failure_into(&DYNAM_FAILURES_TOTAL, error);
+}
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
@@ -63,7 +97,10 @@ pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool 
 
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
-    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const CANCELLATION: &[DynamoErrorType] = &[
+        DynamoErrorType::Cancelled,
+        DynamoErrorType::Backend(dynamo_runtime::error::BackendError::Cancelled),
+    ];
     const NON_CANCELLATION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
@@ -830,6 +867,15 @@ impl Metrics {
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
+        if let Err(configured_prefix) = FAILURE_METRICS_PREFIX.set(prefix.clone())
+            && configured_prefix != prefix
+        {
+            tracing::warn!(
+                configured=%configured_prefix,
+                requested=%prefix,
+                "Semantic failure metrics already use a different process-wide prefix"
+            );
+        }
         if prefix != raw_prefix {
             tracing::warn!(
                 raw=%raw_prefix,
@@ -1379,6 +1425,7 @@ impl Metrics {
         registry.register(Box::new(self.embedding_latency.clone()))?;
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
+        registry.register(Box::new(DYNAM_FAILURES_TOTAL.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
         registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 
@@ -2315,19 +2362,14 @@ fn annotated_to_sse_event<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let error_message = if let Some(ref dynamo_err) = annotated.error
-                && !dynamo_err.message().is_empty()
-            {
-                dynamo_err.message().to_string()
-            } else if let Some(ref comments) = annotated.comment {
-                let joined = comments.join(" -- ");
-                if joined.trim().is_empty() {
-                    "unspecified error".to_string()
-                } else {
-                    joined
-                }
+            let error_message = if let Some(ref dynamo_err) = annotated.error {
+                format!(
+                    "semantic stream error: class={} reason={}",
+                    dynamo_err.class(),
+                    dynamo_err.reason()
+                )
             } else {
-                "unspecified error".to_string()
+                "backend stream error".to_string()
             };
             return Err(axum::Error::new(error_message));
         }
@@ -4209,6 +4251,64 @@ mod tests {
     }
 
     #[test]
+    fn semantic_failure_metric_honors_custom_prefix() {
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(Some("nv_llm_http_service"));
+        counter
+            .with_label_values(&["Internal", "runtime.internal"])
+            .inc();
+        registry.register(Box::new(counter)).unwrap();
+
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "nv_llm_http_service_failures_total")
+        );
+    }
+
+    #[test]
+    fn semantic_failure_metric_has_only_class_and_reason_labels() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(None);
+        registry.register(Box::new(counter.clone())).unwrap();
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.invalid").unwrap())
+            .build();
+
+        record_failure_into(&counter, &error);
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "dynamo_frontend_failures_total")
+            .expect("dynamo_frontend_failures_total metric");
+        let metric = family
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "request.invalid")
+            })
+            .expect("request.invalid sample");
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("class", "InvalidRequest"), ("reason", "request.invalid")]
+        );
+        assert_eq!(metric.get_counter().value(), 1.0);
+    }
+
+    #[test]
     fn test_multiple_requests_different_error_types() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -4403,36 +4503,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error_event_uses_dynamo_error_message() {
+    fn test_error_event_uses_semantic_identity_without_diagnostic() {
         use dynamo_runtime::error::DynamoError;
         let result = run_event_converter(error_annotated(
             Some(DynamoError::msg("image load failed: 403 Forbidden")),
             None,
         ));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("class=Internal"));
+        assert!(message.contains("reason=runtime.unclassified"));
+        assert!(!message.contains("403 Forbidden"));
     }
 
     #[test]
-    fn test_error_event_falls_back_to_comment() {
+    fn test_error_event_does_not_expose_comment() {
         let result =
             run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("connection lost"));
+        let message = result.unwrap_err().to_string();
+        assert_eq!(message, "backend stream error");
+        assert!(!message.contains("connection lost"));
     }
 
     #[test]
-    fn test_error_event_unspecified_when_no_message() {
+    fn test_error_event_without_identity_is_generic() {
         let result = run_event_converter(error_annotated(None, None));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
-    }
-
-    #[test]
-    fn test_error_event_empty_comment_falls_through() {
-        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+        assert_eq!(result.unwrap_err().to_string(), "backend stream error");
     }
 
     #[test]
