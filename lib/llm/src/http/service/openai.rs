@@ -1013,22 +1013,34 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
 
 fn runtime_lora_error_response(error: RuntimeLoraError) -> ErrorResponse {
     match error {
-        RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: "invalid_lora_model_id".to_string(),
-        }),
-        RuntimeLoraError::BaseModelRequired => ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: "runtime_lora_base_model_required".to_string(),
-        }),
-        RuntimeLoraError::BaseModelNotFound(base) => ErrorMessage::from_http_error(HttpError {
-            code: 404,
-            message: format!("model_not_found: {base}"),
-        }),
-        RuntimeLoraError::BaseModelUnsupported(_) => ErrorMessage::from_http_error(HttpError {
-            code: 400,
-            message: "runtime_lora_unsupported".to_string(),
-        }),
+        RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(
+            ErrorClass::InvalidRequest,
+            HttpError {
+                code: 400,
+                message: "invalid_lora_model_id".to_string(),
+            },
+        ),
+        RuntimeLoraError::BaseModelRequired => ErrorMessage::from_http_error(
+            ErrorClass::InvalidRequest,
+            HttpError {
+                code: 400,
+                message: "runtime_lora_base_model_required".to_string(),
+            },
+        ),
+        RuntimeLoraError::BaseModelNotFound(base) => ErrorMessage::from_http_error(
+            ErrorClass::NotFound,
+            HttpError {
+                code: 404,
+                message: format!("model_not_found: {base}"),
+            },
+        ),
+        RuntimeLoraError::BaseModelUnsupported(_) => ErrorMessage::from_http_error(
+            ErrorClass::InvalidRequest,
+            HttpError {
+                code: 400,
+                message: "runtime_lora_unsupported".to_string(),
+            },
+        ),
         RuntimeLoraError::InvalidConfiguration(message) => {
             ErrorMessage::internal_server_error_with_details(
                 "Runtime LoRA configuration is invalid",
