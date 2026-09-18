@@ -326,6 +326,7 @@ def patch_shared_kv_pool_geometry() -> None:
         from gpu_memory_service.integrations.common.kv_lease_client import (
             default_kv_lease_namespace_suffix,
             kv_leases_enabled,
+            read_kv_lease_namespace_total_blocks,
             resolve_kv_lease_namespace_total_blocks,
             resolve_lease_device,
         )
@@ -368,6 +369,55 @@ def patch_shared_kv_pool_geometry() -> None:
     original_resolve = target_cls._resolve_memory_pool_config
 
     def patched_resolve_memory_pool_config(self, pre_model_load_memory):
+        if shared_kv_enabled() and kv_leases_enabled("sglang"):
+            device_idx = _resolve_shared_kv_geometry_device(
+                self, resolve_lease_device
+            )
+            suffix = default_kv_lease_namespace_suffix("sglang")
+            namespace, existing_blocks = read_kv_lease_namespace_total_blocks(
+                "sglang", device_idx, namespace_suffix=suffix
+            )
+            if existing_blocks is not None:
+                # A shadow sees the primary's KV allocation as used HBM. Native
+                # free-memory profiling therefore cannot size the pool it is
+                # about to reattach to. Reconstruct the config from the lease
+                # table's published geometry without profiling or allocating.
+                page_size = _resolved_sglang_page_size(self)
+                target_pages = int(existing_blocks) - 1
+                if target_pages <= 0:
+                    raise RuntimeError(
+                        "Existing SGLang KV lease geometry has no usable pages: "
+                        f"namespace={namespace} total_blocks={existing_blocks}"
+                    )
+                target_tokens = target_pages * page_size
+                from sglang.srt.model_executor.pool_configurator import (
+                    create_memory_pool_configurator,
+                )
+
+                configurator = create_memory_pool_configurator(self)
+                config = configurator.calculate_pool_sizes_from_max_tokens(
+                    target_tokens, page_size
+                )
+                resolve_reqs = getattr(
+                    self, "resolve_max_num_reqs", None
+                ) or getattr(self, "_resolve_max_num_reqs", None)
+                if resolve_reqs is not None:
+                    config.max_running_requests = resolve_reqs(target_tokens)
+                finalize = getattr(
+                    configurator, "finalize_with_max_running_requests", None
+                )
+                if finalize is not None:
+                    config = finalize(config)
+                if hasattr(config, "mem_fraction_static"):
+                    config.mem_fraction_static = self.server_args.mem_fraction_static
+                logger.info(
+                    "[GMS] Reattached SGLang shared KV geometry without HBM "
+                    "profiling: %d pages (namespace=%s)",
+                    target_pages,
+                    namespace,
+                )
+                return config
+
         config = original_resolve(self, pre_model_load_memory)
 
         if not shared_kv_enabled() or not kv_leases_enabled("sglang"):
