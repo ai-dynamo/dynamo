@@ -201,6 +201,7 @@ class GMSProcessManager:
         engine_id: str,
         *,
         read_only_weights: bool | None = None,
+        directory_standby: bool = False,
     ):
         if self._stack is None or self.frontend_port is None:
             raise RuntimeError(
@@ -221,6 +222,11 @@ class GMSProcessManager:
         assert engine.env is not None
         engine.env.update(self._directory_env)
         engine.env["ENGINE_ID"] = engine_id
+        if directory_standby:
+            engine.env["GMS_KV_DIRECTORY_STANDBY"] = "1"
+            engine.env["GMS_VLLM_HYDRATE_HBM"] = os.environ.get(
+                "GMS_VLLM_HYDRATE_HBM", "1"
+            )
         self._engine_ids.add(engine_id)
         return engine
 
@@ -230,12 +236,17 @@ class GMSProcessManager:
         *,
         read_only_weights: bool | None = None,
         wait_until_ready: bool = True,
+        directory_standby: bool = False,
     ):
         if self._stack is None:
             raise RuntimeError(
                 "GMSProcessManager must be entered before starting engines"
             )
-        engine = self.create_engine(engine_id, read_only_weights=read_only_weights)
+        engine = self.create_engine(
+            engine_id,
+            read_only_weights=read_only_weights,
+            directory_standby=directory_standby,
+        )
         health_checks = engine.health_check_urls
         if not wait_until_ready:
             engine.health_check_urls = []
