@@ -25,7 +25,6 @@ from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connec
 from vllm_omni.engine.orchestrator import build_engine_core_request_from_tokens
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.stage_utils import serialize_obj, shm_write_bytes
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 from vllm_omni.inputs.data import OmniTokensPrompt
 
 from dynamo import prometheus_names
@@ -41,6 +40,7 @@ from dynamo.vllm.omni.utils import (
     ensure_awaited,
     is_empty_payload,
     parse_omni_request,
+    resolve_stage_configs,
     unwrap_connector_payload,
 )
 
@@ -478,18 +478,13 @@ async def init_omni_stage(
         getattr(getattr(config, "engine_args", None), "trust_remote_code", False)
     )
 
-    (
-        resolved_stage_configs_path,
-        stage_configs,
-        _omni_lb_policy,
-    ) = load_and_resolve_stage_configs(
+    resolved_path, stage_configs = resolve_stage_configs(
         config.model,
-        kwargs={},
         trust_remote_code=trust_remote_code,
         deploy_config_path=config.stage_configs_path,
     )
     connector_configs_path = _ensure_stage_connectors(
-        resolved_stage_configs_path,
+        resolved_path,
         stage_configs,
     )
     # Only register NixlConnector if it's actually used in stage configs
@@ -583,8 +578,12 @@ def _connector_key(from_stage: int | str, to_stage: int | str) -> tuple[str, str
     return (str(from_stage), str(to_stage))
 
 
-def _uses_nixl_connector(stage_configs_path: str, stage_configs: list[Any]) -> bool:
+def _uses_nixl_connector(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> bool:
     """Check if any stage connector uses NixlConnector."""
+    if stage_configs_path is None:
+        return False
     try:
         with open(stage_configs_path) as f:
             raw = f.read()
@@ -636,8 +635,12 @@ def _load_processor(func_path: str | None) -> Any:
     return getattr(importlib.import_module(module_path), func_name)
 
 
-def _ensure_stage_connectors(stage_configs_path: str, stage_configs: list[Any]) -> str:
+def _ensure_stage_connectors(
+    stage_configs_path: str | None, stage_configs: list[Any]
+) -> str | None:
     """Add default SHM connector edges for stage configs that omit them."""
+    if stage_configs_path is None:
+        return None
     try:
         with open(stage_configs_path) as f:
             deploy_config = yaml.safe_load(f) or {}
