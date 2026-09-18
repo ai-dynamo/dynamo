@@ -80,8 +80,17 @@ pub(crate) fn build_generate_request(
         && let Some(key) = sampling.keys().find(|key| {
             !matches!(
                 key.as_str(),
-                "max_tokens"
+                "temperature"
+                    | "top_p"
+                    | "top_k"
+                    | "seed"
+                    | "max_tokens"
                     | "min_tokens"
+                    | "min_p"
+                    | "frequency_penalty"
+                    | "presence_penalty"
+                    | "repetition_penalty"
+                    | "stop_token_ids"
                     | "ignore_eos"
                     | "logprobs"
                     | "prompt_logprobs"
