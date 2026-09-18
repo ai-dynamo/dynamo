@@ -50,6 +50,8 @@ pub struct Config {
     pub client_body_timeout: Duration,
     /// Maximum accepted prefill response size, in bytes.
     pub max_prefill_response_bytes: usize,
+    /// Total time allowed for the prefill leg, across every chunk.
+    pub prefill_deadline: Duration,
     /// Model both workers serve. Recorded at startup for diagnosis.
     pub model: String,
 }
@@ -75,6 +77,10 @@ impl Config {
             max_request_bytes: byte_limit_from_env(
                 crate::vllm_nixl::MAX_REQUEST_BYTES_ENV,
                 crate::vllm_nixl::DEFAULT_MAX_REQUEST_BYTES,
+            )?,
+            prefill_deadline: duration_from_env(
+                crate::vllm_nixl::PREFILL_DEADLINE_MS_ENV,
+                crate::vllm_nixl::DEFAULT_PREFILL_DEADLINE.as_millis() as u64,
             )?,
             max_prefill_response_bytes: byte_limit_from_env(
                 crate::vllm_nixl::MAX_PREFILL_RESPONSE_BYTES_ENV,

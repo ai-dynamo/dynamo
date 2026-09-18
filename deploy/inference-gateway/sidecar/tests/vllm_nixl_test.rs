@@ -75,6 +75,10 @@ enum Behaviour {
     /// inside the body read with a satisfied `Content-Length`, so only
     /// end-of-stream can finish it.
     HeadersThenStall,
+    /// 200 whose streamed body emits one small chunk every `interval` forever.
+    /// Each gap stays under the read timeout, so only a total deadline can end
+    /// the leg. `Content-Length` promises more than is ever delivered.
+    ChunkEveryMillis(u64),
     /// Never answer at all.
     Hang,
 }
@@ -197,6 +201,21 @@ async fn fake_handler(State(fake): State<Arc<Fake>>, request: Request<Body>) -> 
             Body::from_stream(futures::stream::pending::<Result<Bytes, Infallible>>()),
         )
             .into_response(),
+        Behaviour::ChunkEveryMillis(interval_ms) => {
+            let ticks = futures::stream::unfold(0usize, move |n| async move {
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                Some((Ok::<_, Infallible>(Bytes::from(vec![b'.'; 256])), n + 1))
+            });
+            (
+                StatusCode::OK,
+                [
+                    ("content-type", "application/json"),
+                    ("content-length", "1000000"),
+                ],
+                Body::from_stream(ticks),
+            )
+                .into_response()
+        }
         Behaviour::Hang => {
             futures::future::pending::<()>().await;
             unreachable!("a hanging fake never returns")
@@ -321,6 +340,7 @@ impl Harness {
                 // Long enough that no test trips it by accident.
                 client_body_timeout: Duration::from_secs(30),
                 max_prefill_response_bytes,
+                prefill_deadline: Duration::from_secs(60),
             },
         )
         .unwrap();
@@ -1124,6 +1144,58 @@ async fn c17d_malformed_prefill_body_that_ends_immediately_is_a_protocol_error()
         "invalid_prefill_handoff"
     );
     assert_eq!(decode.call_count(), 0);
+}
+
+/// A peer that keeps producing small chunks must not extend the prefill leg
+/// indefinitely. The read timeout bounds one gap between reads, so each gap here
+/// stays under it and only the total deadline can end the leg.
+#[tokio::test]
+async fn c17e_prefill_leg_deadline_bounds_a_chatty_peer() {
+    let prefill = Fake::start(Behaviour::ChunkEveryMillis(20)).await;
+    let decode = Fake::start(Behaviour::Json(decode_success())).await;
+    let adapter: Arc<dyn PdAdapter> = VllmNixlAdapter::new(
+        decode_url(&decode),
+        Duration::from_secs(10),
+        // Longer than any gap this peer leaves between chunks.
+        Duration::from_millis(500),
+        vllm_nixl::Config {
+            prefill_deadline: Duration::from_millis(400),
+            ..vllm_nixl::Config::default()
+        },
+    )
+    .unwrap();
+    let state = SidecarState::new(
+        decode_url(&decode),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+        adapter,
+        CancellationToken::new(),
+        CancellationToken::new(),
+    )
+    .unwrap();
+
+    let started = std::time::Instant::now();
+    let response = router(state)
+        .oneshot(pd_request(prefill.address(), &original_request()))
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(
+        error_code(&body_json(response).await),
+        "prefill_deadline_exceeded",
+        "a chatty peer must hit the leg deadline, not the per-read timeout"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the leg must end near its deadline, took {elapsed:?}"
+    );
+    assert_eq!(
+        decode.call_count(),
+        0,
+        "a prefill leg that never finishes must not be followed by a decode dispatch"
+    );
 }
 
 /// A client that sends an under-cap body slowly must not hold the handler open.

@@ -74,6 +74,7 @@ rejected, the error taxonomy, and the upgrade checklist are in
 | `DYN_MODEL_NAME` | empty | Model both workers serve; recorded at startup |
 | `DYN_SIDECAR_MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Maximum request body the P/D path buffers |
 | `DYN_SIDECAR_MAX_PREFILL_RESPONSE_BYTES` | `1048576` (1 MiB) | Maximum prefill response the P/D path buffers |
+| `DYN_SIDECAR_PREFILL_DEADLINE_MS` | `60000` (60 s) | Total time allowed for the prefill leg, across every chunk. The read timeout bounds one gap between chunks, not the leg |
 
 The decode target is always the locally configured decode engine
 (`DYN_DECODE_ENGINE_PORT`). `remote_host` and `remote_port` in the handoff are

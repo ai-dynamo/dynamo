@@ -47,6 +47,7 @@ fn build_adapter(config: &Config) -> anyhow::Result<Arc<dyn PdAdapter>> {
                     max_request_bytes: config.max_request_bytes,
                     client_body_timeout: config.client_body_timeout,
                     max_prefill_response_bytes: config.max_prefill_response_bytes,
+                    prefill_deadline: config.prefill_deadline,
                 },
             )?;
             Ok(adapter)
