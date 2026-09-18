@@ -1,25 +1,30 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock, Mutex as StdMutex},
+    sync::{Arc, LazyLock, Mutex as StdMutex, Weak},
     time::Duration,
 };
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use futures::StreamExt;
+use tokio::time::Instant;
+use tokio_util::sync::{CancellationToken, DropGuard};
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
-use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
+use crate::discovery::{Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::routing_policy::{RoutingOccupancyState, get_or_create_routing_occupancy_state};
 use crate::traits::DistributedRuntimeProvider;
 
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_INHIBITED_DURATION_SECS: u64 = 5;
+
+/// Request-path overload is a short-lived routing hint. A worker is probed
+/// again after this cooldown if no authoritative load update arrives first.
+const REQUEST_PATH_OVERLOAD_COOLDOWN: Duration = Duration::from_secs(1);
 
 /// Process-wide inhibited duration, resolved from the environment on first client construction.
 static INHIBITED_DURATION: LazyLock<Duration> =
@@ -52,10 +57,14 @@ fn inhibited_duration_from_env(mut lookup: impl FnMut(&str) -> Option<String>) -
 /// cancellation watcher. Both outputs are driven by a single underlying
 /// discovery `list_and_watch` task so clients do not multiply control-plane
 /// watches.
+///
+/// Dropping the source stops that watch. A backend producer can park on its own feed without
+/// noticing that its consumer is gone, as the Kubernetes watcher does, so the token ends it.
 #[derive(Debug)]
 pub(crate) struct EndpointDiscoverySource {
     instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
     event_subscribers: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<DiscoveryEvent>>>,
+    _watch_guard: DropGuard,
 }
 
 pub(crate) struct DiscoveryEventReceiver {
@@ -78,10 +87,14 @@ impl std::ops::DerefMut for DiscoveryEventReceiver {
 }
 
 impl EndpointDiscoverySource {
-    fn new(instance_source: tokio::sync::watch::Receiver<Vec<Instance>>) -> Self {
+    fn new(
+        instance_source: tokio::sync::watch::Receiver<Vec<Instance>>,
+        watch_guard: DropGuard,
+    ) -> Self {
         Self {
             instance_source,
             event_subscribers: StdMutex::new(Vec::new()),
+            _watch_guard: watch_guard,
         }
     }
 
@@ -114,6 +127,9 @@ pub struct RoutingInstanceCounts {
 pub(crate) struct RoutingInstances {
     discovered_ids: Vec<u64>,
     routable_ids: Vec<u64>,
+    monitor_overloaded_ids: HashSet<u64>,
+    request_overload_deadlines: HashMap<u64, Instant>,
+    next_request_overload_expiry: Option<Instant>,
     overloaded_ids: HashSet<u64>,
     free_ids: Vec<u64>,
     routable_id_set: Arc<HashSet<u64>>,
@@ -130,6 +146,7 @@ impl RoutingInstances {
             discovered_ids.clone(),
             discovered_ids,
             HashSet::new(),
+            HashMap::new(),
             availability_initialized,
         )
     }
@@ -137,18 +154,25 @@ impl RoutingInstances {
     fn from_parts(
         mut discovered_ids: Vec<u64>,
         mut routable_ids: Vec<u64>,
-        overloaded_ids: HashSet<u64>,
+        monitor_overloaded_ids: HashSet<u64>,
+        request_overload_deadlines: HashMap<u64, Instant>,
         availability_initialized: bool,
     ) -> Self {
         discovered_ids.sort_unstable();
         discovered_ids.dedup();
         routable_ids.sort_unstable();
         routable_ids.dedup();
+        let mut overloaded_ids = monitor_overloaded_ids.clone();
+        let next_request_overload_expiry = request_overload_deadlines.values().min().copied();
+        overloaded_ids.extend(request_overload_deadlines.keys().copied());
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
         let routable_id_set = Arc::new(routable_ids.iter().copied().collect());
         Self {
             discovered_ids,
             routable_ids,
+            monitor_overloaded_ids,
+            request_overload_deadlines,
+            next_request_overload_expiry,
             overloaded_ids,
             free_ids,
             routable_id_set,
@@ -197,15 +221,19 @@ impl RoutingInstances {
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
         let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
         let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
-        let mut overloaded_ids = self.overloaded_ids.clone();
-        overloaded_ids
+        let mut monitor_overloaded_ids = self.monitor_overloaded_ids.clone();
+        monitor_overloaded_ids
             .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines
+            .retain(|id, _| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
 
         let availability_initialized = self.availability_initialized || !discovered_ids.is_empty();
         Self::from_parts(
             discovered_ids.clone(),
             discovered_ids,
-            overloaded_ids,
+            monitor_overloaded_ids,
+            request_overload_deadlines,
             availability_initialized,
         )
     }
@@ -221,7 +249,8 @@ impl RoutingInstances {
         Self::from_parts(
             self.discovered_ids.clone(),
             routable_ids,
-            self.overloaded_ids.clone(),
+            self.monitor_overloaded_ids.clone(),
+            self.request_overload_deadlines.clone(),
             self.availability_initialized,
         )
     }
@@ -233,7 +262,8 @@ impl RoutingInstances {
         Self::from_parts(
             self.discovered_ids.clone(),
             routable_ids,
-            self.overloaded_ids.clone(),
+            self.monitor_overloaded_ids.clone(),
+            self.request_overload_deadlines.clone(),
             self.availability_initialized,
         )
     }
@@ -243,31 +273,53 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            HashMap::new(),
             self.availability_initialized,
         )
     }
 
     /// Add a single instance to the overloaded set (immediate
-    /// backpressure mark). Short-lived: the next metric-driven
-    /// `set_overloaded` recompute overwrites the whole set.
-    fn mark_overloaded(&self, instance_id: u64) -> Self {
-        let mut overloaded_ids = self.overloaded_ids.clone();
-        overloaded_ids.insert(instance_id);
+    /// backpressure mark). A monitor update clears all request-path
+    /// marks. Otherwise, each mark expires at its own deadline.
+    fn mark_overloaded_until(&self, instance_id: u64, deadline: Instant) -> Self {
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines.insert(instance_id, deadline);
         Self::from_parts(
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
-            overloaded_ids,
+            self.monitor_overloaded_ids.clone(),
+            request_overload_deadlines,
+            self.availability_initialized,
+        )
+    }
+
+    fn has_expired_request_overload(&self, now: Instant) -> bool {
+        self.next_request_overload_expiry
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    fn clear_expired_request_overloads(&self, now: Instant) -> Self {
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines.retain(|_, deadline| *deadline > now);
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            self.monitor_overloaded_ids.clone(),
+            request_overload_deadlines,
             self.availability_initialized,
         )
     }
 
     fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
-        let mut overloaded_ids = self.overloaded_ids.clone();
-        overloaded_ids.retain(|id| !removed_ids.contains(id));
+        let mut monitor_overloaded_ids = self.monitor_overloaded_ids.clone();
+        monitor_overloaded_ids.retain(|id| !removed_ids.contains(id));
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines.retain(|id, _| !removed_ids.contains(id));
         Self::from_parts(
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
-            overloaded_ids,
+            monitor_overloaded_ids,
+            request_overload_deadlines,
             self.availability_initialized,
         )
     }
@@ -289,7 +341,6 @@ impl RoutingInstances {
 struct RoutingInstancesState {
     snapshot: ArcSwap<RoutingInstances>,
     update_lock: StdMutex<()>,
-    overload_reconciliation_needed: AtomicBool,
     instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
 }
 
@@ -302,7 +353,6 @@ impl RoutingInstancesState {
             Self {
                 snapshot: ArcSwap::from_pointee(snapshot),
                 update_lock: StdMutex::new(()),
-                overload_reconciliation_needed: AtomicBool::new(false),
                 instance_avail_tx,
             },
             instance_avail_rx,
@@ -310,7 +360,26 @@ impl RoutingInstancesState {
     }
 
     fn snapshot(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
+        let now = Instant::now();
+        let current = self.snapshot.load();
+        if !current.has_expired_request_overload(now) {
+            return current;
+        }
+        drop(current);
+
+        self.reconcile_expired_request_overloads(now);
         self.snapshot.load()
+    }
+
+    fn reconcile_expired_request_overloads(&self, now: Instant) {
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        if !current.has_expired_request_overload(now) {
+            return;
+        }
+
+        let next = Arc::new(current.clear_expired_request_overloads(now));
+        self.snapshot.store(next);
     }
 
     fn update(
@@ -364,29 +433,32 @@ impl RoutingInstancesState {
             .copied()
             .collect::<HashSet<_>>();
         let _guard = self.update_lock.lock().unwrap();
-        self.overload_reconciliation_needed
-            .store(false, Ordering::Release);
         let current = self.snapshot.load();
-        if current.overloaded_ids == overloaded_ids {
+        let next = Arc::new(current.set_overloaded(overloaded_ids));
+        let effective_changed = current.overloaded_ids != next.overloaded_ids;
+        let source_changed = current.monitor_overloaded_ids != next.monitor_overloaded_ids
+            || !current.request_overload_deadlines.is_empty();
+        if !source_changed {
             return false;
         }
 
-        let next = Arc::new(current.set_overloaded(overloaded_ids));
         self.snapshot.store(next);
-        true
+        effective_changed
     }
 
     fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.mark_overloaded_until(instance_id, Instant::now() + REQUEST_PATH_OVERLOAD_COOLDOWN);
+    }
+
+    fn mark_overloaded_until(&self, instance_id: u64, deadline: Instant) {
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
-        let next = Arc::new(current.mark_overloaded(instance_id));
+        let next = Arc::new(current.mark_overloaded_until(instance_id, deadline));
         self.snapshot.store(next);
-        self.overload_reconciliation_needed
-            .store(true, Ordering::Release);
     }
 
     fn overload_reconciliation_needed(&self) -> bool {
-        self.overload_reconciliation_needed.load(Ordering::Acquire)
+        !self.snapshot().request_overload_deadlines.is_empty()
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -698,28 +770,28 @@ impl Client {
     }
 
     /// Replace the set of overloaded instances reported by the worker monitor.
-    /// Returns true when this changes the routing snapshot.
+    /// Returns true when this changes the effective overloaded set.
     pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
             .set_overloaded_instances(overloaded_instance_ids)
     }
 
-    /// Whether request-path backpressure changed overload state after the monitor's
-    /// most recent metric publication.
+    /// Whether an unexpired request-path overload lease remains after the
+    /// monitor's most recent metric publication.
     pub fn overload_reconciliation_needed(&self) -> bool {
         self.routing_instances.overload_reconciliation_needed()
     }
 
     /// Mark an instance overloaded immediately after a worker-scoped
     /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
-    /// does not call `report_instance_down`. The next worker-monitor
-    /// reconciliation replaces this short-lived global routing hint.
+    /// does not call `report_instance_down`. A fresh worker-monitor publication
+    /// clears this hint early. Its bounded lease otherwise permits a recovery probe.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
         self.routing_instances
             .mark_overloaded_immediate(instance_id);
         tracing::debug!(
             instance_id,
-            "marking instance overloaded (backpressure); next metric event will re-evaluate"
+            "marking instance overloaded with a bounded backpressure lease"
         );
     }
 
@@ -827,31 +899,57 @@ impl Client {
     async fn get_or_create_dynamic_discovery_source(
         endpoint: &Endpoint,
     ) -> Result<Arc<EndpointDiscoverySource>> {
-        let drt = endpoint.drt();
-        let sources = drt.endpoint_discovery_sources();
-        let mut sources = sources.lock().await;
+        let sources = endpoint.drt().endpoint_discovery_sources();
 
-        if let Some(source) = sources.get(endpoint) {
-            if let Some(source) = source.upgrade() {
-                return Ok(source);
-            } else {
-                sources.remove(endpoint);
-            }
+        let existing = sources.lock().await.get(endpoint).and_then(Weak::upgrade);
+        if let Some(source) = existing {
+            return Ok(source);
         }
 
-        let discovery = drt.discovery();
+        // Discovery::list_and_watch establishes the backend watch, so it runs outside the
+        // registry lock. Holding the lock across it serializes every client construction behind
+        // one round trip to the discovery backend.
+        let discovery = endpoint.drt().discovery();
+        let discovery_source = Self::spawn_dynamic_discovery_source(
+            endpoint,
+            discovery.as_ref(),
+            endpoint.drt().primary_token().child_token(),
+        )
+        .await?;
+
+        let mut sources = sources.lock().await;
+        // Another caller can register a source for this endpoint while this watch is
+        // established. Every later client shares that source, and this one drops, which stops
+        // both the watcher task it spawned and the backend watch it established.
+        if let Some(source) = sources.get(endpoint).and_then(Weak::upgrade) {
+            return Ok(source);
+        }
+        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
+        Ok(discovery_source)
+    }
+
+    /// Pass a child of the runtime's primary token as `cancel_token`: the backends fall back to
+    /// that token, so shutdown still ends a watch that clients are holding.
+    async fn spawn_dynamic_discovery_source(
+        endpoint: &Endpoint,
+        discovery: &dyn Discovery,
+        cancel_token: CancellationToken,
+    ) -> Result<Arc<EndpointDiscoverySource>> {
         let discovery_query = crate::discovery::DiscoveryQuery::Endpoint {
             namespace: endpoint.component.namespace.name.clone(),
             component: endpoint.component.name.clone(),
             endpoint: endpoint.name.clone(),
         };
 
-        let watcher_cancel = drt.primary_token().child_token();
+        let watcher_cancel = cancel_token.clone();
         let mut discovery_stream = discovery
             .list_and_watch(discovery_query.clone(), Some(watcher_cancel.clone()))
             .await?;
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
-        let discovery_source = Arc::new(EndpointDiscoverySource::new(watch_rx));
+        let discovery_source = Arc::new(EndpointDiscoverySource::new(
+            watch_rx,
+            cancel_token.drop_guard(),
+        ));
 
         let secondary = endpoint.component.drt.runtime().secondary().clone();
         let discovery_source_task = Arc::downgrade(&discovery_source);
@@ -913,6 +1011,17 @@ impl Client {
                     }
                     DiscoveryEvent::Added(_) => {}
                     DiscoveryEvent::ModelTaintsUpdated(_) => {}
+                    DiscoveryEvent::Resync(instances) => {
+                        map = instances
+                            .into_iter()
+                            .filter_map(|instance| {
+                                let DiscoveryInstance::Endpoint(instance) = instance else {
+                                    return None;
+                                };
+                                Some((instance.instance_id, instance))
+                            })
+                            .collect();
+                    }
                     DiscoveryEvent::Removed(id) => {
                         if let DiscoveryInstanceId::Endpoint(endpoint_id) = id {
                             map.remove(&endpoint_id.instance_id);
@@ -929,7 +1038,6 @@ impl Client {
             watcher_cancel.cancel();
         });
 
-        sources.insert(endpoint.clone(), Arc::downgrade(&discovery_source));
         Ok(discovery_source)
     }
 }
@@ -937,7 +1045,63 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::TransportType;
+    use crate::discovery::{
+        DiscoveryQuery, DiscoverySpec, DiscoveryStream, MockDiscovery, SharedMockRegistry,
+    };
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+    use futures::future::try_join_all;
+
+    /// A backend whose watch producer, like the Kubernetes watcher, parks on its own feed and ends
+    /// only when the token it was given cancels. A test sends events to a watch through `feeds`.
+    struct ParkedProducerDiscovery {
+        inner: MockDiscovery,
+        producers: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
+        feeds: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<Result<DiscoveryEvent>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Discovery for ParkedProducerDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            _query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            let (feed_tx, mut feed) =
+                tokio::sync::mpsc::unbounded_channel::<Result<DiscoveryEvent>>();
+            self.feeds.lock().unwrap().push(feed_tx.clone());
+            let producer = tokio::spawn(async move {
+                let _feed_tx = feed_tx;
+                match cancel_token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            });
+            self.producers.lock().unwrap().push(producer);
+
+            Ok(Box::pin(async_stream::stream! {
+                while let Some(event) = feed.recv().await {
+                    yield event;
+                }
+            }))
+        }
+    }
 
     async fn wait_for_discovery_event(
         receiver: &mut DiscoveryEventReceiver,
@@ -992,6 +1156,145 @@ mod tests {
             inhibited_duration_from_env(|_| Some("invalid".to_string())),
             Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_clients_share_one_discovery_source() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_shared_discovery_source".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+
+        // Every client passes the registry lookup before the first one establishes its watch, so
+        // they all take the slow path and race on the insert.
+        let clients = try_join_all((0..8).map(|_| endpoint.client()))
+            .await
+            .unwrap();
+
+        let shared = &clients[0].endpoint_discovery_source;
+        for (index, client) in clients.iter().enumerate() {
+            assert!(
+                Arc::ptr_eq(shared, &client.endpoint_discovery_source),
+                "client {index} watches the endpoint through a second discovery source"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_discovery_source_stops_its_backend_watch() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_discovery_source_drop".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+
+        let discovery = ParkedProducerDiscovery {
+            inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+            producers: StdMutex::default(),
+            feeds: StdMutex::default(),
+        };
+
+        let source = Client::spawn_dynamic_discovery_source(
+            &endpoint,
+            &discovery,
+            drt.primary_token().child_token(),
+        )
+        .await
+        .unwrap();
+        let producer = discovery
+            .producers
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("the source established no backend watch");
+        tokio::task::yield_now().await;
+        assert!(
+            !producer.is_finished(),
+            "a live source must keep watching the endpoint"
+        );
+
+        drop(source);
+        tokio::time::timeout(Duration::from_secs(1), producer)
+            .await
+            .expect("the backend watch outlives the source that established it")
+            .unwrap();
+    }
+
+    fn endpoint_instance(endpoint: &Endpoint, instance_id: u64) -> Instance {
+        Instance {
+            namespace: endpoint.component.namespace.name.clone(),
+            component: endpoint.component.name.clone(),
+            endpoint: endpoint.name.clone(),
+            instance_id,
+            transport: TransportType::Tcp(format!("127.0.0.1:{}", 8000 + instance_id)),
+            device_type: None,
+            request_plane_codec: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resync_replaces_the_instances_of_a_discovery_source() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_discovery_source_resync".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+        let discovery = ParkedProducerDiscovery {
+            inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+            producers: StdMutex::default(),
+            feeds: StdMutex::default(),
+        };
+
+        let source = Client::spawn_dynamic_discovery_source(
+            &endpoint,
+            &discovery,
+            drt.primary_token().child_token(),
+        )
+        .await
+        .unwrap();
+        let feed = discovery
+            .feeds
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("the source established no backend watch");
+        let mut instances = source.instance_receiver();
+
+        let first = endpoint_instance(&endpoint, 1);
+        feed.send(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(
+            first.clone(),
+        ))))
+        .unwrap();
+        wait_for_watch_state(&mut instances, |instances| {
+            instances == std::slice::from_ref(&first)
+        })
+        .await;
+
+        let second = endpoint_instance(&endpoint, 2);
+        feed.send(Ok(DiscoveryEvent::Resync(vec![
+            DiscoveryInstance::Endpoint(second.clone()),
+        ])))
+        .unwrap();
+        wait_for_watch_state(&mut instances, |instances| {
+            instances == std::slice::from_ref(&second)
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -1200,6 +1503,69 @@ mod tests {
         assert_eq!(client.overloaded_instance_ids(), None);
         assert!(!client.set_overloaded_instances(&[]));
 
+        rt.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_path_overload_expires_without_monitor_update() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = drt
+            .namespace("test_request_overload_expiry".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+
+        client.mark_overloaded_immediate(7);
+        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+
+        tokio::time::advance(REQUEST_PATH_OVERLOAD_COOLDOWN).await;
+
+        assert_eq!(client.overloaded_instance_ids(), None);
+        assert!(!client.overload_reconciliation_needed());
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn request_path_expiry_preserves_monitor_overload() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = drt
+            .namespace("test_request_expiry_preserves_monitor".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let now = Instant::now();
+
+        assert!(client.set_overloaded_instances(&[11]));
+        client
+            .routing_instances
+            .mark_overloaded_until(7, now + Duration::from_secs(1));
+        client
+            .routing_instances
+            .mark_overloaded_until(8, now + Duration::from_secs(2));
+
+        client
+            .routing_instances
+            .reconcile_expired_request_overloads(now + Duration::from_millis(1500));
+
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(HashSet::from([8, 11]))
+        );
+        assert!(client.overload_reconciliation_needed());
         rt.shutdown();
     }
 

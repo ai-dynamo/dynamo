@@ -56,3 +56,19 @@ def test_video_response_wire_shape():
         "created": 0,
         "data": [{"output_format": "mp4", "url": "http://example.com/v.mp4"}],
     }
+
+
+def test_video_response_reports_media_metadata():
+    response = VideoData(
+        output_format="mp4",
+        url="http://example.com/v.mp4",
+        fps=24,
+        audio_sample_rate=32000,
+    )
+
+    assert response.model_dump(exclude_none=True) == {
+        "output_format": "mp4",
+        "url": "http://example.com/v.mp4",
+        "fps": 24,
+        "audio_sample_rate": 32000,
+    }

@@ -34,6 +34,7 @@ from tests.utils.payload_builder import (
     embedding_payload,
     embedding_payload_default,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     pooling_payload,
     router_cached_tokens_chat_payload,
@@ -43,7 +44,6 @@ from tests.utils.payloads import (
     EmbeddingMultiWorkerDispatchPayload,
     EmbeddingPayload,
     ToolCallingChatPayload,
-    lora_chat_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -835,7 +835,7 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+@pytest.mark.parametrize("num_system_ports", [3], indirect=True)
 def test_serve_deployment(
     vllm_config_test,
     request,
@@ -848,9 +848,7 @@ def test_serve_deployment(
     """
     Test dynamo serve deployments with different graph configurations.
     """
-    assert (
-        num_system_ports >= 2
-    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
+    assert num_system_ports >= 3
     config = dataclasses.replace(
         vllm_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )

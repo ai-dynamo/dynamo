@@ -56,6 +56,10 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
+When reviewing frontend or runtime changes, also read the corresponding
+[frontend review prompt](.github/review-prompts/frontend.md) or
+[runtime review prompt](.github/review-prompts/runtime.md) for additional CODEOWNERS guidance.
+
 **For deploying and operating Dynamo:**
 
 - `synthesize-user-workload` — interview the user, capture their confirmed baseline DGD, and create the canonical workload contract
@@ -67,6 +71,8 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `configure-aiperf-benchmark` — freeze and render a comparable AIPerf workload for a deployed candidate
 - `run-aiperf-benchmark` — execute and collect one run-scoped AIPerf Kubernetes benchmark
 - `analyze-aiperf-results` — validate AIPerf evidence, evaluate SLOs, and compare valid same-series runs
+- `find-serving-recipe` — walk the ordered recipe catalogs with provenance gates and write a recipe dossier
+- `report-skillpack-issue` — file a sanitized, operator-approved GitHub issue for a defect in the pack itself
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
@@ -81,15 +87,17 @@ a maintainer comments `/nvskills-ci` on the PR.
 
 ## Improving These Instructions
 
-If these skills or instructions misled you, blocked you, or contradicted what you verified live, prepare an issue for
-this repository with the `agent-reported` label and ask your operator to approve filing it — filing is an external
-write and requires operator consent. Rules:
-
-1. Search existing `agent-reported` issues first; propose commenting on a duplicate instead of filing a new one.
-2. Prepare at most one issue per optimization session; batch findings into it.
-3. Identify yourself as an AI agent, including your driver model and the skills commit you were running.
-4. Sanitize completely: no user workload details, traffic numbers, cluster or namespace names, company names, or
-   credentials. Describe the instruction gap, not the engagement. Show the operator the full draft before filing.
+If these skills, instructions, role contracts, or this file misled you, blocked you, contradicted what you verified
+live, or left a component or situation uncovered, do not route around it silently: invoke the
+`report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`), which every role contract declares and
+which owns the full procedure. Dispatched roles record drafts in `<EXP_ROOT>/analysis/skillpack-defects.md` and return
+them; only the top-level agent, with operator approval, files, at most one new issue per session with findings
+batched, plus comments on duplicates. If your harness cannot surface the skill, follow this minimum, which the skill
+also enforces: search existing reports by title, body, and comments first; identify yourself as an AI agent with
+your driver model and the skills commit; sanitize every emitted string (title, body, comment, search term: no
+workload details, traffic numbers, cluster or namespace names, company names, or credentials); keep drafts as
+run-scoped files, never in a shared temp path; and show the operator the exact draft and file only on their
+approval, using the `[AGENT]: ` title prefix and verifying the label landed.
 
 ## Optimization Role Dispatch
 
@@ -224,10 +232,14 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
-- For fork PRs that qualify for automatic trusted-CI approval, every commit must have a
-  cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
-  satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
-  a maintainer can manually approve the current head with `/ok to test <sha>`.
+- For fork PRs that qualify for automatic CI approval, GitHub must report every commit's
+  signature as `Verified`. A DCO sign-off alone is not enough. Signing commits does not
+  grant automatic approval; a maintainer can approve the current head manually with
+  `/ok to test <sha>`.
+  The only signature exception is a full-CI request from `glamr-agent` on its own PR.
+  The commenter, PR author, and head repository owner must all be `glamr-agent`,
+  checked by GitHub account ID. The request's full SHA must match the PR's current
+  head. Other automatic approvals still require verified signatures.
 - Do not hand-edit a generated artifact — change its source and regenerate. A
   generated file says so in a `do not edit` marker, and its generator has a
   `--check` mode that fails when the committed output is stale. Resolve a
@@ -248,8 +260,8 @@ cargo fmt --all && cargo clippy --workspace
   skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. For an eligible fork PR, the automatic approval flow posts that command only
-  after every PR commit is GitHub-verified. Fix failures before requesting human review.
+  triggers it. For an eligible fork PR, automatic approval posts this command after the
+  checks above pass. Fix CI failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 

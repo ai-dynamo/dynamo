@@ -13,8 +13,9 @@ use crate::protocols::TokenIdType;
 use crate::protocols::agents::{
     AgentContextHeaderValues, agent_context_header_values, session_affinity_header_value,
 };
+use crate::protocols::common::FinishReason;
 use crate::protocols::common::llm_backend::PromptLogprobs;
-use crate::protocols::common::timing::TimingInfo;
+use crate::protocols::common::timing::{RequestTracker, TimingInfo};
 
 /// Request-level taint constraints carried by `nvext.routing_constraints`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -651,6 +652,13 @@ pub struct NvExtResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<serde_json::Value>,
 
+    /// Dynamo's internal finish reason before OpenAI conversion.
+    ///
+    /// Backend-specific reasons are normalized before this value is set.
+    /// For example, SGLang's `abort` becomes `cancelled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detailed_finish_reason: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_token_ids: Option<Vec<TokenIdType>>,
 
@@ -707,9 +715,21 @@ pub struct NvExtResponseFieldSelection {
     pub routed_experts: bool,
     pub engine_data: bool,
     pub stop_reason: bool,
+    pub detailed_finish_reason: bool,
     pub completion_token_ids: bool,
     pub prompt_token_ids: bool,
     pub prompt_logprobs: bool,
+}
+
+/// Backend data available when building an NVExt response.
+#[derive(Debug, Default)]
+pub struct NvExtResponseInput<'a> {
+    pub tracker: Option<&'a RequestTracker>,
+    pub finish_reason: Option<&'a FinishReason>,
+    pub engine_data: Option<serde_json::Value>,
+    pub stop_reason: Option<StopReason>,
+    pub completion_token_ids: Option<&'a [TokenIdType]>,
+    pub prompt_logprobs: Option<PromptLogprobs>,
 }
 
 impl NvExtResponseFieldSelection {
@@ -727,6 +747,7 @@ impl NvExtResponseFieldSelection {
                     "routed_experts" => selection.routed_experts = true,
                     "engine_data" => selection.engine_data = true,
                     "stop_reason" => selection.stop_reason = true,
+                    "detailed_finish_reason" => selection.detailed_finish_reason = true,
                     "completion_token_ids" => selection.completion_token_ids = true,
                     "prompt_token_ids" => selection.prompt_token_ids = true,
                     "prompt_logprobs" => selection.prompt_logprobs = true,
@@ -741,30 +762,26 @@ impl NvExtResponseFieldSelection {
         selection
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_response_nvext(
-        &self,
-        tracker: Option<&std::sync::Arc<crate::protocols::common::timing::RequestTracker>>,
-        finish_reason_present: bool,
-        engine_data_from_backend: Option<serde_json::Value>,
-        stop_reason_from_backend: Option<StopReason>,
-        completion_token_ids_from_backend: Option<&[TokenIdType]>,
-        prompt_logprobs_from_backend: Option<PromptLogprobs>,
-    ) -> Option<NvExtResponse> {
+    pub fn build_response_nvext(&self, input: NvExtResponseInput<'_>) -> Option<NvExtResponse> {
+        let finish_reason_present = input.finish_reason.is_some();
+
         let worker_id = if self.worker_id {
-            tracker.and_then(|t| t.get_worker_info())
+            input.tracker.and_then(RequestTracker::get_worker_info)
         } else {
             None
         };
 
         let token_ids = if self.token_ids {
-            tracker.and_then(|t| t.query_token_ids().map(<[u32]>::to_vec))
+            input
+                .tracker
+                .and_then(|tracker| tracker.query_token_ids().map(<[u32]>::to_vec))
         } else {
             None
         };
 
         let routed_experts = if self.routed_experts {
-            engine_data_from_backend
+            input
+                .engine_data
                 .as_ref()
                 .and_then(|data| data.get("routed_experts"))
                 .cloned()
@@ -773,25 +790,33 @@ impl NvExtResponseFieldSelection {
         };
 
         let timing = if finish_reason_present && self.timing {
-            tracker.map(|t| t.get_timing_info())
+            input.tracker.map(RequestTracker::get_timing_info)
         } else {
             None
         };
 
         let engine_data = if self.engine_data {
-            engine_data_from_backend
+            input.engine_data
         } else {
             None
         };
 
         let stop_reason = if self.stop_reason {
-            stop_reason_from_backend.and_then(|reason| serde_json::to_value(reason).ok())
+            input
+                .stop_reason
+                .and_then(|reason| serde_json::to_value(reason).ok())
+        } else {
+            None
+        };
+
+        let detailed_finish_reason = if self.detailed_finish_reason {
+            input.finish_reason.map(ToString::to_string)
         } else {
             None
         };
 
         let completion_token_ids = if self.completion_token_ids {
-            completion_token_ids_from_backend.map(<[u32]>::to_vec)
+            input.completion_token_ids.map(<[u32]>::to_vec)
         } else {
             None
         };
@@ -799,13 +824,15 @@ impl NvExtResponseFieldSelection {
         // Prompt IDs can be large, so emit them only once on the terminal
         // chunk. The tracker stores them only for an explicit opt-in request.
         let prompt_token_ids = if self.prompt_token_ids && finish_reason_present {
-            tracker.and_then(|t| t.prompt_token_ids().map(<[u32]>::to_vec))
+            input
+                .tracker
+                .and_then(|tracker| tracker.prompt_token_ids().map(<[u32]>::to_vec))
         } else {
             None
         };
 
         let prompt_logprobs = if self.prompt_logprobs && finish_reason_present {
-            prompt_logprobs_from_backend
+            input.prompt_logprobs
         } else {
             None
         };
@@ -816,6 +843,7 @@ impl NvExtResponseFieldSelection {
             && timing.is_none()
             && engine_data.is_none()
             && stop_reason.is_none()
+            && detailed_finish_reason.is_none()
             && completion_token_ids.is_none()
             && prompt_token_ids.is_none()
             && prompt_logprobs.is_none()
@@ -830,6 +858,7 @@ impl NvExtResponseFieldSelection {
             routed_experts,
             engine_data,
             stop_reason,
+            detailed_finish_reason,
             completion_token_ids,
             prompt_token_ids,
             prompt_logprobs,
@@ -1604,6 +1633,7 @@ mod tests {
                 "worker_id".to_string(),
                 "routed_experts".to_string(),
                 "prompt_token_ids".to_string(),
+                "detailed_finish_reason".to_string(),
             ])
             .build()
             .unwrap();
@@ -1614,6 +1644,7 @@ mod tests {
                 worker_id: true,
                 routed_experts: true,
                 prompt_token_ids: true,
+                detailed_finish_reason: true,
                 ..Default::default()
             }
         );
@@ -1695,9 +1726,13 @@ mod tests {
 
     #[test]
     fn build_response_nvext_all_false_returns_none() {
+        let finish_reason = FinishReason::Cancelled;
         assert!(
             NvExtResponseFieldSelection::default()
-                .build_response_nvext(None, false, None, None, None, None)
+                .build_response_nvext(NvExtResponseInput {
+                    finish_reason: Some(&finish_reason),
+                    ..Default::default()
+                })
                 .is_none()
         );
     }
@@ -1711,7 +1746,10 @@ mod tests {
         let tracker = tracker_with_prefill_worker();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
             .expect("worker_id should emit regardless of finish_reason");
 
         assert!(out.worker_id.is_some());
@@ -1729,7 +1767,10 @@ mod tests {
         let tracker = tracker_with_forwarded_worker_info();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
             .expect("forwarded worker_id should surface in nvext");
 
         assert_eq!(
@@ -1753,12 +1794,20 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(NvExtResponseInput {
+                    tracker: Some(&tracker),
+                    ..Default::default()
+                })
                 .is_none()
         );
 
+        let finish_reason = FinishReason::Stop;
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
             .expect("timing should emit on finish");
         assert!(out.timing.is_some());
     }
@@ -1772,7 +1821,10 @@ mod tests {
         let tracker = tracker_with_query_token_ids();
 
         let out = selection
-            .build_response_nvext(Some(&tracker), false, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                ..Default::default()
+            })
             .expect("token_ids should emit when present");
 
         assert_eq!(out.token_ids, Some(vec![11u32, 22, 33]));
@@ -1787,7 +1839,10 @@ mod tests {
         let engine_data = serde_json::json!({ "routed_experts": {"layer_0": [1, 3]} });
 
         let out = selection
-            .build_response_nvext(None, false, Some(engine_data), None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                engine_data: Some(engine_data),
+                ..Default::default()
+            })
             .expect("routed_experts should emit when present");
 
         assert_eq!(
@@ -1804,11 +1859,32 @@ mod tests {
         };
 
         let out = selection
-            .build_response_nvext(None, false, None, None, Some(&[101u32, 102, 103]), None)
+            .build_response_nvext(NvExtResponseInput {
+                completion_token_ids: Some(&[101u32, 102, 103]),
+                ..Default::default()
+            })
             .expect("completion_token_ids should emit when requested and present");
 
         assert_eq!(out.completion_token_ids, Some(vec![101u32, 102, 103]));
         assert!(out.prompt_logprobs.is_none());
+    }
+
+    #[test]
+    fn build_response_nvext_detailed_finish_reason_pass_through() {
+        let selection = NvExtResponseFieldSelection {
+            detailed_finish_reason: true,
+            ..Default::default()
+        };
+
+        let finish_reason = FinishReason::Cancelled;
+        let out = selection
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
+            .expect("detailed_finish_reason should emit when requested and present");
+
+        assert_eq!(out.detailed_finish_reason.as_deref(), Some("cancelled"));
     }
 
     #[test]
@@ -1821,12 +1897,20 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(Some(&tracker), false, None, None, None, None)
+                .build_response_nvext(NvExtResponseInput {
+                    tracker: Some(&tracker),
+                    ..Default::default()
+                })
                 .is_none()
         );
 
+        let finish_reason = FinishReason::Stop;
         let out = selection
-            .build_response_nvext(Some(&tracker), true, None, None, None, None)
+            .build_response_nvext(NvExtResponseInput {
+                tracker: Some(&tracker),
+                finish_reason: Some(&finish_reason),
+                ..Default::default()
+            })
             .expect("prompt_token_ids should emit on the final chunk");
         assert_eq!(out.prompt_token_ids, Some(vec![101u32, 102, 103]));
     }
@@ -1850,12 +1934,20 @@ mod tests {
 
         assert!(
             selection
-                .build_response_nvext(None, false, None, None, None, Some(payload.clone()))
+                .build_response_nvext(NvExtResponseInput {
+                    prompt_logprobs: Some(payload.clone()),
+                    ..Default::default()
+                })
                 .is_none()
         );
 
+        let finish_reason = FinishReason::Stop;
         let out = selection
-            .build_response_nvext(None, true, None, None, None, Some(payload))
+            .build_response_nvext(NvExtResponseInput {
+                finish_reason: Some(&finish_reason),
+                prompt_logprobs: Some(payload),
+                ..Default::default()
+            })
             .expect("prompt_logprobs should emit on the final chunk");
         let got = out.prompt_logprobs.expect("prompt_logprobs payload");
         assert_eq!(got.len(), 2);

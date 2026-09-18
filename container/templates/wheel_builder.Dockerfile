@@ -607,7 +607,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             arm64) ARCH_ALT=aarch64 ;; \
             *) echo "ERROR: unexpected TARGETARCH='${TARGETARCH}'; cannot pick a manylinux platform tag" >&2; exit 1 ;; \
         esac && \
-    MANYLINUX_POLICY=manylinux_2_28_${ARCH_ALT} && \
+    MANYLINUX_POLICY=manylinux_{{ "2_35" if device == "cpu" else "2_28" }}_${ARCH_ALT} && \
 {% endif %}
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
@@ -630,20 +630,24 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 # wheel metadata and optional source archival both validate every member.
 COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-policy-example/
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
+COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# AI Simulate is released separately as an abi3 wheel. Stage the exact published
-# wheel consumed by ai-dynamo instead of rebuilding it from vendored source.
-# Download only this distribution; runtime images own dependency installation
-# through their requirements files and local wheels.
+# AI Simulate is released separately as an abi3 wheel. Its public PyPI artifact
+# is a small resolver sdist because the full wheel is too large for that registry;
+# stage the actual wheel directly from NVIDIA's package index. Download only this
+# distribution; runtime images own dependency installation through their
+# requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
     python -m pip download \
         --only-binary=:all: \
         --no-deps \
+        --no-index \
+        --find-links https://pypi.nvidia.com/aisimulate/ \
         --dest /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}

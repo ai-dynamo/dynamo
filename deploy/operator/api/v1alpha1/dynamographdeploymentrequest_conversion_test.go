@@ -136,6 +136,7 @@ func newV1beta1DGDR() *v1beta1.DynamoGraphDeploymentRequest {
 				KVRouter: &v1beta1.KVRouterSpec{Enabled: true},
 				Planner:  &runtime.RawExtension{Raw: rawPlanner},
 			},
+			Overrides: &v1beta1.OverridesSpec{TrustRemoteCode: true},
 		},
 		Status: v1beta1.DynamoGraphDeploymentRequestStatus{
 			Phase:              v1beta1.DGDRPhaseProfiling,
