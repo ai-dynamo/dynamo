@@ -455,6 +455,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				ETCDAddress:        "platform-etcd:2379",
 				ModelExpressURL:    "http://model-express:8000",
 				PrometheusEndpoint: "http://prometheus:9090",
+				NATSTLSCAPath:      "/certs/nats-ca.crt",
+				TCPTLSCertPath:     "/certs/tls.crt",
 			}
 
 			sa := &corev1.ServiceAccount{
@@ -526,6 +528,8 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(envByName).Should(HaveKeyWithValue("ETCD_ENDPOINTS", "platform-etcd:2379"))
 			Expect(envByName).Should(HaveKeyWithValue("MODEL_EXPRESS_URL", "http://model-express:8000"))
 			Expect(envByName).Should(HaveKeyWithValue("PROMETHEUS_ENDPOINT", "http://prometheus:9090"))
+			Expect(envByName).ShouldNot(HaveKey("NATS_TLS_CA_CERT_PATH"))
+			Expect(envByName).ShouldNot(HaveKey("DYN_TCP_TLS_CERT_PATH"))
 
 			_ = k8sClient.Delete(ctx, job)
 		})

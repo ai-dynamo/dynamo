@@ -1704,7 +1704,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			VolumeMounts: volumeMounts,
 			WorkingDir:   "/workspace",
 		}
-		dynamo.AddStandardEnvVars(&profilerContainer, r.Config)
+		dynamo.AddStandardEnvVars(&profilerContainer, r.Config.Infrastructure)
 
 		// Generate sidecar script from template
 		tmpl, err := template.New("sidecar").Parse(sidecarScriptTemplate)
