@@ -1132,6 +1132,126 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
     runtime.shutdown();
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn output_block_accounting_tracks_grouped_chunks() {
+    for (track_output_blocks, expected_output_blocks) in [(true, 3), (false, 0)] {
+        let config = KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: true,
+            router_track_output_blocks: track_output_blocks,
+            ..Default::default()
+        };
+        let (router, runtime) = router_with_config(
+            None,
+            HashMap::from([(7, ModelRuntimeConfig::default())]),
+            config,
+        )
+        .await;
+        let prompt_tokens = 16_usize;
+        let chunks = [1_usize, 32, 15];
+        let mut input = request();
+        input.token_ids = (1..=prompt_tokens as u32).collect::<Vec<_>>().into();
+        let input = Context::new(input);
+        let (mut selection, _) = router
+            .select_with_affinity(
+                &input,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let mut guard = router
+            .track_selection(
+                &input,
+                &mut selection,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+            )
+            .await
+            .unwrap();
+        let mut next_token = prompt_tokens as u32 + 1;
+        let initial_loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let initial_blocks = initial_loads
+            .iter()
+            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
+            .unwrap()
+            .potential_decode_blocks;
+        for size in &chunks {
+            let token_ids = (next_token..next_token + *size as u32).collect();
+            next_token += *size as u32;
+            guard
+                .on_item(&Annotated::from_data(LLMEngineOutput {
+                    token_ids,
+                    index: Some(0),
+                    ..Default::default()
+                }))
+                .await;
+        }
+        // Output updates are enqueued without waiting for their application.
+        // This idempotent, acknowledged command on the same actor is a FIFO
+        // barrier, so the load observation cannot race the output updates.
+        let dynamo_kv_router::scheduling::AdmissionAttempt::Tracked(attempt_id) = selection.attempt
+        else {
+            panic!("expected a tracked booking");
+        };
+        router
+            .kv_router()
+            .mark_prefill_completed_if_booking(
+                &crate::kv_router::scheduler::SchedulerBookingDescriptor {
+                    request_id: input.context().id().to_string(),
+                    worker: selection.worker,
+                    attempt_id,
+                },
+            )
+            .await
+            .unwrap();
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let load = loads
+            .iter()
+            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
+            .unwrap();
+        assert_eq!(load.active_requests, 1);
+        // Keep the scheduler's existing prompt accounting unchanged;
+        // this regression checks only the growth caused by output.
+        let expected_blocks = initial_blocks + expected_output_blocks;
+        println!(
+            "track_output_blocks={track_output_blocks} prompt_tokens={prompt_tokens} output_tokens=48 block_size=16 chunks={chunks:?} initial_blocks={initial_blocks} observed_blocks={} expected_blocks={expected_blocks}",
+            load.potential_decode_blocks
+        );
+        let observed_blocks = load.potential_decode_blocks;
+        guard.finish().await;
+        let loads = router
+            .kv_router()
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        let load = loads
+            .iter()
+            .find(|load| load.worker_id == 7 && load.dp_rank == 0)
+            .unwrap();
+        assert_eq!(load.active_requests, 0);
+        assert_eq!(load.potential_decode_blocks, 0);
+        drop(router);
+        runtime.shutdown();
+        assert_eq!(
+            observed_blocks, expected_blocks,
+            "incorrect grouped-output accounting with tracking={track_output_blocks}"
+        );
+    }
+}
+
 async fn router(session_affinity_ttl: Option<Duration>) -> (RoutingHost, Runtime) {
     router_with_workers(session_affinity_ttl, &[7]).await
 }
@@ -1152,6 +1272,24 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    router_with_config(
+        session_affinity_ttl,
+        workers,
+        KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn router_with_config(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    config: KvRouterConfig,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1166,12 +1304,6 @@ async fn router_with_worker_configs(
     let client = endpoint.client().await.unwrap();
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
     let (_tx, workers) = watch::channel(workers);
-    let config = KvRouterConfig {
-        skip_initial_worker_wait: true,
-        use_kv_events: false,
-        router_track_active_blocks: false,
-        ..Default::default()
-    };
     let chooser = KvRouter::new(
         endpoint,
         client.clone(),
