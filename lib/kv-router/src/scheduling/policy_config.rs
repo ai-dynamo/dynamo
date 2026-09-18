@@ -49,6 +49,15 @@ impl PolicyClassConfig {
         self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
     }
 
+    /// Any zero per-worker limit means `queue_rejection` rejects every queued
+    /// entry (`current >= limit` holds at zero usage), so the class can never
+    /// hold a queued request and must keep the direct admission path.
+    pub fn never_queues(&self) -> bool {
+        self.request_queue_limit_per_worker == Some(0)
+            || self.raw_isl_token_queue_limit_per_worker == Some(0)
+            || self.cached_token_queue_limit_per_worker == Some(0)
+    }
+
     pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
         let absolute_busy = self
             .prefill_busy_threshold
@@ -224,15 +233,11 @@ impl RouterPolicyConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
-    #[serde(default)]
     default_policy_family: Option<String>,
-    #[serde(default)]
     policy_classes: Option<Vec<RawPolicyClassConfig>>,
-    #[serde(default)]
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
-    #[serde(default)]
     worker_selection: Option<RawWorkerSelectionConfig>,
 }
 
@@ -310,22 +315,15 @@ struct RawUncachedIslBucket {
 #[serde(deny_unknown_fields)]
 struct RawPolicyClassConfig {
     name: String,
-    #[serde(default)]
     policy_family: Option<String>,
-    #[serde(default)]
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
     quantum: usize,
-    #[serde(default)]
     prefill_busy_threshold: Option<usize>,
-    #[serde(default)]
     prefill_busy_threshold_frac: Option<f64>,
-    #[serde(default)]
     request_queue_limit_per_worker: Option<usize>,
-    #[serde(default)]
     raw_isl_token_queue_limit_per_worker: Option<usize>,
-    #[serde(default)]
     cached_token_queue_limit_per_worker: Option<usize>,
 }
 

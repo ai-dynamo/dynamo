@@ -137,7 +137,7 @@ Add `NIXL_TELEMETRY_ENABLE` to each worker that should expose transfer metrics:
 ```yaml
 spec:
   services:
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       extraPodSpec:
         mainContainer:
@@ -146,7 +146,34 @@ spec:
               value: "y"
 ```
 
-NIXL exposes these metrics on its telemetry port, which defaults to `19090`. See
+`NIXL_TELEMETRY_ENABLE` on its own only turns collection on. A scrapeable endpoint also needs
+`NIXL_TELEMETRY_EXPORTER=prometheus`, because NIXL has no default exporter.
+`NIXL_TELEMETRY_PROMETHEUS_PORT` is optional and chooses the port. When it is unset, the exporter
+falls back to `9090` rather than to Dynamo's `19090` convention. The operator already presets
+`DYN_SYSTEM_PORT` to `9090`, so set the NIXL port explicitly to keep the two apart. The operator
+presets `NIXL_TELEMETRY_EXPORTER=prometheus` and `NIXL_TELEMETRY_PROMETHEUS_PORT=19090` on worker,
+prefill, and decode pods, so on an operator-managed deployment the snippet above is enough. Set all
+three variables explicitly anywhere else.
+
+A worker that runs several ranks in one container builds one NIXL agent per rank, so the configured
+port is the base of a range: SGLang gives node-local rank *i* the port `base + i` and the operator
+declares each one as a separate container port (`nixl`, `nixl-1`, …) when
+`NIXL_TELEMETRY_ENABLE=y` (case-insensitive).
+
+For upgrade compatibility, literal enable values `1`, `yes`, `on`, `true`, and `enable`
+retain their existing container port declarations. To expose the additional SGLang rank ports,
+change the value to `y` in the custom resource. This explicit change updates the pod template
+and rolls the workload; an operator-only upgrade leaves these declarations unchanged.
+
+<Note>
+Enabling telemetry does not on its own make the port scrapeable from Prometheus. The
+`dynamo-worker` PodMonitor endpoint for the `nixl` port is off by default
+(`dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry` in the platform chart), because every worker pod declares the `nixl`
+container port whether or not telemetry is enabled. Turn the endpoint on once the port is
+confirmed to be serving.
+</Note>
+
+See
 [Environment Variables](../../reference/observability/environment-variables.mdx#system-and-metrics)
 for the complete NIXL telemetry configuration.
 
@@ -155,6 +182,9 @@ for the complete NIXL telemetry configuration.
 
 Apply the updated DGD and send traffic through the transfer path. Then confirm the NIXL metric
 families appear in Prometheus. The series are created only after transfers occur.
+
+A multi-GPU SGLang worker produces one Prometheus target per rank rather than one per pod. If only
+one target appears for such a pod, the remaining ranks are not being scraped.
 
 </Step>
 </Steps>
@@ -299,7 +329,7 @@ spec:
     - create: false
       name: fpm-traces
   services:
-    VllmWorker:
+    worker:
       volumeMounts:
         - name: fpm-traces
           mountPoint: /var/log/dynamo
@@ -312,7 +342,7 @@ spec:
               value: /var/log/dynamo/fpm
 ```
 
-Replace `VllmWorker` with every worker service that should write scheduler telemetry.
+Replace `worker` with every worker service that should write scheduler telemetry.
 
 </Step>
 <Step title="Collect the trace files" id="collect-fpm-trace-files">
@@ -358,12 +388,13 @@ defaults to `9090`:
 
 | Probe | Path | Period | Timeout | Failure threshold |
 | --- | --- | --- | --- | --- |
-| Liveness | `/live` | 5 seconds | 30 seconds | 1 |
+| Liveness | `/live` | 5 seconds | 4 seconds | 1 for unknown or pre-1.5.0 runtimes; 3 for runtime 1.5.0 and later |
 | Readiness | `/health` | 10 seconds | 30 seconds | 60 |
 | Startup | `/live` | 10 seconds | 5 seconds | 720 |
 
-The worker startup probe allows approximately two hours for model download and engine warm-up.
-User-specified probes take precedence over these defaults. See the
+The worker startup probe allows approximately two hours for model download and engine warm-up. The
+operator keeps the single-failure liveness behavior for custom images whose runtime version cannot
+be resolved. User-specified probes take precedence over these defaults. See the
 [API Reference](../../reference/kubernetes-api/full-api-reference.mdx) for defaults that vary by component type.
 
 </Step>
@@ -377,7 +408,7 @@ kubectl logs -n dynamo-system <pod-name> --all-containers=true
 ```
 
 If startup is delayed by downloading model weights, prefer
-[Model Caching](../model-deployment/model-loading/model-caching.mdx) over extending the probe indefinitely.
+[shared model storage](../installation/model-storage/overview.md) over extending the probe indefinitely.
 
 </Step>
 <Step title="Override the probes" id="override-health-probes">
@@ -392,7 +423,7 @@ metadata:
   name: my-deployment
 spec:
   components:
-  - name: VllmWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -422,7 +453,7 @@ For a startup budget, calculate `failureThreshold` as the expected startup time 
 `periodSeconds`. Change paths or ports only when a custom engine exposes health differently.
 
 Multinode deployments adjust probes by backend and node role. Review
-[Multinode Deployments](../model-deployment/multinode-deployments.md) before overriding probes on a
+[Multinode Orchestration](../installation/multinode-orchestration.md) before overriding probes on a
 multinode worker.
 
 See [Health Checks](../../reference/observability/health-checks.mdx) for endpoint paths, responses,

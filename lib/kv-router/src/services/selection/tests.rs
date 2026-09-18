@@ -123,22 +123,30 @@ impl WorkerFilter for RejectWorker {
     }
 }
 
+/// Block size 4, partition `model/default`, hashes tracked through `context`.
+fn normalize_with(
+    request: &PromptRequest,
+    context: &TrackingHashContext,
+    assume_kv_reuse: bool,
+) -> Result<super::input::NormalizedPrompt, SelectionError> {
+    request.view().normalize_for_selection(
+        4,
+        false,
+        Some(TrackingHashInput {
+            context,
+            scope: TrackingHashScope {
+                partition: RoutingPartitionRef::new("model", "default"),
+                block_size: 4,
+            },
+            assume_kv_reuse,
+        }),
+    )
+}
+
 fn normalize_prompt(request: &PromptRequest) -> super::input::NormalizedPrompt {
     let config = test_config();
     let context = TrackingHashContext::from_config(&config).unwrap();
-    request
-        .normalize_for_selection(
-            false,
-            TrackingHashInput {
-                context: &context,
-                scope: TrackingHashScope {
-                    partition: RoutingPartitionRef::new("model", "default"),
-                    block_size: 4,
-                },
-                assume_kv_reuse: true,
-            },
-        )
-        .expect("normalize prompt")
+    normalize_with(request, &context, true).expect("normalize prompt")
 }
 
 async fn response_json(response: Response) -> serde_json::Value {
@@ -238,7 +246,7 @@ impl FactoryRendezvous {
     }
 }
 
-async fn native_policy_app<F>(factory: F) -> Router
+async fn native_policy_app<F>(worker_type: crate::WorkerType, factory: F) -> Router
 where
     F: for<'a> Fn(
             &crate::config::KvRouterConfig,
@@ -249,9 +257,30 @@ where
         + Sync
         + 'static,
 {
-    let service = SelectionServiceBuilder::new(test_config())
+    let mut policy_file = NamedTempFile::new().expect("create worker-selection policy config");
+    write!(
+        policy_file,
+        "\nworker_selection:\n  {}: test\n  instances:\n    - name: test\n      type: test\n",
+        worker_type.as_str(),
+    )
+    .expect("write worker-selection policy config");
+    let config = crate::config::KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..test_config()
+    };
+    let factory: crate::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    registry
+        .register(
+            "test",
+            Arc::new(move |_| -> Result<_, WorkerSelectionPolicyProviderError> {
+                Ok(Arc::clone(&factory))
+            }),
+        )
+        .expect("register test worker-selection policy");
+
+    let service = SelectionServiceBuilder::new(config, worker_type, registry)
         .indexer_threads(1)
-        .worker_selection_policy_factory(factory)
         .build()
         .await
         .expect("build selection service");
@@ -281,8 +310,7 @@ async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer_picker_and_books()
-{
+async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_picker_and_books() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_partitions = Arc::new(Mutex::new(Vec::new()));
     let factory_worker_types = Arc::new(Mutex::new(Vec::new()));
@@ -291,9 +319,9 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
     let partitions = Arc::clone(&factory_partitions);
     let worker_types = Arc::clone(&factory_worker_types);
     let rendezvous = Arc::clone(&factory_rendezvous);
-    let service = SelectionServiceBuilder::new(test_config())
-        .indexer_threads(1)
-        .worker_selection_policy_factory(move |config, worker_type, partition| {
+    let app = native_policy_app(
+        crate::WorkerType::Prefill,
+        move |config, worker_type, partition| {
             calls.fetch_add(1, Ordering::Relaxed);
             partitions.lock().unwrap().push(partition.into_owned());
             worker_types.lock().unwrap().push(worker_type);
@@ -305,13 +333,9 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
                 vec![Box::new(WorkerIdScorer)],
                 Box::new(LowestCostPicker),
             )
-        })
-        .build()
-        .await
-        .expect("build selection service");
-    let app = create_router(Arc::new(AppState {
-        service: Arc::new(service),
-    }));
+        },
+    )
+    .await;
 
     let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
     let other_app = app.clone();
@@ -367,20 +391,23 @@ async fn worker_selection_policy_factory_is_per_partition_composes_filter_scorer
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
     assert_eq!(
         *factory_worker_types.lock().unwrap(),
-        vec![crate::WorkerType::Aggregated; 2]
+        vec![crate::WorkerType::Prefill; 2]
     );
 }
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type.as_str(),
-            vec![Box::new(NonFiniteScorer)],
-            Box::new(LowestCostPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(NonFiniteScorer)],
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -405,14 +432,17 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type.as_str(),
-            Vec::new(),
-            Box::new(InvalidRowPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type.as_str(),
+                Vec::new(),
+                Box::new(InvalidRowPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -437,15 +467,18 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
 
 #[tokio::test]
 async fn worker_selection_filter_returns_unavailable_without_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new_with_filters(
-            config.clone(),
-            worker_type.as_str(),
-            vec![Box::new(RejectAllFilter)],
-            Vec::new(),
-            Box::new(LowestCostPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new_with_filters(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(RejectAllFilter)],
+                Vec::new(),
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -540,19 +573,7 @@ fn keyed_prompt_tracking_leaves_indexer_hashes_public() {
     }))
     .unwrap();
 
-    let normalized = request
-        .normalize_for_selection(
-            false,
-            TrackingHashInput {
-                context: &context,
-                scope: TrackingHashScope {
-                    partition: RoutingPartitionRef::new("model", "default"),
-                    block_size: 4,
-                },
-                assume_kv_reuse: true,
-            },
-        )
-        .unwrap();
+    let normalized = normalize_with(&request, &context, true).unwrap();
     let public_blocks = compute_block_hash_for_seq(
         &[1, 2, 3, 4, 5, 6, 7, 8],
         4,
@@ -577,21 +598,7 @@ fn disabled_kv_reuse_keeps_public_indexer_hashes_and_randomizes_tracking() {
         "token_ids": [1, 2, 3, 4, 5, 6, 7, 8]
     }))
     .unwrap();
-    let normalize = || {
-        request
-            .normalize_for_selection(
-                false,
-                TrackingHashInput {
-                    context: &context,
-                    scope: TrackingHashScope {
-                        partition: RoutingPartitionRef::new("model", "default"),
-                        block_size: 4,
-                    },
-                    assume_kv_reuse: false,
-                },
-            )
-            .unwrap()
-    };
+    let normalize = || normalize_with(&request, &context, false).unwrap();
 
     let first = normalize();
     let second = normalize();
@@ -625,6 +632,7 @@ fn keyed_reservation_hashes_directly_from_tokens() {
     };
 
     let normalized = request
+        .view()
         .normalize_for_reservation(
             false,
             TrackingHashInput {
@@ -671,17 +679,9 @@ fn keyed_hash_only_inputs_remain_trusted_for_selection_and_reservation() {
         block_size: 4,
     };
 
-    let selection = request
-        .normalize_for_selection(
-            false,
-            TrackingHashInput {
-                context: &context,
-                scope,
-                assume_kv_reuse: true,
-            },
-        )
-        .unwrap();
+    let selection = normalize_with(&request, &context, true).unwrap();
     let reservation = request
+        .view()
         .normalize_for_reservation(
             false,
             TrackingHashInput {
@@ -725,6 +725,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
         }))
         .unwrap();
         let normalized = request
+            .view()
             .normalize_for_reservation(
                 false,
                 TrackingHashInput {
@@ -755,7 +756,7 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
         device: MatchDetails {
             overlap_scores: device_scores,
             last_matched_hashes: Default::default(),
-            router_hint_root_candidates: None,
+            kv_transfer_candidates: None,
         },
         lower_tier: Default::default(),
     };
@@ -1158,7 +1159,7 @@ policy_classes:
         Some("latency"),
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = response_json(rejected).await;
     assert_eq!(body["details"]["policy_class"], "latency");
     assert_eq!(body["details"]["limit_kind"], "requests");
@@ -1734,11 +1735,12 @@ async fn cached_booking_honors_prefill_tracking() {
     assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
 
     // A select-time override is captured and replayed: this booking tracks
-    // prefill load despite the config default.
+    // prefill load despite the config default. A distinct prompt keeps the
+    // approximate indexer (populated by req-1's booking) from crediting it.
     let select_response = post(
         app.clone(),
         "/select",
-        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":true}}"#,
+        r#"{"model_name":"model","selection_id":"req-2","token_ids":[5,6,7,8],"router_config_override":{"track_prefill_tokens":true}}"#,
     )
     .await;
     assert_eq!(select_response.status(), StatusCode::OK);
@@ -1771,19 +1773,33 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         port: 8092,
         threads: 1,
         indexer_peers: Vec::new(),
+        session_affinity_ttl: None,
         replica_sync_port: Some(port_a),
         replica_sync_peers: Vec::new(),
         kv_router_config: test_config(),
         selection_cache: SelectionCacheConfig::default(),
     };
-    let service_a = Arc::new(config_a.service_builder().build().await.unwrap());
-    let service_b = Arc::new(
-        SelectionServiceBuilder::new(test_config())
-            .indexer_threads(1)
-            .replica_sync(port_b, Vec::new())
+    let service_a = Arc::new(
+        config_a
+            .service_builder(
+                crate::WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
             .build()
             .await
             .unwrap(),
+    );
+    let service_b = Arc::new(
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .replica_sync(port_b, Vec::new())
+        .build()
+        .await
+        .unwrap(),
     );
     service_b
         .register_replica_peer(format!("tcp://127.0.0.1:{port_a}"))
@@ -1963,4 +1979,18 @@ async fn hash_path_validation_returns_bad_request() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn empty_raw_tokens_win_over_supplied_hashes() {
+    let request: PromptRequest = serde_json::from_value(serde_json::json!({
+        "token_ids": [],
+        "block_hashes": [11, 12],
+        "sequence_hashes": [21, 22],
+        "isl_tokens": 8
+    }))
+    .unwrap();
+    let normalized = normalize_prompt(&request);
+    assert!(normalized.block_hashes.is_empty());
+    assert_eq!(normalized.isl_tokens, 0);
 }

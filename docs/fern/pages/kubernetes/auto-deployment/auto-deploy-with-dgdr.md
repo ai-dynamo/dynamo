@@ -162,7 +162,6 @@ GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`).
 **Large and MoE models that span nodes.** When a model needs more GPUs than one node provides, the deployment is multinode and requires a gang scheduler. Install an orchestrator first — the operator returns a hard error otherwise:
 
 - [Multinode Orchestration](../installation/multinode-orchestration.md) — install-time prerequisites (Grove + KAI, or LWS + Volcano).
-- [Grove](../../developer-guide/knowledge-base/kubernetes/multinode/grove.md) (default) and [LWS](../../developer-guide/knowledge-base/kubernetes/multinode/lws.md) — the two orchestration backends.
 
 For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See the [Profiler support matrix](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#support-matrix).
 
@@ -191,9 +190,9 @@ spec:
 
 The operator mounts the PVC read-only into the profiling job and passes it through to the generated DGD, so both profiling and serving use the cached weights.
 
-`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision. See [Model Caching — Find the Snapshot Path](../model-deployment/model-loading/model-caching.mdx#find-the-snapshot-path) for how to look it up.
+`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision.
 
-**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](../installation/install-dynamo.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See [Model Caching](../model-deployment/model-loading/model-caching.mdx) for the full walkthrough.
+**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](../installation/install-dynamo.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See the [Model Storage Overview](../installation/model-storage/overview.md) to choose a storage backend.
 
 For gated models, create the token secret the profiler and pods read automatically:
 
@@ -393,9 +392,24 @@ spec:
                   value: kv
 ```
 
-Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
-component names. An override can modify only components already present in that generated DGD; it
-cannot add a new worker, EPP, or other topology component.
+Add overrides before profiling starts, using the exact, case-sensitive component names generated
+for the selected backend and topology. To discover the names for a specific Dynamo release:
+
+1. Create a temporary DGDR with `autoApply: false` and without component overrides.
+2. Wait for the DGDR to reach the `Ready` phase, then list the generated names:
+
+```bash
+kubectl get dgdr <name> -n <namespace> \
+  -o jsonpath='{range .status.profilingResults.selectedConfig.spec.components[*]}{.name}{"\n"}{end}'
+```
+
+3. Delete the temporary DGDR, then create the final DGDR with overrides that use those names.
+
+The DGDR spec becomes immutable after profiling starts, so you cannot add or change overrides on
+the temporary resource. An override can modify only components already present in the generated
+DGD; it cannot add a new worker, EPP, or other topology component. See
+[Generated component names](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-component-names)
+for the current profiler names by backend and topology.
 
 > [!IMPORTANT]
 > Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,
@@ -437,6 +451,49 @@ replacement behavior and requires the complete desired argument list.
 
 For the complete merge, metadata, and validation rules, see
 [DGDR Reference — Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
+
+### Profiling job overrides and the trust boundary
+
+`spec.overrides.profilingJob` accepts a partial Kubernetes `JobSpec` that the operator merges
+into the profiling Job it launches (for example, to add tolerations or adjust resources). Because
+the operator creates that Job on your behalf, treat this the way Kubernetes treats any
+workload-creation API:
+
+> [!IMPORTANT]
+> Any principal that can create workloads in a namespace where Dynamo runs — a `Pod` directly, or
+> any resource that creates Pods (`Job`, `Deployment`, `DynamoGraphDeploymentRequest`, …) — is
+> inside that namespace's trust boundary: it can run code with the Secrets and ServiceAccount
+> tokens mounted in that namespace. Creating a DGDR is one such path and is no more privileged than
+> creating a `Job` or `Pod` there — including through `overrides.profilingJob`. This is by design
+> and matches how Kubernetes treats every Pod-spawning resource.
+>
+> Enforce Pod security **centrally on the resulting Pods** with
+> [Pod Security Admission](https://kubernetes.io/docs/concepts/security/pod-security-admission/)
+> (and any admission webhooks), which applies the full
+> [Pod Security Standards](https://kubernetes.io/docs/concepts/security/pod-security-standards/) —
+> not only `securityContext` fields but also `privileged`, host namespaces, `hostPath` volumes, and
+> host ports. PSA applies no policy until you label the namespace — set
+> `pod-security.kubernetes.io/enforce: <level>` (plus the matching `audit`/`warn` labels) on every
+> namespace where Dynamo runs, exactly as you would for any workload. The operator does not
+> re-implement those checks.
+>
+> Dynamo's operator-generated workloads — including the DGDR profiling Job — satisfy the **`baseline`**
+> standard. Enforce **`baseline`** to block the privileged-container, host-namespace, host-device, and
+> `hostPath` escalation paths while keeping Dynamo running.
+>
+> PSA governs a Pod's security *posture*, not its *identity*: `overrides.profilingJob` can set the
+> Job's `serviceAccountName` and `automountServiceAccountToken`, and those are bounded by RBAC and
+> namespace membership, not by PSA — the same authority any Pod author in the namespace already has.
+> So grant `create`/`update` on DGDRs — and on workload resources generally — only to principals you
+> would trust to create Pods in that namespace, and use namespaces as the tenancy boundary — see
+> [Kubernetes RBAC good practices](https://kubernetes.io/docs/concepts/security/rbac-good-practices/#workload-creation).
+
+The profiling Job object always remains in the DGDR's own namespace and overrides cannot relocate
+it — but namespace containment is not node or cross-tenant isolation. If admission permits
+privileged containers, host namespaces, host devices, or `hostPath` mounts, a DGDR creator can
+obtain those capabilities through the operator, exactly as any Pod author in the namespace could.
+Enforcing `baseline` non-exempt on every resulting Pod closes those paths; use namespaces as the
+tenancy boundary for anything stronger.
 
 ## Next steps
 

@@ -238,3 +238,18 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_subject_is_the_client_subject_and_unique_per_instance() {
+        assert_eq!(instance_subject("generate", 0xa), "generate-a");
+        assert_ne!(
+            instance_subject("generate", 0xa),
+            instance_subject("generate", 0xb),
+            "two instances of one endpoint name must not share a handler-map key"
+        );
+    }
+}

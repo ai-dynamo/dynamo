@@ -66,23 +66,22 @@ pub(crate) fn supports_family(family: &str) -> bool {
     V2_FAMILIES.contains(&family)
 }
 
-/// Families served by the v2 UNIFIED parser (reasoning + content + tool calls in
-/// ONE ordered pass), default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
+/// Parser names served by a v2 UNIFIED parser (reasoning + content + tool calls in
+/// ONE ordered pass), exposed to configuration and Python.
+///
+/// These parsers are default-on — no `DYN_ENABLE_EXPERIMENTAL_PARSERS_V2` gate.
 /// Muse has no usable v1 reasoning parser (the v1 crate dropped the variant, so
 /// `get_reasoning_parser_from_name` falls back to `Basic`, which cannot read the
 /// `to=self<|message|>` grammar), so the unified pass is the only correct path.
-/// Strings match dynamo's parser names.
-/// The two names the FRAMEWORKS register, so a card written against either engine
+/// The two Muse names match those the frameworks register, so a card written against either engine
 /// selects the same parser here: vLLM ships `--reasoning-parser muse_glimmer` and
 /// `--tool-call-parser muse_glimmer`, SGLang registers the family as `muse` in both
 /// its reasoning and function-call registries. A hyphenated spelling matches neither
 /// engine, so it is not accepted.
-pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse"];
+/// DeepSeek V4.1 is selected separately by `unified_parser::configured_family`,
+/// which requires both parser fields to name `deepseek_v41`.
+pub(crate) const UNIFIED_FAMILIES: &[&str] = &["muse_glimmer", "muse", "deepseek_v41"];
 
-/// The parser names that route through the muse unified pass. Public accessor for
-/// [`UNIFIED_FAMILIES`] so the Python bindings can add muse to the selectable
-/// tool-call and reasoning parser names — fc's v1 registries dropped muse, so this
-/// is the only source of truth for the unified names.
 pub fn unified_family_names() -> &'static [&'static str] {
     UNIFIED_FAMILIES
 }
@@ -96,7 +95,7 @@ pub(crate) fn unified_family(
     tool_call_parser: Option<&str>,
     reasoning_parser: Option<&str>,
 ) -> Option<String> {
-    let is_muse = |p: Option<&str>| UNIFIED_FAMILIES.contains(&p.unwrap_or_default());
+    let is_muse = |p: Option<&str>| matches!(p, Some("muse_glimmer" | "muse"));
     (is_muse(tool_call_parser) || is_muse(reasoning_parser)).then(|| "muse_glimmer".to_string())
 }
 
@@ -1121,7 +1120,8 @@ mod tests {
         )]);
         let mut finished = HashSet::new();
         let mut tool_emitted = HashSet::from([3]);
-        let template = usage_chunk().data.expect("usage response data");
+        let mut template = usage_chunk().data.expect("usage response data");
+        template.nvext = Some(serde_json::json!({"completion_token_ids": [42]}));
 
         let responses =
             finish_unterminated_choices(&mut states, &mut finished, &mut tool_emitted, &template);
@@ -1139,6 +1139,10 @@ mod tests {
         assert!(
             response.llm_metrics.is_none(),
             "terminal chunk must not repeat LLM metrics"
+        );
+        assert!(
+            response.nvext.is_none(),
+            "terminal chunk must not repeat nvext"
         );
         assert_eq!(response.inner.choices.len(), 1);
         assert_eq!(response.inner.choices[0].index, 3);
@@ -1270,7 +1274,10 @@ mod tests {
             .chunks(8)
             .map(|b| chunk(std::str::from_utf8(b).unwrap(), false))
             .collect();
-        chunks.push(usage_chunk());
+        let mut usage = usage_chunk();
+        usage.data.as_mut().expect("usage data").nvext =
+            Some(serde_json::json!({"completion_token_ids": [42]}));
+        chunks.push(usage);
 
         let out: Vec<_> =
             apply_unified_stream(stream::iter(chunks), None, "muse_glimmer".to_string(), true)
@@ -1307,6 +1314,24 @@ mod tests {
         assert!(
             finish_position < usage_position,
             "synthesized finish chunk must precede usage"
+        );
+        let finish_data = out[finish_position]
+            .data
+            .as_ref()
+            .expect("synthesized finish data");
+        assert!(
+            finish_data.nvext.is_none(),
+            "synthetic terminal chunk must not duplicate nvext"
+        );
+        assert_eq!(
+            out.iter()
+                .filter(|response| response
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.nvext.is_some()))
+                .count(),
+            1,
+            "only the real usage chunk may carry nvext"
         );
     }
 
@@ -1473,7 +1498,14 @@ mod tests {
     // leaves its byte-for-byte original path untouched.
     #[test]
     fn unified_family_returns_none_for_other_families() {
-        for other in ["deepseek_v4", "qwen3", "glm47", "harmony", "nemotron_deci"] {
+        for other in [
+            "deepseek_v4",
+            "deepseek_v41",
+            "qwen3",
+            "glm47",
+            "harmony",
+            "nemotron_deci",
+        ] {
             assert_eq!(unified_family(Some(other), None), None, "{other} tool");
             assert_eq!(unified_family(None, Some(other)), None, "{other} reasoning");
         }

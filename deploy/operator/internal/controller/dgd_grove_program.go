@@ -77,6 +77,7 @@ func (p *groveProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	clearComponentGPUShapes(programResult.Status.Components)
 
 	// Fail a durable Grove selection when Grove is unavailable rather than falling back.
 	if !p.gate.Enabled(features.Grove) {
@@ -132,6 +133,10 @@ func (p *groveProgram) Reconcile(
 		checkpoints.Infos,
 	)
 	if err != nil {
+		// Preserve newly observed component status while leaving the generation unobserved.
+		if result.ComponentStatus != nil {
+			programResult.Status.Components = result.ComponentStatus
+		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)

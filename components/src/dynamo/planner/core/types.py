@@ -69,6 +69,15 @@ class WorkerCounts:
     expected_num_decode: Optional[int] = None
     prefill_scaling_in_progress: bool = False
     decode_scaling_in_progress: bool = False
+    # Positive only when the connector has verified a scale-up with no drain,
+    # rollout, or unobserved spec update anywhere in the deployment.
+    pending_num_prefill: int = 0
+    pending_num_decode: int = 0
+
+    @property
+    def startup_in_progress(self) -> bool:
+        """True when verified startup-only inventory includes pending workers."""
+        return self.pending_num_prefill > 0 or self.pending_num_decode > 0
 
 
 @dataclass
@@ -199,6 +208,7 @@ class EngineCapabilities:
     """Static capabilities for a single engine stage (prefill or decode)."""
 
     num_gpu: Optional[int] = None
+    gpu_cost_per_replica: Optional[int] = None
     max_num_batched_tokens: Optional[int] = None
     max_num_seqs: Optional[int] = None
     context_length: Optional[int] = None
@@ -209,6 +219,14 @@ class EngineCapabilities:
     # cap × the replica-wide GPU total. None when power awareness is off or the
     # cap has not been resolved. The final budget clamp reads this.
     power_watts_per_replica: Optional[int] = None
+
+    @property
+    def resolved_gpu_cost_per_replica(self) -> Optional[int]:
+        """GPU budget cost, falling back to the legacy engine width."""
+
+        if self.gpu_cost_per_replica is not None:
+            return self.gpu_cost_per_replica
+        return self.num_gpu
 
 
 @dataclass

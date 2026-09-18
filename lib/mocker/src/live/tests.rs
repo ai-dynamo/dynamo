@@ -83,6 +83,34 @@ async fn wait_for_idle(engine: &LiveEngine) {
     .expect("live request state should return to idle");
 }
 
+#[test]
+fn failed_output_batch_reports_the_scheduler_id() {
+    let client_id = Uuid::from_u128(1);
+    let scheduler_id = Uuid::from_u128(2);
+    let routes = Arc::new(RequestRoutes::default());
+    let (output_tx, _output_rx) = mpsc::channel(1);
+    let route = Arc::new(RequestRoute::new(client_id, scheduler_id, output_tx));
+    routes.by_client.insert(client_id, Arc::clone(&route));
+    routes.by_scheduler.insert(scheduler_id, route);
+    let signal = |token_id| OutputSignal {
+        uuid: scheduler_id,
+        token_id: Some(token_id),
+        completed: false,
+        rejected: false,
+        handoff_delay_ms: None,
+        cached_tokens: None,
+    };
+
+    assert_eq!(
+        dispatch_output_batch(vec![signal(10)], &routes, &CancellationToken::new()).unwrap(),
+        Vec::<Uuid>::new()
+    );
+    assert_eq!(
+        dispatch_output_batch(vec![signal(20)], &routes, &CancellationToken::new()).unwrap(),
+        vec![scheduler_id]
+    );
+}
+
 async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     let mut request = engine
         .submit(DirectRequest {
@@ -103,8 +131,8 @@ async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     })
     .await
     .expect("request should complete");
-    // The ordered output lane acknowledges terminal delivery before the
-    // grouped pass dispatcher publishes its completion metrics. Wait for the
+    // Direct route delivery completes before the grouped pass dispatcher
+    // publishes its completion metrics. Wait for the
     // whole boundary so the assertion below observes the same semantic point
     // as the historical single-rank live boundary.
     engine.drain_completion_boundary().await.unwrap();
@@ -232,6 +260,86 @@ async fn attention_dp_live_handles_share_one_grouped_engine() {
 
     engines[0].shutdown().await.unwrap();
     engines[1].shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_one_attention_dp_rank_retires_its_native_requests() {
+    let mut grouped_args = args(EngineType::Vllm);
+    grouped_args.dp_size = 2;
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let mut engines = LiveEngine::start_grouped_with_options(
+        grouped_args,
+        (0..2)
+            .map(|_| LiveEngineOptions {
+                output_gate: Some(gate_rx.clone()),
+                ..LiveEngineOptions::default()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let rank1 = engines.pop().unwrap();
+    let rank0 = engines.pop().unwrap();
+    let mut rank1_metrics = rank1.metrics_receiver();
+
+    let rank0_request = rank0.submit(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![101]),
+        dp_rank: 0,
+        ..Default::default()
+    });
+    let rank1_request = rank1.submit(DirectRequest {
+        tokens: vec![5, 6, 7, 8],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![202]),
+        dp_rank: 1,
+        ..Default::default()
+    });
+    let (rank0_request, rank1_request) = tokio::join!(rank0_request, rank1_request);
+    let mut rank0_request = rank0_request.unwrap();
+    let mut rank1_request = rank1_request.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = rank1_metrics.borrow().clone();
+            if metrics.running_requests > 0 || metrics.waiting_requests > 0 {
+                break;
+            }
+            rank1_metrics.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the rank 1 request should reach the native scheduler");
+
+    drop(rank1);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), rank1_request.recv())
+            .await
+            .expect("dropping one rank should close its response stream")
+            .is_none()
+    );
+    gate_tx.send(true).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), rank0_request.recv())
+            .await
+            .expect("the retained rank should continue")
+            .unwrap()
+            .token_id,
+        Some(101)
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = rank1_metrics.borrow().clone();
+            if metrics.running_requests == 0 && metrics.waiting_requests == 0 {
+                break;
+            }
+            rank1_metrics.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the dropped rank's native request should retire");
+
+    submit_and_finish(&rank0, vec![9, 10, 11, 12], Uuid::from_u128(303)).await;
+    rank0.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -915,50 +1023,7 @@ async fn aborting_a_deferred_submit_cleans_up_after_admission() {
 }
 
 #[tokio::test]
-async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
-    let (gate_tx, gate_rx) = watch::channel(false);
-    let engine = LiveEngine::start_with_output_gate(
-        args(EngineType::Vllm),
-        0,
-        Some(gate_rx),
-        DEFAULT_REQUEST_OUTPUT_CAPACITY,
-    )
-    .unwrap();
-    let mut request = engine
-        .submit(DirectRequest {
-            tokens: vec![1],
-            max_output_tokens: 3,
-            output_token_ids: Some(vec![7; 3]),
-            uuid: Some(Uuid::from_u128(12)),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    drop(gate_tx);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), request.recv())
-            .await
-            .expect("dispatcher failure should close request streams")
-            .is_none()
-    );
-    let error = engine
-        .submit(DirectRequest {
-            tokens: vec![2],
-            max_output_tokens: 1,
-            output_token_ids: Some(vec![22]),
-            uuid: Some(Uuid::from_u128(13)),
-            ..Default::default()
-        })
-        .await
-        .err()
-        .expect("dispatcher failure should stop new submissions");
-    assert!(error.to_string().contains("not running"));
-    assert_eq!(engine.active_request_count(), 0);
-}
-
-#[tokio::test]
-async fn ordered_lane_forwards_admission_before_releasing_output() {
+async fn direct_delivery_forwards_admission_before_releasing_output() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
     let engine = LiveEngine::start_internal(
@@ -966,9 +1031,9 @@ async fn ordered_lane_forwards_admission_before_releasing_output() {
         0,
         LiveEngineOptions {
             admission_tx: Some(admission_tx),
+            output_gate: Some(gate_rx),
             ..LiveEngineOptions::default()
         },
-        Some(gate_rx),
     )
     .unwrap();
     let uuid = Uuid::from_u128(20);
