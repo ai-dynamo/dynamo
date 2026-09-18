@@ -631,11 +631,12 @@ fn server_info() -> pb::ServerInfo {
 #[test]
 fn engine_config_advertises_supported_capabilities() {
     let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
-    assert!(
-        !model
+    assert_eq!(
+        model
             .engine_config()
             .runtime_data
-            .contains_key("vllm_inference_v1_generate")
+            .get("vllm_inference_v1_generate"),
+        Some(&json!(true))
     );
     assert_eq!(
         model
