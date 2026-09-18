@@ -1804,6 +1804,7 @@ class ManagedDeployment:
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
             events = await self._get_pod_events()
+            os.makedirs(self.log_dir, exist_ok=True)
             with open(os.path.join(self.log_dir, "events.log"), "w") as event_file:
                 event_file.write("\n".join(events))
             self._logger.info(

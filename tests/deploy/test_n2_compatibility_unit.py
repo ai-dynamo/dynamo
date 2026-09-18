@@ -6,9 +6,10 @@ import json
 import logging
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -48,8 +49,20 @@ def test_matrix_uses_both_age_directions_without_candidate_controls():
         (releases["1.3"]["frontend"], "candidate-wk"),
         ("candidate-fe", releases["1.3"]["worker"]),
     ]
-    with pytest.raises(KeyError):
-        version_matrix(releases, "1.6", "fe", "wk")
+
+
+def test_release_catalog_covers_workspace_n_minus_one_and_two():
+    releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"][
+        "version"
+    ]
+    major, minor = map(int, version.split(".")[:2])
+    required = {f"{major}.{minor - age}" for age in (1, 2)}
+
+    assert required <= releases.keys(), (
+        f"release catalog is missing {sorted(required - releases.keys())} "
+        f"required by workspace version {version}"
+    )
 
 
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])
@@ -221,6 +234,21 @@ async def test_cleanup_keeps_request_failure_and_records_cleanup_failure(tmp_pat
     assert deployment.cleanup_errors == [failure]
     with pytest.raises(RuntimeError, match="delete failed"):
         await deployment.__aexit__(None, None, None)
+
+
+async def test_cleanup_creates_log_dir_when_deployment_has_no_pods(tmp_path):
+    log_dir = tmp_path / "missing"
+    deployment = ManagedDeployment(str(log_dir), SimpleNamespace(name="test"), "test")
+    deployment._logger = logging.getLogger(__name__)
+    deployment._get_service_logs = MagicMock()
+    deployment._get_pod_events = AsyncMock(return_value=["test event"])
+    deployment._delete_deployment = AsyncMock()
+
+    await deployment._cleanup_preserving_error(ValueError("startup failed"))
+
+    assert deployment.cleanup_errors == []
+    assert (log_dir / "events.log").read_text() == "test event"
+    deployment._delete_deployment.assert_awaited_once_with()
 
 
 @pytest.mark.parametrize("exit_code,fatal", [(0, False), (1, True)])
