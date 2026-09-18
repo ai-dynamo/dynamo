@@ -376,6 +376,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
+        --build-suffix=_dynamo \
         --disable-gpl \
         --disable-nonfree \
         --disable-doc \
@@ -402,6 +403,28 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
+    # ldconfig BEFORE the guard below, not after. The binary carries no RPATH, so
+    # until the cache knows about these libraries it cannot start -- and the guard
+    # discards stderr, so an unstartable binary produces empty output, matches no
+    # disallowed codec, and passes having checked nothing. Measured on a shipped
+    # image: with the ffmpeg libraries missing from the cache the run fails with
+    # "error while loading shared libraries" and the guard still passes.
+    ldconfig && \
+    # --build-suffix renames the pkg-config files too, so `pkg-config libavformat`
+    # stops resolving and ffmpeg-sys-next's probe fails the Rust build outright.
+    # Canonical-name symlinks keep that working; each .pc still reports
+    # -lavformat_dynamo, so consumers link the suffixed library.
+    for pc in /usr/local/lib/pkgconfig/*_dynamo.pc; do \
+        ln -sf "$(basename "$pc")" "${pc%_dynamo.pc}.pc"; \
+    done && \
+    # Positive check first: everything below is an absence test, and an absence
+    # test over empty output proves nothing. VP9 is present here by construction.
+    { /usr/local/bin/ffmpeg -hide_banner -encoders 2>/dev/null \
+        | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: the in-tree ffmpeg does not list its VP9 encoder; it is" >&2; \
+           echo "       either broken or unable to start, and the codec guard" >&2; \
+           echo "       below would then pass without checking anything." >&2; \
+           exit 1; }; } && \
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
     # match here means a config regression. Check the implementation-carrying
@@ -419,7 +442,6 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         fi; \
     done && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
-    ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
@@ -599,6 +621,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # wheel, which the codec gate rejects. Repair with those sonames excluded so
     # they stay external and resolve to the image's /usr/local/lib copies. This
     # media-enabled wheel is intentionally image-only and non-self-contained.
+    #
+    # The exclusions name the _dynamo-suffixed sonames, because that is what the
+    # wheel's DT_NEEDED entries carry. auditwheel globs these against the soname
+    # and 'libavcodec.so.*' does not match 'libavcodec_dynamo.so.62', so leaving
+    # them unsuffixed silently re-enables the grafting this exists to prevent.
 {% if device == "xpu" %}        ARCH_ALT=x86_64 && \
     MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
 {% else %}
@@ -611,13 +638,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 {% endif %}
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
-            --exclude 'libavcodec.so.*' \
-            --exclude 'libavdevice.so.*' \
-            --exclude 'libavfilter.so.*' \
-            --exclude 'libavformat.so.*' \
-            --exclude 'libavutil.so.*' \
-            --exclude 'libswresample.so.*' \
-            --exclude 'libswscale.so.*' \
+            --exclude 'libavcodec_dynamo.so.*' \
+            --exclude 'libavdevice_dynamo.so.*' \
+            --exclude 'libavfilter_dynamo.so.*' \
+            --exclude 'libavformat_dynamo.so.*' \
+            --exclude 'libavutil_dynamo.so.*' \
+            --exclude 'libswresample_dynamo.so.*' \
+            --exclude 'libswscale_dynamo.so.*' \
             --plat ${MANYLINUX_POLICY} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
