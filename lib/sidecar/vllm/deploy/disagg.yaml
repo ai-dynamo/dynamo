@@ -51,6 +51,9 @@ spec:
           startupProbe:
             grpc:
               port: 50051
+              # vLLM 0.28.0: overall health mirrors Control and Inference.
+              # Reverify this behavior when upgrading vLLM.
+              service: ""
             periodSeconds: 5
             timeoutSeconds: 5
             # Allow 30 minutes for model startup; increase for larger models.
@@ -58,9 +61,17 @@ spec:
           readinessProbe:
             grpc:
               port: 50051
+              service: ""
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+          livenessProbe:
+            grpc:
+              port: 50051
+              service: ""
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           env:
           - name: VLLM_NIXL_SIDE_CHANNEL_HOST
             valueFrom:
@@ -130,6 +141,9 @@ spec:
           startupProbe:
             grpc:
               port: 50051
+              # vLLM 0.28.0: overall health mirrors Control and Inference.
+              # Reverify this behavior when upgrading vLLM.
+              service: ""
             periodSeconds: 5
             timeoutSeconds: 5
             # Allow 30 minutes for model startup; increase for larger models.
@@ -137,9 +151,17 @@ spec:
           readinessProbe:
             grpc:
               port: 50051
+              service: ""
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
+          livenessProbe:
+            grpc:
+              port: 50051
+              service: ""
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           env:
           - name: VLLM_NIXL_SIDE_CHANNEL_HOST
             valueFrom:
