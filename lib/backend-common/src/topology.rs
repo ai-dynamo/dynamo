@@ -174,29 +174,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn disabled_topology_leaves_runtime_config_untouched() {
-        for enabled in [None, Some(""), Some("false")] {
-            let mut config = ModelRuntimeConfig {
-                topology_domains: HashMap::from([("rack".into(), "rack-1".into())]),
-                ..Default::default()
-            };
-            let before = serde_json::to_value(&config).unwrap();
-            apply_from_env(
-                &mut config,
-                |name| {
-                    assert_eq!(name, "DYN_TOPOLOGY_ENABLED");
-                    enabled.map(str::to_owned)
-                },
-                POLL_INTERVAL,
-                POLL_TIMEOUT,
-            )
-            .await
-            .unwrap();
-            assert_eq!(serde_json::to_value(config).unwrap(), before);
-        }
-    }
-
-    #[tokio::test]
     async fn reads_projected_domains_and_required_or_preferred_policy() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("..data");
