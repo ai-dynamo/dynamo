@@ -257,11 +257,10 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The manifests require an operator with the `v1beta1` `dynamoSidecar` field from
-[DEP #14657](https://github.com/ai-dynamo/dynamo/issues/14657). The engine runs in
-`containers[name=main]`; `initContainers[name=dynamo]` is the restartable Dynamo
-sidecar and receives the operator's runtime defaults. Engine startup and readiness
-use Kubernetes-native `grpc` probes on port 50051. The omitted `service` selects
+The manifests require an operator that supports the `v1beta1` `dynamoSidecar`
+field. The engine runs in `containers[name=main]`; the restartable Dynamo sidecar
+runs in `initContainers[name=dynamo]` and receives the operator's runtime defaults.
+Engine startup and readiness use Kubernetes-native `grpc` probes on port 50051. The omitted `service` selects
 vLLM's aggregate health, which covers both `vllm.Control` and `vllm.Inference`.
 No probe executable or installer init container is required. The engine binds to
 `0.0.0.0` because kubelet probes connect to the pod IP; the colocated sidecar still
@@ -270,16 +269,15 @@ pod network and restrict access with your cluster's network controls.
 The engine image must include a `vllm-rs` build compatible with the pinned
 `vllm-proto` crate.
 
-Use a sidecar image containing the early HTTP/probe changes from
-[PR #15051](https://github.com/ai-dynamo/dynamo/pull/15051), which implements the
-startup and readiness portion of [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+Use a sidecar image that starts its HTTP listener before connecting runtime
+dependencies or discovering engine metadata.
 The operator injects the sidecar's startup and liveness probes on `/live` and its
-readiness probe on `/health`; no probe overrides are needed. The HTTP listener
-starts before runtime connections or engine metadata discovery. `/live` stays
-independent of both, while `/health` checks runtime initialization, required
-runtime connectivity, and shutdown. Engine loading does not hold either probe
-unready. The engine's separate gRPC probes keep the pod unready until aggregate engine
-health is serving. Increase only the engine startup budget for larger models.
+readiness probe on `/health`; no probe overrides are needed. `/live` stays
+independent of engine and runtime connectivity, while `/health` checks runtime
+initialization, required runtime connectivity, and shutdown. Engine loading does
+not hold either probe unready. The engine's separate gRPC probes keep the pod
+unready until aggregate engine health is serving. The engine startup budget is 30 minutes (`360 × 5` seconds).
+Increase this budget for larger models.
 
 Continuous engine-health reconciliation, engine restart recovery, and changes to
 engine drain/grace behavior remain deferred to the rest of DEP #14897.
@@ -296,13 +294,11 @@ upstream vLLM images and locate the binary inside the Python package.
   for `disagg.yaml`). Dynamo runs as a native sidecar (`initContainers` with
   `restartPolicy: Always`), which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
-- A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
 
 ### 1. Build and push the sidecar image
 
-From a checkout containing PR #15051, build and push the image to a registry
-your cluster can pull from:
+Build and push the image to a registry your cluster can pull from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
@@ -322,14 +318,7 @@ in `containers[name=main]`. Add `imagePullSecrets` if your registry is private.
 For a custom image tag without a semantic version, set `runtimeVersionOverride`
 to the Dynamo version built into the sidecar image.
 
-### 3. Create the Hugging Face token secret
-
-```bash
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN="$HF_TOKEN" -n <namespace>
-```
-
-### 4. Deploy
+### 3. Deploy
 
 ```bash
 kubectl apply -f lib/sidecar/vllm/deploy/agg.yaml -n <namespace>
@@ -341,7 +330,7 @@ Wait for the worker pod to reach `2/2 Running`:
 kubectl get pods -n <namespace> -w
 ```
 
-### 5. Send a request
+### 4. Send a request
 
 ```bash
 kubectl port-forward -n <namespace> svc/vllm-sidecar-agg-frontend 8000:8000 &
