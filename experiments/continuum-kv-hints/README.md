@@ -22,6 +22,7 @@ Run the focused checks from the Dynamo repository root:
 
 ```bash
 cargo test -p dynamo-kv-hint-policy-example
+cargo run -p dynamo-continuum-session-prefix-bench --example lineage_sanity
 cargo bench -p dynamo-continuum-session-prefix-bench --bench session_prefix_index -- \
   --warm-up-time 1 --measurement-time 3 --sample-size 30
 ```

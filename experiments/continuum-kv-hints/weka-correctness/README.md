@@ -77,3 +77,12 @@ bash experiments/continuum-kv-hints/weka-correctness/run_networked.sh
 ```
 
 Results are written under `/tmp/continuum-weka-correctness/networked` by default.
+
+To run the same replay against the pinned container instead of source worktrees:
+
+```bash
+CONTINUUM_IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295 \
+  bash experiments/continuum-kv-hints/weka-correctness/run_container.sh
+```
+
+Container results are written under `/tmp/continuum-weka-correctness/container-networked` by default.

@@ -17,6 +17,7 @@ harness = false
 
 [dependencies]
 dynamo-kv-router.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"

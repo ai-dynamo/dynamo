@@ -2466,6 +2466,7 @@ version = "1.5.0"
 dependencies = [
  "criterion",
  "dynamo-kv-router",
+ "serde_json",
 ]
 
 [[package]]

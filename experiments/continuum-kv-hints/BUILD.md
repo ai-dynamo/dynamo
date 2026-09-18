@@ -8,12 +8,10 @@ patch layer that overlays the custom vLLM onto it.
 | Image | Tag |
 |---|---|
 | Dynamo base (this branch) | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm` |
-| + vLLM patch layer | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-43aeef1b` |
+| Validated Dynamo + vLLM image | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295` |
 
-- `55667792` = tip of `karenc/continuum-kv-hints-poc` (this Dynamo branch)
-- `43aeef1b` = tag alias for `d2b7d4ae81`, tip of `karenc/kv-hints-on-v0.29.0` in
-  `~/vllm` (vLLM feature commits cherry-picked onto vLLM v0.29.0, plus
-  `BlockStored.session_id` from upstream PR #51381)
+- `6d7cf575cb` = pushed Dynamo revision containing the experiment stack and native-request plugin allowlist
+- `4091050295` = pushed vLLM revision containing the v0.29.0-compatible KV hint, G1 action, and session-attributed event stack
 
 ## Native vLLM request path
 
@@ -73,14 +71,14 @@ touched. The build context is the vLLM checkout.
 
 ```bash
 cd ~/vllm
-git checkout karenc/kv-hints-on-v0.29.0  # tip d2b7d4ae81
+git checkout karenc/kv-hints-g1-actions  # tip 4091050295
 
 docker build \
-  -t nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-43aeef1b \
+  -t nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295 \
   -f /home/scratch.karenc_coreai/dynamo/container/Dockerfile.vllm-kv-hints-patch \
   .
 
-docker push nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-43aeef1b
+docker push nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295
 ```
 
 ### vLLM files patched
