@@ -436,14 +436,21 @@ async def init_llm_worker(
 
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
-        # Warn on collisions using the parsed YAML *before* the merge, so the
-        # warning only fires on keys the user actually set in the file (arg_map
+        # Log collisions using the parsed YAML *before* the merge, so the
+        # report only fires on keys the user actually set in the file (arg_map
         # is pre-populated with non-None defaults that recipes legitimately
-        # override, and a post-merge diff would warn on every normal start).
+        # override, and a post-merge diff would flag every normal start).
+        # Stock recipe YAMLs intentionally override several of these defaults,
+        # so this path logs at INFO; --override-engine-args (an explicit
+        # operator action) keeps the WARNING level.
         with open(config.extra_engine_args) as f:
-            extra_options = yaml.safe_load(f) or {}
+            extra_options = yaml.safe_load(f)
+        if not isinstance(extra_options, dict):
+            # Non-mapping roots (list/str) are rejected with a clear message
+            # by update_llm_args_with_extra_options below.
+            extra_options = {}
         warn_override_collisions(
-            arg_map, extra_options, source_name="extra_engine_args"
+            arg_map, extra_options, source_name="extra_engine_args", level=logging.INFO
         )
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
 

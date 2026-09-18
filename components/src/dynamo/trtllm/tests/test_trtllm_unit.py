@@ -770,24 +770,32 @@ def test_warn_override_collisions_names_the_source(caplog):
 
 
 @pytest.mark.core
-def test_warn_override_collisions_recurses_nested_and_skips_identical(caplog):
-    """Nested changes report the dotted path; identical values stay silent."""
-    target = {"kv_cache_config": {"max_tokens": 1000, "free_gpu_memory_fraction": 0.85}}
-    source = {"kv_cache_config": {"max_tokens": 2592, "free_gpu_memory_fraction": 0.85}}
+def test_warn_override_collisions_recurses_into_model_objects(caplog):
+    """Mapping-like old values (e.g. KvCacheConfig) report per-key dotted paths."""
+    class FakeKvCacheConfig:
+        def __init__(self):
+            self.max_tokens = 1000
+            self.free_gpu_memory_fraction = 0.85
+
+    target = {"kv_cache_config": FakeKvCacheConfig()}
+    source = {"kv_cache_config": {"max_tokens": 2592}}
     with caplog.at_level("WARNING"):
         warn_override_collisions(target, source)
     assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+    # Untouched keys inside the model are not reported; the whole object is
+    # never dumped as a single opaque value.
     assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
 
 
 @pytest.mark.core
 @pytest.mark.asyncio
 async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, caplog):
-    """extra_engine_args silently replacing an existing arg_map value now warns.
+    """extra_engine_args silently replacing an existing arg_map value now logs.
 
-    --override-engine-args has warned via warn_override_collisions;
+    --override-engine-args warns via warn_override_collisions;
     --extra-engine-args went through TRT-LLM's
-    update_llm_args_with_extra_options with no equivalent warning.
+    update_llm_args_with_extra_options with no equivalent report. Recipe
+    YAMLs legitimately override arg_map defaults, so this path logs at INFO.
     """
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
@@ -801,7 +809,7 @@ async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, capl
     )
 
     with (
-        caplog.at_level("WARNING"),
+        caplog.at_level("INFO"),
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
         mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
         mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),

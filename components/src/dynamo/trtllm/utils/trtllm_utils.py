@@ -44,18 +44,22 @@ def warn_override_collisions(
     source: Mapping[str, Any],
     path: str = "",
     source_name: str = "override_engine_args",
+    level: int = logging.WARNING,
 ) -> None:
-    """Log warnings for keys in *source* that will overwrite existing values in *target*."""
+    """Log collisions for keys in *source* that will overwrite existing values in *target*."""
     for key, new_val in source.items():
         full_key = f"{path}.{key}" if path else key
         if key in target:
             old_val = target[key]
-            if isinstance(new_val, dict) and isinstance(old_val, dict):
+            new_map = _as_mapping(new_val)
+            old_map = _as_mapping(old_val)
+            if new_map is not None and old_map is not None:
                 warn_override_collisions(
-                    old_val, new_val, full_key, source_name=source_name
+                    old_map, new_map, full_key, source_name=source_name, level=level
                 )
             elif old_val != new_val:
-                logging.warning(
+                logging.log(
+                    level,
                     "%s will replace %s: %r -> %r",
                     source_name,
                     full_key,
