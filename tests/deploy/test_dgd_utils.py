@@ -236,16 +236,21 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
 
 
 @pytest.mark.parametrize(
-    ("failed", "capture_times_out", "expected_events"),
+    ("failed", "capture_behavior", "expected_events"),
     [
-        (False, False, ["delete"]),
-        (True, False, ["capture-start", "capture-done", "delete"]),
-        (True, True, ["capture-start", "delete"]),
+        (False, "complete", ["service-logs", "delete"]),
+        (
+            True,
+            "complete",
+            ["capture-start", "capture-done", "service-logs", "delete"],
+        ),
+        (True, "timeout", ["capture-start", "service-logs", "delete"]),
+        (True, "cancel", ["capture-start", "service-logs", "delete"]),
     ],
-    ids=["success", "failure", "capture-timeout"],
+    ids=["success", "failure", "capture-timeout", "capture-cancelled"],
 )
 async def test_discovery_capture_and_cleanup(
-    monkeypatch, tmp_path, failed, capture_times_out, expected_events
+    monkeypatch, tmp_path, failed, capture_behavior, expected_events
 ):
     deployment = managed_deployment(tmp_path)
     events = []
@@ -254,13 +259,17 @@ async def test_discovery_capture_and_cleanup(
     monkeypatch.setattr(
         ManagedDeployment, "__aenter__", AsyncMock(return_value=deployment)
     )
-    deployment._get_service_logs = MagicMock()
+    deployment._get_service_logs = MagicMock(
+        side_effect=lambda: events.append("service-logs")
+    )
     monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", 0.01)
 
     async def capture():
         events.append("capture-start")
-        if capture_times_out:
+        if capture_behavior == "timeout":
             await asyncio.Event().wait()
+        if capture_behavior == "cancel":
+            raise asyncio.CancelledError
         await asyncio.sleep(0)
         events.append("capture-done")
 

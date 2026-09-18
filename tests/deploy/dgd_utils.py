@@ -1793,13 +1793,13 @@ class ManagedDeployment:
 
     async def _capture_discovery_state(self):
         """Save namespace discovery resources while their owner objects still exist."""
-        directory = Path(self.log_dir) / "discovery"
-        directory.mkdir(parents=True, exist_ok=True)
         if self._custom_api is None or self._core_api is None:
             self._logger.warning(
                 "Discovery snapshot unavailable: Kubernetes clients not initialized"
             )
             return
+        directory = Path(self.log_dir) / "discovery"
+        directory.mkdir(parents=True, exist_ok=True)
         api_client = self._core_api.api_client
         discovery_api = client.DiscoveryV1Api(api_client)
         resources = (
@@ -1851,7 +1851,7 @@ class ManagedDeployment:
                 )
             try:
                 (directory / f"{name}.json").write_text(json.dumps(record, indent=2))
-            except OSError as error:
+            except (OSError, TypeError, ValueError) as error:
                 self._logger.warning(
                     "Could not save discovery resource %s: %s", name, error
                 )
@@ -1862,7 +1862,9 @@ class ManagedDeployment:
                 try:
                     async with asyncio.timeout(DISCOVERY_SNAPSHOT_TIMEOUT):
                         await self._capture_discovery_state()
-                except Exception as error:
+                except BaseException as error:
+                    # Snapshot capture is best-effort and must not replace the
+                    # existing setup or test failure.
                     self._logger.warning(
                         "Discovery snapshot failed; continuing cleanup: %s", error
                     )
