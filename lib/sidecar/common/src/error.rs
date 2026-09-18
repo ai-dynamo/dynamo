@@ -87,12 +87,6 @@ fn typed(kind: ErrorType, message: impl Into<String>) -> DynamoError {
         .build()
 }
 
-/// One worker is out of capacity while others may still have room. The router
-/// sheds and migrates on this; flattening it to `Unknown` costs that behaviour.
-pub fn worker_overloaded(message: impl Into<String>) -> DynamoError {
-    typed(ErrorType::WorkerOverloaded, message)
-}
-
 pub fn cancelled(message: impl Into<String>) -> DynamoError {
     typed(ErrorType::Cancelled, message)
 }
