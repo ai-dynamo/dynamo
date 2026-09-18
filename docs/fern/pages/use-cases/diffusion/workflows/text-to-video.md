@@ -92,6 +92,7 @@ container/run.sh \
   -e DYN_H3_FASTH3_LORA_PATH \
   -e DYN_H3_FASTH3_VARIANT \
   -e DYN_H3_FASTVIDEO_VSA_TOPK \
+  -e DYN_H3_FASTVIDEO_VSA_SM100A \
   -e HF_TOKEN \
   -it
 ```
