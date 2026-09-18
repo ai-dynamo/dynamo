@@ -371,6 +371,26 @@ def test_geometry_wait_honors_vllm_specific_timeout(monkeypatch):
     assert install_vmm_ipc_kv._geometry_wait_ms(-1) == 42
 
 
+def test_geometry_patch_does_not_wait_with_explicit_block_override(monkeypatch):
+    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
+
+    waits = []
+    monkeypatch.setattr(
+        install_vmm_ipc_kv,
+        "_existing_shared_kv_blocks",
+        lambda *, wait_ms: waits.append(wait_ms) or None,
+    )
+
+    def original(_vllm_config, _kv_cache_specs, available_memory):
+        return available_memory
+
+    patched = install_vmm_ipc_kv._wrap_get_kv_cache_configs(original)
+    config = SimpleNamespace(cache_config=SimpleNamespace(num_gpu_blocks_override=4096))
+
+    assert patched(config, object(), -1) == -1
+    assert waits == [0]
+
+
 def test_vllm_geometry_patch_updates_late_engine_core_alias(monkeypatch):
     import sys
     import types

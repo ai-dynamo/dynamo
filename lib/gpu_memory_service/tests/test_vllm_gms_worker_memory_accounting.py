@@ -126,7 +126,16 @@ def test_vllm_gms_model_loader_base_worker_reserves_ro_imported_weights(monkeypa
         Worker.determine_available_memory = original
 
 
-def test_vllm_gms_model_loader_preserves_explicit_kv_capacity(monkeypatch):
+@pytest.mark.parametrize(
+    "cache_config",
+    [
+        SimpleNamespace(kv_cache_memory_bytes=42),
+        SimpleNamespace(kv_cache_memory_bytes=None, num_gpu_blocks_override=4096),
+    ],
+)
+def test_vllm_gms_model_loader_preserves_explicit_kv_capacity(
+    monkeypatch, cache_config
+):
     from gpu_memory_service.integrations.vllm import model_loader
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -139,7 +148,7 @@ def test_vllm_gms_model_loader_preserves_explicit_kv_capacity(monkeypatch):
     )
     monkeypatch.setattr(model_loader, "get_imported_weights_bytes", lambda: 13)
     model_loader.patch_vllm_worker_memory_accounting()
-    worker = SimpleNamespace(cache_config=SimpleNamespace(kv_cache_memory_bytes=42))
+    worker = SimpleNamespace(cache_config=cache_config)
 
     try:
         assert Worker.determine_available_memory(worker) == 42
