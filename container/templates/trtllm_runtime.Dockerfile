@@ -301,9 +301,9 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
     set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI in base image: $before"; \
-    newest=$(printf '%s\n2.1.1\n' "$before" | sort -V | tail -1); \
-    if [ "$newest" != "2.1.1" ]; then \
-        echo "ERROR: base image already carries DALI $before, so pinning 2.1.1 would" >&2; \
+    newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.2.0" ]; then \
+        echo "ERROR: base image already carries DALI $before, so pinning 2.2.0 would" >&2; \
         echo "       downgrade it. Upstream has caught up -- delete this RUN and let" >&2; \
         echo "       the base version stand. Keep the guards below and the bundled-" >&2; \
         echo "       libavcodec assertion in tests/dependencies/, which are what stop" >&2; \
@@ -311,10 +311,10 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         exit 1; \
     fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.1.1'; \
+        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.2.0'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
-    [ "$v" = "2.1.1" ] || { echo "ERROR: wanted DALI 2.1.1, got $v" >&2; exit 1; }; \
+    [ "$v" = "2.2.0" ] || { echo "ERROR: wanted DALI 2.2.0, got $v" >&2; exit 1; }; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
