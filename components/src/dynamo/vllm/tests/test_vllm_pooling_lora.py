@@ -396,3 +396,125 @@ async def test_failed_engine_removal_restores_the_discovery_card():
     handler._register_lora_discovery.assert_awaited_once_with(ADAPTER, 7)
     assert results[-1]["status"] == "error"
     assert ADAPTER in handler.loaded_loras, "tracking must survive a failed unload"
+
+
+# --- the same lifecycle races on the /v1/embeddings path ---------------------
+
+
+@pytest.mark.asyncio
+async def test_unload_waits_for_an_in_flight_embedding_batch():
+    """/v1/embeddings submits its encodes as sibling tasks and awaits them
+    together, so one batch spans many event-loop turns. An unload landing
+    mid-batch must wait, or the later encodes run against an adapter vLLM has
+    already dropped."""
+    handler = _embedding_handler()
+    _install_adapter(handler)
+    handler._engine_loaded_loras.add(ADAPTER)
+    handler.engine_client.remove_lora = AsyncMock()
+
+    seen_ids: list[int | None] = []
+    first_encode = asyncio.Event()
+    finish_encodes = asyncio.Event()
+
+    async def _encode(**kwargs):
+        lora = kwargs.get("lora_request")
+        seen_ids.append(lora.lora_int_id if lora is not None else None)
+        first_encode.set()
+        await finish_encodes.wait()
+        yield _pooling_output([0.25, 0.75], [1, 2])
+
+    handler.engine_client.encode = _encode
+
+    prompts = [f"prompt-{i}" for i in range(6)]
+    batch = asyncio.create_task(
+        _drain(handler.generate({"model": ADAPTER, "input": prompts}, _context()))
+    )
+    await first_encode.wait()
+
+    unload = asyncio.create_task(_drain(handler.unload_lora({"lora_name": ADAPTER})))
+    await _settle()
+    assert not unload.done(), "unload must drain the in-flight batch first"
+    assert ADAPTER in handler.loaded_loras
+    handler.engine_client.remove_lora.assert_not_awaited()
+
+    finish_encodes.set()
+    await batch
+    await unload
+
+    assert len(seen_ids) == len(prompts), "every prompt must reach the engine"
+    assert set(seen_ids) == {7}, "the whole batch must use one adapter version"
+    assert ADAPTER not in handler.loaded_loras
+
+
+@pytest.mark.asyncio
+async def test_hot_swap_waits_for_an_in_flight_embedding_batch():
+    """An adapter id is a stable hash of its name, so a swap replaces the
+    weights behind an unchanged id. An embedding batch straddling one would be
+    answered from two adapters with nothing in the response to show it."""
+    handler = _embedding_handler()
+    _install_adapter(handler)
+    handler.generate_endpoint = MagicMock()
+    handler._engine_loaded_loras.add(ADAPTER)
+    handler.engine_client.add_lora = AsyncMock()
+    handler.engine_client.remove_lora = AsyncMock()
+    handler.engine_client.reset_prefix_cache = AsyncMock()
+    handler._register_lora_discovery = AsyncMock()
+    handler._resolve_lora_source_path = AsyncMock(return_value=(True, "/tmp/new"))
+
+    first_encode = asyncio.Event()
+    finish_encodes = asyncio.Event()
+
+    async def _encode(**kwargs):
+        first_encode.set()
+        await finish_encodes.wait()
+        yield _pooling_output([0.25, 0.75], [1, 2])
+
+    handler.engine_client.encode = _encode
+
+    prompts = [f"prompt-{i}" for i in range(6)]
+    batch = asyncio.create_task(
+        _drain(handler.generate({"model": ADAPTER, "input": prompts}, _context()))
+    )
+    await first_encode.wait()
+
+    with patch.dict(os.environ, {"DYN_LORA_HOTSWAP_ENABLED": "true"}):
+        swap = asyncio.create_task(
+            _drain(
+                handler.load_lora(
+                    {"lora_name": ADAPTER, "source": {"uri": "s3://bucket/v2"}}
+                )
+            )
+        )
+        await _settle()
+        assert not swap.done(), "the swap must drain the in-flight batch first"
+        handler.engine_client.remove_lora.assert_not_awaited()
+
+        finish_encodes.set()
+        await batch
+        await swap
+
+    handler.engine_client.remove_lora.assert_awaited_once()
+
+
+# --- fail closed when LoRA was asked for but the runtime is not ready --------
+
+
+@pytest.mark.asyncio
+async def test_unknown_adapter_is_rejected_when_the_manager_is_unavailable():
+    """``--enable-lora`` without a LoRA manager must not answer an adapter-named
+    request from the base weights: the name is unresolvable, so it has to fail
+    rather than return a plausible wrong vector."""
+    handler = _embedding_handler()
+    # Engine flag on (via _config), manager absent -- so the worker cannot
+    # advertise adapters, but it must still reject names it cannot resolve.
+    handler.__dict__["_lora_enabled"] = False
+    handler.__dict__["_lora_requested"] = True
+
+    captured = _capture_encode(handler, _pooling_output([0.1, 0.2], [1]))
+
+    with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+        await _drain(
+            handler.generate({"model": "never-loaded", "input": "hello"}, _context())
+        )
+
+    assert captured == [], "the request must never reach the engine"

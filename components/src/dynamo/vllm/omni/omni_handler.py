@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import copy
-import functools
 import logging
 import os
 import random
@@ -25,7 +24,6 @@ from vllm.sampling_params import SamplingParams
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniTextPrompt
 
 from dynamo._core import Context
-from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.multimodal import ImageLoader
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
@@ -244,14 +242,6 @@ class OmniHandler(BaseOmniHandler):
             engine_client=self.engine_client,
             media_output_fs=media_output_fs,
             media_output_http_url=media_output_http_url,
-        )
-
-    @functools.cached_property
-    def _lora_enabled(self) -> bool:
-        # Match non-Omni LoRA gating: engine must be started with LoRA support
-        # and the LoRA manager must be initialized.
-        return bool(getattr(self.config.engine_args, "enable_lora", False)) and (
-            get_lora_manager() is not None
         )
 
     def _parse_lora_unload_request(self, request: Any) -> str:

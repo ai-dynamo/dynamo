@@ -3716,157 +3716,163 @@ class EmbeddingWorkerHandler(LoRAHandlerMixin):
         caller-supplied token IDs are never modified.
         """
         model_name = request.get("model") or self.config.served_model_name or ""
-        # Raises for an unknown non-base model name rather than quietly
-        # pooling with the base weights.
-        lora_request = self._resolve_lora_request(model_name)
-        self._track_lora_request_activation(lora_request)
-        # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
-        # requests carry the same logical batch as 'token_ids'.
-        token_ids_batch = request.get("token_ids")
-        is_tokens_path = token_ids_batch is not None
-        input_field = token_ids_batch if is_tokens_path else request.get("input")
-        if input_field is None:
-            raise ValueError(
-                "Embedding request missing required 'input' or 'token_ids' field"
-            )
+        # Hold the adapter for the whole batch. The encodes below are
+        # submitted as separate tasks and awaited together, so a single up-front
+        # resolve leaves a concurrent unload or hot swap free to remove or
+        # replace the adapter while those tasks are still being admitted -- one
+        # client batch would then span two adapter versions, or outlive the
+        # adapter it named. Entering the reservation also raises for an unknown
+        # non-base model name rather than quietly pooling with the base weights.
+        async with self._reserved_lora_request(model_name) as lora_request:
+            # Raw OpenAI requests carry 'input'. Rust-preprocessed embedding
+            # requests carry the same logical batch as 'token_ids'.
+            token_ids_batch = request.get("token_ids")
+            is_tokens_path = token_ids_batch is not None
+            input_field = token_ids_batch if is_tokens_path else request.get("input")
+            if input_field is None:
+                raise ValueError(
+                    "Embedding request missing required 'input' or 'token_ids' field"
+                )
 
-        # Per OpenAI spec, `input` can be:
-        #   - str           : single text prompt
-        #   - list[str]     : batch of text prompts
-        #   - list[int]     : single pre-tokenized prompt (token IDs)
-        #   - list[list[int]]: batch of pre-tokenized prompts
-        # Token-id forms must be passed to vLLM as TokensPrompt so the engine
-        # skips its own tokenizer; the previous str()-coercion path turned
-        # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
-        prompts: list[Any] = _classify_embedding_input(input_field)
+            # Per OpenAI spec, `input` can be:
+            #   - str           : single text prompt
+            #   - list[str]     : batch of text prompts
+            #   - list[int]     : single pre-tokenized prompt (token IDs)
+            #   - list[list[int]]: batch of pre-tokenized prompts
+            # Token-id forms must be passed to vLLM as TokensPrompt so the engine
+            # skips its own tokenizer; the previous str()-coercion path turned
+            # `[1, 2, 3]` into three text prompts ("1", "2", "3") instead of one.
+            prompts: list[Any] = _classify_embedding_input(input_field)
 
-        dimensions = request.get("dimensions")
-        if dimensions is not None and (
-            not isinstance(dimensions, int) or isinstance(dimensions, bool)
-        ):
-            raise TypeError(
-                f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
-            )
-        if dimensions is not None and dimensions < 1:
-            raise ValueError(f"dimensions must be >= 1, got {dimensions}")
-
-        # Rust's preprocessed request represents an omitted client format as
-        # ``None``. Treat both an absent key and an explicit internal null as
-        # the OpenAI default while continuing to reject invalid non-null values.
-        encoding_format = request.get("encoding_format")
-        if encoding_format is None:
-            encoding_format = "float"
-        if encoding_format not in ("float", "base64"):
-            raise ValueError(
-                f"Invalid 'encoding_format' value {encoding_format!r}; "
-                "expected 'float' or 'base64'"
-            )
-
-        truncate_prompt_tokens = request.get("truncate_prompt_tokens")
-        tokenization_kwargs: dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
-            if not isinstance(truncate_prompt_tokens, int) or isinstance(
-                truncate_prompt_tokens, bool
+            dimensions = request.get("dimensions")
+            if dimensions is not None and (
+                not isinstance(dimensions, int) or isinstance(dimensions, bool)
             ):
                 raise TypeError(
-                    "Invalid 'truncate_prompt_tokens' type "
-                    f"{type(truncate_prompt_tokens).__name__}; expected int"
+                    f"Invalid 'dimensions' type {type(dimensions).__name__}; expected int"
                 )
-            if truncate_prompt_tokens < -1:
+            if dimensions is not None and dimensions < 1:
+                raise ValueError(f"dimensions must be >= 1, got {dimensions}")
+
+            # Rust's preprocessed request represents an omitted client format as
+            # ``None``. Treat both an absent key and an explicit internal null as
+            # the OpenAI default while continuing to reject invalid non-null values.
+            encoding_format = request.get("encoding_format")
+            if encoding_format is None:
+                encoding_format = "float"
+            if encoding_format not in ("float", "base64"):
                 raise ValueError(
-                    "truncate_prompt_tokens must be >= -1, "
-                    f"got {truncate_prompt_tokens}"
+                    f"Invalid 'encoding_format' value {encoding_format!r}; "
+                    "expected 'float' or 'base64'"
                 )
-            tokenization_kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
 
-        add_special_tokens = request.get("add_special_tokens")
-        if add_special_tokens is not None:
-            if not isinstance(add_special_tokens, bool):
-                raise TypeError(
-                    "Invalid 'add_special_tokens' type "
-                    f"{type(add_special_tokens).__name__}; expected bool"
+            truncate_prompt_tokens = request.get("truncate_prompt_tokens")
+            tokenization_kwargs: dict[str, Any] = {}
+            if truncate_prompt_tokens is not None:
+                if not isinstance(truncate_prompt_tokens, int) or isinstance(
+                    truncate_prompt_tokens, bool
+                ):
+                    raise TypeError(
+                        "Invalid 'truncate_prompt_tokens' type "
+                        f"{type(truncate_prompt_tokens).__name__}; expected int"
+                    )
+                if truncate_prompt_tokens < -1:
+                    raise ValueError(
+                        "truncate_prompt_tokens must be >= -1, "
+                        f"got {truncate_prompt_tokens}"
+                    )
+                tokenization_kwargs["truncate_prompt_tokens"] = truncate_prompt_tokens
+
+            add_special_tokens = request.get("add_special_tokens")
+            if add_special_tokens is not None:
+                if not isinstance(add_special_tokens, bool):
+                    raise TypeError(
+                        "Invalid 'add_special_tokens' type "
+                        f"{type(add_special_tokens).__name__}; expected bool"
+                    )
+                tokenization_kwargs["add_special_tokens"] = add_special_tokens
+
+            # Request the pooled sentence embedding. With no task, vLLM's
+            # encode() resolves to per-token output (the full ``n_tokens x
+            # hidden`` hidden-state matrix), so the OpenAI ``/v1/embeddings``
+            # response ends up with the wrong shape (dim scales with input
+            # length) instead of one vector per input. ``task="embed"`` selects
+            # the pooled embedding and runs the model's configured pooler
+            # (normalization included for models like Qwen3-Embedding), matching
+            # vLLM's own embedding server. ``use_activation`` is intentionally
+            # left at the pooler default so per-model behaviour isn't overridden.
+            #
+            # ``dimensions`` (OpenAI Matryoshka truncation) is forwarded to vLLM
+            # rather than applied here: vLLM's pooler truncates to ``dimensions``
+            # and then re-normalizes (the correct MRL behaviour) and validates
+            # that the model actually supports Matryoshka -- raising rather than
+            # silently returning a degraded, un-normalized vector for models that
+            # don't. This matches bare ``vllm serve``. Models whose HF config
+            # doesn't declare Matryoshka support (e.g. Qwen3-Embedding) must be
+            # launched with ``--hf-overrides '{"is_matryoshka": true}'`` for
+            # ``dimensions`` requests to be accepted.
+            pooling_kwargs: dict[str, Any] = {"task": "embed"}
+            if dimensions is not None:
+                pooling_kwargs["dimensions"] = dimensions
+            pooling_params = PoolingParams(**pooling_kwargs)
+            # Use the per-request context id (same as the chat/completion paths
+            # in this file) so concurrent embeddings never collide inside
+            # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
+            # shared by every request in a trace and ``id(context)`` can be
+            # reused across short-lived ``Context`` objects, so neither is
+            # unique enough to scope a vLLM ``request_id``.
+            base_request_id = context.id()
+
+            async def _encode_one(idx: int, prompt: Any):
+                request_id = f"{base_request_id}-{idx}"
+                encode_arg: Any = (
+                    prompt
+                    if isinstance(prompt, str)
+                    else TokensPrompt(prompt_token_ids=prompt)
                 )
-            tokenization_kwargs["add_special_tokens"] = add_special_tokens
+                final_output = None
+                async with self._abort_monitor(context, request_id):
+                    encode_kwargs: dict[str, Any] = {
+                        "prompt": encode_arg,
+                        "pooling_params": pooling_params,
+                        "request_id": request_id,
+                    }
+                    # Omitting this silently pools with the base model for a
+                    # request that named an adapter.
+                    if lora_request is not None:
+                        encode_kwargs["lora_request"] = lora_request
+                    if tokenization_kwargs and isinstance(encode_arg, str):
+                        encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
 
-        # Request the pooled sentence embedding. With no task, vLLM's
-        # encode() resolves to per-token output (the full ``n_tokens x
-        # hidden`` hidden-state matrix), so the OpenAI ``/v1/embeddings``
-        # response ends up with the wrong shape (dim scales with input
-        # length) instead of one vector per input. ``task="embed"`` selects
-        # the pooled embedding and runs the model's configured pooler
-        # (normalization included for models like Qwen3-Embedding), matching
-        # vLLM's own embedding server. ``use_activation`` is intentionally
-        # left at the pooler default so per-model behaviour isn't overridden.
-        #
-        # ``dimensions`` (OpenAI Matryoshka truncation) is forwarded to vLLM
-        # rather than applied here: vLLM's pooler truncates to ``dimensions``
-        # and then re-normalizes (the correct MRL behaviour) and validates
-        # that the model actually supports Matryoshka -- raising rather than
-        # silently returning a degraded, un-normalized vector for models that
-        # don't. This matches bare ``vllm serve``. Models whose HF config
-        # doesn't declare Matryoshka support (e.g. Qwen3-Embedding) must be
-        # launched with ``--hf-overrides '{"is_matryoshka": true}'`` for
-        # ``dimensions`` requests to be accepted.
-        pooling_kwargs: dict[str, Any] = {"task": "embed"}
-        if dimensions is not None:
-            pooling_kwargs["dimensions"] = dimensions
-        pooling_params = PoolingParams(**pooling_kwargs)
-        # Use the per-request context id (same as the chat/completion paths
-        # in this file) so concurrent embeddings never collide inside
-        # ``AsyncLLM``. ``context.trace_id`` is a distributed-trace id
-        # shared by every request in a trace and ``id(context)`` can be
-        # reused across short-lived ``Context`` objects, so neither is
-        # unique enough to scope a vLLM ``request_id``.
-        base_request_id = context.id()
+                    async for out in self.engine_client.encode(**encode_kwargs):
+                        final_output = out
+                if final_output is None:
+                    raise RuntimeError(
+                        f"vLLM engine.encode produced no output for input index {idx}"
+                    )
+                return final_output
 
-        async def _encode_one(idx: int, prompt: Any):
-            request_id = f"{base_request_id}-{idx}"
-            encode_arg: Any = (
-                prompt
-                if isinstance(prompt, str)
-                else TokensPrompt(prompt_token_ids=prompt)
-            )
-            final_output = None
-            async with self._abort_monitor(context, request_id):
-                encode_kwargs: dict[str, Any] = {
-                    "prompt": encode_arg,
-                    "pooling_params": pooling_params,
-                    "request_id": request_id,
-                }
-                # Omitting this silently pools with the base model for a
-                # request that named an adapter.
-                if lora_request is not None:
-                    encode_kwargs["lora_request"] = lora_request
-                if tokenization_kwargs and isinstance(encode_arg, str):
-                    encode_kwargs["tokenization_kwargs"] = tokenization_kwargs
-
-                async for out in self.engine_client.encode(**encode_kwargs):
-                    final_output = out
-            if final_output is None:
-                raise RuntimeError(
-                    f"vLLM engine.encode produced no output for input index {idx}"
-                )
-            return final_output
-
-        # Submit every prompt to the engine in the same event-loop tick so
-        # vLLM's continuous-batching scheduler can coalesce them into a
-        # single forward pass instead of N sequential ones. ``asyncio.gather``
-        # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
-        # regardless of engine completion order.
-        #
-        # Use explicit tasks + a ``finally`` cancellation pass so that if one
-        # ``_encode_one`` raises, we cancel siblings still in flight instead
-        # of leaving them running -- otherwise vLLM keeps consuming engine
-        # capacity for output that this handler will discard.
-        tasks = [asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)]
-        try:
-            outputs = await asyncio.gather(*tasks)
-        finally:
-            pending = [t for t in tasks if not t.done()]
-            for t in pending:
-                t.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
+            # Submit every prompt to the engine in the same event-loop tick so
+            # vLLM's continuous-batching scheduler can coalesce them into a
+            # single forward pass instead of N sequential ones. ``asyncio.gather``
+            # returns results in input order, so ``outputs[k]`` matches ``prompts[k]``
+            # regardless of engine completion order.
+            #
+            # Use explicit tasks + a ``finally`` cancellation pass so that if one
+            # ``_encode_one`` raises, we cancel siblings still in flight instead
+            # of leaving them running -- otherwise vLLM keeps consuming engine
+            # capacity for output that this handler will discard.
+            tasks = [
+                asyncio.create_task(_encode_one(i, p)) for i, p in enumerate(prompts)
+            ]
+            try:
+                outputs = await asyncio.gather(*tasks)
+            finally:
+                pending = [t for t in tasks if not t.done()]
+                for t in pending:
+                    t.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
 
         embedding_objects: list[Dict[str, Any]] = []
         token_embeddings: list[str] = []

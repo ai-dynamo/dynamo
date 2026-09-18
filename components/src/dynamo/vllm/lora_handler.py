@@ -86,15 +86,27 @@ class LoRAHandlerMixin:
         self._lora_state.loaded_loras = value
 
     @functools.cached_property
-    def _lora_enabled(self) -> bool:
-        """Whether this host can serve adapters.
+    def _lora_requested(self) -> bool:
+        """Whether the operator asked this worker to serve adapters at all.
 
-        Deliberately the same predicate that gates endpoint registration and
-        capacity advertisement. Splitting them lets a worker advertise adapter
-        capacity it cannot honour, so an adapter-named request resolves to
-        nothing and is answered from the base weights.
+        Gates rejection only. An adapter-named request must fail closed the
+        moment LoRA was asked for, even when the runtime turns out not to be
+        ready -- otherwise an unknown name resolves to nothing and is answered
+        from the base weights, which looks like a plausible result.
         """
-        return lora_runtime_enabled(getattr(self.engine_args, "enable_lora", False))
+        return bool(getattr(self.engine_args, "enable_lora", False))
+
+    @functools.cached_property
+    def _lora_enabled(self) -> bool:
+        """Whether this host can actually serve adapters.
+
+        Gates advertisement: discovery cards, capacity, and lifecycle routes.
+        Kept separate from :attr:`_lora_requested` because advertising capacity
+        this worker cannot honour and rejecting names it cannot resolve are
+        opposite failure directions -- the first must fail closed, the second
+        must stay quiet.
+        """
+        return lora_runtime_enabled(self._lora_requested)
 
     def _resolve_lora_request(self, model_name: str | None) -> LoRARequest | None:
         """Return a LoRARequest for loaded adapters, or None for base model names.
@@ -122,7 +134,7 @@ class LoRAHandlerMixin:
                 self.engine_args.model,
                 *self._served_model_aliases,
             ),
-            lora_enabled=self._lora_enabled,
+            lora_enabled=self._lora_requested,
         )
 
     def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
@@ -164,6 +176,21 @@ class LoRAHandlerMixin:
             yield admitted
         finally:
             self._lora_state.release_batch(lora_name)
+
+    @staticmethod
+    async def _settle(task: "asyncio.Future[Any]") -> BaseException | None:
+        """Wait for a detached mutation to finish and report how it ended.
+
+        Called from a cancellation path, where the mutation was shielded and so
+        outlives the coroutine awaiting it. Returning the outcome lets the
+        caller reconcile against what the engine or registry actually did
+        instead of assuming the operation never happened.
+        """
+        with contextlib.suppress(BaseException):
+            await asyncio.shield(task)
+        if task.cancelled():
+            return asyncio.CancelledError()
+        return task.exception()
 
     @staticmethod
     def _is_lora_not_loaded_error(error: Exception) -> bool:
@@ -248,6 +275,29 @@ class LoRAHandlerMixin:
                 lora_name,
             )
 
+    async def _withdraw_lora_discovery(self, lora_name: str) -> None:
+        """Pull the card for an adapter whose engine state is indeterminate.
+
+        A hot swap never republishes -- it reuses the card the original load
+        put out -- so a failed rollback that only drops local tracking leaves
+        that card advertising an adapter this worker can no longer resolve.
+        Discovery keeps routing adapter traffic here and every request fails.
+        """
+        try:
+            await self._unregister_lora_discovery(lora_name)
+        except Exception:
+            logger.exception(
+                "Failed to withdraw the discovery card for LoRA '%s' after a "
+                "failed hot-swap rollback; it stays advertised but unroutable",
+                lora_name,
+            )
+        else:
+            logger.info(
+                "Withdrew the discovery card for LoRA '%s' after a failed "
+                "hot-swap rollback",
+                lora_name,
+            )
+
     def _preload_lora_into_engine(self) -> bool:
         """Whether lifecycle registration should eagerly activate the adapter.
 
@@ -285,14 +335,54 @@ class LoRAHandlerMixin:
             logger.debug(f"load_lora request keys: {list(request.keys())}")
             logger.debug(f"load_lora request: {request}")
 
+            hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
+
+            # An idempotent re-load needs no fetch at all. Revalidated under the
+            # lock below; this check only avoids downloading an adapter we
+            # already hold.
+            preexisting = self._lora_state.loaded_loras.get(lora_name)
+            if (
+                preexisting is not None
+                and preexisting.id != -1
+                and not hot_swap_enabled
+            ):
+                logger.info(
+                    f"LoRA adapter already loaded: {lora_name} "
+                    f"with ID {preexisting.id}"
+                )
+                yield {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' already loaded",
+                    "lora_name": lora_name,
+                    "lora_id": preexisting.id,
+                    "hot_swap": False,
+                }
+                return
+
+            # Fetch before taking the admission lock. _reserved_lora_request
+            # needs that same lock, so downloading under it stalls every request
+            # naming the still-advertised old adapter for as long as the remote
+            # fetch takes. Only the short engine swap needs exclusion.
+            logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+            path_ok, lora_path_or_error = await self._resolve_lora_source_path(lora_uri)
+            if not path_ok:
+                yield {
+                    "status": "error",
+                    "message": lora_path_or_error,
+                }
+                return
+            lora_path = lora_path_or_error
+            logger.debug(f"LoRA downloaded to: {lora_path}")
+
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
             async with lock:
                 capacity_reserved = False
                 committed_lora_info = False
                 try:
+                    # Revalidate under the lock: the adapter may have been
+                    # loaded, swapped, or unloaded while the fetch ran unlocked.
                     old_info = self._lora_state.loaded_loras.get(lora_name)
-                    hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
                     is_hot_swap = old_info is not None and hot_swap_enabled
                     old_engine_loaded = lora_name in self._engine_loaded_loras
 
@@ -338,24 +428,6 @@ class LoRAHandlerMixin:
                                 id=-1, path=""
                             )
                             capacity_reserved = True
-
-                    logger.info(
-                        f"Downloading LoRA adapter: {lora_name} from {lora_uri}"
-                    )
-                    path_ok, lora_path_or_error = await self._resolve_lora_source_path(
-                        lora_uri
-                    )
-                    if not path_ok:
-                        if capacity_reserved:
-                            self._lora_state.loaded_loras.pop(lora_name, None)
-                        yield {
-                            "status": "error",
-                            "message": lora_path_or_error,
-                        }
-                        return
-
-                    lora_path = lora_path_or_error
-                    logger.debug(f"LoRA downloaded to: {lora_path}")
 
                     # Generate deterministic ID from lora_name before using it
                     lora_id = lora_name_to_id(lora_name)
@@ -418,6 +490,7 @@ class LoRAHandlerMixin:
                                         f"Rollback failed for LoRA {lora_name}: "
                                         f"{rollback_error}"
                                     )
+                                    await self._withdraw_lora_discovery(lora_name)
                             else:
                                 # For new loads that weren't hot-swap, clean up reservation
                                 if capacity_reserved:
@@ -479,6 +552,7 @@ class LoRAHandlerMixin:
                                         f"LoRA '{lora_name}' hot-swap engine "
                                         f"rollback failed: {rollback_error}"
                                     )
+                                    await self._withdraw_lora_discovery(lora_name)
                             else:
                                 self._lora_state.loaded_loras.pop(lora_name, None)
                             logger.error(
@@ -608,12 +682,22 @@ class LoRAHandlerMixin:
                         logger.debug(
                             f"Unregistering LoRA '{lora_name}' ModelDeploymentCard"
                         )
+                        # Shielded so a cancellation arriving mid-withdraw
+                        # cannot leave us guessing whether the card is gone.
+                        # Settling it first is what makes the restore below
+                        # reachable: setting the flag after a bare await means a
+                        # cancellation that lands once the withdraw has already
+                        # committed skips restoration entirely, stranding the
+                        # adapter tracked but unadvertised.
+                        withdraw = asyncio.ensure_future(
+                            self._unregister_lora_discovery(lora_name)
+                        )
                         try:
-                            await self._unregister_lora_discovery(lora_name)
-                            discovery_withdrawn = True
-                            logger.info(
-                                f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
-                            )
+                            await asyncio.shield(withdraw)
+                        except asyncio.CancelledError:
+                            if await self._settle(withdraw) is None:
+                                await self._restore_lora_discovery(lora_name, lora_id)
+                            raise
                         except Exception as e:
                             logger.exception(
                                 f"Failed to unregister LoRA {lora_name} ModelDeploymentCard: {e}"
@@ -624,6 +708,10 @@ class LoRAHandlerMixin:
                                 "lora_name": lora_name,
                             }
                             return
+                        discovery_withdrawn = True
+                        logger.info(
+                            f"Successfully unregistered LoRA '{lora_name}' ModelDeploymentCard"
+                        )
                     else:
                         logger.debug(
                             f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
@@ -642,8 +730,29 @@ class LoRAHandlerMixin:
                     # without republishing it.
                     try:
                         if lora_name in self._engine_loaded_loras:
+                            # Shielded for the same reason as the withdraw: a
+                            # cancellation delivered once vLLM has already
+                            # dropped the adapter would otherwise skip both
+                            # state updates, leaving tracking and discovery
+                            # advertising an adapter the engine no longer holds.
+                            removal = asyncio.ensure_future(
+                                self.engine_client.remove_lora(lora_id)
+                            )
                             try:
-                                await self.engine_client.remove_lora(lora_id)
+                                await asyncio.shield(removal)
+                            except asyncio.CancelledError:
+                                outcome = await self._settle(removal)
+                                if outcome is None or (
+                                    isinstance(outcome, Exception)
+                                    and self._is_lora_not_loaded_error(outcome)
+                                ):
+                                    # The unload did complete, so finish it
+                                    # rather than republishing an adapter the
+                                    # engine has already let go.
+                                    self._engine_loaded_loras.discard(lora_name)
+                                    self._lora_state.loaded_loras.pop(lora_name, None)
+                                    discovery_withdrawn = False
+                                raise
                             except Exception as e:
                                 if not self._is_lora_not_loaded_error(e):
                                     raise

@@ -1290,7 +1290,11 @@ class WorkerFactory:
         if rl_endpoint is not None:
             shutdown_endpoints.append(rl_endpoint)
 
-        lora_enabled = config.engine_args.enable_lora
+        # Combined predicate, not the raw engine flag: registering these
+        # routes without a LoRA manager advertises adapter capacity this
+        # worker cannot honour, and an adapter-named request is then
+        # answered from the base weights.
+        lora_enabled = lora_runtime_enabled(config.engine_args.enable_lora)
         if lora_enabled:
             load_lora_endpoint = runtime.endpoint(
                 f"{config.namespace}.{config.component}.load_lora"
@@ -1610,7 +1614,11 @@ class WorkerFactory:
             if config.enable_rl
             else None
         )
-        lora_enabled = config.engine_args.enable_lora
+        # Combined predicate, not the raw engine flag: registering these
+        # routes without a LoRA manager advertises adapter capacity this
+        # worker cannot honour, and an adapter-named request is then
+        # answered from the base weights.
+        lora_enabled = lora_runtime_enabled(config.engine_args.enable_lora)
         if lora_enabled:
             load_lora_endpoint = runtime.endpoint(
                 f"{config.namespace}.{config.component}.load_lora"
@@ -1731,7 +1739,7 @@ class WorkerFactory:
             runtime,
             generate_endpoint,
             handler,
-            lora_enabled=config.engine_args.enable_lora,
+            lora_enabled=lora_runtime_enabled(config.engine_args.enable_lora),
         )
 
         was_failover = False

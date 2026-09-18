@@ -1070,6 +1070,11 @@ class TestPrefillRegistrationContract:
         monkeypatch.setattr(
             "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
         )
+        # Prefill gates its lifecycle routes on the combined predicate, so the
+        # engine flag alone no longer registers them.
+        monkeypatch.setattr(
+            "dynamo.common.lora.manager.get_lora_manager", lambda: Mock()
+        )
 
         config = _make_config(
             disaggregation_mode=DisaggregationMode.PREFILL,
@@ -1116,10 +1121,23 @@ class TestPrefillRegistrationContract:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lora_enabled", [True, False])
+@pytest.mark.parametrize(
+    ("engine_lora_enabled", "manager_ready", "expect_endpoints"),
+    [
+        (True, True, True),
+        # The engine flag alone must fail closed: registering the routes would
+        # advertise adapter capacity this worker cannot honour, and an
+        # adapter-named request would be answered from the base weights.
+        (True, False, False),
+        (False, True, False),
+        (False, False, False),
+    ],
+)
 async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
-    lora_enabled: bool,
+    engine_lora_enabled: bool,
+    manager_ready: bool,
+    expect_endpoints: bool,
 ) -> None:
     engine_client = Mock()
     vllm_config = Mock(additional_config={})
@@ -1158,6 +1176,10 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
     )
+    monkeypatch.setattr(
+        "dynamo.common.lora.manager.get_lora_manager",
+        (lambda: Mock()) if manager_ready else (lambda: None),
+    )
 
     endpoints: dict[str, Mock] = {}
 
@@ -1181,7 +1203,7 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         frontend_decoding=False,
         enable_multimodal=False,
         enable_rl=False,
-        engine_args=SimpleNamespace(enable_lora=lora_enabled),
+        engine_args=SimpleNamespace(enable_lora=engine_lora_enabled),
     )
     shutdown_endpoints: list = []
 
@@ -1197,7 +1219,7 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         "dyn.prefill.unload_lora",
         "dyn.prefill.list_loras",
     }
-    if lora_enabled:
+    if expect_endpoints:
         assert lifecycle_names <= endpoints.keys()
         for name in lifecycle_names:
             endpoints[name].serve_endpoint.assert_awaited_once()
