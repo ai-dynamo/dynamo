@@ -78,6 +78,7 @@ from .kv_connector_protocols import (
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
+from .runtime_lora import publish_runtime_lora_capability
 from .multimodal_utils.models.nemotron_video_routing import (
     publish_vllm_nemotron_video_processor_contract,
 )
@@ -838,6 +839,7 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_runtime_lora_capability(runtime_config, config, worker_type)
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

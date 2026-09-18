@@ -110,6 +110,7 @@ from .multimodal_utils.request_processor import (
     MissingMultimodalHandoffError,
     VllmMultimodalRequestProcessor,
 )
+from .runtime_lora import RuntimeLoRACoordinator
 from .state_agent import state_agent_settings
 
 configure_dynamo_logging()
@@ -1191,6 +1192,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._served_model_aliases = tuple(config.served_model_aliases or ())
         self.engine_args = config.engine_args
         self._lora_state = LoRAState()
+        self._runtime_lora_coordinator = RuntimeLoRACoordinator(self)
         # Adapters known to have been handed to vLLM. Prefill registration is
         # metadata-only, but vLLM activates a prefill adapter lazily when an
         # inference request supplies its LoRARequest.
@@ -2398,6 +2400,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_enabled=self._lora_enabled,
         )
 
+    async def _resolve_or_ensure_lora_request(
+        self,
+        request: Mapping[str, Any],
+        request_id: str,
+    ) -> LoRARequest | None:
+        """Resolve explicit adapters or load a request-time adapter fail-closed."""
+        coordinator = getattr(self, "_runtime_lora_coordinator", None)
+        if coordinator is None:
+            coordinator = RuntimeLoRACoordinator(self)
+            self._runtime_lora_coordinator = coordinator
+        runtime_request = await coordinator.ensure_from_request(request, request_id)
+        if runtime_request is not None:
+            return runtime_request
+
+        routing = request.get("routing")
+        routed_lora_name = (
+            routing.get("lora_name") if isinstance(routing, Mapping) else None
+        )
+        return self._resolve_lora_request(routed_lora_name or request.get("model"))
+
     def _track_lora_request_activation(self, lora_request: LoRARequest | None) -> None:
         """Record adapters handed to vLLM for request-time lazy activation."""
         if lora_request is not None:
@@ -2895,6 +2917,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lock = self._get_lora_lock(lora_name)
             async with lock:
                 try:
+                    if lora_name in self._lora_state.runtime_loras:
+                        yield {
+                            "status": "error",
+                            "message": (
+                                "Request-time LoRA adapters cannot be unloaded through "
+                                "the admin endpoint"
+                            ),
+                        }
+                        return
+
                     # Check if the LoRA exists *after* waiting for any in-progress load.
                     lora = self._lora_state.loaded_loras.get(lora_name)
                     if lora is None:
@@ -3674,10 +3706,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Extract LoRA request if present
         model_name = request.get("model")
-        lora_request = self._resolve_lora_request(model_name)
+        lora_request = await self._resolve_or_ensure_lora_request(request, request_id)
         if lora_request:
             logger.info(
-                f"Decode request {request_id} will use LoRA adapter: {model_name} (ID: {lora_request.lora_int_id})"
+                "Decode request %s will use LoRA adapter %s (ID: %s)",
+                request_id,
+                lora_request.lora_name,
+                lora_request.lora_int_id,
             )
         else:
             logger.debug(
@@ -3991,11 +4026,13 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Extract LoRA request if present
         model_name = request.get("model")
-        lora_request = self._resolve_lora_request(model_name)
+        lora_request = await self._resolve_or_ensure_lora_request(request, request_id)
         if lora_request:
             logger.info(
-                f"Prefill request {request_id} will use LoRA adapter: {model_name} "
-                f"(ID: {lora_request.lora_int_id}), path: {lora_request.lora_path}"
+                "Prefill request %s will use LoRA adapter %s (ID: %s)",
+                request_id,
+                lora_request.lora_name,
+                lora_request.lora_int_id,
             )
         else:
             logger.debug(

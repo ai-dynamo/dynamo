@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from typing import Any
 
@@ -61,6 +62,10 @@ def require_lora_load_request(request: Mapping[str, Any] | None) -> tuple[str, s
     lora_name = request.get("lora_name")
     if not isinstance(lora_name, str) or not lora_name:
         raise RLAdminValidationError("'lora_name' is required and must be a string")
+    if re.fullmatch(r"dyn-lora-[0-9a-f]{32}", lora_name):
+        raise RLAdminValidationError(
+            "'dyn-lora-' names are reserved for request-time adapters"
+        )
 
     source = request.get("source")
     if not source or not isinstance(source, Mapping):
@@ -81,7 +86,6 @@ def require_lora_unload_request(request: Mapping[str, Any] | None) -> str:
     lora_name = request.get("lora_name")
     if not isinstance(lora_name, str) or not lora_name:
         raise RLAdminValidationError("'lora_name' is required and must be a string")
-
     return lora_name
 
 

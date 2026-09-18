@@ -4,10 +4,23 @@
 import asyncio
 import threading
 import weakref
+from dataclasses import dataclass
 
 from vllm.lora.request import LoRARequest
 
 from dynamo.common.lora.manager import LoRAInfo
+
+
+@dataclass(frozen=True)
+class RuntimeLoRAInfo:
+    """Private worker-local residency record for a request-time adapter."""
+
+    adapter_key: str
+    full_identity_digest: bytes
+    base_model_name: str
+    source_revision: str
+    id: int
+    path: str
 
 
 class LoRAState:
@@ -23,6 +36,14 @@ class LoRAState:
             str, asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
+        # Runtime adapters are intentionally private and are never published as
+        # model cards. Raw source URIs are not retained after resolution.
+        self.runtime_loras: dict[str, RuntimeLoRAInfo] = {}
+        self.runtime_load_tasks: dict[str, asyncio.Task[RuntimeLoRAInfo]] = {}
+        self.runtime_load_digests: dict[str, bytes] = {}
+        self.runtime_reserved_ids: dict[str, int] = {}
+        self.runtime_resolution_semaphore: asyncio.Semaphore | None = None
+        self.runtime_cache_guard: asyncio.Lock | None = None
 
     def resolve_request(
         self,

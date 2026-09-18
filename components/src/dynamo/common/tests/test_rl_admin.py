@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,
@@ -135,6 +134,17 @@ def test_lora_unload_request_validation() -> None:
             pass
         else:
             raise AssertionError(f"expected validation error for lora_name={bad!r}")
+
+
+def test_runtime_adapter_names_are_reserved_for_new_loads() -> None:
+    runtime_name = "dyn-lora-0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(RLAdminValidationError, match="reserved"):
+        require_lora_load_request(
+            {"lora_name": runtime_name, "source": {"uri": "file:///adapter"}}
+        )
+
+    assert require_lora_unload_request({"lora_name": runtime_name}) == runtime_name
 
 
 def test_lora_load_request_rejects_non_string_fields() -> None:
