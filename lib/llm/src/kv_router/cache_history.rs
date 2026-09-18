@@ -260,7 +260,10 @@ mod tests {
 
     #[test]
     fn environment_variable_names_are_stable() {
-        assert_eq!(CACHE_REUSE_HISTORY_ENABLED_ENV, "DYN_ROUTER_CACHE_REUSE_HISTORY");
+        assert_eq!(
+            CACHE_REUSE_HISTORY_ENABLED_ENV,
+            "DYN_ROUTER_CACHE_REUSE_HISTORY"
+        );
         assert_eq!(HISTORY_BYTES_ENV, "DYN_ROUTER_CACHE_REUSE_HISTORY_BYTES");
     }
 
