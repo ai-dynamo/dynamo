@@ -75,9 +75,6 @@ pub(crate) fn build_generate_request(
     let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
-    if !mode.is_prefill() && !mode.is_encode() {
-        validate_proto_sampling(&request.sampling_options)?;
-    }
     // Legacy envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
         && !mode.is_encode()
@@ -395,22 +392,6 @@ fn hydrate_option<T: DeserializeOwned>(
             "extra_args.vllm_tito.sampling_params.{field} is invalid: {error}"
         ))
     })?);
-    Ok(())
-}
-
-fn validate_proto_sampling(
-    sampling: &dynamo_backend_common::SamplingOptions,
-) -> Result<(), DynamoError> {
-    if matches!(sampling.top_k, Some(-1 | 0)) {
-        return Err(client::invalid_argument(
-            "vllm-proto 0.3 cannot represent explicit top_k disable; omit top_k or use chat/completions",
-        ));
-    }
-    if sampling.min_p == Some(0.0) {
-        return Err(client::invalid_argument(
-            "vllm-proto 0.3 cannot represent explicit min_p=0; omit min_p or use chat/completions",
-        ));
-    }
     Ok(())
 }
 

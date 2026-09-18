@@ -1216,7 +1216,7 @@ fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
 }
 
 #[test]
-fn native_generate_defaults_temperature_and_rejects_unrepresentable_zero_controls() {
+fn native_generate_normalizes_disabled_sampling_controls() {
     let mut defaults = request();
     defaults.sampling_options.temperature = None;
     let wire = build_generate_request(
@@ -1227,29 +1227,19 @@ fn native_generate_defaults_temperature_and_rejects_unrepresentable_zero_control
     .expect("native Generate defaults temperature to HTTP semantics");
     assert_eq!(wire.temperature, Some(1.0));
 
-    for sampling in [
-        SamplingOptions {
-            top_k: Some(0),
-            ..request().sampling_options
-        },
-        SamplingOptions {
-            top_k: Some(-1),
-            ..request().sampling_options
-        },
-        SamplingOptions {
-            min_p: Some(0.0),
-            ..request().sampling_options
-        },
-    ] {
-        let mut unsupported = request();
-        unsupported.sampling_options = sampling;
-        let error = build_generate_request(
-            unsupported,
-            "unsupported".to_string(),
+    for top_k in [-1, 0] {
+        let mut disabled = request();
+        disabled.sampling_options.top_k = Some(top_k);
+        disabled.sampling_options.min_p = Some(0.0);
+        let wire = build_generate_request(
+            disabled,
+            "disabled".to_string(),
             DisaggregationMode::Aggregated,
         )
-        .expect_err("proto 0.3 cannot distinguish explicit disable from omission");
-        assert!(error.to_string().contains("cannot represent"));
+        .expect("disabled sampling controls map to protobuf defaults");
+        let sampling = wire.sampling.expect("sampling parameters");
+        assert_eq!(sampling.top_k, 0);
+        assert_eq!(sampling.min_p, 0.0);
     }
 }
 
