@@ -174,11 +174,13 @@ fn preprocessed_backend_engine(
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
+            let runtime_lora_filter = model_manager.lora_filter_for(endpoint_id);
+            Arc::new(RoutingHost::new_with_runtime_lora_filter_and_coordinator(
                 router,
                 chooser,
                 load_context,
                 affinity,
+                runtime_lora_filter,
             ))
         }
         _ => {

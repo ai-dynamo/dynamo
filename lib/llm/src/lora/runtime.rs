@@ -83,7 +83,12 @@ impl RuntimeLoraConfig {
         use dynamo_runtime::config::environment_names::llm;
 
         let enabled = dynamo_runtime::config::env_is_truthy(llm::DYN_LORA_RUNTIME_LOAD_ENABLED);
-        if enabled && !dynamo_runtime::config::env_is_truthy(llm::DYN_LORA_ENABLED) {
+        let lora_enabled = dynamo_runtime::config::env_is_truthy(llm::DYN_LORA_ENABLED);
+        Self::from_flags(enabled, lora_enabled)
+    }
+
+    fn from_flags(enabled: bool, lora_enabled: bool) -> Result<Self, RuntimeLoraError> {
+        if enabled && !lora_enabled {
             return Err(RuntimeLoraError::InvalidConfiguration(
                 "DYN_LORA_RUNTIME_LOAD_ENABLED requires DYN_LORA_ENABLED=true".to_string(),
             ));
@@ -202,6 +207,20 @@ mod tests {
 
     fn config() -> RuntimeLoraConfig {
         RuntimeLoraConfig { enabled: true }
+    }
+
+    #[test]
+    fn runtime_loading_requires_lora_serving() {
+        assert_eq!(
+            RuntimeLoraConfig::from_flags(true, false),
+            Err(RuntimeLoraError::InvalidConfiguration(
+                "DYN_LORA_RUNTIME_LOAD_ENABLED requires DYN_LORA_ENABLED=true".to_string()
+            ))
+        );
+        assert_eq!(
+            RuntimeLoraConfig::from_flags(true, true),
+            Ok(RuntimeLoraConfig { enabled: true })
+        );
     }
 
     fn resolve_base(name: &str) -> Option<String> {
