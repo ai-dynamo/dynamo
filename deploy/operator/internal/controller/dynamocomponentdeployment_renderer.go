@@ -271,6 +271,7 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 	}
 
 	alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
+	expectedCompatibilityHash := dynamo.GetPodTemplateAnnotations(component)[commonconsts.SnapshotCandidateCompatibilityHashAnnotation]
 	automaticSnapshotJob, err := automaticSnapshotJobReferenceForDCD(dcd)
 	if err != nil {
 		return nil, err
@@ -284,27 +285,23 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 		info = &checkpoint.CheckpointInfo{
-			Enabled:              true,
-			AutomaticCapture:     automaticSnapshotJob != nil,
-			StartupPolicy:        startupPolicy,
-			AutomaticSnapshotJob: automaticSnapshotJob,
+			Enabled:                   true,
+			AutomaticCapture:          automaticSnapshotJob != nil,
+			StartupPolicy:             startupPolicy,
+			SnapshotCompatibilityHash: expectedCompatibilityHash,
+			AutomaticSnapshotJob:      automaticSnapshotJob,
 		}
 		// Preserve an explicit capture target across the pending-to-Ready handoff.
 		if alphaCheckpointConfig.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
 	} else {
-		workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd)
-		var expectedWorkerHash *string
-		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
-			expectedWorkerHash = &workerHash
-		}
 		info, err = checkpoint.ResolvePodSnapshotForService(
 			ctx,
 			r.reader,
 			dcd.Namespace,
 			alphaCheckpointConfig,
-			expectedWorkerHash,
+			expectedCompatibilityHash,
 			podSnapshotUseForDCD(dcd, automaticSnapshotJob),
 		)
 		if err != nil {

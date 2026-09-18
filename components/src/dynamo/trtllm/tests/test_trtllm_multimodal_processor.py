@@ -455,7 +455,7 @@ async def test_epd_non_object_kwargs_raises_client_error() -> None:
     # URLs come from the processor, not the request; the engine must report an
     # available encoder, or the flow short-circuits before the kwargs check.
     processor = MagicMock()
-    processor.extract_prompt_and_media.return_value = (
+    processor.extract_prompt_and_media_from_request.return_value = (
         "describe",
         ["http://example.invalid/a.png"],
         [],
@@ -542,3 +542,114 @@ async def test_cached_path_rejects_non_object_kwargs_on_hit() -> None:
 
     assert excinfo.value.status == 400
     cache.get.assert_not_called()
+
+
+def test_extract_prompt_and_media_from_request_uses_multi_modal_data() -> None:
+    """Frontend-stripped extra_args.messages still resolve images from multi_modal_data."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    data_url = "data:image/png;base64,AAAA"
+    https_url = "https://example.com/img.png"
+    text, image_urls, embedding_paths = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {"type": "image_url", "image_url": {"url": ""}},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": https_url},
+                            },
+                        ],
+                    }
+                ]
+            },
+            "multi_modal_data": {"image_url": [{"Url": data_url}, {"Url": https_url}]},
+        }
+    )
+    assert text == "describe"
+    assert image_urls == [data_url, https_url]
+    assert embedding_paths == []
+
+
+def test_extract_prompt_and_media_from_request_classifies_signed_safetensors() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    signed = "https://host/embedding.SAFETENSORS?sig=abc"
+    _, image_urls, embedding_paths = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {"messages": []},
+            "multi_modal_data": {"image_url": [{"Url": signed}]},
+        }
+    )
+    assert image_urls == []
+    assert embedding_paths == [signed]
+
+
+def test_extract_prompt_and_media_from_request_keeps_message_fallback() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    url = "https://example.com/legacy.png"
+    _, image_urls, _ = processor.extract_prompt_and_media_from_request(
+        {
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+    assert image_urls == [url]
+
+
+def test_extract_prompt_and_media_from_request_empty_or_malformed_mm_data() -> None:
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    fallback = "https://example.com/fallback.png"
+    request = {
+        "extra_args": {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hi"},
+                        {"type": "image_url", "image_url": {"url": fallback}},
+                    ],
+                }
+            ]
+        }
+    }
+    for mm_data in ({}, {"image_url": "not-a-list"}, {"image_url": [None, 1, {}]}):
+        request["multi_modal_data"] = mm_data
+        (
+            text,
+            image_urls,
+            embedding_paths,
+        ) = processor.extract_prompt_and_media_from_request(request)
+        assert text == "hi"
+        assert image_urls == [fallback]
+        assert embedding_paths == []

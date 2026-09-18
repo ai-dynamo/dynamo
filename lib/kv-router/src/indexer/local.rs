@@ -240,8 +240,34 @@ impl LocalKvIndexer {
         metrics: Arc<KvIndexerMetrics>,
         max_buffer_size: usize,
     ) -> Self {
+        Self::from_primary(
+            KvIndexer::new(token, kv_block_size, metrics.clone()),
+            metrics,
+            max_buffer_size,
+        )
+    }
+
+    /// Construct a local indexer with a delegate for its primary device index.
+    pub fn new_with_delegate(
+        token: CancellationToken,
+        kv_block_size: u32,
+        metrics: Arc<KvIndexerMetrics>,
+        max_buffer_size: usize,
+        delegate: Arc<dyn super::KvIndexerDelegate>,
+    ) -> Self {
+        let indexer = KvIndexer::builder(token, kv_block_size, metrics.clone())
+            .delegate(delegate)
+            .build();
+        Self::from_primary(indexer, metrics, max_buffer_size)
+    }
+
+    fn from_primary(
+        indexer: KvIndexer,
+        metrics: Arc<KvIndexerMetrics>,
+        max_buffer_size: usize,
+    ) -> Self {
         Self {
-            indexer: KvIndexer::new(token, kv_block_size, metrics.clone()),
+            indexer,
             metrics,
             lower_tier_indexers: Arc::new(Mutex::new(HashMap::new())),
             event_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_buffer_size))),

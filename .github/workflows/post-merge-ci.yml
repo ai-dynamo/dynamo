@@ -19,7 +19,7 @@ on:
       framework:
         description: 'Framework to validate'
         type: choice
-        options: [all, vllm, sglang, trtllm]
+        options: [all, vllm, sglang, trtllm, triton]
         default: all
 
 permissions:
@@ -42,13 +42,14 @@ jobs:
       run_vllm:   ${{ steps.flags.outputs.run_vllm }}
       run_sglang: ${{ steps.flags.outputs.run_sglang }}
       run_trtllm: ${{ steps.flags.outputs.run_trtllm }}
+      run_triton: ${{ steps.flags.outputs.run_triton }}
     steps:
       - id: flags
         shell: bash
         env:
           FW: ${{ github.event.inputs.framework || 'all' }}
         run: |
-          for f in vllm sglang trtllm; do
+          for f in vllm sglang trtllm triton; do
             if [[ "$FW" == "all" || "$FW" == "$f" ]]; then
               echo "run_$f=true" >> "$GITHUB_OUTPUT"
             else
@@ -214,6 +215,11 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-runtime-{0}', github.sha) || '' }}
+      # Lets sidecar-vllm-test (pr.yaml) fall back to this floating tag via its
+      # source_ref input instead of rebuilding vllm-runtime on every
+      # lib/sidecar/**-only PR.
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -279,6 +285,11 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-runtime-{0}', github.sha) || '' }}
+      # Lets sidecar-sglang-test (pr.yaml) fall back to this floating tag via
+      # its source_ref input instead of rebuilding sglang-runtime on every
+      # lib/sidecar/**-only PR.
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -344,6 +355,11 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm-runtime' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-runtime-{0}', github.sha) || '' }}
+      # Lets sidecar-trtllm-test (pr.yaml) fall back to this floating tag via
+      # its source_ref input instead of rebuilding trtllm-runtime on every
+      # lib/sidecar/**-only PR.
+      test_extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm-runtime-test' || '' }}
       archive_sources: false
     secrets: inherit
 
@@ -389,6 +405,23 @@ jobs:
       archive_sources: false
     secrets: inherit
 
+  triton-build:
+    name: triton-runtime
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-build-image.yml
+    with:
+      framework: triton
+      target: runtime
+      cuda_version: '[""]'
+      platform: 'linux/amd64,linux/arm64'
+      builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
+      build_timeout_minutes: 120
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-triton-runtime' || '' }}
+        ${{ github.ref_name == 'main' && format('main-triton-runtime-{0}', github.sha) || '' }}
+    secrets: inherit
+
   planner-build:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     if: github.event_name != 'workflow_dispatch'
@@ -423,7 +456,7 @@ jobs:
       platform: 'linux/amd64,linux/arm64'
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       inline_compliance: true
-      build_timeout_minutes: 45
+      build_timeout_minutes: 90  # TEMPORARY CHANGE - TODO: INVESTIGATE AND SPEEDUP SLOW BUILDS
       # OSRB CSV diff baseline: post-merge context. main -> previous commit;
       # release/* -> prior release tag (see resolve_diff_base.py).
       diff_event_context: push
@@ -445,6 +478,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -452,7 +486,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and vllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1'
+      # not sidecar: sidecar-marked tests need dynamo-vllm-sidecar layered onto
+      # the image (see pr.yaml's sidecar-vllm-test), which this plain
+      # vllm-runtime image doesn't have.
+      gpu_test_markers: '(pre_merge or post_merge) and vllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests (those carrying @pytest.mark.profiled_vram_gib(N)) run concurrently in
       # the parallel stage; the rest fall through to the sequential stage. 24 GiB admits all
@@ -468,6 +505,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -485,6 +523,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm
+      framework: vllm  # matches the framework passed to vllm-build
       test_type: 4-GPU Test
       amd_runner: prod-tester-amd-gpu-4-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
@@ -502,6 +541,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: vllm-efa
+      framework: vllm  # matches the framework passed to vllm-efa-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.vllm-efa-build.outputs.target_tag_plain }}
@@ -519,6 +559,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -526,7 +567,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and sglang and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1'
+      # not sidecar: sidecar-marked tests need dynamo-sglang-sidecar layered
+      # onto the image (see pr.yaml's sidecar-sglang-test), which this plain
+      # sglang-runtime image doesn't have.
+      gpu_test_markers: '(pre_merge or post_merge) and sglang and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled SGLang pool
@@ -542,6 +586,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: sglang
+      framework: sglang  # matches the framework passed to sglang-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
@@ -559,6 +604,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: Test
       amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -566,7 +612,10 @@ jobs:
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and trtllm and gpu_0'
-      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1'
+      # not sidecar: sidecar-marked tests need dynamo-trtllm-sidecar layered
+      # onto the image (see pr.yaml's sidecar-trtllm-test), which this plain
+      # trtllm-runtime image doesn't have.
+      gpu_test_markers: '(pre_merge or post_merge) and trtllm and gpu_1 and not sidecar'
       gpu_test_timeout_minutes: 120
       # Profiled tests run in the VRAM-aware GPU stage; unprofiled fall through to sequential.
       # Current single-GPU runners are 24 GiB, so this cap admits the profiled TRT-LLM pool
@@ -582,6 +631,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm
+      framework: trtllm  # matches the framework passed to trtllm-build
       test_type: 2-GPU Test
       amd_runner: prod-tester-amd-gpu-2-v2
       target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
@@ -599,6 +649,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: trtllm-efa
+      framework: trtllm  # matches the framework passed to trtllm-efa-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2 # EFA image validation runs gpu_0 tests only
       target_tag_plain: ${{ needs.trtllm-efa-build.outputs.target_tag_plain }}
@@ -609,6 +660,47 @@ jobs:
       run_gpu_tests: false
     secrets: inherit
 
+  triton-test:
+    name: triton-runtime
+    needs: [config, triton-build]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: triton
+      framework: triton
+      test_type: CPU Test
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+      cuda_version: '[""]'
+      platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
+      run_sanity_check: false # requires torch which is not present.
+      run_cpu_only_tests: true
+      cpu_only_test_markers: '(pre_merge or post_merge) and triton and gpu_0'
+      run_gpu_tests: false
+    secrets: inherit
+
+  # TODO: Enable once test time has been reduced.
+  #       Current implementation takes up to 2 hours to complete.
+  # triton-qa-test:
+  #   name: triton-runtime
+  #   needs: [config, triton-build]
+  #   if: needs.config.outputs.run_triton == 'true'
+  #   uses: $/.github/workflows/shared-test.yml
+  #   with:
+  #     test_suite_name: triton
+  #     test_type: QA Test
+  #     amd_runner: prod-tester-amd-gpu-v2
+  #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+  #     cuda_version: '[""]'
+  #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
+  #     enable_coverage: true
+  #     run_sanity_check: false # requires torch which is not present.
+  #     run_gpu_tests: true
+  #     gpu_test_markers: '(pre_merge or post_merge) and triton_qa' and gpu_1
+  #     gpu_test_timeout_minutes: 180
+  #     verify_gpu: false # requires torch which is not present.
+  #   secrets: inherit
+
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI
     needs: [planner-build]
@@ -616,6 +708,7 @@ jobs:
     with:
       dd_env: post-merge
       test_suite_name: planner
+      framework: dynamo  # matches the framework passed to planner-build
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.planner-build.outputs.target_tag_plain }}
@@ -1566,6 +1659,7 @@ jobs:
         docker buildx rm b-${{ github.run_id }}-${{ github.run_attempt }} || true
 
   ############################## SLACK NOTIFICATION ##############################
+
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [ deploy-status-check ]

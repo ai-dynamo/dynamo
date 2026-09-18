@@ -110,6 +110,7 @@ enum StoreRouteDecision {
 /// velo-backed case use `BranchShardedIndexer<VeloShardClient>` (feature-gated
 /// behind `velo-runtime`).
 pub struct BranchShardedIndexer<S: AsyncShardHandle> {
+    lifecycle: super::HashLifecycle,
     shards: Vec<Arc<S>>,
     num_shards: usize,
     max_routing_depth: usize,
@@ -128,6 +129,34 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
 #[deprecated(note = "use BranchShardedIndexer<ThreadPoolIndexer<T>> instead")]
 pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<ThreadPoolIndexer<T>>;
 
+impl
+    BranchShardedIndexer<
+        ThreadPoolIndexer<super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed>,
+    >
+{
+    /// Construct local compressed shards with one delegate for the whole indexer.
+    /// Structural anchors do not acquire ownership or produce notifications.
+    pub fn new_with_delegate(
+        num_shards: usize,
+        workers_per_shard: usize,
+        prefix_depth: usize,
+        kv_block_size: u32,
+        delegate: Arc<dyn super::KvIndexerDelegate>,
+    ) -> Self {
+        let lifecycle = super::HashLifecycle::new(delegate);
+        let shards = (0..num_shards).map(|_| {
+            ThreadPoolIndexer::new(
+                super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed::with_lifecycle(lifecycle.clone()),
+                workers_per_shard,
+                kv_block_size,
+            )
+        }).collect();
+        let mut indexer = Self::new(shards, prefix_depth, kv_block_size);
+        indexer.lifecycle = lifecycle;
+        indexer
+    }
+}
+
 impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     /// Create a branch-sharded indexer from pre-built shard handles.
     pub fn new(shards: Vec<S>, prefix_depth: usize, kv_block_size: u32) -> Self {
@@ -136,6 +165,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
         let shards = shards.into_iter().map(Arc::new).collect();
 
         Self {
+            lifecycle: super::HashLifecycle::default(),
             shards,
             num_shards,
             max_routing_depth: prefix_depth.max(1),
@@ -245,6 +275,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             if node.depth < self.max_routing_depth {
                 node = self.get_or_create_child(&node, block);
                 node.live_workers.insert(worker);
+                self.lifecycle.insert(worker, block.block_hash);
                 lookup.entry(block.block_hash).or_insert(BlockRoutingEntry {
                     shard_idx: node.shard(),
                     routing_node: node.clone(),
@@ -470,8 +501,9 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
             return;
         };
         let mut seen_nodes = FxHashSet::default();
-        for (_, entry) in lookup {
+        for (hash, entry) in lookup {
             if entry.affects_router_node {
+                self.lifecycle.remove(worker, hash);
                 let ptr = Arc::as_ptr(&entry.routing_node) as usize;
                 if seen_nodes.insert(ptr) {
                     entry.routing_node.live_workers.remove(&worker);
@@ -629,6 +661,7 @@ impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
                 if entry.affects_router_node {
                     entry.routing_node.live_workers.remove(&worker);
                     lookup.remove(&block_hash);
+                    self.lifecycle.remove(worker, block_hash);
                 } else {
                     shard_blocks[entry.shard_idx].push(block_hash);
                     lookup.remove(&block_hash);

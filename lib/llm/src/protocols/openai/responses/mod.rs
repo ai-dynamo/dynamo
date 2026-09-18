@@ -679,7 +679,8 @@ fn convert_input_items_to_messages(
 ///
 /// Bare function names are preserved for model compatibility. Reject collisions
 /// from different origins instead of guessing which namespace to restore on the
-/// response path.
+/// response path. Return `InvalidArgument` for non-function tools, including
+/// namespace members, instead of silently discarding unsupported definitions.
 fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
     let mut converted = Vec::new();
     let mut origins = HashMap::<String, Option<String>>::new();
@@ -719,27 +720,41 @@ fn convert_tools(tools: &[Tool]) -> anyhow::Result<Vec<ChatCompletionTool>> {
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
-                    if let NamespaceToolParamTool::Function(f) = tool {
-                        push_function(
+                    match tool {
+                        NamespaceToolParamTool::Function(f) => push_function(
                             &f.name,
                             &f.description,
                             &f.parameters,
                             f.strict,
                             Some(&namespace.name),
-                        )?;
+                        )?,
+                        _ => return unsupported_tool(tool, "tools"),
                     }
                 }
             }
-            // Only function tools are forwarded to Chat Completions.
-            _ => {}
+            _ => return unsupported_tool(tool, "tools"),
         }
     }
     Ok(converted)
 }
 
+/// Identify an unsupported tool or choice by its serialized type and return
+/// `InvalidArgument` with the affected request field and supported alternatives.
+fn unsupported_tool<T>(tool: &impl serde::Serialize, field: &str) -> anyhow::Result<T> {
+    let value = serde_json::to_value(tool)?;
+    let tool_type = value["type"].as_str().unwrap_or("unknown");
+    Err(ResponsesConversionError::InvalidArgument(format!(
+        "Unsupported Responses {field} type '{tool_type}': the Chat Completions adapter supports only function tools and none, auto, required, or named function tool choices"
+    ))
+    .into())
+}
+
 /// Convert Responses API ToolChoiceParam to ChatCompletionToolChoiceOption.
-fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
-    match tc {
+///
+/// Preserve supported modes and named functions; return `InvalidArgument` for
+/// choices whose semantics cannot be represented by the adapter.
+fn convert_tool_choice(tc: &ToolChoiceParam) -> anyhow::Result<ChatCompletionToolChoiceOption> {
+    Ok(match tc {
         ToolChoiceParam::Mode(mode) => match mode {
             ToolChoiceOptions::None => ChatCompletionToolChoiceOption::None,
             ToolChoiceOptions::Auto => ChatCompletionToolChoiceOption::Auto,
@@ -753,15 +768,8 @@ fn convert_tool_choice(tc: &ToolChoiceParam) -> ChatCompletionToolChoiceOption {
                 },
             })
         }
-        ToolChoiceParam::Hosted(_) => {
-            // Hosted tools are not forwarded to chat completions
-            ChatCompletionToolChoiceOption::Auto
-        }
-        _ => {
-            // Other tool choice types (AllowedTools, Mcp, Custom, etc.) default to auto
-            ChatCompletionToolChoiceOption::Auto
-        }
-    }
+        _ => return unsupported_tool(tc, "tool_choice"),
+    })
 }
 
 /// Convert Responses API `text.format` to Chat Completions `response_format`.
@@ -876,7 +884,12 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             .filter(|t: &Vec<_>| !t.is_empty());
 
         // Convert tool_choice if present
-        let tool_choice = resp.inner.tool_choice.as_ref().map(convert_tool_choice);
+        let tool_choice = resp
+            .inner
+            .tool_choice
+            .as_ref()
+            .map(convert_tool_choice)
+            .transpose()?;
 
         // Determine stream setting: respect caller's preference, default to true for aggregation
         let stream = resp.inner.stream.or(Some(true));
@@ -932,76 +945,6 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
 
 fn convert_top_logprobs(input: Option<u8>) -> Option<u8> {
     input.map(|x| x.min(20))
-}
-
-/// Parse `<tool_call>` blocks from model text output.
-/// Returns a list of (name, arguments_json) tuples.
-/// Returns an empty vec immediately if no `<tool_call>` tag is present.
-fn parse_tool_call_text(text: &str) -> Vec<(String, String)> {
-    if !text.contains("<tool_call>") {
-        return Vec::new();
-    }
-    let mut results = Vec::new();
-    let mut search_start = 0;
-    while let Some(start) = text[search_start..].find("<tool_call>") {
-        let abs_start = search_start + start + "<tool_call>".len();
-        if let Some(end) = text[abs_start..].find("</tool_call>") {
-            let block = text[abs_start..abs_start + end].trim();
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(block) {
-                let name = parsed
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let arguments = if let Some(args) = parsed.get("arguments") {
-                    if args.is_string() {
-                        args.as_str().unwrap_or("{}").to_string()
-                    } else {
-                        serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string())
-                    }
-                } else {
-                    "{}".to_string()
-                };
-                if !name.is_empty() {
-                    results.push((name, arguments));
-                }
-            }
-            search_start = abs_start + end + "</tool_call>".len();
-        } else {
-            break;
-        }
-    }
-    results
-}
-
-/// Strip `<tool_call>...</tool_call>` blocks and any `<think>...</think>` blocks from text.
-/// Returns the original string (no allocation) if no tags are present.
-fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
-    let has_tool = text.contains("<tool_call>");
-    let has_think = text.contains("<think>");
-    if !has_tool && !has_think {
-        return std::borrow::Cow::Borrowed(text);
-    }
-
-    fn strip_tag(input: &mut String, open: &str, close: &str) {
-        while let Some(start) = input.find(open) {
-            if let Some(end_offset) = input[start..].find(close) {
-                input.replace_range(start..start + end_offset + close.len(), "");
-            } else {
-                input.truncate(start);
-                break;
-            }
-        }
-    }
-
-    let mut result = text.to_string();
-    if has_tool {
-        strip_tag(&mut result, "<tool_call>", "</tool_call>");
-    }
-    if has_think {
-        strip_tag(&mut result, "<think>", "</think>");
-    }
-    std::borrow::Cow::Owned(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,18 +1081,6 @@ fn make_text_message(id: String, text: String) -> OutputItem {
     })
 }
 
-/// Build a function call output item with generated IDs.
-fn make_function_call(name: String, arguments: String, namespace: Option<String>) -> OutputItem {
-    OutputItem::FunctionCall(FunctionToolCall {
-        arguments,
-        call_id: format!("call_{}", Uuid::new_v4().simple()),
-        namespace,
-        name,
-        id: Some(format!("fc_{}", Uuid::new_v4().simple())),
-        status: Some(OutputStatus::Completed),
-    })
-}
-
 /// Convert a ChatCompletion response into a Responses API response object,
 /// echoing back the actual request parameters from `params`.
 pub fn chat_completion_to_response(
@@ -1200,8 +1131,6 @@ pub fn chat_completion_to_response(
                 }));
             }
         }
-        // Handle text content -- also parse <tool_call> blocks from models
-        // that emit tool calls as text (e.g. Qwen3)
         let content_text = match choice.message.content {
             Some(dynamo_protocols::types::ChatCompletionMessageContent::Text(text)) => Some(text),
             Some(dynamo_protocols::types::ChatCompletionMessageContent::Parts(_)) => {
@@ -1215,22 +1144,7 @@ pub fn chat_completion_to_response(
         if let Some(content_text) = content_text
             && !content_text.is_empty()
         {
-            let parsed_calls = parse_tool_call_text(&content_text);
-            if !parsed_calls.is_empty() {
-                for (name, arguments) in parsed_calls {
-                    let namespace = params.namespace_for_function(&name);
-                    output.push(make_function_call(name, arguments, namespace));
-                }
-                let remaining = strip_tool_call_text(&content_text);
-                if !remaining.trim().is_empty() {
-                    output.push(make_text_message(
-                        message_id.clone(),
-                        remaining.into_owned(),
-                    ));
-                }
-            } else {
-                output.push(make_text_message(message_id.clone(), content_text));
-            }
+            output.push(make_text_message(message_id.clone(), content_text));
         }
 
         if output.is_empty() {
@@ -2998,55 +2912,45 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_tool_call_text() {
-        // Standard Qwen3 format
-        let text = r#"<think>
-Let me check the weather.
-</think>
-
-<tool_call>
-{"name": "get_weather", "arguments": {"location": "San Francisco"}}
-</tool_call>"#;
-        let calls = parse_tool_call_text(text);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, "get_weather");
-        let args: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
-        assert_eq!(args["location"], "San Francisco");
-    }
-
-    #[test]
-    fn test_parse_tool_call_text_multiple() {
-        let text = r#"<tool_call>
-{"name": "func_a", "arguments": {"x": 1}}
-</tool_call>
-<tool_call>
-{"name": "func_b", "arguments": {"y": 2}}
-</tool_call>"#;
-        let calls = parse_tool_call_text(text);
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "func_a");
-        assert_eq!(calls[1].0, "func_b");
-    }
-
-    #[test]
-    fn test_parse_tool_call_text_no_calls() {
-        let text = "Just a regular message with no tool calls.";
-        let calls = parse_tool_call_text(text);
-        assert!(calls.is_empty());
-    }
-
-    #[test]
-    fn test_strip_tool_call_text() {
-        let text = r#"<think>
-thinking
-</think>
-
-<tool_call>
-{"name": "f", "arguments": {}}
-</tool_call>"#;
-        let stripped = strip_tool_call_text(text);
-        assert!(!stripped.contains("<tool_call>"));
-        assert!(!stripped.contains("<think>"));
+    fn test_response_preserves_literal_tool_markup_alongside_structured_call() {
+        let text = r#"Example: <think>reasoning</think><tool_call>{"name":"get_weather","arguments":{}}</tool_call>"#;
+        let params = ResponseParams {
+            tools: Some(
+                serde_json::from_value(serde_json::json!([{
+                    "type": "namespace", "name": "weather", "description": "Weather tools",
+                    "tools": [{"type": "function", "name": "get_weather"}]
+                }]))
+                .unwrap(),
+            ),
+            tool_choice: Some(ToolChoiceParam::Mode(ToolChoiceOptions::Auto)),
+            ..Default::default()
+        };
+        let mut chat = make_chat_resp_with_text(text);
+        chat.inner.choices[0].message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
+            id: "call_original".into(),
+            r#type: FunctionType::Function,
+            function: dynamo_protocols::types::FunctionCall {
+                name: "get_weather".into(),
+                arguments: r#"{"city":"Paris"}"#.into(),
+            },
+        }]);
+        chat.inner.choices[0].finish_reason = Some(FinishReason::ToolCalls);
+        let response = chat_completion_to_response(chat, &params, None).unwrap();
+        assert_eq!(response.inner.output.len(), 2);
+        let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+            panic!("expected the structured function call");
+        };
+        assert_eq!(call.call_id, "call_original");
+        assert_eq!(call.name, "get_weather");
+        assert_eq!(call.namespace.as_deref(), Some("weather"));
+        assert_eq!(call.arguments, r#"{"city":"Paris"}"#);
+        let OutputItem::Message(message) = &response.inner.output[1] else {
+            panic!("expected the original text");
+        };
+        let OutputMessageContent::OutputText(content) = &message.content[0] else {
+            panic!("expected output text");
+        };
+        assert_eq!(content.text, text);
     }
 
     // ── PR1: reasoning / text.format / service_tier pass-through tests ──
