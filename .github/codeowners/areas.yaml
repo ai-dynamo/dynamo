@@ -580,6 +580,7 @@ shared:
   - frontend
   - gms
   - kv-memory
+  - lpx
   - multimodal
   - observability
   - operator
