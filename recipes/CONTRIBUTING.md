@@ -201,10 +201,11 @@ The render convention is:
   `unfold` renders each selected source into an ordinary Component under the
   public overlay's `components/` directory at the selected path. Users never
   need Jinja to inspect or apply that overlay.
-- Legacy strategic-merge bases that patch Dynamo CRDs include the central
+- Bases that use strategic merge patches against Dynamo CRDs include the central
   `recipes/kustomize/components/dynamo-openapi/` Component. Its generated
-  schema is derived from every operator CRD and lets strategic merge patches
-  merge CRD map lists such as `env` by name. The beta cluster starter carries
+  schema is derived from every operator CRD, with an additional Kustomize-only
+  merge rule for beta DGD `spec.env`. Shared `spec.env` and container `env`
+  entries merge by `name`. The beta cluster starter carries
   a generated copy of the same schema so that its strategic merge networking
   Components and hook patches merge by name; its guarded JSON 6902 Components
   do not depend on it.
@@ -213,6 +214,31 @@ The render convention is:
   `DecodeWorker` service keys.
 
 Within the legacy alpha matrix path, prefer resource-shaped Kustomize merge patches where possible. For other Custom Resource Definition (CRD) list fields, include the complete intended list in the merge patch unless the schema supplies an OpenAPI merge key. In the beta cluster starter, use guarded JSON 6902 for the structural Components whose correctness depends on canonical list positions and fail-loud preconditions, and strategic merge patches addressed by name for the networking Components and hook patches.
+
+With the schema loaded, a strategic merge patch adds new environment names,
+updates matching entries, and preserves entries omitted from the patch. For a
+beta DGD named `example`, the following patch updates an existing `HF_HOME` and
+adds `UCX_TLS`, while preserving an existing `MODEL_NAME`:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: example
+spec:
+  env:
+    - name: HF_HOME
+      value: /cluster-cache
+    - name: UCX_TLS
+      value: rc_x
+```
+
+This rule applies during Kustomize rendering. It does not change the operator
+CRD or DGDR override semantics, where shared `spec.env` remains an atomic list.
+JSON 6902 `add` operations at `/spec/env/-` still append literally and can create
+duplicate names. Regenerate both checked-in schema copies with
+`python3 scripts/generate_kustomize_openapi.py`; refresh the schema in an older
+copied cluster starter to use the shared-env merge rule.
 
 Edit the Kustomize source, not the generated manifests. A recipe matrix is an
 explicit `.kustomize-matrix.yaml` beside the recipe. It names the Kustomize
