@@ -60,6 +60,9 @@ class _Worker:
             server_task = asyncio.ensure_future(
                 endpoint.serve_endpoint(_generate_error)
             )
+        # BaseException, not Exception: a cancelled setup must still shut the runtime down, or
+        # its detached endpoint cleanup task outlives this test and removes a later test's
+        # handler — the contamination this test exists to catch.
         except BaseException:
             runtime.shutdown()
             raise

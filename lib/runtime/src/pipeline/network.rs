@@ -43,11 +43,20 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 /// Shared default maximum TCP message size across request-plane components.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
-/// Prefix a request-plane server writes on the request connection to reject a request it cannot
-/// serve. The client matches on it to classify the reply as a rejection rather than the success
+/// Prefixes a request-plane server writes on the request connection to reject a request it cannot
+/// serve. The client matches on them to classify the reply as a rejection rather than the success
 /// ACK; anything it does not recognise is read as the ACK and it waits for a response stream.
-/// Both ends must use this constant.
+/// Both ends must use these constants.
 pub(crate) const ACK_UNAVAILABLE_PREFIX: &str = "Server unavailable:";
+pub(crate) const ACK_OVERLOADED_PREFIX: &str = "Server overloaded:";
+
+/// Request path and handler-map key for one endpoint instance on the shared TCP server. Several
+/// instances in one process share that server, so the key must carry the instance id. The worker
+/// registers under this path, its teardown removes exactly this path, and the address clients dial
+/// ends with it — all three must agree, so all three derive it here.
+pub(crate) fn instance_path(endpoint_name: &str, instance_id: u64) -> String {
+    format!("{instance_id:x}/{endpoint_name}")
+}
 
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();

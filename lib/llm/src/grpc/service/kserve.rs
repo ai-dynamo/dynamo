@@ -434,7 +434,6 @@ impl InferRequest {
                     response: NvCreateTensorResponse::from_annotated_stream(stream)
                         .await
                         .map_err(|e| {
-                            tracing::error!("Failed to fold completions stream: {:?}", e);
                             dispatch_error_status(e.as_ref(), "Failed to fold completions stream")
                         })?,
                     set_raw_output_contents,
@@ -455,7 +454,6 @@ impl InferRequest {
                     NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
                         .await
                         .map_err(|e| {
-                            tracing::error!("Failed to fold completions stream: {:?}", e);
                             dispatch_error_status(&e, "Failed to fold completions stream")
                         })?;
                 completion_response.try_into().map_err(|e| {
@@ -556,13 +554,7 @@ impl InferRequest {
                     } else {
                         let completion_response = NvCreateCompletionResponse::from_annotated_stream(stream, parsing_options)
                             .await
-                            .map_err(|e| {
-                                tracing::error!(
-                                    "Failed to fold completions stream: {:?}",
-                                    e
-                                );
-                                dispatch_error_status(&e, "Failed to fold completions stream")
-                            })?;
+                            .map_err(|e| dispatch_error_status(&e, "Failed to fold completions stream"))?;
 
                         let mut response: ModelStreamInferResponse = completion_response.try_into().map_err(|e| {
                             Status::invalid_argument(format!("Failed to parse response: {}", e))

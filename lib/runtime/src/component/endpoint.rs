@@ -336,16 +336,14 @@ fn build_transport_type_inner(
                 .filter(|&p| p != 0)
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
-            // Include instance_id and endpoint name for proper TCP routing.
-            // Format: host:port/instance_id_hex/endpoint_name
-            // This ensures each worker has a unique routing key when multiple workers
-            // share the same TCP server (e.g., --num-workers > 1).
-            let tcp_endpoint = format!(
-                "{}:{}/{:x}/{}",
-                tcp_host, tcp_port, connection_id, endpoint_id.name
-            );
+            // The dialed address is the server's bind address followed by the same instance path
+            // the worker registers its handler under, so clients reach exactly one instance.
+            let instance_path =
+                crate::pipeline::network::instance_path(&endpoint_id.name, connection_id);
 
-            Ok(TransportType::Tcp(tcp_endpoint))
+            Ok(TransportType::Tcp(format!(
+                "{tcp_host}:{tcp_port}/{instance_path}"
+            )))
         }
         RequestPlaneMode::Nats => Ok(TransportType::Nats(nats::instance_subject(
             endpoint_id,

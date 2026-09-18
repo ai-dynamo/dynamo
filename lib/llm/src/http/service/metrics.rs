@@ -105,6 +105,46 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
 
+/// Why a dispatch failed, in the precedence every frontend applies. Classified once by
+/// [`Self::classify`] so a new error flavor is answered the same way everywhere: adding a
+/// variant here makes each frontend's `match` fail to compile until it handles it, which an
+/// `if`-cascade per frontend does not.
+///
+/// The response bodies stay with each frontend, which owns its own error envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchFailure {
+    Cancelled,
+    Rejected,
+    Unavailable,
+    Internal,
+}
+
+impl DispatchFailure {
+    /// Classify a failed dispatch. `killed` carries the request context's own cancellation
+    /// state, which the error chain does not record.
+    pub fn classify(err: &(dyn std::error::Error + 'static), killed: bool) -> Self {
+        if killed || request_was_cancelled(err) {
+            Self::Cancelled
+        } else if request_was_rejected(err) {
+            Self::Rejected
+        } else if request_was_unavailable(err) {
+            Self::Unavailable
+        } else {
+            Self::Internal
+        }
+    }
+
+    /// The label this failure is counted under. Rejections and unavailability share
+    /// [`ErrorType::Unavailable`]: both mean the request found no worker to serve it.
+    pub fn metric_error_type(self) -> ErrorType {
+        match self {
+            Self::Cancelled => ErrorType::Cancelled,
+            Self::Rejected | Self::Unavailable => ErrorType::Unavailable,
+            Self::Internal => ErrorType::Internal,
+        }
+    }
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;

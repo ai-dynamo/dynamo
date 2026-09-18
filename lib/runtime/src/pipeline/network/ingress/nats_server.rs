@@ -35,11 +35,34 @@ struct EndpointTask {
     join_handle: tokio::task::JoinHandle<()>,
 }
 
-/// NATS subject and handler-map key for one endpoint instance. Several instances in one
-/// process can register the same endpoint name, so the key must carry the instance id;
-/// register and unregister must agree on it or a teardown removes the wrong task, or none.
-fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
+/// Handler-map key and service-group endpoint name for one endpoint instance: the trailing
+/// `{name}-{id:x}` of the client subject built by [`crate::transports::nats::instance_subject`].
+/// Several instances in one process can register the same endpoint name, so the key must carry
+/// the instance id.
+fn endpoint_with_id(endpoint_name: &str, instance_id: u64) -> String {
     format!("{endpoint_name}-{instance_id:x}")
+}
+
+/// Store one instance's task. Keyed per instance so a second instance of the same endpoint
+/// name does not evict the first's cancel token and join handle.
+fn store_handler(
+    handlers: &DashMap<String, EndpointTask>,
+    endpoint_name: &str,
+    instance_id: u64,
+    task: EndpointTask,
+) {
+    handlers.insert(endpoint_with_id(endpoint_name, instance_id), task);
+}
+
+/// Take only the caller's instance's task, leaving other instances of the same endpoint name.
+fn take_handler(
+    handlers: &DashMap<String, EndpointTask>,
+    endpoint_name: &str,
+    instance_id: u64,
+) -> Option<EndpointTask> {
+    handlers
+        .remove(&endpoint_with_id(endpoint_name, instance_id))
+        .map(|(_, task)| task)
 }
 
 impl NatsMultiplexedServer {
@@ -105,7 +128,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         tracing::info!("Successfully retrieved service group");
 
-        let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
+        let endpoint_with_id = endpoint_with_id(&endpoint_name, instance_id);
 
         // Create NATS service endpoint with the full subject
         let service_endpoint = service_group
@@ -180,8 +203,10 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Store task info for later cleanup
-        self.handlers.insert(
-            endpoint_with_id,
+        store_handler(
+            &self.handlers,
+            &endpoint_name,
+            instance_id,
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
@@ -192,11 +217,10 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
-        let endpoint_with_id = instance_subject(endpoint_name, instance_id);
-        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
+        if let Some(task) = take_handler(&self.handlers, endpoint_name, instance_id) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
-                endpoint_with_id = %endpoint_with_id,
+                instance_id = instance_id,
                 "Unregistering NATS endpoint"
             );
             // Cancel the token to trigger graceful shutdown
@@ -243,13 +267,59 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 mod tests {
     use super::*;
 
+    fn idle_task() -> EndpointTask {
+        EndpointTask {
+            cancel_token: CancellationToken::new(),
+            join_handle: tokio::spawn(std::future::pending()),
+        }
+    }
+
     #[test]
-    fn instance_subject_is_the_client_subject_and_unique_per_instance() {
-        assert_eq!(instance_subject("generate", 0xa), "generate-a");
-        assert_ne!(
-            instance_subject("generate", 0xa),
-            instance_subject("generate", 0xb),
-            "two instances of one endpoint name must not share a handler-map key"
+    fn endpoint_with_id_is_the_tail_of_the_client_subject() {
+        let endpoint_id = crate::protocols::EndpointId {
+            namespace: "ns".to_string(),
+            component: "component".to_string(),
+            name: "generate".to_string(),
+        };
+        let client_subject = crate::transports::nats::instance_subject(&endpoint_id, 0xa);
+        assert!(
+            client_subject.ends_with(&endpoint_with_id("generate", 0xa)),
+            "the handler-map key must be the tail of the subject clients dial, got {client_subject}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_instances_of_one_endpoint_name_coexist() {
+        let handlers = DashMap::new();
+
+        store_handler(&handlers, "generate", 0xa, idle_task());
+        store_handler(&handlers, "generate", 0xb, idle_task());
+
+        assert_eq!(
+            handlers.len(),
+            2,
+            "a second instance's registration must not evict the first's task"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_handler_removes_only_the_callers_instance() {
+        let handlers = DashMap::new();
+        store_handler(&handlers, "generate", 0xa, idle_task());
+        store_handler(&handlers, "generate", 0xb, idle_task());
+
+        let taken = take_handler(&handlers, "generate", 0xa).expect("own task should be taken");
+        taken.cancel_token.cancel();
+
+        let survivor = take_handler(&handlers, "generate", 0xb)
+            .expect("the other instance's task must survive this teardown");
+        assert!(
+            !survivor.cancel_token.is_cancelled(),
+            "the other instance's task must not be cancelled by this teardown"
+        );
+        assert!(
+            take_handler(&handlers, "generate", 0xa).is_none(),
+            "a taken instance must not be takeable twice"
         );
     }
 }

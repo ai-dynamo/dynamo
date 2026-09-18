@@ -28,7 +28,7 @@ use super::disconnect::{
     ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_error,
 };
 use super::error::SanitizedError;
-use super::metrics::{CancellationLabels, ErrorType};
+use super::metrics::{CancellationLabels, DispatchFailure, ErrorType};
 use super::openai::{
     check_model_serving_ready, check_ready, context_from_headers, find_invalid_argument_in_chain,
     get_body_limit, get_or_create_request_id,
@@ -384,44 +384,16 @@ async fn dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
-            let was_cancelled = request_context.is_killed()
-                || super::metrics::request_was_cancelled(error.as_ref());
-            let was_rejected = super::metrics::request_was_rejected(error.as_ref());
-            let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
-            let invalid_argument = find_invalid_argument_in_chain(error.as_ref());
-            inflight_guard.mark_error(if was_cancelled {
-                ErrorType::Cancelled
-            } else if was_rejected || was_unavailable {
-                ErrorType::Unavailable
-            } else if invalid_argument.is_some() {
-                ErrorType::Validation
-            } else {
-                ErrorType::Internal
+            let failure = DispatchFailure::classify(error.as_ref(), request_context.is_killed());
+            // This frontend refines the internal arm: a bad argument the engine rejected is the
+            // caller's fault, not ours. The other arms cannot be an argument error.
+            let invalid_argument = (failure == DispatchFailure::Internal)
+                .then(|| find_invalid_argument_in_chain(error.as_ref()))
+                .flatten();
+            inflight_guard.mark_error(match invalid_argument {
+                Some(_) => ErrorType::Validation,
+                None => failure.metric_error_type(),
             });
-            if was_cancelled {
-                return cancelled_response();
-            }
-            if was_rejected {
-                tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected SGLang generate request");
-                state
-                    .metrics_clone()
-                    .inc_rejection(&model, super::metrics::Endpoint::Generate);
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "engine rejected the request".to_string(),
-                );
-            }
-            if was_unavailable {
-                tracing::warn!(
-                    %request_id,
-                    error = %format!("{error:#}"),
-                    "no worker available for SGLang generate request"
-                );
-                return error_response(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    SanitizedError::Unavailable.to_string(),
-                );
-            }
             if let Some(invalid_argument) = invalid_argument {
                 tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected invalid SGLang generate request");
                 return error_response(
@@ -429,8 +401,34 @@ async fn dispatch(
                     invalid_argument.message().to_string(),
                 );
             }
-            tracing::error!(%request_id, error = %format!("{error:#}"), "SGLang engine generate call failed");
-            return internal_error_response();
+            return match failure {
+                DispatchFailure::Cancelled => cancelled_response(),
+                DispatchFailure::Rejected => {
+                    tracing::warn!(%request_id, error = %format!("{error:#}"), "engine rejected SGLang generate request");
+                    state
+                        .metrics_clone()
+                        .inc_rejection(&model, super::metrics::Endpoint::Generate);
+                    error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "engine rejected the request".to_string(),
+                    )
+                }
+                DispatchFailure::Unavailable => {
+                    tracing::warn!(
+                        %request_id,
+                        error = %format!("{error:#}"),
+                        "no worker available for SGLang generate request"
+                    );
+                    error_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        SanitizedError::Unavailable.to_string(),
+                    )
+                }
+                DispatchFailure::Internal => {
+                    tracing::error!(%request_id, error = %format!("{error:#}"), "SGLang engine generate call failed");
+                    internal_error_response()
+                }
+            };
         }
     };
 

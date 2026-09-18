@@ -12,7 +12,9 @@ use crate::metrics::work_handler_pool::{
     WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
     WORK_HANDLER_QUEUE_DEPTH,
 };
-use crate::pipeline::network::PushWorkHandler;
+use crate::pipeline::network::{
+    ACK_OVERLOADED_PREFIX, ACK_UNAVAILABLE_PREFIX, PushWorkHandler, instance_path,
+};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -87,13 +89,6 @@ struct WorkItem {
     namespace: String,
     component_name: String,
     endpoint_name: String,
-}
-
-/// Handler-map key and request path for one endpoint instance. Several instances in one process
-/// share this server, so the key must carry the instance id; register and unregister must agree on
-/// the format or a teardown removes the wrong handler, or none.
-fn instance_path(endpoint_name: &str, instance_id: u64) -> String {
-    format!("{instance_id:x}/{endpoint_name}")
 }
 
 /// Shared TCP server that handles multiple endpoints on a single port
@@ -448,7 +443,7 @@ impl SharedTcpServer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn register_endpoint(
+    pub async fn insert_handler(
         &self,
         endpoint_path: String,
         service_handler: Arc<dyn PushWorkHandler>,
@@ -484,26 +479,31 @@ impl SharedTcpServer {
         Ok(())
     }
 
-    pub async fn remove_handler(&self, endpoint_path: &str, endpoint_name: &str) {
-        if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
-            handler
-                .system_health
-                .lock()
-                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
-            tracing::info!(
-                endpoint_name = %endpoint_name,
-                endpoint_path = %endpoint_path,
-                "Unregistered TCP endpoint handler"
-            );
+    /// Remove one handler and drain its inflight requests, up to
+    /// [`crate::runtime::graceful_shutdown_timeout`].
+    pub async fn remove_handler(&self, endpoint_path: &str) {
+        let Some((_, handler)) = self.handlers.remove(endpoint_path) else {
+            return;
+        };
+        let endpoint_name = handler.endpoint_name.as_str();
 
-            super::drain_inflight(
-                handler.inflight.clone(),
-                handler.notify.clone(),
-                endpoint_name,
-                crate::runtime::graceful_shutdown_timeout(),
-            )
-            .await;
-        }
+        handler
+            .system_health
+            .lock()
+            .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+        tracing::info!(
+            endpoint_name = %endpoint_name,
+            endpoint_path = %endpoint_path,
+            "Unregistered TCP endpoint handler"
+        );
+
+        super::drain_inflight(
+            handler.inflight.clone(),
+            handler.notify.clone(),
+            endpoint_name,
+            crate::runtime::graceful_shutdown_timeout(),
+        )
+        .await;
     }
 
     /// Start the server (legacy method - prefer bind_and_start for new code).
@@ -633,8 +633,7 @@ impl SharedTcpServer {
                     // The client only treats this prefix as a rejection; any other reply is
                     // read as a success ACK and it waits for a response stream that never opens.
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
-                        "{} unknown endpoint {endpoint_path}",
-                        crate::pipeline::network::ACK_UNAVAILABLE_PREFIX
+                        "{ACK_UNAVAILABLE_PREFIX} unknown endpoint {endpoint_path}"
                     )));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
@@ -697,17 +696,16 @@ impl SharedTcpServer {
                         instance_id = handler.instance_id,
                         "TCP worker pool and work queue full, rejecting request"
                     );
-                    send_response(TcpResponseMessage::new(Bytes::from_static(
-                        b"Server overloaded: worker at capacity",
-                    )));
+                    send_response(TcpResponseMessage::new(Bytes::from(format!(
+                        "{ACK_OVERLOADED_PREFIX} worker at capacity"
+                    ))));
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     send_response(TcpResponseMessage::new(Bytes::from(format!(
-                        "{} worker pool channel closed",
-                        crate::pipeline::network::ACK_UNAVAILABLE_PREFIX
+                        "{ACK_UNAVAILABLE_PREFIX} worker pool channel closed"
                     ))));
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
@@ -744,7 +742,7 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        self.register_endpoint(
+        self.insert_handler(
             instance_path(&endpoint_name, instance_id),
             service_handler,
             instance_id,
@@ -758,7 +756,7 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
 
     async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
         // Other instances in this process may serve the same endpoint name; remove only ours.
-        self.remove_handler(&instance_path(endpoint_name, instance_id), endpoint_name)
+        self.remove_handler(&instance_path(endpoint_name, instance_id))
             .await;
         Ok(())
     }
@@ -883,7 +881,7 @@ mod tests {
         let system_health = ready_system_health();
 
         server
-            .register_endpoint(
+            .insert_handler(
                 endpoint_path.clone(),
                 handler.clone() as Arc<dyn PushWorkHandler>,
                 1,
@@ -941,7 +939,7 @@ mod tests {
             let server = server.clone();
             let endpoint_path = endpoint_path.clone();
             async move {
-                server.remove_handler(&endpoint_path, "test_endpoint").await;
+                server.remove_handler(&endpoint_path).await;
                 Instant::now()
             }
         });
@@ -1028,11 +1026,10 @@ mod tests {
         let addr = server.clone().bind_and_start().await.unwrap();
 
         let system_health = ready_system_health();
-        let plane: &dyn RequestPlaneServer = server.as_ref();
         let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
         let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
         for (instance_id, handler) in [(0xa_u64, removed), (0xb_u64, survivor.clone())] {
-            plane
+            server
                 .register_endpoint(
                     "generate".to_string(),
                     handler as Arc<dyn PushWorkHandler>,
@@ -1045,7 +1042,7 @@ mod tests {
                 .unwrap();
         }
 
-        plane.unregister_endpoint("generate", 0xa).await.unwrap();
+        server.unregister_endpoint("generate", 0xa).await.unwrap();
 
         let client = TcpRequestClient::new().unwrap();
 
@@ -1061,7 +1058,7 @@ mod tests {
 
         let ack = send_ack(&client, addr, "a/generate").await;
         assert!(
-            ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
+            ack.starts_with(ACK_UNAVAILABLE_PREFIX.as_bytes()),
             "removed instance should be rejected on the ACK, got {:?}",
             String::from_utf8_lossy(&ack)
         );
