@@ -827,7 +827,7 @@ impl Metrics {
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
+    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 80.0, 20)
     /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
@@ -1024,7 +1024,7 @@ impl Metrics {
 
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
         let (itl_min, itl_max, itl_count) =
-            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
@@ -2780,9 +2780,11 @@ mod tests {
 
     #[test]
     fn itl_ceiling_env_var_reaches_the_exported_le_labels() {
+        // Deliberately not the default (80.0, 20): a test that sets the env to the
+        // default value would pass even if the variable were ignored entirely.
         let env = fake_env(&[
-            ("DYN_METRICS_ITL_MAX", "80"),
-            ("DYN_METRICS_ITL_COUNT", "20"),
+            ("DYN_METRICS_ITL_MAX", "30"),
+            ("DYN_METRICS_ITL_COUNT", "8"),
         ]);
         let registry = Registry::new();
         let metrics = Metrics::build(None, &env);
@@ -2802,8 +2804,46 @@ mod tests {
         );
         assert_eq!(
             bounds.last().copied(),
-            Some(80.0),
+            Some(30.0),
             "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
+        );
+        assert_eq!(
+            bounds.len(),
+            8,
+            "bucket count should follow DYN_METRICS_ITL_COUNT"
+        );
+    }
+
+    #[test]
+    fn itl_default_buckets_reach_80_seconds() {
+        // The ceiling was 2.0s, so any inter-token latency above it landed in `+Inf` and
+        // `histogram_quantile` pinned p99 at exactly 2.0 -- indistinguishable from a real
+        // 2s measurement. Guard the shipped default, not just the env-var override.
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &fake_env(&[]));
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.5);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        // The exact set is the contract. Note the bottom edge of 0.0018: vLLM's equivalent
+        // starts at 0.01 and cannot resolve anything faster than 10ms per token, so raising
+        // the ceiling must not cost the low-end resolution Dynamo has and vLLM does not.
+        assert_eq!(
+            bounds,
+            vec![
+                0.0, 0.0018, 0.0033, 0.0059, 0.011, 0.02, 0.035, 0.064, 0.12, 0.21, 0.38, 0.69,
+                1.2, 2.3, 4.1, 7.4, 13.0, 24.0, 44.0, 80.0
+            ],
         );
     }
 
@@ -2841,11 +2881,12 @@ mod tests {
     #[test]
     fn test_all_buckets_are_two_sig_figs() {
         let test_cases = vec![
-            (1.0, 256.0, 10),
+            (1.0, 512.0, 10),
             (50.0, 128000.0, 12),
             (50.0, 32000.0, 10),
             (0.001, 480.0, 18),
-            (0.001, 2.0, 13),
+            (0.001, 80.0, 20),
+            (0.001, 10.0, 14),
         ];
 
         for (min, max, count) in test_cases {
