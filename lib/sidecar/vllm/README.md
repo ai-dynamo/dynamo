@@ -291,14 +291,19 @@ offline deployments must supply that binary through an image or volume instead.
 The engine image must include a `vllm-rs` build compatible with the pinned
 `vllm-proto` crate.
 
-Until [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897) is implemented,
-the current sidecar waits for engine metadata before starting its HTTP listener.
-The examples override its startup probe with a process check so Kubernetes can
-start the engine, and delay HTTP liveness for five minutes. HTTP readiness still
-waits for sidecar initialization. Increase the engine startup budget and sidecar
-liveness delay together for larger models. These examples demonstrate rendering
-and inference; engine/sidecar restart recovery and shutdown semantics still depend
-on the lifecycle work.
+Use a sidecar image containing the early HTTP/probe changes from
+[PR #15051](https://github.com/ai-dynamo/dynamo/pull/15051), which implements the
+startup and readiness portion of [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
+The operator injects the sidecar's startup and liveness probes on `/live` and its
+readiness probe on `/health`; no probe overrides are needed. The HTTP listener
+starts before runtime connections or engine metadata discovery. `/live` stays
+independent of both, while `/health` checks runtime initialization, required
+runtime connectivity, and shutdown. Engine loading does not hold either probe
+unready. The engine's separate exec probes keep the pod unready until both gRPC
+services are serving. Increase only the engine startup budget for larger models.
+
+Continuous engine-health reconciliation, engine restart recovery, and changes to
+engine drain/grace behavior remain deferred to the rest of DEP #14897.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that
@@ -317,12 +322,13 @@ upstream vLLM images and locate the binary inside the Python package.
 
 ### 1. Build and push the sidecar image
 
-Build and push the image to a registry your cluster can pull from:
+From a checkout containing PR #15051, build and push the image to a registry
+your cluster can pull from:
 
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 \
   -f lib/sidecar/Dockerfile \
-  -t <your-registry>/dynamo-sidecar:1.3.0 --push .
+  -t <your-registry>/dynamo-sidecar:1.6.0 --push .
 ```
 
 See [Build the image](../README.md#build-the-image) for a single-architecture
