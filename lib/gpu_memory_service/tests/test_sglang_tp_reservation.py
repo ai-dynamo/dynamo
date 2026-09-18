@@ -11,6 +11,13 @@ from gpu_memory_service.integrations.common.kv_lease_client import KVLease
 from gpu_memory_service.integrations.sglang import install_kv_leases as hooks
 from gpu_memory_service.integrations.sglang.tp_consistency import TPConsistency
 
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.sglang,
+    pytest.mark.gpu_0,
+]
+
 
 class _Votes:
     """Execute the real agreement protocol on two simulated scheduler ranks."""
@@ -141,13 +148,13 @@ def test_full_retained_window_reclaims_actual_demand(monkeypatch):
 
 def test_window_contention_falls_back_to_request_size(monkeypatch):
     rings = [_Ring(0), _Ring(7)]
-    rings[1].acquire("competitor", 1, [1], True)
+    rings[1].acquire("competitor", 3, [1, 2, 3], True)
     allocators = _cohort_allocators(monkeypatch, rings, "test")
     monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4")
     with ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(_reserve, allocators))
     assert all(result is not None for result in results)
-    assert [[lease.block_id for lease in result] for result in results] == [[2], [2]]
+    assert [[lease.block_id for lease in result] for result in results] == [[4], [4]]
 
 
 @pytest.mark.parametrize("rollback", ["allocation", "adoption", "queued-release"])
@@ -171,6 +178,35 @@ def test_rollback_realigns_remaining_window(monkeypatch, rollback):
     next_leases = hooks._consume_tp_reservation(allocator, 1)
     assert [lease.block_id for lease in next_leases] == [2]
     assert allocator.free_pages[0].item() == 2
+
+
+def test_small_pool_window_preserves_standby_headroom(monkeypatch):
+    rings = [_Ring(0), _Ring(7)]
+    primary = _cohort_allocators(monkeypatch, rings, "primary")
+    shadow = _cohort_allocators(monkeypatch, rings, "shadow")
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4096")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        primary_leases = list(executor.map(_reserve, primary))
+        shadow_leases = list(executor.map(_reserve, shadow))
+    assert all(leases is not None for leases in primary_leases + shadow_leases)
+    assert primary_leases[0][0].block_id != shadow_leases[0][0].block_id
+
+
+def test_explicit_demand_can_use_entire_small_pool(monkeypatch):
+    rings = [_Ring(0), _Ring(7)]
+    allocators = _cohort_allocators(monkeypatch, rings, "primary")
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4096")
+
+    def reserve_all(allocator):
+        return hooks._reserve_pages(
+            allocator, [1, 2, 3, 4], local_free=4, operation="test"
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(reserve_all, allocators))
+    assert [[lease.block_id for lease in result] for result in results] == [
+        [1, 2, 3, 4]
+    ] * 2
 
 
 def test_opposite_primary_shadow_rank_order_keeps_one_layout_per_cohort(monkeypatch):
