@@ -568,8 +568,8 @@ where
             isl_tokens,
             overlap: OverlapSignals {
                 tier_overlap_blocks,
-                effective_overlap_blocks: effective_overlap_blocks.into_iter().collect(),
-                effective_cached_tokens: effective_cached_tokens.into_iter().collect(),
+                effective_overlap_blocks,
+                effective_cached_tokens,
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -751,8 +751,9 @@ where
         self.slots.publish_prefill_completed_if_booking(booking)
     }
 
-    /// Wait for an actor recheck of pending admission. This does not wait for
-    /// requests blocked on worker capacity to finish or for the queue to empty.
+    /// Wait for an admission recheck when queueing is enabled and the actor is running.
+    /// This does not wait for blocked requests to finish or for the queue to empty.
+    /// With queueing disabled, return immediately without an admission barrier.
     pub async fn update_queue(&self) {
         self.queue.update().await;
     }
@@ -964,6 +965,8 @@ mod tests {
             if threshold.is_some() {
                 assert!(poll_once(scheduler.update_queue()).is_pending());
                 scheduler.update_queue().await;
+            } else {
+                assert!(poll_once(scheduler.update_queue()).is_ready());
             }
             cancellation.cancel();
         }
