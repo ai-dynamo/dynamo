@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dynamo_kv_router::protocols::KvTransferEnforcement;
+use dynamo_llm::kv_router::protocols::KvTransferEnforcement;
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use tokio::time::Instant;
 
