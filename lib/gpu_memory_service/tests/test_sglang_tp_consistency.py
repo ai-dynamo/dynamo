@@ -99,6 +99,27 @@ def test_leader_true_collective_failure_is_fatal(monkeypatch):
         cohort.leader_true("candidate", True)
 
 
+def test_all_true_requires_every_rank_to_be_ready(monkeypatch):
+    cohort = TPConsistency(world_size=2)
+    monkeypatch.setattr(
+        cohort,
+        "_gather",
+        lambda value: [value, ("steady", False)],
+    )
+    assert cohort.all_true("steady", True) is False
+
+
+def test_all_true_rejects_stage_divergence(monkeypatch):
+    cohort = TPConsistency(world_size=2)
+    monkeypatch.setattr(
+        cohort,
+        "_gather",
+        lambda value: [value, ("other-stage", True)],
+    )
+    with pytest.raises(GmsTPConsistencyError, match="stage mismatch"):
+        cohort.all_true("steady", True)
+
+
 def test_digest_transaction_uses_one_compact_tensor_collective(monkeypatch):
     import torch.distributed as dist
 
@@ -145,6 +166,27 @@ def test_digest_transaction_rejects_divergent_layout(monkeypatch):
         cohort.transact_digest("publish", b"layout", lambda: None)
 
 
+def test_run_agreed_digest_returns_local_result_with_one_compact_collective(
+    monkeypatch,
+):
+    import torch.distributed as dist
+
+    cohort = TPConsistency(world_size=2)
+    calls = []
+
+    def all_gather(outputs, vote, *, group):
+        calls.append((vote.numel(), group))
+        for output in outputs:
+            output.copy_(vote)
+
+    monkeypatch.setattr(dist, "all_gather", all_gather)
+    assert cohort.run_agreed_digest("pressure", lambda: ([4, 5], b"victim-digest")) == [
+        4,
+        5,
+    ]
+    assert calls == [(33, None)]
+
+
 def test_one_rank_failure_prevents_successful_rank_from_proceeding(monkeypatch):
     cohort = TPConsistency(world_size=2)
     monkeypatch.setattr(
@@ -183,7 +225,7 @@ def test_collective_failure_is_fatal_not_a_local_cache_miss(monkeypatch):
     def broken_collective(*_args, **_kwargs):
         raise RuntimeError("peer unavailable")
 
-    monkeypatch.setattr(dist, "all_gather_object", broken_collective)
+    monkeypatch.setattr(dist, "all_gather", broken_collective)
     with pytest.raises(GmsTPConsistencyError, match="channel failed"):
         TPConsistency(world_size=2).common_prefix("lookup", [(4, 7)])
 
@@ -265,6 +307,44 @@ def test_tp_reservation_window_amortizes_successful_collectives(monkeypatch):
     assert first_gathers > 0
     assert len(gathers) == first_gathers
     assert state["tp_reserved_pages"] == [2]
+
+
+def test_tp_reservation_selects_shared_free_pages_from_full_native_set(monkeypatch):
+    import torch
+    from gpu_memory_service.integrations.common.kv_lease_client import KVLease
+    from gpu_memory_service.integrations.sglang import install_kv_leases as hooks
+
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "3")
+    cohort = TPConsistency(world_size=2)
+    monkeypatch.setattr(cohort, "_gather", lambda value: [value, value])
+    monkeypatch.setattr(cohort, "_rank", lambda: 0)
+    calls = []
+
+    def acquire(count, *, preferred_blocks, strict_preferred):
+        calls.append((count, list(preferred_blocks), strict_preferred))
+        shared_free = {4, 5, 6}
+        selected = [page for page in preferred_blocks if page in shared_free][:count]
+        if len(selected) != count:
+            raise RuntimeError("preserved prefix is not shared-free")
+        return [KVLease(page, 1) for page in selected]
+
+    client = SimpleNamespace(acquire=acquire, release=lambda _leases: None)
+    allocator = SimpleNamespace(
+        free_pages=torch.tensor([1, 2, 3, 4, 5, 6]),
+        _gms_tp_consistency=cohort,
+    )
+    state = {"client": client, "leases_by_page": {}, "retained_pages": set()}
+    monkeypatch.setattr(hooks, "torch", torch)
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    leases = hooks._reserve_pages(
+        allocator, [1], local_free=6, operation="preserved-prefix"
+    )
+
+    assert [lease.block_id for lease in leases] == [4]
+    assert calls == [(3, [1, 2, 3, 4, 5, 6], True)]
+    assert allocator.free_pages.tolist()[:3] == [4, 5, 6]
+    assert state["tp_reserved_pages"] == [5, 6]
 
 
 def test_native_capacity_agreement_is_only_on_exhaustion(monkeypatch):
@@ -364,14 +444,16 @@ def _pressure_allocator(monkeypatch, *, rank=0, failure=None):
 
     def gather(value):
         stage = value[0]
-        if stage == "pressure:victims" and failure == "victim_disagreement":
-            divergent = [(b"x" * 32, "engine-0", (4,), (2,))]
-            return [value, (stage, divergent)]
-        if stage == "pressure:eligible":
-            return [value, (stage, [4])]
-        if stage == "pressure:validate" and failure == "peer_validation":
-            return [value, (stage, False)]
+        if stage == "pressure:native-free":
+            return [value, (stage, True, [4])]
         return [value, value]
+
+    def gather_digest(stage, ok, agreement):
+        if stage == "pressure:select-validate" and failure == "peer_validation":
+            return [(ok, agreement), (False, agreement)]
+        if stage == "pressure:select-validate" and failure == "victim_disagreement":
+            return [(ok, agreement), (True, b"x" * 32)]
+        return [(ok, agreement), (ok, agreement)]
 
     def publish(items):
         for item in items:
@@ -385,6 +467,7 @@ def _pressure_allocator(monkeypatch, *, rank=0, failure=None):
         return len(items)
 
     monkeypatch.setattr(cohort, "_gather", gather)
+    monkeypatch.setattr(cohort, "_gather_digest", gather_digest)
     monkeypatch.setattr(cohort, "_rank", lambda: rank)
     state["client"].free_count = lambda: 0
     state["client"].adopt = adopt
@@ -499,3 +582,48 @@ def test_uniform_capacity_exhaustion_returns_native_backpressure(
     assert [(lease.block_id, lease.generation) for lease in released] == (
         [(4, 3)] if reclaim_available else []
     )
+
+
+@pytest.mark.parametrize("native_free,expected", [(64, 64), (3, 3)])
+def test_pressure_batches_only_already_native_free_pages(
+    monkeypatch, native_free, expected
+):
+    import torch
+
+    hooks, allocator, state, released, selected, pinned = _pressure_allocator(
+        monkeypatch
+    )
+    monkeypatch.setenv("GMS_SGLANG_TP_LEASE_WINDOW_PAGES", "4096")
+    allocator.size = 65536
+    allocator.page_size = 64
+    allocator.free_pages = torch.arange(1, native_free + 1)
+    monkeypatch.setattr(
+        allocator._gms_tp_consistency, "_gather", lambda value: [value, value]
+    )
+    calls = []
+
+    def select(count, *, eligible_slot_ids):
+        calls.append((count, eligible_slot_ids))
+        return [
+            {
+                "content_hash": b"v" * 32,
+                "engine_id": "engine-0",
+                "slot_ids": list(range(1, count + 1)),
+                "generations": [2] * count,
+            }
+        ]
+
+    allocator._gms_kv_directory.ensure_hbm_capacity = select
+    assert hooks._ensure_directory_capacity(allocator, 1) == expected
+    assert calls == [(expected, list(range(1, native_free + 1)))]
+    assert [lease.block_id for lease in released] == list(range(1, expected + 1))
+
+
+def test_tp_exact_candidate_still_aligns_native_free_head(monkeypatch):
+    import torch
+
+    hooks, allocator, state, _released = _allocator(monkeypatch)
+    allocator.free_pages = torch.tensor([5, 4])
+    leases = hooks._reserve_tp_pages(allocator, [4], "test", reclaim=False)
+    assert [lease.block_id for lease in leases] == [4]
+    assert allocator.free_pages.tolist() == [4, 5]
