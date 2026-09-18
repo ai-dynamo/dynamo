@@ -22,7 +22,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.gms_failover import (
-    release_attached_gms_failover_lock,
     run_gms_failover_post_lock_fence,
     run_gms_failover_promotion_warmup,
 )
@@ -1249,14 +1248,17 @@ class WorkerFactory:
             )
             raise
 
-    def _maybe_start_rank_liveness_monitor(self, handler, config: Config):
+    def _maybe_start_rank_liveness_monitor(
+        self, handler, config: Config, *, failover_lock=None
+    ):
         """Leader side of the cross-node ZMQ rank-liveness channel.
 
         Only the rank-0 leader runs worker_factory (headless workers bypass it),
-        so reaching here means we are the active leader. On a worker node going
-        silent (process death), release the failover lock so the warm shadow
-        promotes in ~one heartbeat-timeout, then signal a graceful shutdown of the
-        now-broken leader — instead of waiting out the NCCL collective timeout.
+        so reaching here means we are the active leader. When a worker node goes
+        silent, terminate the broken leader instead of waiting out the NCCL
+        collective timeout. Do not release the failover lock from this callback:
+        kernel release on leader exit is the proof that the predecessor can no
+        longer enqueue CUDA writes.
         """
         import signal
 
@@ -1268,38 +1270,55 @@ class WorkerFactory:
         if nnodes <= 1:
             return None
 
+        preinit_monitor = getattr(self, "_gms_preinit_rank_liveness_monitor", None)
+        if preinit_monitor is not None:
+            if handler is not None:
+                handler_ref = getattr(preinit_monitor, "_gms_handler_ref", None)
+                if handler_ref is not None:
+                    handler_ref[0] = handler
+                preinit_monitor.set_timeout_ms(rl.timeout_ms())
+                setattr(handler, "_gms_rank_liveness_monitor", preinit_monitor)
+            delattr(self, "_gms_preinit_rank_liveness_monitor")
+            return preinit_monitor
+
         loop = asyncio.get_running_loop()
+        handler_ref = [handler]
 
         def on_rank_lost(rank: int, reason: str) -> None:
+            active_handler = handler_ref[0]
             logger.warning(
-                "[GMS liveness] vLLM worker rank %d lost (%s); releasing lock + "
-                "shutting down broken leader for fast shadow promotion",
+                "[GMS liveness] vLLM worker rank %d lost (%s); terminating "
+                "broken leader so process death can release KV ownership",
                 rank,
                 reason,
             )
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    release_attached_gms_failover_lock(handler, backend_name="vllm"),
-                    loop,
-                )
-            except Exception:
-                logger.debug(
-                    "[GMS liveness] lock release on rank loss failed", exc_info=True
-                )
             # A broken TP cohort cannot make progress, so preserving its active
             # streams for the normal graceful-shutdown grace period only delays
             # frontend replay. Wake the handler's abort monitors immediately;
-            # discovery withdrawal and process cleanup still follow SIGTERM.
-            shutdown_event = getattr(handler, "shutdown_event", None)
+            # discovery withdrawal and process exit still follow SIGTERM. The
+            # lock remains held until that process exit completes.
+            shutdown_event = getattr(active_handler, "shutdown_event", None)
             if shutdown_event is not None:
                 loop.call_soon_threadsafe(shutdown_event.set)
 
             # The cohort is broken (a TP rank is gone); bring the leader down so it
-            # stops holding the GPU/KV and the shadow (now lock holder) serves.
+            # stops holding the GPU/KV. Kernel lock release then admits the shadow.
             os.kill(os.getpid(), signal.SIGTERM)
 
-        monitor = rl.RankLivenessMonitor(on_rank_lost, expected_ranks=range(1, nnodes))
-        setattr(handler, "_gms_rank_liveness_monitor", monitor)
+        monitor_kwargs = {"expected_ranks": range(1, nnodes)}
+        if handler is None:
+            # Model/process startup can starve Python heartbeat threads for
+            # hundreds of milliseconds. Use the conservative default until the
+            # serving handler is attached, then adopt the configured deadline.
+            monitor_kwargs["timeout_ms_override"] = max(
+                rl.timeout_ms(), rl.DEFAULT_TIMEOUT_MS
+            )
+        monitor = rl.RankLivenessMonitor(on_rank_lost, **monitor_kwargs)
+        setattr(monitor, "_gms_handler_ref", handler_ref)
+        if handler is None:
+            setattr(self, "_gms_preinit_rank_liveness_monitor", monitor)
+        else:
+            setattr(handler, "_gms_rank_liveness_monitor", monitor)
         monitor.start()
         logger.info("[GMS liveness] started vLLM leader rank-liveness monitor")
         return monitor
@@ -1327,6 +1346,12 @@ class WorkerFactory:
                 "[Shadow] Preinitialized standby explicitly enabled; shared-KV "
                 "safety depends on the complete lease-aware vLLM integration"
             )
+            # Bind the cohort liveness endpoint before model loading. Large
+            # models can take longer than the startup grace, while non-leader
+            # ranks start heartbeating before their engine setup completes.
+            # This inactive cohort owns no shared-KV writer lock yet; after
+            # handler attachment the same monitor uses normal fenced release.
+            self._maybe_start_rank_liveness_monitor(None, config)
             return None, False
 
         logger.info(
@@ -1340,6 +1365,7 @@ class WorkerFactory:
                 backend_name="vllm",
                 role=f"engine-{os.environ.get('ENGINE_ID', '0')}-pre-init",
             )
+            self._maybe_start_rank_liveness_monitor(None, config, failover_lock=lock)
         except BaseException:
             await lock.release()
             raise

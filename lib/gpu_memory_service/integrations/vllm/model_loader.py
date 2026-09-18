@@ -178,10 +178,14 @@ def patch_vllm_worker_memory_accounting() -> None:
     def patched_determine_available_memory(self, *args, **kwargs):
         available = int(original(self, *args, **kwargs))
         cache_config = getattr(self, "cache_config", None)
-        if getattr(cache_config, "kv_cache_memory_bytes", None):
-            # vLLM returns this user/config-selected KV capacity verbatim and
-            # explicitly says it bypasses profiling and GPU utilization. It is
-            # already KV-only, so subtracting weights would change its meaning.
+        if (
+            getattr(cache_config, "kv_cache_memory_bytes", None) is not None
+            or getattr(cache_config, "num_gpu_blocks_override", None) is not None
+        ):
+            # vLLM returns an explicit byte capacity verbatim, while downstream
+            # sizing honors an explicit block override independently of the
+            # profiler result. In both cases subtracting imported weights would
+            # reject an otherwise valid explicit KV-cache configuration.
             return available
         manager = get_gms_client_memory_manager("weights")
         if manager is None or manager.granted_lock_type != GrantedLockType.RO:

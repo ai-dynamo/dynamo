@@ -69,6 +69,16 @@ def test_fire_is_exactly_once_even_if_callback_raises():
     assert calls == [(1, "first")]
 
 
+def test_monitor_timeout_can_tighten_after_startup():
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: None, timeout_ms_override=750
+    )
+
+    monitor.set_timeout_ms(500)
+
+    assert monitor._timeout == 0.5
+
+
 def test_expected_rank_that_never_registers_fires_startup_timeout():
     endpoint = _endpoint()
     fired = threading.Event()
@@ -314,3 +324,65 @@ def test_noisy_peer_cannot_starve_registered_rank_timeout(monkeypatch):
     assert calls == [(1, "liveness-timeout")]
     assert sock.received == 2 * rl._MAX_HEARTBEATS_PER_POLL
     assert sock.closed
+
+
+def test_noisy_ack_socket_cannot_starve_leader_timeout(monkeypatch, caplog):
+    """A connected/misbehaving transport is not engine progress."""
+    import zmq
+
+    clock = [0.0]
+    calls = []
+
+    class BusySocket:
+        received = 0
+        closed = False
+
+        def setsockopt(self, *_args):
+            pass
+
+        def connect(self, _addr):
+            pass
+
+        def send(self, *_args, **_kwargs):
+            pass
+
+        def recv(self, **_kwargs):
+            self.received += 1
+            assert self.received <= 4 * rl._MAX_HEARTBEATS_PER_POLL
+            clock[0] += 0.001
+            return b"ack" if self.received == 1 else b"noise"
+
+        def close(self, _linger):
+            self.closed = True
+
+    sock = BusySocket()
+
+    class ReadyPoller:
+        def register(self, *_args):
+            pass
+
+        def poll(self, _timeout):
+            return [(sock, zmq.POLLIN)]
+
+    monkeypatch.setattr(
+        zmq,
+        "Context",
+        SimpleNamespace(instance=lambda: SimpleNamespace(socket=lambda _: sock)),
+    )
+    monkeypatch.setattr(zmq, "Poller", ReadyPoller)
+    monkeypatch.setattr(rl.time, "monotonic", lambda: clock[0])
+    client = rl.RankLivenessClient(
+        "unused",
+        1,
+        interval_ms=20,
+        connect_addr=_endpoint(),
+        on_leader_lost=lambda rank, reason: calls.append((rank, reason)),
+        timeout_ms_override=80,
+        startup_grace_ms_override=1000,
+    )
+    client._run()
+
+    assert calls == [(0, "liveness-timeout")]
+    assert sock.closed
+    assert "local scheduling gap" in caplog.text
+    assert "writer fencing still required" in caplog.text
