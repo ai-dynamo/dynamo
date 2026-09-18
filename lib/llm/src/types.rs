@@ -193,19 +193,19 @@ pub mod generic {
         use super::*;
 
         pub use dynamo_protocols::types::realtime::{
-            DynamoRealtimeClientEvent as RealtimeClientEvent, RealtimeServerEvent,
+            DynamoRealtimeClientEvent, RealtimeServerEvent,
         };
 
         /// A [`BidirectionalStreamingEngine`] implementation for the OpenAI
         /// Realtime API.
         ///
-        /// Many-in / many-out: the client streams a sequence of [`RealtimeClientEvent`]
+        /// Many-in / many-out: the client streams a sequence of [`DynamoRealtimeClientEvent`]
         /// frames over the lifetime of one session and receives a stream of
         /// [`RealtimeServerEvent`] frames back. Used by the experimental
         /// `/v1/realtime` WebSocket endpoint. The canonical concrete implementor of
         /// the input side is [`dynamo_runtime::pipeline::RequestStream`].
         pub type RealtimeBidirectionalEngine =
-            BidirectionalStreamingEngine<RealtimeClientEvent, Annotated<RealtimeServerEvent>>;
+            BidirectionalStreamingEngine<DynamoRealtimeClientEvent, Annotated<RealtimeServerEvent>>;
     }
 }
 

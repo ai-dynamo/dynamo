@@ -4,7 +4,7 @@
 //! WebSocket endpoint at `/v1/realtime` for the OpenAI Realtime API.
 //!
 //! Wire shape: client sends a sequence of `Message::Text` frames each containing a
-//! JSON-encoded [`RealtimeClientEvent`]; server forwards each frame onto an
+//! JSON-encoded [`DynamoRealtimeClientEvent`]; server forwards each frame onto an
 //! engine-bound stream and forwards engine [`RealtimeServerEvent`] chunks back as
 //! `Message::Text` frames. Per the OpenAI Realtime spec, audio is base64-encoded
 //! inside the JSON envelope (`input_audio_buffer.append`); binary WebSocket frames
