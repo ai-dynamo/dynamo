@@ -12,6 +12,7 @@ run the normal init_decode/init_prefill path against a thin engine facade.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 import os
 import subprocess
@@ -61,6 +62,12 @@ def build_gateway_engine():
     attach = getattr(sgl.Engine, "attach_tokenizer_worker", None)
     if attach is not None:
         engine = attach(int(os.environ[ENV_PARENT_PID]))
+        # The Dynamo publisher binds a PULL socket on port_args.metrics_ipc_name; the
+        # parent's schedulers publish there and the parent already owns that bind.
+        engine.port_args = copy.copy(engine.port_args)
+        engine.port_args.metrics_ipc_name = (
+            f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
+        )
         logging.info(
             "gateway child pid=%d: attached via Engine.attach_tokenizer_worker",
             os.getpid(),
