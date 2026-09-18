@@ -1163,6 +1163,113 @@ fn compatibility_envelope_accepts_sampling_projected_to_proto() {
 }
 
 #[test]
+fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
+    let mut legacy = request();
+    legacy.sampling_options = SamplingOptions::default();
+    legacy.stop_conditions = StopConditions::default();
+    legacy.output_options = OutputOptions::default();
+    legacy.extra_args = Some(json!({
+        "vllm_tito": {
+            "sampling_params": {
+                "temperature": 0.8,
+                "top_p": 0.85,
+                "top_k": 7,
+                "min_p": 0.05,
+                "seed": 321,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.3,
+                "repetition_penalty": 1.2,
+                "max_tokens": 9,
+                "min_tokens": 2,
+                "stop_token_ids": [42, 43],
+                "ignore_eos": true,
+                "logprobs": 2,
+                "prompt_logprobs": 3,
+                "skip_special_tokens": false
+            }
+        }
+    }));
+
+    let legacy = normalize_response_options(legacy).expect("normalize v1.4 controls");
+    assert_eq!(legacy.sampling_options.temperature, Some(0.8));
+    assert_eq!(legacy.sampling_options.top_p, Some(0.85));
+    assert_eq!(legacy.sampling_options.top_k, Some(7));
+    assert_eq!(legacy.sampling_options.min_p, Some(0.05));
+    assert_eq!(legacy.sampling_options.seed, Some(321));
+    assert_eq!(legacy.sampling_options.presence_penalty, Some(0.2));
+    assert_eq!(legacy.sampling_options.frequency_penalty, Some(0.3));
+    assert_eq!(legacy.sampling_options.repetition_penalty, Some(1.2));
+    assert_eq!(legacy.stop_conditions.max_tokens, Some(9));
+    assert_eq!(legacy.stop_conditions.min_tokens, Some(2));
+    assert_eq!(legacy.stop_conditions.stop_token_ids, Some(vec![42, 43]));
+    assert_eq!(legacy.stop_conditions.ignore_eos, Some(true));
+    assert_eq!(legacy.output_options.logprobs, Some(2));
+    assert_eq!(legacy.output_options.prompt_logprobs, Some(3));
+    assert_eq!(legacy.output_options.skip_special_tokens, Some(false));
+
+    let mut canonical = legacy;
+    canonical.sampling_options.temperature = Some(0.4);
+    canonical.stop_conditions.stop_token_ids = Some(vec![7]);
+    let canonical = normalize_response_options(canonical).expect("keep canonical controls");
+    assert_eq!(canonical.sampling_options.temperature, Some(0.4));
+    assert_eq!(canonical.stop_conditions.stop_token_ids, Some(vec![7]));
+}
+
+#[test]
+fn native_generate_defaults_temperature_and_rejects_unrepresentable_zero_controls() {
+    let mut defaults = request();
+    defaults.sampling_options.temperature = None;
+    let wire = build_generate_request(
+        defaults,
+        "defaults".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("native Generate defaults temperature to HTTP semantics");
+    assert_eq!(wire.temperature, Some(1.0));
+
+    for sampling in [
+        SamplingOptions {
+            top_k: Some(0),
+            ..request().sampling_options
+        },
+        SamplingOptions {
+            top_k: Some(-1),
+            ..request().sampling_options
+        },
+        SamplingOptions {
+            min_p: Some(0.0),
+            ..request().sampling_options
+        },
+    ] {
+        let mut unsupported = request();
+        unsupported.sampling_options = sampling;
+        let error = build_generate_request(
+            unsupported,
+            "unsupported".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("proto 0.3 cannot distinguish explicit disable from omission");
+        assert!(error.to_string().contains("cannot represent"));
+    }
+}
+
+#[test]
+fn compatibility_envelope_allows_projected_prefix_cache_bypass() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "skip_reading_prefix_cache": true,
+        "vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}
+    }));
+    let wire = build_generate_request(
+        request,
+        "cache-bypass".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("projected cache bypass should be accepted");
+    assert!(wire.kv.expect("kv options").bypass_prefix_cache);
+}
+
+#[test]
 fn compatibility_envelope_rejects_disabled_token_ids() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let mut request = request();
@@ -3670,12 +3777,16 @@ fn preprocessed_routing_identity_matches_inline_content() {
         .and_then(serde_json::Value::as_object_mut)
         .expect("object extra_args")
         .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
-    build_generate_request(
+    let wire = build_generate_request(
         request,
         "request-1".to_string(),
         DisaggregationMode::Aggregated,
     )
     .expect("matching content-derived routing identity");
+    let Some(pb::media_item::Source::Features(feature)) = wire.media[0].source.as_ref() else {
+        panic!("expected preprocessed features")
+    };
+    assert_eq!(feature.identifier, marker);
 
     let mut mismatched =
         request_with_preprocessed_features(image_features(ALTERNATE_MM_KWARGS_BASE64));
@@ -3760,6 +3871,49 @@ fn preprocessed_multimodal_identifier_is_scoped_by_lora() {
         adapter_b_feature.identifier,
         format!("adapter-b:{}", base_feature.identifier)
     );
+
+    let marker = image_routing_marker(VALID_MM_KWARGS_BASE64);
+    let mut routed_adapter =
+        request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    routed_adapter.routing.as_mut().unwrap().lora_name = Some("adapter-a".to_string());
+    routed_adapter
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+    let routed_adapter = build_generate_request(
+        routed_adapter,
+        "request-routed-adapter".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("adapter identity must remain scoped");
+    assert_eq!(
+        feature(&routed_adapter).identifier,
+        adapter_a_feature.identifier
+    );
+}
+
+#[test]
+fn renderer_null_mm_metadata_is_accepted_but_non_null_metadata_fails_closed() {
+    let mut with_null = image_features(VALID_MM_KWARGS_BASE64);
+    with_null["mm_metadata"] = serde_json::Value::Null;
+    build_generate_request(
+        request_with_preprocessed_features(with_null),
+        "request-null-metadata".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("the vLLM renderer serializes mm_metadata as null");
+
+    let mut with_metadata = image_features(VALID_MM_KWARGS_BASE64);
+    with_metadata["mm_metadata"] = json!({"image": [{"cache_only": true}]});
+    let error = build_generate_request(
+        request_with_preprocessed_features(with_metadata),
+        "request-non-null-metadata".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("unsupported metadata-only inputs must fail closed");
+    assert!(error.to_string().contains("mm_metadata"));
 }
 
 #[test]

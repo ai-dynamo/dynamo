@@ -9,7 +9,7 @@ use dynamo_backend_common::{
     PrefillResult, PreprocessedRequest, StopReason, TopLogprob, usage,
 };
 use dynamo_llm::protocols::common::{preprocessed_mm_identifier, preprocessed_mm_routing_hash};
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 
 use crate::client;
 use crate::json::{json_to_struct, struct_to_json};
@@ -32,6 +32,8 @@ struct VllmTitoFeatures {
     mm_hashes: BTreeMap<String, Vec<String>>,
     mm_placeholders: BTreeMap<String, Vec<VllmTitoPlaceholder>>,
     kwargs_data: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    mm_metadata: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +75,9 @@ pub(crate) fn build_generate_request(
     let request = normalize_response_options(request)?;
     validate_request(&request, mode)?;
     validate_multimodal_cache_uuids(&request)?;
+    if !mode.is_prefill() && !mode.is_encode() {
+        validate_proto_sampling(&request.sampling_options)?;
+    }
     // Legacy envelopes may only carry controls preserved by the typed request.
     if !mode.is_prefill()
         && !mode.is_encode()
@@ -102,6 +107,7 @@ pub(crate) fn build_generate_request(
                     | "prompt_logprobs"
                     | "skip_special_tokens"
                     | "return_token_ids"
+                    | "skip_reading_prefix_cache"
             )
         }) {
             return Err(client::invalid_argument(format!(
@@ -220,7 +226,7 @@ pub(crate) fn build_generate_request(
         prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: token_ids,
         })),
-        temperature: sampling.temperature,
+        temperature: sampling.temperature.or(Some(1.0)),
         sampling: Some(pb::RandomSampling {
             num_sequences: 1,
             top_k: normalize_top_k(sampling.top_k)?,
@@ -294,6 +300,51 @@ pub(crate) fn normalize_response_options(
         .and_then(serde_json::Value::as_object)
         .and_then(|envelope| envelope.get("kv_transfer_params"))
         .cloned();
+    let legacy_skip_prefix_cache = legacy_bool(&sampling, "skip_reading_prefix_cache")?;
+    hydrate_option(
+        &mut request.sampling_options.temperature,
+        &sampling,
+        "temperature",
+    )?;
+    hydrate_option(&mut request.sampling_options.top_p, &sampling, "top_p")?;
+    hydrate_option(&mut request.sampling_options.top_k, &sampling, "top_k")?;
+    hydrate_option(&mut request.sampling_options.min_p, &sampling, "min_p")?;
+    hydrate_option(&mut request.sampling_options.seed, &sampling, "seed")?;
+    hydrate_option(
+        &mut request.sampling_options.presence_penalty,
+        &sampling,
+        "presence_penalty",
+    )?;
+    hydrate_option(
+        &mut request.sampling_options.frequency_penalty,
+        &sampling,
+        "frequency_penalty",
+    )?;
+    hydrate_option(
+        &mut request.sampling_options.repetition_penalty,
+        &sampling,
+        "repetition_penalty",
+    )?;
+    hydrate_option(
+        &mut request.stop_conditions.max_tokens,
+        &sampling,
+        "max_tokens",
+    )?;
+    hydrate_option(
+        &mut request.stop_conditions.min_tokens,
+        &sampling,
+        "min_tokens",
+    )?;
+    hydrate_option(
+        &mut request.stop_conditions.stop_token_ids,
+        &sampling,
+        "stop_token_ids",
+    )?;
+    hydrate_option(
+        &mut request.stop_conditions.ignore_eos,
+        &sampling,
+        "ignore_eos",
+    )?;
     if request.output_options.logprobs.is_none() {
         request.output_options.logprobs = legacy_logprob_count(&sampling, "logprobs")?;
     }
@@ -313,7 +364,54 @@ pub(crate) fn normalize_response_options(
     {
         extra.insert("kv_transfer_params".to_string(), legacy_kv_transfer);
     }
+    if let Some(legacy_skip_prefix_cache) = legacy_skip_prefix_cache
+        && let Some(extra) = request
+            .extra_args
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+        && !extra.contains_key("skip_reading_prefix_cache")
+    {
+        extra.insert(
+            "skip_reading_prefix_cache".to_string(),
+            serde_json::Value::Bool(legacy_skip_prefix_cache),
+        );
+    }
     Ok(request)
+}
+
+fn hydrate_option<T: DeserializeOwned>(
+    target: &mut Option<T>,
+    sampling: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<(), DynamoError> {
+    if target.is_some() {
+        return Ok(());
+    }
+    let Some(value) = sampling.get(field).filter(|value| !value.is_null()) else {
+        return Ok(());
+    };
+    *target = Some(serde_json::from_value(value.clone()).map_err(|error| {
+        client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params.{field} is invalid: {error}"
+        ))
+    })?);
+    Ok(())
+}
+
+fn validate_proto_sampling(
+    sampling: &dynamo_backend_common::SamplingOptions,
+) -> Result<(), DynamoError> {
+    if matches!(sampling.top_k, Some(-1 | 0)) {
+        return Err(client::invalid_argument(
+            "vllm-proto 0.3 cannot represent explicit top_k disable; omit top_k or use chat/completions",
+        ));
+    }
+    if sampling.min_p == Some(0.0) {
+        return Err(client::invalid_argument(
+            "vllm-proto 0.3 cannot represent explicit min_p=0; omit min_p or use chat/completions",
+        ));
+    }
+    Ok(())
 }
 
 fn vllm_tito_sampling(
@@ -689,6 +787,11 @@ fn build_preprocessed_media(
     routing_hashes: Option<&[String]>,
     lora_name: &str,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
+    if features.mm_metadata.is_some() {
+        return Err(client::invalid_argument(
+            "preprocessed multimodal mm_metadata is not supported by vLLM gRPC",
+        ));
+    }
     if features.mm_hashes.is_empty() {
         return Err(client::invalid_argument(
             "preprocessed multimodal features must not be empty",
@@ -771,19 +874,23 @@ fn build_preprocessed_media(
 
             let kwargs = decode_preprocessed_kwargs(encoded_kwargs, &mut decoded_bytes)?;
             let mm_hash = preprocessed_mm_identifier(modality_name, &kwargs);
-            let identifier = if lora_name.is_empty() {
-                mm_hash.clone()
-            } else {
-                format!("{lora_name}:{mm_hash}")
-            };
-            if modality == pb::Modality::Image
-                && let Some(expected) = routing_hashes.and_then(|hashes| hashes.get(index))
+            let expected_routing_marker = (modality == pb::Modality::Image)
+                .then(|| routing_hashes.and_then(|hashes| hashes.get(index)))
+                .flatten();
+            if let Some(expected) = expected_routing_marker
                 && expected != &preprocessed_mm_routing_hash(modality_name, &kwargs)
             {
                 return Err(client::invalid_argument(format!(
                     "dynamo_mm_routing_hashes[{index}] does not match the preprocessed image payload"
                 )));
             }
+            let identifier = if lora_name.is_empty() {
+                expected_routing_marker
+                    .cloned()
+                    .unwrap_or_else(|| mm_hash.clone())
+            } else {
+                format!("{lora_name}:{mm_hash}")
+            };
             media.push(pb::MediaItem {
                 modality: modality as i32,
                 source: Some(pb::media_item::Source::Features(
