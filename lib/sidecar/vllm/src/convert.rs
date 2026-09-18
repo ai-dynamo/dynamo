@@ -103,11 +103,11 @@ pub(crate) fn build_generate_request(
                     | "skip_special_tokens"
                     | "return_token_ids"
             )
-        })
-    {
-        return Err(client::invalid_argument(format!(
-            "extra_args.vllm_tito.sampling_params.{key} is not supported by the sidecar; use the chat/completions API"
-        )));
+        }) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{key} is not supported by the sidecar; use the chat/completions API"
+            )));
+        }
     }
 
     let has_raw_media = request_has_raw_media(&request);
