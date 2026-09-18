@@ -59,14 +59,13 @@ curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
 
 ## Deploy on Kubernetes
 
-The source tree ships an
-[aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml) and a
-[disaggregated one](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/disagg.yaml) that runs
-prefill and decode as separate worker pods. Both need two images you build
-yourself: `dynamo-sidecar`, which carries all three engine-specific executables,
-and a TensorRT-LLM image with the pinned OpenEngine bindings layered on — the
-release ships the servicer but not the bindings that it and the manifests'
-health probes import.
+The source tree ships two
+[deployment manifests](https://github.com/ai-dynamo/dynamo/tree/main/lib/sidecar/trtllm/deploy):
+`agg.yaml`, and `disagg.yaml`, which runs prefill and decode as separate worker
+pods. Both need two images you build yourself: `dynamo-sidecar`, which carries
+all three engine-specific executables, and a TensorRT-LLM image with the pinned
+OpenEngine bindings layered on — the release ships the servicer but not the
+bindings that it and the manifests' health probes import.
 
 Read the disaggregated manifest's header before applying it: it requests
 `rdma/ib` on both engines, which you drop if your fabric does not expose it. The
