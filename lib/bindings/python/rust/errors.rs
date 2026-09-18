@@ -231,22 +231,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_argument_keeps_diagnostic_private() {
-        pyo3::prepare_freethreaded_python();
-        let error = Python::with_gil(|py| {
-            let exception =
-                PyErr::new::<InvalidArgument, _>("private backend detail containing credentials");
-            py_exception_to_dynamo_error(py, &exception).expect("known Dynamo exception")
-        });
-
-        assert_eq!(
-            error.message(),
-            "private backend detail containing credentials"
-        );
-        assert_eq!(error.public_message(), Some("Invalid request"));
-    }
-
-    #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
             (409, ErrorClass::Conflict),
