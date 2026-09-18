@@ -94,10 +94,10 @@ def bootstrap_kwargs(
         return {}
     info = request.get("bootstrap_info")
     if info is None and mode == DisaggregationMode.PREFILL and prefill_endpoint:
-        host, port = prefill_endpoint
+        prefill_host, prefill_port = prefill_endpoint
         info = {
-            "bootstrap_host": host,
-            "bootstrap_port": port,
+            "bootstrap_host": prefill_host,
+            "bootstrap_port": prefill_port,
             # Match the router's signed-64-bit room range and attention DP=1.
             "bootstrap_room": secrets.randbits(63),
         }

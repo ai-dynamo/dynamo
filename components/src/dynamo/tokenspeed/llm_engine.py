@@ -21,7 +21,7 @@ from dynamo.common.backend.engine import (
     LLMEngine,
     LlmRegistration,
 )
-from dynamo.common.backend.publisher import ZmqSource
+from dynamo.common.backend.publisher import KvEventSource, ZmqSource
 from dynamo.common.backend.worker import WorkerConfig
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.utils.engine_response import normalize_finish_reason
@@ -155,7 +155,7 @@ class TokenspeedLLMEngine(LLMEngine):
         self._kv_source = kv_event_source(config)
         self.server_args.kv_events_config = json.dumps(config)
 
-    async def kv_event_sources(self) -> list[ZmqSource]:
+    async def kv_event_sources(self) -> list[KvEventSource]:
         return [self._kv_source] if self._kv_source is not None else []
 
     async def generate(
