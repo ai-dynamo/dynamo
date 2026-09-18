@@ -144,6 +144,50 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
 
 
 @pytest.mark.asyncio
+async def test_prepare_lora_admission_tolerates_skipped_base_initialization():
+    handler = mod.DecodeWorkerHandler.__new__(mod.DecodeWorkerHandler)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+
+    admission_stack, lora_request, runtime_lora = await handler._prepare_lora_admission(
+        {"model": "test-model"},
+        "request-id",
+    )
+
+    assert lora_request is None
+    assert runtime_lora is False
+    assert not hasattr(handler, "_runtime_lora_coordinator")
+    handler._resolve_lora_request.assert_called_once_with("test-model")
+    async with admission_stack:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_prepare_lora_admission_skips_guard_when_runtime_loading_is_disabled():
+    handler = mod.DecodeWorkerHandler.__new__(mod.DecodeWorkerHandler)
+    handler._resolve_lora_request = MagicMock(return_value=None)
+    coordinator = SimpleNamespace(
+        enabled=False,
+        ensure_from_request=AsyncMock(return_value=None),
+        pending_admission_guard=MagicMock(
+            side_effect=AssertionError("disabled coordinator must not allocate a guard")
+        ),
+    )
+    handler._runtime_lora_coordinator = coordinator
+    request = {"model": "test-model"}
+
+    admission_stack, lora_request, runtime_lora = await handler._prepare_lora_admission(
+        request, "request-id"
+    )
+
+    assert lora_request is None
+    assert runtime_lora is False
+    coordinator.ensure_from_request.assert_awaited_once_with(request, "request-id")
+    coordinator.pending_admission_guard.assert_not_called()
+    async with admission_stack:
+        pass
+
+
+@pytest.mark.asyncio
 async def test_clear_kv_blocks_resets_vllm_external_cache():
     handler = _make_handler()
     handler.engine_client = SimpleNamespace(

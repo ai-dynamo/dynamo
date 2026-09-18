@@ -1184,6 +1184,7 @@ class WorkerFactory:
         Instantiate and serve
         """
         with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            primary_error: BaseException | None = None
             try:
                 await self._run_decode_worker(
                     runtime,
@@ -1193,8 +1194,40 @@ class WorkerFactory:
                     snapshot_engine=snapshot_engine,
                     lifecycle=lifecycle,
                 )
+            except BaseException as exc:
+                primary_error = exc
+                raise
             finally:
-                await self.state_agent_lifecycle.close()
+                try:
+                    await self._drain_decode_worker_resources(lifecycle)
+                except BaseException:
+                    if primary_error is None:
+                        raise
+                    logger.exception(
+                        "Failed to drain decode worker after an earlier failure"
+                    )
+
+    async def _drain_decode_worker_resources(
+        self, lifecycle: _DecodeWorkerLifecycle
+    ) -> None:
+        """Drain all async owners before synchronous handler and engine cleanup."""
+        errors: list[BaseException] = []
+        try:
+            await self.state_agent_lifecycle.close()
+        except (Exception, asyncio.CancelledError) as exc:
+            errors.append(exc)
+        if lifecycle.handler is not None:
+            try:
+                await lifecycle.handler.aclose()
+            except (Exception, asyncio.CancelledError) as exc:
+                errors.append(exc)
+        if errors:
+            for secondary in errors[1:]:
+                logger.error(
+                    "Additional decode worker drain failure",
+                    exc_info=(type(secondary), secondary, secondary.__traceback__),
+                )
+            raise errors[0]
 
     async def _run_decode_worker(
         self,

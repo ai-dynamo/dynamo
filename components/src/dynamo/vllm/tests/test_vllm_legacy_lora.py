@@ -22,6 +22,7 @@ from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import handlers as handlers_mod  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
+from dynamo.vllm.lora_state import RuntimeLoRAInfo  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
@@ -45,9 +46,9 @@ def _make_prefill_handler():
         use_kv_events=True,
     )
     handler.engine_client = SimpleNamespace(
-        add_lora=AsyncMock(),
-        remove_lora=AsyncMock(),
-        reset_prefix_cache=AsyncMock(),
+        add_lora=AsyncMock(return_value=True),
+        remove_lora=AsyncMock(return_value=True),
+        reset_prefix_cache=AsyncMock(return_value=True),
         # LoRA MDC registration reads the engine-actual main-attention block
         # size from here (hybrid-attention models inflate it past the CLI's
         # engine_args.block_size=16 above).
@@ -61,6 +62,8 @@ def _make_prefill_handler():
     # Initialize LoRA state
     from dynamo.vllm.lora_state import LoRAState
 
+    handler._lora_capacity = None
+    handler._lora_capacity_guard = asyncio.Lock()
     handler.engine_args = handler.config.engine_args
     handler.dp_range = (0, 1)
     handler._served_model_name = "llama2-7b"
@@ -204,6 +207,7 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
     monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
     monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", register)
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
 
     results = [
         result
@@ -237,6 +241,44 @@ async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
     assert results[-1]["status"] == "success"
     assert order == ["unregister", "remove"]
     assert "adapterA" not in handler._lora_state.loaded_loras
+
+
+@pytest.mark.asyncio
+async def test_admin_unload_rejects_resident_request_time_adapter(monkeypatch):
+    handler = _make_prefill_handler()
+    adapter_key = "dyn-lora-0123456789abcdef0123456789abcdef"
+    handler._lora_state.loaded_loras = {
+        adapter_key: LoRAInfo(id=123, path="/cache/runtime-adapter")
+    }
+    handler._lora_state.runtime_loras = {
+        adapter_key: RuntimeLoRAInfo(
+            adapter_key=adapter_key,
+            full_identity_digest=bytes(32),
+            base_model_name="/models/base",
+            source_revision="immutable-revision",
+            id=123,
+            path="/cache/runtime-adapter",
+        )
+    }
+    handler._engine_loaded_loras = {adapter_key}
+    unregister = AsyncMock()
+    monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
+
+    results = [
+        result async for result in handler.unload_lora({"lora_name": adapter_key})
+    ]
+
+    assert results == [
+        {
+            "status": "error",
+            "message": "'dyn-lora-' names are reserved for request-time adapters",
+        }
+    ]
+    assert adapter_key in handler._lora_state.loaded_loras
+    assert adapter_key in handler._lora_state.runtime_loras
+    assert adapter_key in handler._engine_loaded_loras
+    unregister.assert_not_awaited()
+    handler.engine_client.remove_lora.assert_not_awaited()
 
 
 @pytest.mark.asyncio

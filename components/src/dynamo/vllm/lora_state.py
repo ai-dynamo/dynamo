@@ -4,10 +4,24 @@
 import asyncio
 import threading
 import weakref
+from collections import OrderedDict
+from dataclasses import dataclass
 
 from vllm.lora.request import LoRARequest
 
 from dynamo.common.lora.manager import LoRAInfo
+
+
+@dataclass(frozen=True)
+class RuntimeLoRAInfo:
+    """Private worker-local residency record for a request-time adapter."""
+
+    adapter_key: str
+    full_identity_digest: bytes
+    base_model_name: str
+    source_revision: str
+    id: int
+    path: str
 
 
 class LoRAState:
@@ -23,6 +37,25 @@ class LoRAState:
             str, asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
+        # Runtime adapters are intentionally private and are never published as
+        # model cards. Raw source URIs are not retained after resolution.
+        self.runtime_loras: OrderedDict[str, RuntimeLoRAInfo] = OrderedDict()
+        self.runtime_load_tasks: dict[str, asyncio.Task[RuntimeLoRAInfo]] = {}
+        self.runtime_load_digests: dict[str, bytes] = {}
+        self.runtime_reserved_ids: dict[str, int] = {}
+        self.runtime_eviction_events: dict[str, asyncio.Event] = {}
+        self.admin_reserved_ids: dict[str, int] = {}
+        self.rollback_reserved_ids: set[int] = set()
+        self.uncertain_engine_lora_ids: set[int] = set()
+        self.discovery_uncertain_loras: set[str] = set()
+        self.runtime_pending_admissions: dict[str, tuple[str, asyncio.TimerHandle]] = {}
+        self.runtime_pending_leases: dict[str, int] = {}
+        self.runtime_active_leases: dict[str, int] = {}
+        self.runtime_expiry_tasks: set[asyncio.Task[None]] = set()
+        self.runtime_resolution_semaphore: asyncio.Semaphore | None = None
+        self.runtime_cache_guard: asyncio.Lock | None = None
+
+        self.runtime_cache_reserved_bytes = 0
 
     def resolve_request(
         self,
@@ -75,6 +108,36 @@ class LoRAState:
                 lock = asyncio.Lock()
                 self.lora_load_locks[lora_name] = lock
             return lock
+
+    def is_runtime_managed(self, lora_name: str) -> bool:
+        """Return whether runtime loading currently owns an adapter identity."""
+        return (
+            lora_name in self.runtime_loras
+            or lora_name in self.runtime_load_tasks
+            or lora_name in self.runtime_eviction_events
+        )
+
+    def allocate_lora_id(self, lora_name: str, preferred_id: int) -> int:
+        """Return an unused positive ID across committed and in-flight loads."""
+        used = {
+            info.id: name for name, info in self.loaded_loras.items() if info.id > 0
+        }
+        used.update(
+            {lora_id: name for name, lora_id in self.runtime_reserved_ids.items()}
+        )
+        used.update(
+            {lora_id: name for name, lora_id in self.admin_reserved_ids.items()}
+        )
+        used.update(
+            {lora_id: "<rollback-reserved>" for lora_id in self.rollback_reserved_ids}
+        )
+        candidate = max(1, int(preferred_id))
+        for _ in range(len(used) + 1):
+            owner = used.get(candidate)
+            if owner is None or owner == lora_name:
+                return candidate
+            candidate = candidate % 0x7FFFFFFF + 1
+        raise ValueError("no collision-free LoRA ID is available")
 
     def list_lora_ids(self) -> dict[str, int]:
         """Return map of loaded LoRA names to integer IDs.

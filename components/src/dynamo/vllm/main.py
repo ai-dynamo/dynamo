@@ -85,6 +85,7 @@ from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
+from .runtime_lora import publish_runtime_lora_capability
 from .snapshot import prepare_snapshot_engine
 from .state_agent import (
     StateAgentLifecycle,
@@ -838,6 +839,7 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_runtime_lora_capability(runtime_config, config, worker_type)
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)

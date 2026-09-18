@@ -26,6 +26,69 @@ Low-Rank Adaptation (LoRA) serves specialized model variants without duplicating
 
 See the [feature support matrix](../../reference/general/compatibility.mdx#feature-support) for the backend and interaction matrices.
 
+## Resolve Adapters at Request Time
+
+**Experimental.** Protocol version 2 supports request-time resolver plugins on aggregated vLLM workers. SGLang, disaggregated prefill/decode, and TensorRT-LLM do not advertise this capability and fail closed when request-time loading is enabled.
+
+Set the OpenAI-compatible `model` field to one of these forms:
+
+| Form | Behavior |
+| --- | --- |
+| `<base-model>\|<opaque-source>` | Resolve an adapter for the named canonical base model |
+| `<opaque-source>` | Resolve an adapter only when the frontend has exactly one canonical base model |
+
+An exact known model or preloaded adapter name takes precedence over request-time parsing. Otherwise, the Rust frontend splits the combined form once on `|`, validates only bounded envelope constraints, and forwards the source unchanged as private routing metadata. Rust does not parse provider URI syntax or contain provider-specific parsers. The selected worker extracts the URI scheme only to dispatch to an operator-allowlisted resolver; the resolver owns provider grammar, authorization, immutable revision lookup, download, and atomic cache publication.
+
+For example, a W&B resolver can accept this request without adding W&B logic to Dynamo:
+
+```json
+{
+  "model": "Qwen/Qwen3-0.6B|wandb-artifact:///team/project/adapter:v1",
+  "messages": [{"role": "user", "content": "Summarize this request."}]
+}
+```
+
+Set `DYN_LORA_ENABLED=true` and `DYN_LORA_RUNTIME_LOAD_ENABLED=true` on the frontend and aggregated vLLM worker. Set the plugin, allowlist, cache, and worker bounds only on the worker:
+
+```yaml
+env:
+- name: DYN_LORA_ENABLED
+  value: "true"
+- name: DYN_LORA_RUNTIME_LOAD_ENABLED
+  value: "true"
+- name: DYN_LORA_DOWNLOADER_PLUGIN
+  value: my_package.wandb_resolver:resolver
+- name: DYN_LORA_ALLOWED_SCHEMES
+  value: wandb-artifact
+- name: DYN_LORA_PATH
+  value: /var/cache/dynamo/loras
+```
+
+Scope `DYN_LORA_RUNTIME_LOAD_ENABLED` to the frontend and eligible aggregated vLLM worker containers. Do not put it in a deployment-wide environment block shared with SGLang, TensorRT-LLM, or disaggregated workers; those backends do not advertise protocol version 2 and continue to support only their existing explicit LoRA lifecycle.
+
+Mount `DYN_LORA_PATH` and provider credentials only into worker pods. Keep the plugin package in the worker image. `DYN_LORA_DOWNLOADER_PLUGIN` accepts a resolver instance, a class with a zero-argument constructor, or a zero-argument factory in `module:object` or `module.object` form. The resulting object must expose `protocol_version = 2`, a non-empty lowercase `schemes` set, and an asynchronous `resolve(*, source_uri, context)` method. It returns a `ResolvedLoRA` whose `local_path` is an immutable snapshot directory under `DYN_LORA_PATH` and whose `source_revision` identifies an immutable provider revision. `DYN_LORA_ALLOWED_SCHEMES` must explicitly intersect the plugin's declared schemes; built-in explicit-load schemes are not enabled automatically.
+
+| Worker Variable | Default | Purpose |
+| --- | --- | --- |
+| `DYN_LORA_RESOLVE_TIMEOUT_SECONDS` | `300` | Resolver deadline |
+| `DYN_LORA_MAX_CONCURRENT_RESOLUTIONS` | `2` | Active plugin calls |
+| `DYN_LORA_MAX_PENDING_RUNTIME_KEYS` | `64` | Distinct unresolved adapter identities |
+| `DYN_LORA_MAX_PENDING_ADMISSIONS` | vLLM `--max-num-seqs`, or `256` | Requests holding a pending adapter lease |
+| `DYN_LORA_PENDING_ADMISSION_TIMEOUT_SECONDS` | `30` | Time allowed between worker resolution and generation admission |
+| `DYN_LORA_MAX_RESIDENT_RUNTIME_LORAS` | vLLM CPU LoRA capacity | Resident request-time adapters |
+| `DYN_LORA_MAX_DOWNLOAD_BYTES` | `10737418240` | Maximum validated snapshot size |
+| `DYN_LORA_MAX_CACHE_BYTES` | `107374182400` | Cache admission ceiling, including in-flight reservations |
+
+The resolver is trusted Python code running inside the worker process. It must honor `ResolveContext.max_download_bytes`, keep temporary files private until an atomic publish, and clean them after cancellation or failure. Dynamo validates containment, file types, measured size, adapter metadata, rank, base-model compatibility, and cache usage after the resolver returns, but it cannot sandbox the plugin or undo bytes written by a plugin that ignores its reservation.
+
+The vLLM runtime path accepts only `adapter_config.json`, `adapter_model.safetensors`, and optional `new_embeddings.safetensors` in the returned snapshot root. It rejects nested, unrelated, and pickle-based files.
+
+Protocol version 2 deterministically pins each runtime adapter key to one healthy capable worker. It does not spill that key to another worker when the selected worker is overloaded, so throughput for one adapter is bounded by one worker and a membership change can trigger a cold load on a different worker. Residency-aware spillover and replication are future protocol work.
+
+Set ingress and client timeouts longer than `DYN_LORA_RESOLVE_TIMEOUT_SECONDS` plus the backend adapter-load and first-generation-event budgets. Otherwise, an intermediary can return an untyped timeout before Dynamo returns the resolver's structured error.
+
+Protocol version 2 keeps every successful returned path immutable and pinned for the worker lifetime. Dynamo evicts runtime adapters from vLLM capacity but does not delete plugin cache entries online because the ABI does not expose ownership and active path references. Drain and stop the worker before external cache cleanup.
+
 <AccordionGroup>
   <Accordion title="Architecture">
     ```mermaid
@@ -44,8 +107,8 @@ See the [feature support matrix](../../reference/general/compatibility.mdx#featu
         ManagerNode --> HF["hf://<br/>(custom)"]
     ```
 
-    - **Rust core** (`lib/llm/src/lora/`): Downloading, caching, and validation
-    - **Python manager** (`components/src/dynamo/common/lora/`): Custom source support
+    - **Rust core** (`lib/llm/`): Bounded request parsing, opaque source propagation, routing identity, and capability-aware worker selection
+    - **Python manager** (`components/src/dynamo/common/lora/`): Resolver loading, scheme dispatch, provider integration, caching, and snapshot validation
     - **Worker handlers** (`components/src/dynamo/vllm/handlers.py` and `components/src/dynamo/sglang/request_handlers/handler_base.py`): Backend load/unload and inference integration
   </Accordion>
 </AccordionGroup>
