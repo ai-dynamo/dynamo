@@ -50,6 +50,8 @@ class KvDcRelayCliConfig:
     expected_unique_blocks: int
     bind: str | None
     tuning: tuple[tuple[str, int], ...]
+    sources_file: str | None = None
+    connection_revision: str | None = None
 
 
 class RelayShutdownWaiter(Protocol):
@@ -131,6 +133,9 @@ def parse_args(
     parser = argparse.ArgumentParser(description="Dynamo DC-scoped KV Relay")
     parser.add_argument("--dc-id")
     parser.add_argument(
+        "--sources-file", help="Live source namespace file (selects file mode)"
+    )
+    parser.add_argument(
         "--namespaces",
         help="Comma-separated Dynamo namespaces containing inference DGDs",
     )
@@ -165,6 +170,27 @@ def parse_args(
     if dc_id != dc_id.strip():
         parser.error("DC ID must not contain surrounding whitespace")
 
+    sources_file = parsed.sources_file
+    connection_revision = None
+    if sources_file is not None:
+        if not sources_file.strip():
+            parser.error("--sources-file must not be empty")
+        connection_revision = environment.get("DYN_RELAY_CONNECTION_REVISION")
+        if connection_revision is not None and not connection_revision.strip():
+            parser.error("DYN_RELAY_CONNECTION_REVISION must not be empty")
+        if any(
+            (
+                parsed.namespaces is not None,
+                parsed.namespace_filter is not None,
+                parsed.watch_all,
+                parsed.endpoint_prefixes is not None,
+                "DYN_RELAY_NAMESPACES" in environment,
+                "DYN_RELAY_WATCH_ALL" in environment,
+                "DYN_RELAY_ENDPOINT_PREFIXES" in environment,
+            )
+        ):
+            parser.error("--sources-file cannot be combined with discovery filters")
+
     configured_cli_scopes = sum(
         (
             parsed.namespaces is not None,
@@ -176,7 +202,10 @@ def parse_args(
         parser.error(
             "--namespace-filter, --namespaces, and --watch-all are mutually exclusive"
         )
-    if parsed.namespaces is not None:
+    if sources_file is not None:
+        namespaces: tuple[str, ...] = ()
+        watch_all = False
+    elif parsed.namespaces is not None:
         namespaces = _csv_values(parsed.namespaces, "--namespaces", parser)
         watch_all = False
     elif parsed.namespace_filter is not None:
@@ -272,6 +301,8 @@ def parse_args(
         ),
         bind=bind,
         tuning=tuple(tuning),
+        sources_file=sources_file,
+        connection_revision=connection_revision,
     )
 
 

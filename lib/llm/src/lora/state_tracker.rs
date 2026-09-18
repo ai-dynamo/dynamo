@@ -9,6 +9,7 @@
 //! [`LoraObservedSnapshot`] so a routing decision cannot mix indexes from different
 //! discovery generations.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -26,9 +27,31 @@ pub struct LoraObservedSnapshot {
     lora_info: HashMap<(String, WorkerWithDpRank), LoraInfo>,
     worker_to_loras: HashMap<WorkerWithDpRank, HashSet<String>>,
     worker_capacity: HashMap<WorkerWithDpRank, u32>,
+    registration_required: HashSet<WorkerWithDpRank>,
 }
 
 impl LoraObservedSnapshot {
+    pub(crate) fn eligible_workers<'a>(
+        &self,
+        lora_name: &str,
+        available: &'a [u64],
+    ) -> Cow<'a, [u64]> {
+        if self.registration_required.is_empty() {
+            return Cow::Borrowed(available);
+        }
+        Cow::Owned(
+            available
+                .iter()
+                .copied()
+                .filter(|id| {
+                    let worker = WorkerWithDpRank::new(*id, 0);
+                    !self.registration_required.contains(&worker)
+                        || self.is_loaded(lora_name, &worker)
+                })
+                .collect(),
+        )
+    }
+
     pub fn incarnation(&self) -> u64 {
         self.incarnation
     }
@@ -109,6 +132,7 @@ impl LoraObservedSnapshot {
 pub(crate) struct LoraWorkerProjection {
     pub(crate) capacity: u32,
     pub(crate) loras: Vec<LoraInfo>,
+    pub(crate) is_registration_required: bool,
 }
 
 /// Tracks one endpoint's complete observed LoRA state.
@@ -227,6 +251,7 @@ impl LoraStateTracker {
         let projection = capacity.map(|capacity| LoraWorkerProjection {
             capacity,
             loras: loras.to_vec(),
+            is_registration_required: false,
         });
         self.mutate(|next| replace_worker(next, worker, projection));
     }
@@ -401,6 +426,7 @@ fn replace_worker(
         .unwrap_or_default();
     let Some(projection) = projection else {
         snapshot.worker_capacity.remove(&worker);
+        snapshot.registration_required.remove(&worker);
         for name in previous {
             remove_lora(snapshot, worker, &name);
         }
@@ -408,6 +434,11 @@ fn replace_worker(
     };
 
     snapshot.worker_capacity.insert(worker, projection.capacity);
+    if projection.is_registration_required {
+        snapshot.registration_required.insert(worker);
+    } else {
+        snapshot.registration_required.remove(&worker);
+    }
     let desired = projection
         .loras
         .into_iter()

@@ -18,7 +18,7 @@ use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID,
-    ModelCardInstanceId, reconcile_discovery_snapshot,
+    ModelCardInstanceId, reconcile_discovery_snapshot, resync_discovery_events,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -398,8 +398,23 @@ impl Discovery for KubeDiscoveryClient {
 
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let stream_id = uuid::Uuid::new_v4();
+
+        // Acquire read lock, subscribe to broadcast, then read initial state.
+        // The write lock (held by the daemon while updating list_state and sending events)
+        // is mutually exclusive with our read lock, so no events can slip between
+        // our subscription point and our initial state read.
+        // This runs before the return, so a caller that lists afterwards cannot observe an
+        // instance that a removal deletes before the subscription.
+        let (initial_instances, mut broadcast_rx) = {
+            let state = self.list_state.read().await;
+            let rx = self.event_tx.subscribe();
+            let initial = state
+                .values()
+                .flat_map(|m| m.filter(&query))
+                .collect::<Vec<_>>();
+            (initial, rx)
+        };
         let list_state = self.list_state.clone();
-        let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
             let receiver_closed = out_tx.closed();
@@ -411,30 +426,6 @@ impl Discovery for KubeDiscoveryClient {
                 }
             };
             tokio::pin!(cancelled);
-
-            // Acquire read lock, subscribe to broadcast, then read initial state.
-            // The write lock (held by the daemon while updating list_state and sending events)
-            // is mutually exclusive with our read lock, so no events can slip between
-            // our subscription point and our initial state read.
-            let (initial_instances, mut broadcast_rx) = tokio::select! {
-                _ = &mut receiver_closed => {
-                    tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
-                    return;
-                }
-                _ = &mut cancelled => {
-                    tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
-                    return;
-                }
-                initial = async {
-                    let state = list_state.read().await;
-                    let rx = event_tx.subscribe();
-                    let initial = state
-                        .values()
-                        .flat_map(|m| m.filter(&query))
-                        .collect::<Vec<_>>();
-                    (initial, rx)
-                } => initial,
-            };
 
             tracing::debug!(
                 stream_id = %stream_id,
@@ -477,34 +468,33 @@ impl Discovery for KubeDiscoveryClient {
 
                 match recv_result {
                     Ok(event) => {
-                        let forward = match &event {
+                        let forwarded = match &event {
                             DiscoveryEvent::Added(instance) => {
                                 if instance.matches(&query) {
                                     let id = instance.id();
                                     if known.get(&id) != Some(instance) {
-                                        known.insert(id, instance.clone());
-                                        true
+                                        known.insert(id.clone(), instance.clone());
+                                        Some(("added", id))
                                     } else {
-                                        false
+                                        None
                                     }
                                 } else {
-                                    false
+                                    None
                                 }
                             }
-                            DiscoveryEvent::Removed(id) => known.remove(id).is_some(),
-                            DiscoveryEvent::ModelTaintsUpdated(update) => {
-                                known.contains_key(&DiscoveryInstanceId::Model(update.id.clone()))
+                            DiscoveryEvent::Removed(id) => {
+                                known.remove(id).is_some().then(|| ("removed", id.clone()))
                             }
+                            DiscoveryEvent::ModelTaintsUpdated(update) => {
+                                let id = DiscoveryInstanceId::Model(update.id.clone());
+                                known
+                                    .contains_key(&id)
+                                    .then_some(("model_taints_updated", id))
+                            }
+                            // The daemon publishes incremental events only.
+                            DiscoveryEvent::Resync(_) => None,
                         };
-                        if forward {
-                            let (event_kind, instance_id) = match &event {
-                                DiscoveryEvent::Added(i) => ("added", i.id()),
-                                DiscoveryEvent::ModelTaintsUpdated(u) => (
-                                    "model_taints_updated",
-                                    DiscoveryInstanceId::Model(u.id.clone()),
-                                ),
-                                DiscoveryEvent::Removed(id) => ("removed", id.clone()),
-                            };
+                        if let Some((event_kind, instance_id)) = forwarded {
                             tracing::info!(
                                 stream_id = %stream_id,
                                 event_kind,
@@ -539,9 +529,7 @@ impl Discovery for KubeDiscoveryClient {
                             .map(|i| (i.id(), i))
                             .collect();
                         drop(state);
-                        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
-                        known = reconciled;
-                        for event in events {
+                        for event in resync_discovery_events(&mut known, current) {
                             if out_tx.send(Ok(event)).is_err() {
                                 return;
                             }

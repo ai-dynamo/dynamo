@@ -79,6 +79,8 @@ async def worker(runtime: DistributedRuntime) -> None:
         expected_unique_blocks=args.expected_unique_blocks,
         bind=args.bind,
         tuning=dict(args.tuning) or None,
+        sources_file=args.sources_file,
+        connection_revision=args.connection_revision,
     )
     await relay.start()
     diagnostics = KvDcRelayDiagnostics(relay)
