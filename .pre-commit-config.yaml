@@ -211,6 +211,13 @@ repos:
       additional_dependencies: [packaging, pytest]
       pass_filenames: false
       always_run: true
+    - id: ffmpeg-version-consistency
+      name: Check the in-tree FFmpeg version is declared consistently
+      entry: python3 tests/dependencies/test_ffmpeg_version_consistency.py
+      language: python
+      additional_dependencies: [pytest, pyyaml]
+      pass_filenames: false
+      always_run: true
     - id: validate-agent-instructions
       name: Validate AGENTS.md and CLAUDE.md pairs
       entry: python3 scripts/validate_agent_instructions.py
