@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: planner RBAC — powerAwareness.enabled gate
+suite: planner RBAC — Pod lifecycle observation
 templates:
   - charts/dynamo-operator/templates/planner.yaml
 
 tests:
   # ── cluster-wide mode (default) ──────────────────────────────────────────────
 
-  - it: omits pods/list from ClusterRole when powerAwareness is disabled (default)
+  - it: includes pods/list in ClusterRole when powerAwareness is disabled (default)
     asserts:
-      - notContains:
+      - contains:
           path: rules
           content:
             apiGroups:
@@ -19,6 +19,17 @@ tests:
               - pods
             verbs:
               - list
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentscalingadapters/scale
+            verbs:
+              - get
+              - patch
         documentIndex: 0
 
   - it: includes pods/list in ClusterRole when powerAwareness is enabled
@@ -35,15 +46,26 @@ tests:
             verbs:
               - list
         documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentscalingadapters/scale
+            verbs:
+              - get
+              - patch
+        documentIndex: 0
 
   # ── namespace-restricted mode ─────────────────────────────────────────────────
 
-  - it: omits pods/list from Role when powerAwareness is disabled in namespace-restricted mode
+  - it: includes pods/list in Role when powerAwareness is disabled in namespace-restricted mode
     set:
       dynamo-operator.namespaceRestriction.enabled: true
       dynamo-operator.upgradeCRD: false
     asserts:
-      - notContains:
+      - contains:
           path: rules
           content:
             apiGroups:
@@ -52,6 +74,17 @@ tests:
               - pods
             verbs:
               - list
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentscalingadapters/scale
+            verbs:
+              - get
+              - patch
         documentIndex: 1
 
   - it: includes pods/list in Role when powerAwareness is enabled in namespace-restricted mode
@@ -69,4 +102,15 @@ tests:
               - pods
             verbs:
               - list
+        documentIndex: 1
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - nvidia.com
+            resources:
+              - dynamographdeploymentscalingadapters/scale
+            verbs:
+              - get
+              - patch
         documentIndex: 1

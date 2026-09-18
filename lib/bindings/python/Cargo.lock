@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.12.0-dev.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4db6a085073ecb1c2569f796ba44742ed4681f8f4060daaed2456ef4ea9b652"
+checksum = "7d266db788afdb866421aad39f8fbc7096dba9517105ff7d770ee83ad70f82bb"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -2079,7 +2079,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-backend-common"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2103,7 +2103,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-custom-policy-builtin"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
  "serde",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-data-gen"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-hashing"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "derive_builder",
  "dynamo-tokens",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-kv-router"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
@@ -2282,7 +2282,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "cudarc",
@@ -2299,7 +2299,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-mocker"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2388,7 +2388,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "aisimulate-core",
  "anyhow",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-rl"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2545,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sglang-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2569,7 +2569,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-sidecar-common"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "clap",
  "dynamo-backend-common",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-trtllm-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2641,20 +2641,22 @@ dependencies = [
 
 [[package]]
 name = "dynamo-truthy"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-vllm-sidecar"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "clap",
  "dynamo-backend-common",
+ "dynamo-llm",
+ "dynamo-runtime",
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.4",
@@ -2669,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-worker-selection-policy-catalog"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
 ]
@@ -2906,9 +2908,9 @@ dependencies = [
 
 [[package]]
 name = "fastokens"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35ff8cf975d8f772e7d4c3be439659b0b23b1ae1086ebee7204573807053ff7f"
+checksum = "102017e5eb15d2d2d5308f5bcb537390e38b0547174000f408d1f9d6aa62a369"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",
@@ -6756,9 +6758,9 @@ dependencies = [
 
 [[package]]
 name = "quinn"
-version = "0.11.9"
+version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e20a958963c291dc322d98411f541009df2ced7b5a4f2bd52337638cfccf20"
+checksum = "4051e23e9185c255a7e33ef59cdbca87a22d359052eecd22fc6b901fb37d9d11"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -6776,9 +6778,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.17"
+version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "bytes",
  "getrandom 0.4.2",
