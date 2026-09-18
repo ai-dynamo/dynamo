@@ -4651,21 +4651,29 @@ mod tests {
         );
     }
 
-    /// #11349 regression: non-streaming chat must preserve per-chunk metrics
-    /// through folding and the backend-error preflight, including a zero-token
-    /// payload-usage tail.
-    #[tokio::test]
-    async fn test_non_streaming_fold_preserves_chunk_metrics() {
+    /// Helpers for the #11349 fold/scan regression tests below. They build the
+    /// production stream shape (typed per-chunk metrics, a finish chunk, and
+    /// the zero-token `payload_usage` tail that payload capture appends) and
+    /// read the collector's output back from a private registry.
+    mod fold_regression {
+        use super::*;
         use crate::http::service::openai::check_for_backend_error;
-        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::http::service::service_v2::BackendErrorCheck;
+        use crate::protocols::common::metrics::ANNOTATION_PAYLOAD_USAGE;
         use crate::protocols::openai::ParsingOptions;
+        use crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
         use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-        use crate::protocols::openai::chat_completions::{
-            NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+        use crate::request_trace::payload_stream::{
+            fold_aggregate_with_future, scan_aggregate_with_future,
         };
-        use crate::request_trace::payload_stream::fold_aggregate_with_future;
         use crate::types::Annotated;
-        use futures::StreamExt;
+        use futures::{Stream, StreamExt};
+
+        const MODEL: &str = "test-model";
+        const RESPONSE_ID: &str = "test-id";
+        const CREATED: u32 = 1234567890;
+        const INPUT_TOKENS: usize = 7;
+        const TAIL_CACHED_TOKENS: usize = 2;
 
         fn chat_chunk(
             content: Option<&str>,
@@ -4691,10 +4699,10 @@ mod tests {
             };
             let response = NvCreateChatCompletionStreamResponse {
                 inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
-                    id: "test-id".to_string(),
+                    id: RESPONSE_ID.to_string(),
                     choices: vec![choice],
-                    created: 1234567890,
-                    model: "test-model".to_string(),
+                    created: CREATED,
+                    model: MODEL.to_string(),
                     system_fingerprint: None,
                     object: "chat.completion.chunk".to_string(),
                     usage: None,
@@ -4712,119 +4720,276 @@ mod tests {
             }
         }
 
+        /// Per-chunk metrics as the preprocessor attaches them to content
+        /// chunks: no `cached_tokens`, which only the usage tail carries.
         fn chunk_metrics(chunk_tokens: usize, output_tokens: usize) -> LLMMetricAnnotation {
             LLMMetricAnnotation {
-                input_tokens: 7,
+                input_tokens: INPUT_TOKENS,
                 output_tokens,
                 chunk_tokens,
+                cached_tokens: None,
                 ..Default::default()
             }
         }
 
-        // Production shape: positive-count content chunks, a finish chunk, then
-        // a zero-token usage tail carrying the final cumulative metrics.
-        let tail_annotation = chunk_metrics(0, 3).to_annotation::<()>().unwrap();
-        let mut tail = chat_chunk(None, None, None);
-        {
-            let data = tail.data.as_mut().unwrap();
-            data.inner.choices = vec![];
-            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
-                prompt_tokens: 7,
-                completion_tokens: 3,
-                total_tokens: 10,
-                ..Default::default()
-            });
+        /// The tail payload capture appends: usage data plus the cumulative
+        /// metrics as a `payload_usage` annotation with `chunk_tokens = 0` and
+        /// the request's `cached_tokens`, which no content chunk carries. The
+        /// tag is set explicitly because `to_annotation` always emits
+        /// `llm_metrics`, which is not the production tag for this chunk.
+        fn payload_usage_tail(
+            output_tokens: usize,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            let tail_metrics = LLMMetricAnnotation {
+                cached_tokens: Some(TAIL_CACHED_TOKENS),
+                ..chunk_metrics(0, output_tokens)
+            };
+            let annotation = tail_metrics.to_annotation::<()>().unwrap();
+            let mut tail = chat_chunk(None, None, None);
+            {
+                let data = tail.data.as_mut().unwrap();
+                data.inner.choices = vec![];
+                data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                    prompt_tokens: INPUT_TOKENS as u32,
+                    completion_tokens: output_tokens as u32,
+                    total_tokens: (INPUT_TOKENS + output_tokens) as u32,
+                    ..Default::default()
+                });
+            }
+            tail.event = Some(ANNOTATION_PAYLOAD_USAGE.to_string());
+            tail.comment = annotation.comment;
+            tail
         }
-        tail.event = tail_annotation.event;
-        tail.comment = tail_annotation.comment;
 
-        let chunks = vec![
-            chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
-            chat_chunk(Some("world"), None, Some(chunk_metrics(2, 3))),
-            chat_chunk(
-                None,
-                Some(dynamo_protocols::types::FinishReason::Stop),
-                None,
-            ),
-            tail,
-        ];
+        /// Production stream with payload capture on: positive-count content
+        /// chunks, a finish chunk, then the zero-token usage tail.
+        fn production_chunks() -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+            vec![
+                chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
+                chat_chunk(Some("world"), None, Some(chunk_metrics(2, 3))),
+                chat_chunk(
+                    None,
+                    Some(dynamo_protocols::types::FinishReason::Stop),
+                    None,
+                ),
+                payload_usage_tail(3),
+            ]
+        }
 
-        let metrics = Arc::new(Metrics::new());
-        let registry = prometheus::Registry::new();
-        metrics.register(&registry).unwrap();
-        let mut collector = metrics.clone().create_response_collector("test-model");
-        let mut http_queue_guard = None;
+        /// What the collector wrote, minus durations: TTFT and ITL sums are
+        /// wall-clock and cannot be compared across runs, so only their
+        /// sample counts are part of the signature.
+        #[derive(Debug, PartialEq)]
+        struct MetricSignature {
+            output_tokens_total: u64,
+            /// (sample count, sample sum)
+            isl: (u64, u64),
+            osl: (u64, u64),
+            cached_tokens: (u64, u64),
+            ttft_samples: u64,
+            itl_samples: u64,
+        }
 
-        // Match the production non-streaming chat path exactly:
-        // fold -> observe metrics -> backend-error preflight -> aggregate.
-        // The preflight buffers leading annotation frames, so the observer must
-        // sit ahead of it for TTFT/ITL to reflect arrival time.
-        let (folded, payload_future) = fold_aggregate_with_future(futures::stream::iter(chunks));
-        let observed = folded.inspect(move |response| {
-            process_chat_response_and_observe_metrics(
-                response,
-                &mut collector,
-                &mut http_queue_guard,
+        fn signature(registry: &Registry) -> MetricSignature {
+            let families = registry.gather();
+            let histogram = |name: &str| -> (u64, u64) {
+                families
+                    .iter()
+                    .find(|mf| mf.name() == name)
+                    .map(|mf| {
+                        let h = mf.get_metric()[0].get_histogram();
+                        (h.get_sample_count(), h.get_sample_sum() as u64)
+                    })
+                    .unwrap_or((0, 0))
+            };
+            let counter = |name: &str| -> u64 {
+                families
+                    .iter()
+                    .find(|mf| mf.name() == name)
+                    .map(|mf| mf.get_metric()[0].get_counter().value() as u64)
+                    .unwrap_or(0)
+            };
+            MetricSignature {
+                output_tokens_total: counter("dynamo_frontend_output_tokens_total"),
+                isl: histogram("dynamo_frontend_input_sequence_tokens"),
+                osl: histogram("dynamo_frontend_output_sequence_tokens"),
+                cached_tokens: histogram("dynamo_frontend_cached_tokens"),
+                ttft_samples: histogram("dynamo_frontend_time_to_first_token_seconds").0,
+                itl_samples: histogram("dynamo_frontend_inter_token_latency_seconds").0,
+            }
+        }
+
+        /// Drive `stream` through the non-streaming HTTP handler's observation
+        /// chain (observe, backend-error preflight, aggregate) against a
+        /// private registry. Aggregating consumes the stream, which drops the
+        /// collector and flushes ITL and the final OSL.
+        async fn observe_and_aggregate(
+            stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
+        ) -> (Registry, NvCreateChatCompletionResponse) {
+            let metrics = Arc::new(Metrics::new_with_prefix(None));
+            let registry = Registry::new();
+            metrics.register(&registry).unwrap();
+            let mut collector = metrics.create_response_collector(MODEL);
+            let mut http_queue_guard = None;
+
+            let observed = stream.inspect(move |response| {
+                process_chat_response_and_observe_metrics(
+                    response,
+                    &mut collector,
+                    &mut http_queue_guard,
+                );
+            });
+            let checked = check_for_backend_error(observed, BackendErrorCheck::UntilFirstEvent)
+                .await
+                .expect("production-shaped stream must pass the backend-error preflight");
+            let response = NvCreateChatCompletionResponse::from_annotated_stream(
+                checked,
+                ParsingOptions::default(),
+            )
+            .await
+            .expect("aggregation must produce a response");
+            (registry, response)
+        }
+
+        fn assert_identity(response: &NvCreateChatCompletionResponse) {
+            assert_eq!(response.inner.id, RESPONSE_ID);
+            assert_eq!(response.inner.model, MODEL);
+            assert_eq!(response.inner.created, CREATED);
+        }
+
+        /// #11349 regression: non-streaming chat must preserve per-chunk metrics
+        /// through folding and the backend-error preflight, including a zero-token
+        /// payload-usage tail, and the fold's blank metric envelopes must not
+        /// blank the response identity.
+        #[tokio::test]
+        async fn test_non_streaming_fold_preserves_chunk_metrics() {
+            let (folded, payload_future) =
+                fold_aggregate_with_future(futures::stream::iter(production_chunks()));
+            let (registry, response) = observe_and_aggregate(folded).await;
+
+            assert_eq!(
+                response.inner.choices[0].message.content.as_ref().unwrap(),
+                &dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                    "Hello world".to_string()
+                )
             );
-        });
-        let checked = check_for_backend_error(observed, None)
-            .await
-            .expect("production-shaped stream must pass the backend-error preflight");
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(
-            checked,
-            ParsingOptions::default(),
-        )
-        .await
-        .expect("non-streaming fold must produce a response");
-        // Consuming the stream drops the collector, flushing ITL and final OSL.
+            assert_eq!(response.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            assert_identity(&response);
 
-        assert_eq!(
-            response.inner.choices[0].message.content.as_ref().unwrap(),
-            &dynamo_protocols::types::ChatCompletionMessageContent::Text("Hello world".to_string())
-        );
-        assert_eq!(response.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            let record = payload_future
+                .await
+                .expect("payload capture must produce a response record");
+            assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            assert_identity(&record);
 
-        let record = payload_future
-            .await
-            .expect("payload capture must produce a response record");
-        assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            assert_eq!(
+                signature(&registry),
+                MetricSignature {
+                    // Positive chunks contribute 1 + 2 output tokens; the
+                    // zero-token tail must not increment the counter again.
+                    output_tokens_total: 3,
+                    // ISL and TTFT are emitted once, from the first positive chunk.
+                    isl: (1, INPUT_TOKENS as u64),
+                    // The zero-token tail still supplies the final cumulative
+                    // OSL and the only cached_tokens observation, so dropping
+                    // the tail's metrics is visible here.
+                    osl: (1, 3),
+                    cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
+                    ttft_samples: 1,
+                    // The second chunk contributes two ITL observations.
+                    itl_samples: 2,
+                }
+            );
+        }
 
-        let families = registry.gather();
-        let find = |name: &str| {
-            families
-                .iter()
-                .find(|mf| mf.name() == name)
-                .unwrap_or_else(|| panic!("{name} should be registered"))
-        };
+        /// The tool-call jail attaches typed `llm_metrics` to the payload-usage
+        /// tail, so one chunk carries both metric forms. The fold must observe
+        /// it once, typed form winning, exactly as the unfolded stream does;
+        /// forwarding both frames lets the zero-token annotation overwrite the
+        /// final OSL.
+        #[tokio::test]
+        async fn test_non_streaming_fold_observes_dual_carrier_chunk_once() {
+            let dual_carrier = || {
+                let mut tail = payload_usage_tail(3);
+                tail.data.as_mut().unwrap().llm_metrics = Some(chunk_metrics(5, 5));
+                vec![tail]
+            };
 
-        // Positive chunks contribute 1 + 2 output tokens; the zero-token tail
-        // must not increment the counter again.
-        let output_tokens = find("dynamo_frontend_output_tokens_total");
-        assert_eq!(
-            output_tokens.get_metric()[0].get_counter().value() as u64,
-            3
-        );
+            let (folded, _payload_future) =
+                fold_aggregate_with_future(futures::stream::iter(dual_carrier()));
+            let (fold_registry, _) = observe_and_aggregate(folded).await;
+            let (control_registry, _) =
+                observe_and_aggregate(futures::stream::iter(dual_carrier())).await;
 
-        // ISL and TTFT are emitted once from the first positive chunk.
-        let isl = find("dynamo_frontend_input_sequence_tokens");
-        assert_eq!(isl.get_metric()[0].get_histogram().get_sample_count(), 1);
-        assert_eq!(
-            isl.get_metric()[0].get_histogram().get_sample_sum() as u64,
-            7
-        );
-        let ttft = find("dynamo_frontend_time_to_first_token_seconds");
-        assert_eq!(ttft.get_metric()[0].get_histogram().get_sample_count(), 1);
+            let expected = MetricSignature {
+                output_tokens_total: 5,
+                isl: (1, INPUT_TOKENS as u64),
+                // Typed metrics win: OSL is 5, not the annotation's 3.
+                osl: (1, 5),
+                // The unobserved annotation also carried cached_tokens; the
+                // control path drops it the same way, since the collector
+                // reads one carrier per chunk.
+                cached_tokens: (0, 0),
+                ttft_samples: 1,
+                itl_samples: 0,
+            };
+            assert_eq!(signature(&control_registry), expected);
+            assert_eq!(signature(&fold_registry), expected);
+        }
 
-        // The second chunk contributes two ITL observations.
-        let itl = find("dynamo_frontend_inter_token_latency_seconds");
-        assert_eq!(itl.get_metric()[0].get_histogram().get_sample_count(), 2);
+        /// The invariant #11349 is about: the collector sees the same metrics
+        /// whether payload capture is off, on with streaming (scan), or on
+        /// without streaming (fold). The same chunk vector goes through each
+        /// transform into its own registry; the capture-off cells share the
+        /// untransformed path because neither wrapper is applied there.
+        #[tokio::test]
+        async fn test_metrics_parity_across_payload_capture_modes() {
+            let (plain_registry, plain_response) =
+                observe_and_aggregate(futures::stream::iter(production_chunks())).await;
 
-        // The zero-token tail still supplies the final cumulative OSL.
-        let osl = find("dynamo_frontend_output_sequence_tokens");
-        assert_eq!(osl.get_metric()[0].get_histogram().get_sample_count(), 1);
-        assert_eq!(
-            osl.get_metric()[0].get_histogram().get_sample_sum() as u64,
-            3
-        );
+            let (scanned, scan_future) =
+                scan_aggregate_with_future(futures::stream::iter(production_chunks()));
+            let (scan_registry, scan_response) = observe_and_aggregate(scanned).await;
+
+            let (folded, fold_future) =
+                fold_aggregate_with_future(futures::stream::iter(production_chunks()));
+            let (fold_registry, fold_response) = observe_and_aggregate(folded).await;
+
+            let plain = signature(&plain_registry);
+            assert_eq!(
+                signature(&scan_registry),
+                plain,
+                "scan path diverges from plain"
+            );
+            assert_eq!(
+                signature(&fold_registry),
+                plain,
+                "fold path diverges from plain"
+            );
+            // The shared signature must be the real request, not three
+            // agreeing zeros.
+            assert_eq!(plain.output_tokens_total, 3);
+            assert_eq!(plain.osl, (1, 3));
+            assert_eq!(plain.cached_tokens, (1, TAIL_CACHED_TOKENS as u64));
+            assert_eq!(plain.ttft_samples, 1);
+            assert_eq!(plain.itl_samples, 2);
+
+            // The client response and the captured record agree across paths.
+            for response in [&plain_response, &scan_response, &fold_response] {
+                assert_identity(response);
+                assert_eq!(
+                    response.inner.choices[0].message.content.as_ref().unwrap(),
+                    &dynamo_protocols::types::ChatCompletionMessageContent::Text(
+                        "Hello world".to_string()
+                    )
+                );
+                assert_eq!(response.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            }
+            for record in [scan_future.await, fold_future.await] {
+                let record = record.expect("payload capture must produce a response record");
+                assert_identity(&record);
+                assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            }
+        }
     }
 }

@@ -141,21 +141,26 @@ where
         let mut forwarded_frames: usize = 0;
 
         while let Some(mut chunk) = stream.next().await {
-            // Move typed metrics out of the buffered chunk and forward them
-            // immediately, still typed, so the collector's typed path observes
-            // them without a serialize/deserialize round-trip.
+            // Each source chunk yields at most one observable metrics frame.
+            // Typed metrics win over an event annotation on the same chunk,
+            // the same precedence the collector applies to an unfolded
+            // stream, so the fold cannot observe one chunk twice. The
+            // tool-call jail produces such dual-carrier chunks: it attaches
+            // typed `llm_metrics` to the payload-usage tail, which also
+            // carries its own annotation.
             if let Some(metrics) = chunk.data.as_mut().and_then(|data| data.llm_metrics.take()) {
+                // Forward typed metrics immediately, still typed, so the
+                // collector observes them without a serialize/deserialize
+                // round-trip.
                 forwarded_frames += 1;
                 yield typed_metric_frame(metrics);
-            }
-
-            // Forward the event annotation as a data-less shell, leaving any
-            // payload data behind for aggregation. The annotation is parsed
-            // once, by the collector.
-            if matches!(
+            } else if matches!(
                 chunk.event.as_deref(),
                 Some(ANNOTATION_LLM_METRICS) | Some(ANNOTATION_PAYLOAD_USAGE)
             ) {
+                // Forward the event annotation as a data-less shell, leaving
+                // any payload data behind for aggregation. The annotation is
+                // parsed once, by the collector.
                 forwarded_frames += 1;
                 yield Annotated {
                     data: None,
@@ -782,29 +787,26 @@ mod tests {
         assert!(resp2.is_none());
     }
 
+    /// Per-chunk metrics as the preprocessor attaches them to content
+    /// chunks: no `cached_tokens`, which only the usage tail carries.
     fn typed_metrics(chunk_tokens: usize, output_tokens: usize) -> LLMMetricAnnotation {
         LLMMetricAnnotation {
             input_tokens: 10,
             output_tokens,
             chunk_tokens,
-            cached_tokens: Some(4),
+            cached_tokens: None,
             ..Default::default()
         }
     }
 
-    /// Production-shaped payload-usage tail: usage data plus its metric
-    /// annotation, with `chunk_tokens = 0`.
-    fn payload_usage_tail(output_tokens: usize) -> Annotated<NvCreateChatCompletionStreamResponse> {
-        let metrics = LLMMetricAnnotation {
-            input_tokens: 10,
-            output_tokens,
-            chunk_tokens: 0,
-            cached_tokens: Some(4),
-            ..Default::default()
-        };
-        let annotation = metrics.to_annotation::<()>().unwrap();
+    /// Serialized annotation comment for `metrics`, tag-agnostic.
+    fn annotation_comment(metrics: &LLMMetricAnnotation) -> Option<Vec<String>> {
+        metrics.to_annotation::<()>().unwrap().comment
+    }
 
-        let usage_chunk = NvCreateChatCompletionStreamResponse {
+    /// Usage chunk shaped like the preprocessor's payload-only usage tail.
+    fn usage_chunk(output_tokens: usize) -> NvCreateChatCompletionStreamResponse {
+        NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
                 id: "test-id".to_string(),
                 choices: vec![],
@@ -822,15 +824,56 @@ mod tests {
             },
             nvext: None,
             llm_metrics: None,
+        }
+    }
+
+    /// Production-shaped payload-usage tail: usage data plus its metric
+    /// annotation under the `payload_usage` tag, with `chunk_tokens = 0`.
+    ///
+    /// The tag is set explicitly: `to_annotation` always emits the
+    /// `llm_metrics` tag, which is not what the preprocessor puts on this
+    /// chunk when payload capture is on.
+    fn payload_usage_tail(output_tokens: usize) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens,
+            chunk_tokens: 0,
+            cached_tokens: Some(4),
+            ..Default::default()
         };
 
         Annotated {
-            data: Some(usage_chunk),
+            data: Some(usage_chunk(output_tokens)),
             id: None,
-            event: annotation.event,
-            comment: annotation.comment,
+            event: Some(ANNOTATION_PAYLOAD_USAGE.to_string()),
+            comment: annotation_comment(&metrics),
             error: None,
         }
+    }
+
+    /// Legacy data-less metrics frame under the `llm_metrics` tag, as emitted
+    /// by engines that report metrics as annotations rather than on the typed
+    /// field.
+    fn llm_metrics_event_frame(
+        chunk_tokens: usize,
+        output_tokens: usize,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        typed_metrics(chunk_tokens, output_tokens)
+            .to_annotation::<NvCreateChatCompletionStreamResponse>()
+            .unwrap()
+    }
+
+    /// Dual-carrier chunk: the payload-usage tail after the tool-call jail has
+    /// attached typed `llm_metrics` to it, so typed metrics and the
+    /// `payload_usage` annotation ride on the same chunk.
+    fn dual_carrier_tail(
+        typed_output_tokens: usize,
+        annotation_output_tokens: usize,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut tail = payload_usage_tail(annotation_output_tokens);
+        tail.data.as_mut().unwrap().llm_metrics =
+            Some(typed_metrics(typed_output_tokens, typed_output_tokens));
+        tail
     }
 
     #[tokio::test]
@@ -840,19 +883,37 @@ mod tests {
         let mut chunk2 = create_mock_chunk("World".to_string(), 0);
         chunk2.data.as_mut().unwrap().llm_metrics = Some(typed_metrics(2, 3));
 
-        let chunks = vec![chunk1, chunk2, create_final_chunk(0), payload_usage_tail(3)];
+        // A legacy data-less `llm_metrics` frame leads the stream, so both
+        // annotation tags the fold forwards are exercised: dropping either
+        // arm of the `matches!` changes the frame count below.
+        let chunks = vec![
+            llm_metrics_event_frame(0, 0),
+            chunk1,
+            chunk2,
+            create_final_chunk(0),
+            payload_usage_tail(3),
+        ];
 
         let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
         let results: Vec<_> = folded.collect().await;
         let final_resp = future.await.expect("aggregation should produce a record");
 
-        // Two typed metric frames, one payload-usage shell, then one
-        // folded client chunk.
-        assert_eq!(results.len(), 4);
+        // One legacy shell, two typed metric frames, one payload-usage shell,
+        // then one folded client chunk.
+        assert_eq!(results.len(), 5);
+
+        // The legacy annotation is forwarded under its own tag.
+        let legacy = &results[0];
+        assert!(legacy.data.is_none());
+        assert_eq!(legacy.event.as_deref(), Some(ANNOTATION_LLM_METRICS));
+        let legacy_metrics = LLMMetricAnnotation::from_annotation(legacy)
+            .unwrap()
+            .expect("legacy llm_metrics shell must parse");
+        assert_eq!(legacy_metrics.input_tokens, 10);
 
         // Typed metrics stay typed: carried on `llm_metrics` of an empty
         // envelope, never re-encoded as an annotation.
-        for (frame, expected_chunk_tokens) in results[..2].iter().zip([1usize, 2]) {
+        for (frame, expected_chunk_tokens) in results[1..3].iter().zip([1usize, 2]) {
             let data = frame
                 .data
                 .as_ref()
@@ -868,10 +929,11 @@ mod tests {
             assert!(frame.comment.is_none());
         }
 
-        // The legacy annotation is forwarded without payload data; usage
-        // remains in the fold.
-        let shell = &results[2];
+        // The payload-usage annotation is forwarded without payload data and
+        // under its production tag; usage remains in the fold.
+        let shell = &results[3];
         assert!(shell.data.is_none());
+        assert_eq!(shell.event.as_deref(), Some(ANNOTATION_PAYLOAD_USAGE));
         let tail_metrics = LLMMetricAnnotation::from_annotation(shell)
             .unwrap()
             .expect("payload-usage shell must parse");
@@ -879,7 +941,7 @@ mod tests {
         assert_eq!(tail_metrics.output_tokens, 3);
 
         // Exactly one folded client chunk; metrics must not be replayed on it.
-        let folded_chunk = results[3].data.as_ref().expect("folded client chunk");
+        let folded_chunk = results[4].data.as_ref().expect("folded client chunk");
         assert!(folded_chunk.llm_metrics.is_none());
         assert_eq!(
             folded_chunk.inner.choices[0]
@@ -894,6 +956,12 @@ mod tests {
             3
         );
 
+        // The blank envelopes of the metric frames must not blank the
+        // response identity: the folded chunk re-supplies it.
+        assert_eq!(folded_chunk.inner.id, "test-id");
+        assert_eq!(folded_chunk.inner.model, "test-model");
+        assert_eq!(folded_chunk.inner.created, 1234567890);
+
         assert_eq!(
             final_resp.inner.choices[0]
                 .message
@@ -901,6 +969,70 @@ mod tests {
                 .as_ref()
                 .unwrap(),
             &ChatCompletionMessageContent::Text("Hello World".to_string())
+        );
+        assert_eq!(
+            final_resp.inner.usage.as_ref().unwrap().completion_tokens,
+            3
+        );
+        assert_eq!(final_resp.inner.id, "test-id");
+        assert_eq!(final_resp.inner.model, "test-model");
+        assert_eq!(final_resp.inner.created, 1234567890);
+    }
+
+    /// A chunk carrying both typed `llm_metrics` and a `payload_usage`
+    /// annotation must yield exactly one observable metrics frame, with the
+    /// typed form winning, as it does on the unfolded stream. Two frames
+    /// would make the collector observe the chunk twice; since the second
+    /// observation is the zero-token tail, the visible damage is the final
+    /// OSL being overwritten with the annotation's value.
+    #[tokio::test]
+    async fn test_fold_dual_carrier_chunk_yields_one_metrics_frame() {
+        let chunks = vec![
+            create_mock_chunk("Hello".to_string(), 0),
+            create_final_chunk(0),
+            dual_carrier_tail(5, 3),
+        ];
+
+        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
+        let results: Vec<_> = folded.collect().await;
+        let final_resp = future.await.expect("aggregation should produce a record");
+
+        // One typed metric frame, then the folded client chunk.
+        assert_eq!(results.len(), 2);
+
+        let observable = results
+            .iter()
+            .filter(|frame| {
+                let typed = frame
+                    .data
+                    .as_ref()
+                    .is_some_and(|data| data.llm_metrics.is_some());
+                let annotated = matches!(LLMMetricAnnotation::from_annotation(frame), Ok(Some(_)));
+                typed || annotated
+            })
+            .count();
+        assert_eq!(
+            observable, 1,
+            "a dual-carrier chunk must be observable once"
+        );
+
+        let typed = results[0]
+            .data
+            .as_ref()
+            .and_then(|data| data.llm_metrics.as_ref())
+            .expect("typed metrics must win over the annotation");
+        assert_eq!(typed.output_tokens, 5);
+        assert_eq!(typed.chunk_tokens, 5);
+        assert!(results[0].event.is_none());
+        assert!(results[0].comment.is_none());
+
+        // The annotation is not forwarded, but its usage payload still folds.
+        let folded_chunk = results[1].data.as_ref().expect("folded client chunk");
+        assert!(folded_chunk.llm_metrics.is_none());
+        assert!(results[1].event.is_none());
+        assert_eq!(
+            folded_chunk.inner.usage.as_ref().unwrap().completion_tokens,
+            3
         );
         assert_eq!(
             final_resp.inner.usage.as_ref().unwrap().completion_tokens,
