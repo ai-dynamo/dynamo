@@ -97,21 +97,29 @@ impl AisPerfConfig {
     }
 }
 
+pub(super) fn normalize_ais_perf_config(
+    py: Python<'_>,
+    config: &Bound<'_, PyAny>,
+) -> PyResult<serde_json::Value> {
+    let mapping = if config.hasattr("to_dict")? {
+        config.call_method0("to_dict")?
+    } else {
+        py.import("builtins")?.call_method1("dict", (config,))?
+    };
+    let canonical = py
+        .import("aisimulate_core.sdk")?
+        .getattr("ForwardPassPerfModelConfig")?
+        .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
+    Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
+}
+
 #[pymethods]
 impl AisPerfConfig {
     #[new]
     fn new(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let mapping = if config.hasattr("to_dict")? {
-            config.call_method0("to_dict")?
-        } else {
-            config.clone()
-        };
-        let canonical = py
-            .import("aisimulate_core.sdk")?
-            .getattr("ForwardPassPerfModelConfig")?
-            .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
-        let config = pythonize::depythonize(&canonical.call_method0("to_dict")?)?;
-        Ok(Self { config })
+        Ok(Self {
+            config: normalize_ais_perf_config(py, config)?,
+        })
     }
 
     fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -778,13 +786,21 @@ async fn select_engine(
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
                 mocker_engine_args.inner()
             } else if let Some(extra_args_path) = args.extra_engine_args {
-                RsMockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to load mocker args from {:?}: {}",
-                        extra_args_path,
-                        e
-                    )
-                })?
+                tokio::fs::read_to_string(&extra_args_path)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|config_json| {
+                        Python::with_gil(|py| {
+                            Ok(PyMockEngineArgs::from_json(py, &config_json)?.inner())
+                        })
+                    })
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to load mocker args from {:?}: {}",
+                            extra_args_path,
+                            e
+                        )
+                    })?
             } else {
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."

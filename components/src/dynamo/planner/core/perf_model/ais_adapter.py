@@ -366,17 +366,28 @@ class PlannerEnginePerfModel:
                 logger.warning("AIS perf model tuning failed: %s", e)
         else:
             self._pending_iterations.extend(iterations)
-            if len(self._pending_iterations) > self._config.max_num_fpm_samples:
-                self._pending_iterations = self._pending_iterations[
-                    -self._config.max_num_fpm_samples :
-                ]
+            self._pending_iterations = self._pending_iterations[
+                -self._observation_history_limit() :
+            ]
+
+    def _observation_history_limit(self) -> int:
+        default = self._config.max_num_fpm_samples
+        spec = self._config.ais_perf_model
+        if spec is None:
+            return default
+        controls = spec.roles[self._worker_type].get("estimator_config", {})
+        return max(
+            controls.get(estimator, {})
+            .get("sampling", {})
+            .get("max_observations", default)
+            for estimator in ("fpm_regression", "correction")
+        )
 
     def _remember_iterations(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         self._retained_iterations.extend(iterations)
-        if len(self._retained_iterations) > self._config.max_num_fpm_samples:
-            self._retained_iterations = self._retained_iterations[
-                -self._config.max_num_fpm_samples :
-            ]
+        self._retained_iterations = self._retained_iterations[
+            -self._observation_history_limit() :
+        ]
 
     def _is_supported_fpm(self, fpm: ForwardPassMetrics) -> bool:
         if fpm.version != FPM_VERSION:

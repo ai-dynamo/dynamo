@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import textwrap
 from importlib import metadata
 from pathlib import Path
 
@@ -33,6 +35,49 @@ CARGO_LOCKFILES = (
     ROOT / "lib/bindings/python/Cargo.lock",
     ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
+
+
+@pytest.mark.timeout(30)
+def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import runpy
+        import sys
+
+        class WithoutAIS(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core', 'aiconfigurator_core'}:
+                    raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
+
+        sys.meta_path.insert(0, WithoutAIS())
+        namespace = runpy.run_path(sys.argv[1], run_name='__main__')
+        try:
+            namespace['PlannerConfig'](
+                mode='decode',
+                ais_perf_model={'roles': {'decode': {
+                    'model': 'model', 'system': 'system', 'backend': 'vllm',
+                }}},
+            )
+        except ModuleNotFoundError as error:
+            assert error.name == 'aisimulate_core'
+        else:
+            raise AssertionError('Explicit AIS configuration requires its runtime')
+        """
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT / "deploy/operator/api/scripts/validate_pydantic_models.py"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _requirement_names(requirements: list[str]) -> set[str]:

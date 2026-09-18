@@ -40,6 +40,7 @@ from dynamo.profiler.utils.config import (
     get_component_dict,
     get_main_container,
     get_main_container_dict,
+    remove_all_argument_occurrences,
     set_argument_value,
     set_unique_env_value,
 )
@@ -452,12 +453,13 @@ def _inject_mocker_ais_args(
         )
     args_list = set_argument_value(args_list, "--ais-system", aic_spec.system)
     args_list = set_argument_value(args_list, "--ais-tp-size", str(kwargs["tp_size"]))
-    args_list = set_argument_value(
-        args_list, "--ais-moe-tp-size", str(kwargs["moe_tp_size"])
-    )
-    args_list = set_argument_value(
-        args_list, "--ais-moe-ep-size", str(kwargs["moe_ep_size"])
-    )
+    for field in ("moe_tp_size", "moe_ep_size"):
+        flag = "--ais-" + field.replace("_", "-")
+        if kwargs["moe_tp_size"] * kwargs["moe_ep_size"] > 1:
+            args_list = set_argument_value(args_list, flag, str(kwargs[field]))
+        else:
+            # Dense picks use (1, 1) as a sentinel, not an MoE topology.
+            args_list = remove_all_argument_occurrences(args_list, flag)
     args_list = set_argument_value(
         args_list, "--ais-attention-dp-size", str(kwargs["attention_dp_size"])
     )

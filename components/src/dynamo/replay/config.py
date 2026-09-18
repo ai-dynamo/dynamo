@@ -30,6 +30,10 @@ def canonical_upstream_config(
     from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
     if "model" in config:
+        if config.get("worker_type") != worker_type:
+            raise ValueError(
+                f"AIS metadata worker_type must match the {worker_type} engine role"
+            )
         return dict(config)
     fields = {
         "model_path": "model",

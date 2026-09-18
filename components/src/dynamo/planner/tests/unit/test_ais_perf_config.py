@@ -4,11 +4,16 @@
 """Canonical AIS configuration survives Planner input, runtime binding and reload."""
 
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from dynamo.common.forward_pass_metrics import (
+    ForwardPassMetrics,
+    ScheduledRequestMetrics,
+)
 from dynamo.planner.config.planner_config import AISPerfModelSpec, PlannerConfig
 from dynamo.planner.core.perf_model.ais_adapter import PlannerEnginePerfModel
 from dynamo.planner.core.types import EngineCapabilities
@@ -73,6 +78,58 @@ def test_canonical_defaults_and_complete_controls_roundtrip(tmp_path):
     assert (
         PlannerConfig.model_validate(serialized).ais_perf_model == config.ais_perf_model
     )
+
+
+@pytest.mark.parametrize("policy", ["off", "conservative", "balanced"])
+def test_sdk_presets_validate_without_persisting_machine_local_roots(policy):
+    config = _planner(_role_config(transfer_policy=policy, systems_paths=["default"]))
+    role = config.ais_perf_model.roles["decode"]
+    assert role["transfer_policy"] == policy
+    assert role["systems_paths"] == ["default"]
+    assert role["estimator_config"] == {}
+    restored = PlannerConfig.model_validate(config.model_dump(mode="json"))
+    assert restored.ais_perf_model == config.ais_perf_model
+
+
+@pytest.mark.parametrize("initial_capabilities", [True, False])
+def test_canonical_observation_budget_survives_capability_rebuild(initial_capabilities):
+    config = _planner(
+        _role_config(
+            estimation_mode="fpm_regression",
+            estimator_config={
+                "fpm_regression": {
+                    "sampling": {"max_observations": 256, "bins_per_axis": [1, 1]},
+                    "min_observations": 128,
+                }
+            },
+        )
+    )
+    caps = _limits()
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=caps if initial_capabilities else None,
+    )
+    for index in range(128):
+        requests = index % 8 + 1
+        model.add_observations(
+            {
+                ("worker", 0): ForwardPassMetrics(
+                    worker_id="worker",
+                    dp_rank=0,
+                    wall_time=0.01 + index * 1e-5,
+                    scheduled_requests=ScheduledRequestMetrics(
+                        num_decode_requests=requests,
+                        sum_decode_kv_tokens=requests * (index % 7 + 10),
+                    ),
+                )
+            }
+        )
+    if initial_capabilities:
+        assert model.has_sufficient_data()
+    model.update_capabilities(replace(caps, max_num_seqs=256))
+    assert model.has_sufficient_data()
+    assert model.num_observations == 128
 
 
 @pytest.mark.parametrize(

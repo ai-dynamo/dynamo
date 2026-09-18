@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from dynamo.replay.config import load_engine_args
@@ -127,3 +129,107 @@ def test_disaggregated_replay_uses_native_ais_engine() -> None:
     assert report["num_requests"] == 2
     assert report["mean_ttft_ms"] > 0.0
     assert report["mean_tpot_ms"] > 0.0
+
+
+@pytest.mark.parametrize(
+    "input_kind,policy",
+    [("mapping", "off"), ("json", "balanced"), ("external_json", None)],
+)
+def test_canonical_python_presets_survive_mocker_round_trip_and_replay(
+    input_kind, policy
+) -> None:
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+    from dynamo._core import (
+        AisPerfConfig,
+        MockEngineArgs,
+        run_mocker_synthetic_trace_replay,
+    )
+
+    # Load packaged model metadata/performance tables only, without model weights.
+    payload = {
+        "model": AIS_MODEL,
+        "system": AIS_SYSTEM,
+        "backend": "vllm",
+        "worker_type": "aggregated",
+        "estimation_mode": "op_level",
+        "transfer_policy": policy,
+        "systems_paths": ["default"],
+    }
+    expected = ForwardPassPerfModelConfig(**payload).to_dict()
+    assert AisPerfConfig(payload).to_dict() == expected
+    if input_kind == "mapping":
+        args = MockEngineArgs(ais_perf_config=payload, num_gpu_blocks=1000)
+    else:
+        timing = (
+            {"ais_perf_config": payload}
+            if input_kind == "json"
+            else {
+                "timing_model": {
+                    "type": "external",
+                    "provider": "aic",
+                    "config": payload,
+                }
+            }
+        )
+        args = MockEngineArgs.from_json(json.dumps({"num_gpu_blocks": 1000, **timing}))
+    assert args.ais_perf_config == expected
+    updated = args.with_overrides(num_gpu_blocks=1001)
+    assert updated.ais_perf_config == expected
+    restored = MockEngineArgs.from_json(
+        json.dumps(
+            {
+                "ais_perf_config": updated.ais_perf_config,
+                "num_gpu_blocks": updated.num_gpu_blocks,
+            }
+        )
+    )
+    assert restored.ais_perf_config == expected
+    assert restored.num_gpu_blocks == 1001
+    report = run_mocker_synthetic_trace_replay(
+        128, 2, 1, extra_engine_args=restored, replay_concurrency=1
+    ).summary
+    assert report["num_requests"] == 1
+    assert report["mean_ttft_ms"] > 0
+    assert report["mean_tpot_ms"] > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.forked
+@pytest.mark.parametrize(
+    "discovery_backend,request_plane", [("mem", "tcp")], indirect=True
+)
+@pytest.mark.parametrize("num_gpu_blocks", [None, 1000])
+async def test_live_mocker_file_normalizes_canonical_python_presets(
+    runtime, tmp_path, num_gpu_blocks
+) -> None:
+    from dynamo._core import EngineType, EntrypointArgs, MockEngineArgs, make_engine
+
+    payload = {
+        "ais_perf_config": {
+            "model": AIS_MODEL,
+            "system": AIS_SYSTEM,
+            "backend": "vllm",
+            "worker_type": "aggregated",
+            "estimation_mode": "op_level",
+            "transfer_policy": "balanced",
+            "systems_paths": ["default"],
+        }
+    }
+    if num_gpu_blocks is not None:
+        payload["num_gpu_blocks"] = num_gpu_blocks
+    path = tmp_path / "mocker.json"
+    path.write_text(json.dumps(payload))
+    parsed = MockEngineArgs.from_json(path.read_text())
+    assert parsed.num_gpu_blocks == (
+        16384 if num_gpu_blocks is None else num_gpu_blocks
+    )
+    engine = await make_engine(
+        runtime,
+        EntrypointArgs(
+            engine_type=EngineType.Mocker,
+            model_name="ais-file-config-test",
+            extra_engine_args=str(path),
+        ),
+    )
+    assert engine is not None

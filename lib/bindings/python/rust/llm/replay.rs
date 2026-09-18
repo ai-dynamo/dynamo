@@ -27,7 +27,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
-use super::entrypoint::{AisPerfConfig, KvRouterConfig, to_pyerr};
+use super::entrypoint::{AisPerfConfig, KvRouterConfig, normalize_ais_perf_config, to_pyerr};
 
 #[derive(Debug, Serialize)]
 struct OfflineReplayCoverage {
@@ -248,6 +248,7 @@ impl MockEngineArgs {
     #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, ais_nextn=None, ais_nextn_accept_rates=None, ais_mtp_seed=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, ais_perf_config=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         engine_type: &str,
         num_gpu_blocks: Option<usize>,
         block_size: usize,
@@ -312,7 +313,11 @@ impl MockEngineArgs {
             .startup_time(startup_time)
             .worker_type(worker_type)
             .planner_profile_data(planner_profile_data.clone())
-            .ais_perf_config(ais_perf_config.map(pythonize::depythonize).transpose()?)
+            .ais_perf_config(
+                ais_perf_config
+                    .map(|config| normalize_ais_perf_config(py, config))
+                    .transpose()?,
+            )
             .ais_nextn(ais_nextn)
             .ais_nextn_accept_rates(ais_nextn_accept_rates)
             .ais_mtp_seed(ais_mtp_seed.unwrap_or(42))
@@ -363,19 +368,28 @@ impl MockEngineArgs {
     }
 
     #[staticmethod]
-    fn from_json(config_json: &str) -> PyResult<Self> {
-        let num_gpu_blocks_explicit = serde_json::from_str::<serde_json::Value>(config_json)
-            .ok()
-            .and_then(|value| {
-                value.as_object().map(|object| {
-                    object
-                        .get("num_gpu_blocks")
-                        .and_then(|value| value.as_u64())
-                        .is_some()
-                })
-            })
-            .unwrap_or(false);
-        RsMockEngineArgs::from_json_str(config_json)
+    pub(super) fn from_json(py: Python<'_>, config_json: &str) -> PyResult<Self> {
+        let mut config: serde_json::Value = serde_json::from_str(config_json).map_err(|e| {
+            PyException::new_err(format!("Failed to parse MockEngineArgs JSON: {e}"))
+        })?;
+        let num_gpu_blocks_explicit = config
+            .get("num_gpu_blocks")
+            .and_then(serde_json::Value::as_u64)
+            .is_some();
+        if let Some(perf_config) = config.get_mut("ais_perf_config")
+            && !perf_config.is_null()
+        {
+            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
+        }
+        if let Some(timing) = config.get_mut("timing_model")
+            && timing["type"] == "external"
+            && matches!(timing["provider"].as_str(), Some("aic" | "ais"))
+            && let Some(perf_config) = timing.get_mut("config")
+        {
+            *perf_config = normalize_ais_perf_config(py, &pythonize(py, perf_config)?)?;
+        }
+        let config_json = serde_json::to_string(&config).map_err(to_pyerr)?;
+        RsMockEngineArgs::from_json_str(&config_json)
             .map(|inner| Self {
                 inner,
                 num_gpu_blocks_explicit,

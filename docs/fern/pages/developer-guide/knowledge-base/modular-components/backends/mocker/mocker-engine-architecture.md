@@ -84,9 +84,9 @@ remain request-local until they cross a block boundary.
 The unified AISimulate configuration exposes three timing modes under
 `engine.workers.<role>.timing`:
 
-- **`default`** uses the AISonfigurator compatibility API shipped in the `aisimulate` wheel. It
-  derives the model, backend, hardware, and parallelism inputs from the `engine` configuration and
-  requires performance data for that tuple.
+- **`default`** constructs the canonical AISimulate performance model through
+  `ForwardPassPerfModel.best_available(config)`. It derives model, backend, hardware, and parallelism
+  inputs from the `engine` configuration and requires a ready estimator for that tuple.
 - **`fixed`** uses the configured `prefill_ms` and `decode_ms` for deterministic tests.
 - **`polynomial`** uses hardcoded polynomial formulas. Prefill time scales quadratically with token
   count, while decode time depends on the total active KV cache size.

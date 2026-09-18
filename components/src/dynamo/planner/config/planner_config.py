@@ -25,8 +25,6 @@ from typing import Any, Dict, Literal, Optional, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
-from aisimulate_core import RustForwardPassPerfModel
-from aisimulate_core.sdk import ForwardPassPerfModelConfig
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -115,6 +113,11 @@ class AISPerfModelSpec(BaseModel):
     def validate_role_identity(
         cls, roles: dict[str, dict[str, Any]]
     ) -> dict[str, dict[str, Any]]:
+        # Operator schema generation imports this module without the optional
+        # estimator runtime. Require AIS only when validating an AIS config.
+        from aisimulate_core import RustForwardPassPerfModel
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
         result = {}
         for role, config in roles.items():
             config = deepcopy(config)
@@ -124,8 +127,11 @@ class AISPerfModelSpec(BaseModel):
             try:
                 # Use the installed SDK's fields/defaults; never duplicate its
                 # expanding schema or discard an unrecognized input field.
-                result[role] = asdict(ForwardPassPerfModelConfig(**config))
-                RustForwardPassPerfModel.normalize_config(json.dumps(result[role]))
+                request = ForwardPassPerfModelConfig(**config)
+                RustForwardPassPerfModel.normalize_config(json.dumps(request.to_dict()))
+                # Keep authored roots portable and controls explicit; to_dict()
+                # resolves package/env roots on the machine doing validation.
+                result[role] = asdict(request)
             except TypeError as error:
                 raise ValueError(f"invalid AIS config for {role}: {error}") from error
         return result

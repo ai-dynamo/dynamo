@@ -336,6 +336,34 @@ class TestInjectMockerAicArgs:
         assert out[out.index("--ais-backend") + 1] == "sglang"
         assert out[out.index("--ais-backend-version") + 1] == "current"
 
+    @pytest.mark.parametrize("explicit_capacity", [False, True])
+    def test_dense_tp_pick_starts_with_canonical_estimator(self, explicit_capacity):
+        # Only packaged model metadata/performance tables are used; no weights.
+        from aisimulate_core.sdk import RustForwardPassPerfModel
+
+        from dynamo.mocker.args import parse_args
+        from dynamo.mocker.config import build_mocker_engine_args
+
+        pick = PickedParallelConfig(tp=2)
+        spec = self._spec("vllm").model_copy(
+            update={
+                "hf_id": "Qwen/Qwen3-32B",
+                "prefill_pick": pick,
+                "decode_pick": pick,
+            }
+        )
+        args = ["--model-path", spec.hf_id, "--disaggregation-mode", "prefill"]
+        if explicit_capacity:
+            args.extend(["--num-gpu-blocks-override", "1024"])
+        engine = build_mocker_engine_args(
+            parse_args(_inject_mocker_ais_args(args, spec, pick))
+        )
+        assert engine.num_gpu_blocks > 0
+        assert engine.ais_perf_config["tp"] == 2
+        assert engine.ais_perf_config["moe_tp_size"] is None
+        model = RustForwardPassPerfModel.best_available(engine.ais_perf_config)
+        assert model.diagnostics()["readiness"] == "ready"
+
 
 class TestBuildPlannerConfigEmbedsAicSpec:
     def test_spec_threads_into_planner_config(self):

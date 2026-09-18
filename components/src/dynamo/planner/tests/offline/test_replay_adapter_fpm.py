@@ -59,6 +59,21 @@ def _agg_config_sla() -> PlannerConfig:
     )
 
 
+def test_bootstrap_metadata_rejects_a_different_worker_role():
+    args = MockEngineArgs(worker_type="aggregated", num_gpu_blocks=1024)
+    metadata = {
+        "model": "Qwen/Qwen3-32B",
+        "system": "h200_sxm",
+        "backend": "vllm",
+        "worker_type": "decode",
+        "estimation_mode": "op_level",
+    }
+    with pytest.raises(
+        ValueError, match="metadata worker_type must match the aggregated"
+    ):
+        replay_planner._ais_session_kwargs(metadata, args)
+
+
 def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
     """A replay FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
     return {
@@ -398,6 +413,7 @@ def test_replay_engine_caps_keeps_single_rank_defaults():
 )
 def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
     monkeypatch,
+    tmp_path,
     identity_source,
 ):
     class _Session:
@@ -444,12 +460,14 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
         lambda **kwargs: adapter,
     )
     prefill_args = MockEngineArgs(
+        worker_type="prefill",
         max_num_batched_tokens=128,
         max_num_seqs=1,
         num_gpu_blocks=64,
         block_size=16,
     )
     decode_args = MockEngineArgs(
+        worker_type="decode",
         max_num_batched_tokens=128,
         max_num_seqs=2,
         num_gpu_blocks=64,
@@ -485,7 +503,9 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
             config["tp"] = config.pop("tp_size")
             config["attention_dp"] = config.pop("attention_dp_size")
             config["worker_type"] = role
-            config["systems_paths"] = [f"data-{role}"]
+            root = tmp_path / f"data-{role}"
+            root.mkdir()
+            config["systems_paths"] = [str(root)]
             config["estimator_config"] = {"correction": {"enabled": False}}
         if identity_source == "engine_config":
 
@@ -532,8 +552,8 @@ def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
             "decode",
         ]
         assert [request["config"]["systems_paths"] for request in session_requests] == [
-            ["data-prefill"],
-            ["data-decode"],
+            [str(tmp_path / "data-prefill")],
+            [str(tmp_path / "data-decode")],
         ]
     assert adapter.prefill_fpms
     assert adapter.decode_fpms

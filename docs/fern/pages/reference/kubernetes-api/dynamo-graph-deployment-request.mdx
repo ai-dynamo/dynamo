@@ -322,8 +322,8 @@ service.
     Explicit modes select the named estimator.
   </ParamField>
   <ParamField path="roles.&lt;role&gt;.fallback_policy" type="string" default="deny">
-    `deny` rejects failure of an explicitly selected mode. `allow` permits the
-    remaining lower-priority modes; `regression` permits a regression fallback.
+    `deny` rejects failure of an explicitly selected mode. `allow` tries the other modes in
+    `op_level`, `fpm_interpolation`, `fpm_regression` priority order; `regression` permits a regression fallback.
     Auto selection searches the full priority order even with `deny`.
   </ParamField>
   <ParamField path="roles.&lt;role&gt;.systems_paths" type="list[string]" default="[]">
