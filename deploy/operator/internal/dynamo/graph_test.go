@@ -9776,6 +9776,46 @@ func envVarsToMap(envs []corev1.EnvVar) map[string]string {
 	return out
 }
 
+func TestFrontendSidecarDiscoveryIdentity(t *testing.T) {
+	for _, mode := range []string{"pod", "container"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Log("Configure a worker in main with a separately named frontend and no native Dynamo sidecar")
+			component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "worker", ComponentType: v1beta1.ComponentTypeWorker,
+				FrontendSidecar: ptr.To("router"),
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoKubeDiscoveryMode: mode,
+					}},
+					Spec: corev1.PodSpec{Containers: []corev1.Container{
+						{Name: "main", Image: "worker:1.5.0"},
+						{Name: "router", Image: "frontend:1.5.0"},
+					}},
+				},
+			}
+
+			t.Log("Render both runtime containers through the production PodSpec path")
+			pod, err := GenerateBasePodSpec(component, BackendFrameworkVLLM, &mockSecretsRetriever{},
+				"test-dgd", "test-ns", RoleMain, 1, &configv1alpha1.OperatorConfiguration{},
+				commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0))
+			require.NoError(t, err)
+			require.Len(t, pod.Containers, 2)
+
+			t.Log("Container discovery uses each container's own identity; pod discovery does not inject one")
+			for _, container := range pod.Containers {
+				env := envVarsToMap(container.Env)
+				if mode == "container" {
+					assert.Equal(t, container.Name, env["CONTAINER_NAME"])
+					assert.Equal(t, mode, env["DYN_KUBE_DISCOVERY_MODE"])
+				} else {
+					assert.NotContains(t, env, "CONTAINER_NAME")
+					assert.NotContains(t, env, "DYN_KUBE_DISCOVERY_MODE")
+				}
+			}
+		})
+	}
+}
+
 func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
