@@ -689,10 +689,15 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
         exit 1; \
     fi; \
+    examined=0; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
             -name 'libavcodec*.so*' -o -name 'libavformat*.so*' 2>/dev/null); do \
+        examined=$((examined + 1)); \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
+    [ "$examined" -gt 0 ] \
+        || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
+             echo "       the package layout changed and this check went blind." >&2; exit 1; }; \
     tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
     if [ "$tarballs" -gt 1 ]; then \
         echo "ERROR: more than one FFmpeg source tarball survived the overlay, so the" >&2; \
