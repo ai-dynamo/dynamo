@@ -17,6 +17,7 @@ recipes:
 - k-exaone-2
 - kimi-k3
 - qwen-3-8-flash-next
+- minimax-m3
 - qwen-3-8-2-4t-a95b-fp8
 - glm-5-2
 - inkling
