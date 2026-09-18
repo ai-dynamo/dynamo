@@ -356,6 +356,13 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
+    /// Listen backlog for the frontend HTTP socket. Defaults to 4096; the
+    /// kernel caps it at `net.core.somaxconn`. tokio's default is 128, which a
+    /// few thousand clients connecting within seconds can overflow, and with
+    /// `tcp_syncookies=1` the overflowed connections are reset rather than
+    /// retried.
+    pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
+
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
@@ -1070,6 +1077,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
