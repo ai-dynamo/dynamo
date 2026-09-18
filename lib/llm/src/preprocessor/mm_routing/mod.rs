@@ -15,7 +15,7 @@ mod qwen3;
 
 use std::{path::Path, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::{protocols::TokenIdType, tokenizers::traits::Tokenizer};
@@ -43,6 +43,18 @@ pub(crate) struct QwenVideoProcessorContract {
     pub resize_mode: QwenVideoResizeMode,
 }
 
+/// Worker-reported Nemotron video prompt-expansion behavior.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+pub(crate) struct NemotronVideoProcessorContract {
+    pub video_pruning_rate: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct VideoProcessorContracts {
+    pub qwen: Option<QwenVideoProcessorContract>,
+    pub nemotron: Option<NemotronVideoProcessorContract>,
+}
+
 /// Geometry and temporal metadata visible to a model's video processor.
 pub(crate) struct VideoRoutingInput<'a> {
     pub frame_count: usize,
@@ -54,6 +66,10 @@ pub(crate) struct VideoRoutingInput<'a> {
 
 pub(crate) struct VideoRoutingReplacement {
     pub placeholder_token_id: TokenIdType,
+    /// Token ID passed to the worker KV-event normalizer for video runs.
+    /// Nemotron uses the image placeholder for both modalities, so it keeps
+    /// the worker's existing image-run normalization instead.
+    pub event_video_token_id: Option<TokenIdType>,
     /// Exact chat-template token sequence replaced by the model processor.
     pub target_tokens: Vec<TokenIdType>,
     pub replacement_tokens: Vec<TokenIdType>,
@@ -61,6 +77,7 @@ pub(crate) struct VideoRoutingReplacement {
 
 enum SupportedVideoModel {
     Qwen3(qwen3::Qwen3VideoRoutingSpec),
+    Nemotron(nemotron::NemotronVideoRoutingSpec),
     #[cfg(test)]
     TestStub,
 }
@@ -82,7 +99,7 @@ impl VideoRoutingProcessor {
         model_type: &str,
         model_dir: &Path,
         tokenizer: Arc<dyn Tokenizer>,
-        qwen_video_contract: QwenVideoProcessorContract,
+        contracts: VideoProcessorContracts,
     ) -> Result<Option<Self>> {
         let model = if qwen3::supports_model_type(model_type) {
             SupportedVideoModel::Qwen3(qwen3::Qwen3VideoRoutingSpec::from_model_dir(
@@ -90,7 +107,19 @@ impl VideoRoutingProcessor {
                 model_type,
                 model_dir,
                 tokenizer,
-                qwen_video_contract,
+                contracts
+                    .qwen
+                    .context("mm-routing: Qwen video worker contract is missing")?,
+            )?)
+        } else if nemotron::supports_model_type(Some(model_type)) {
+            SupportedVideoModel::Nemotron(nemotron::NemotronVideoRoutingSpec::from_model_dir(
+                model_id,
+                model_type,
+                model_dir,
+                tokenizer,
+                contracts
+                    .nemotron
+                    .context("mm-routing: Nemotron video worker contract is missing")?,
             )?)
         } else {
             return Ok(None);
@@ -105,6 +134,7 @@ impl VideoRoutingProcessor {
     ) -> Result<VideoRoutingReplacement> {
         match &self.model {
             SupportedVideoModel::Qwen3(spec) => spec.build_replacement(input),
+            SupportedVideoModel::Nemotron(spec) => spec.build_replacement(input),
             #[cfg(test)]
             SupportedVideoModel::TestStub => anyhow::bail!("test video routing processor stub"),
         }

@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use aisimulate_core::engine::{
-    Backend, EngineConfig, EngineFactory, PreemptionMode as EnginePreemptionMode, SglangConfig,
-    SglangSchedulePolicy, TimingModel, TimingModelConfig, TransferTimingMode,
+    Backend, EngineConfig, EngineFactory, KvEvictionPolicy, PreemptionMode as EnginePreemptionMode,
+    SglangConfig, SglangSchedulePolicy, TimingModel, TimingModelConfig, TransferTimingMode,
     WorkerType as EngineWorkerType,
 };
 use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
@@ -158,6 +158,7 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
+        kv_eviction_policy: KvEvictionPolicy::Lru,
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
         num_gpu_blocks_is_explicit: None,
@@ -193,6 +194,7 @@ pub(crate) fn disaggregated_replay_setup(
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
+        kv_eviction_policy: KvEvictionPolicy::Lru,
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
         num_gpu_blocks_is_explicit: prefill_role.num_gpu_blocks_is_explicit,

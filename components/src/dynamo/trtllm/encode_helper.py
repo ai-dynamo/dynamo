@@ -409,15 +409,11 @@ class EncodeHelper:
             yield {"error": "No multimodal_processor configured on encode worker"}
             return
 
-        # Extract messages and determine which flow to use
-        messages = request.get("extra_args", {}).get(
-            "messages", request.get("messages", [])
-        )
         (
             _,
             image_urls,
             embedding_paths,
-        ) = multimodal_processor.extract_prompt_and_media(messages)
+        ) = multimodal_processor.extract_prompt_and_media_from_request(request)
 
         # Flow 1: Embedding-path flow (pre-computed embeddings via NIXL)
         if embedding_paths:
