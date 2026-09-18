@@ -1858,7 +1858,6 @@ mod tests {
         Drop,
         Drain,
         RemoteKill,
-        RemoteStop,
     }
 
     async fn full_request_channel(action: FullRequestChannelAction) {
@@ -1943,12 +1942,9 @@ mod tests {
                 assert!(!controller.is_stopped());
                 assert_eq!(counter.get(), 0);
             }
-            FullRequestChannelAction::Drain
-            | FullRequestChannelAction::RemoteKill
-            | FullRequestChannelAction::RemoteStop => {
+            FullRequestChannelAction::Drain | FullRequestChannelAction::RemoteKill => {
                 let control = match action {
                     FullRequestChannelAction::RemoteKill => ControlMessage::Kill,
-                    FullRequestChannelAction::RemoteStop => ControlMessage::Stop,
                     _ => ControlMessage::Sentinel,
                 };
                 // A wire control frame follows the blocked data frame. It is not
@@ -1996,11 +1992,6 @@ mod tests {
     async fn test_full_request_channel_remote_kill() {
         full_request_channel(FullRequestChannelAction::RemoteKill).await;
     }
-    #[tokio::test]
-    async fn test_full_request_channel_remote_stop() {
-        full_request_channel(FullRequestChannelAction::RemoteStop).await;
-    }
-
     /// Receiving Stop calls context.stop(), increments the counter, and exits.
     #[tokio::test]
     async fn test_handle_request_reader_stop_control_message() {
