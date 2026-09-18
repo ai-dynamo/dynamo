@@ -173,19 +173,16 @@ func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
 	build.SupportsCPUEmbeddings = true
 	build.SelectedPropSyncChains = nil
 
-	t.Log("Keep Cyborg's partition zero regardless of the Nova CPU-embedding setting")
-	for _, settings := range []string{"", `{"cpu_embeddings":false}`, `{"cpu_embeddings":true}`, `{"cpu_embeddings":"runtime-owned","batch_folding":true}`} {
-		projection := projectTestBuild(t, normalized, PipelineLPX, settings)
-		spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
-		require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
-		require.Len(t, spec.Partitions, 2)
-		require.Equal(t, int64(0), spec.Partitions[0].CompilerPartitionID)
-		require.Equal(t, 4, projection.agentReplicas)
-		data := resolvedPartitionData([]*ModelProjection{projection})
-		require.Equal(t, "0\n1", data["partition_ids"])
-		require.Equal(t, "0\n2", data["partition_node_offsets"])
-	}
-
+	t.Log("Keep Cyborg's partition zero independently of Nova's embedding placement")
+	projection := projectTestBuild(t, normalized, PipelineLPX, "")
+	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
+	require.Equal(t, lpxv1alpha1.WorkloadModeV2StrictHybrid, spec.WorkloadMode)
+	require.Len(t, spec.Partitions, 2)
+	require.Equal(t, int64(0), spec.Partitions[0].CompilerPartitionID)
+	require.Equal(t, 4, projection.agentReplicas)
+	data := resolvedPartitionData([]*ModelProjection{projection})
+	require.Equal(t, "0\n1", data["partition_ids"])
+	require.Equal(t, "0\n2", data["partition_node_offsets"])
 }
 
 func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {

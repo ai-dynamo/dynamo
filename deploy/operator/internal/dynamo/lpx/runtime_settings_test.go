@@ -11,7 +11,6 @@ import (
 	"slices"
 	"testing"
 
-	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -196,56 +195,39 @@ func TestResolveBuildSettingsDeepMergesDefaultsAndOverrides(t *testing.T) {
 func TestProjectModelLegacyNovaSettings(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Capture the Nova and hybrid settings paths before runtime-specific overrides")
+	t.Log("Capture the Nova settings path before runtime-specific overrides")
 	singleIntent := ModelProjectionInput{
 		Models: []string{"default"}, Pipeline: PipelineSingle,
 		BuildSnapshot: normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV3CompilerFixture(t))),
 	}
-	hybridFixture := newV2CompilerFixture()
-	hybridFixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	hybridIntent := ModelProjectionInput{
-		Models: []string{"default"}, Pipeline: PipelineLPX,
-		BuildSnapshot: normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, hybridFixture))),
-	}
 	singleBaselineBatch, err := appendModelProjections(nil, singleIntent)
 	require.NoError(t, err)
 	singleBaseline := singleBaselineBatch[0]
-	hybridBaselineBatch, err := appendModelProjections(nil, hybridIntent)
-	require.NoError(t, err)
-	hybridBaseline := hybridBaselineBatch[0]
 
 	t.Log("Define accepted legacy defaults and unsupported values")
 	tests := []struct {
 		settings, wantErr string
-		hybrid            bool
 	}{
-		{`{"batch_folding":false}`, "", false},
-		{`{"num_batch_split_divisions":0}`, "", false},
-		{`{"num_batch_split_divisions":1}`, "", false},
-		{`{"num_batch_split_divisions":1.0}`, "", false},
-		{`{"num_batch_split_divisions":10e-1}`, "", false},
-		{`{"num_batch_split_divisions":-0.0}`, "", false},
-		{`{"batch_folding":true}`, `iop.batch_folding=true is not supported`, false},
-		{`{"batch_folding":"false"}`, "iop.batch_folding must be a boolean", false},
-		{`{"num_batch_split_divisions":-1}`, `iop.num_batch_split_divisions=-1 is not supported`, false},
-		{`{"num_batch_split_divisions":2}`, `iop.num_batch_split_divisions=2 is not supported`, false},
-		{`{"num_batch_split_divisions":-1.0}`, `iop.num_batch_split_divisions=-1.0 is not supported`, false},
-		{`{"num_batch_split_divisions":0.5}`, "iop.num_batch_split_divisions must be an integer", false},
-		{`{"num_batch_split_divisions":0.99999999999999999999}`, "iop.num_batch_split_divisions must be an integer", false},
-		{`{"num_batch_split_divisions":1.00000000000000000001}`, "iop.num_batch_split_divisions must be an integer", false},
-		{`{"num_batch_split_divisions":1e-1000}`, "iop.num_batch_split_divisions must be an integer", false},
-		{`{"num_batch_split_divisions":"1"}`, "iop.num_batch_split_divisions must be an integer", false},
-		{`{"batch_folding":false,"num_batch_split_divisions":1.0}`, "", true},
-		{`{"batch_folding":true}`, "", true},
-		{`{"num_batch_split_divisions":0.99999999999999999999}`, "", true},
-		{`{"cpu_embeddings":"runtime-owned"}`, "", true},
+		{`{"batch_folding":false}`, ""},
+		{`{"num_batch_split_divisions":0}`, ""},
+		{`{"num_batch_split_divisions":1}`, ""},
+		{`{"num_batch_split_divisions":1.0}`, ""},
+		{`{"num_batch_split_divisions":10e-1}`, ""},
+		{`{"num_batch_split_divisions":-0.0}`, ""},
+		{`{"batch_folding":true}`, `iop.batch_folding=true is not supported`},
+		{`{"batch_folding":"false"}`, "iop.batch_folding must be a boolean"},
+		{`{"num_batch_split_divisions":-1}`, `iop.num_batch_split_divisions=-1 is not supported`},
+		{`{"num_batch_split_divisions":2}`, `iop.num_batch_split_divisions=2 is not supported`},
+		{`{"num_batch_split_divisions":-1.0}`, `iop.num_batch_split_divisions=-1.0 is not supported`},
+		{`{"num_batch_split_divisions":0.5}`, "iop.num_batch_split_divisions must be an integer"},
+		{`{"num_batch_split_divisions":0.99999999999999999999}`, "iop.num_batch_split_divisions must be an integer"},
+		{`{"num_batch_split_divisions":1.00000000000000000001}`, "iop.num_batch_split_divisions must be an integer"},
+		{`{"num_batch_split_divisions":1e-1000}`, "iop.num_batch_split_divisions must be an integer"},
+		{`{"num_batch_split_divisions":"1"}`, "iop.num_batch_split_divisions must be an integer"},
 	}
 
 	for _, test := range tests {
 		intent, baseline := singleIntent, singleBaseline
-		if test.hybrid {
-			intent, baseline = hybridIntent, hybridBaseline
-		}
 		t.Run(string(intent.Pipeline)+"/"+test.settings, func(t *testing.T) {
 			t.Log("Validate model-provided JSON settings before rendering")
 			intent.ModelSettings = []byte(test.settings)
@@ -262,11 +244,9 @@ func TestProjectModelLegacyNovaSettings(t *testing.T) {
 			require.Equal(t, baseline.configuredBuild.Partitions, projection.configuredBuild.Partitions)
 			require.Equal(t, baseline.connectors, projection.connectors)
 
-			t.Log("Omit legacy Nova settings from runtime output without validating unused hybrid values")
-			if !test.hybrid {
-				require.NotContains(t, projection.configuredBuild.runtimeSettings, "batch_folding")
-				require.NotContains(t, projection.configuredBuild.runtimeSettings, "num_batch_split_divisions")
-			}
+			t.Log("Omit legacy Nova settings from runtime output")
+			require.NotContains(t, projection.configuredBuild.runtimeSettings, "batch_folding")
+			require.NotContains(t, projection.configuredBuild.runtimeSettings, "num_batch_split_divisions")
 			configMap, err := renderLPUConfigMap("test", "test-dgd", "/models", []*ModelProjection{projection})
 			require.NoError(t, err)
 			require.NotContains(t, configMap.Data["model_config.toml"], "batch_folding")

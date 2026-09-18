@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -90,7 +89,7 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
 		Pipeline: PipelineLPX, Models: []string{"default"},
 		BuildSnapshot:   normalized,
-		RuntimeBuildRef: "model-build", ModelSettings: json.RawMessage(`{"prop_sync":false}`),
+		RuntimeBuildRef: "model-build",
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]

@@ -75,13 +75,6 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	require.Equal(t, *before, projection.RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents"))
 	require.Nil(t, projection.RequestSpec(&MaterializationPlan{}, "agents").CyborgPodCliqueRef)
 
-	t.Log("Leave unused Nova settings opaque on the hybrid path")
-	intent.ModelSettings = json.RawMessage(`{"cpu_embeddings":"runtime-owned","batch_folding":true}`)
-	authored, err := appendModelProjections(nil, intent)
-	require.NoError(t, err)
-	require.Equal(t, map[string]any{"cpu_embeddings": "runtime-owned", "batch_folding": true}, authored[0].configuredBuild.runtimeSettings)
-	require.Equal(t, *before, authored[0].RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents"))
-
 	t.Log("Remove the manifest's selected chain without synthesizing hybrid connectors")
 	fixture.selectedPropSyncChains = nil
 	writeTestV3CapnpManifest(t, buildDir, fixture)

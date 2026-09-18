@@ -31,6 +31,16 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	modelSettings, modelSettingsObject := canonicalModelSettings(intent.ModelSettings)
 	intent.ModelSettings = modelSettings
 
+	// Hybrid runtimes read their manifests directly; only XT scheduler controls are consumed here.
+	if intent.Pipeline == PipelineLPX {
+		for key := range modelSettingsObject {
+			if intent.BuildSnapshot.build.Family != BuildFamilyXT ||
+				(key != "prop_sync" && key != "prop_sync_multiple_load_sets") {
+				return nil, fmt.Errorf("hybrid %s workloads do not support runtime settings overrides", intent.BuildSnapshot.build.Family)
+			}
+		}
+	}
+
 	var projections []*ModelProjection
 	var err error
 	switch intent.BuildSnapshot.build.Family {

@@ -32,8 +32,6 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		if err := resolveBuildSettings(&configured, modelSettings); err != nil {
 			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
 		}
-	} else {
-		configured.runtimeSettings = modelSettings
 	}
 	if value, present := modelSettings["prop_sync"]; present {
 		enabled, ok := value.(bool)

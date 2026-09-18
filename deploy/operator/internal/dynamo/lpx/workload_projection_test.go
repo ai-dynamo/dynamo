@@ -9,9 +9,48 @@ import (
 	"encoding/json"
 	"testing"
 
+	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 )
+
+func TestHybridSettingsRejectRuntimeOverrides(t *testing.T) {
+	for _, fixture := range []testV3CapnpFixture{newV2CompilerFixture(), newV3CompilerFixture()} {
+		t.Log("Acquire a hybrid build for each supported family")
+		fixture.compilationMode = manifestcapnp.CompilationMode_lpx
+		snapshot := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+
+		t.Log("Allow empty settings and XT scheduler controls, but not runtime overrides")
+		for _, test := range []struct {
+			settings       string
+			xtOnly, reject bool
+		}{
+			{settings: ""},
+			{settings: "null"},
+			{settings: "{}"},
+			{settings: `{"prop_sync":true}`, xtOnly: true},
+			{settings: `{"prop_sync_multiple_load_sets":true}`, xtOnly: true},
+			{settings: `{"batch_size":4}`, reject: true},
+			{settings: `{"setup":{"agent_setup_timeout":"600s"}}`, reject: true},
+			{settings: `{"cpu_embeddings":true}`, reject: true},
+			{settings: `{"batch_folding":false,"num_batch_split_divisions":1}`, reject: true},
+			{settings: `{"prop_sync":false,"batch_size":4}`, reject: true},
+		} {
+			t.Run(string(snapshot.build.Family)+"/"+test.settings, func(t *testing.T) {
+				t.Log("Reject unsupported settings before producing a workload projection")
+				_, err := appendModelProjections(nil, ModelProjectionInput{
+					Pipeline: PipelineLPX, Models: []string{"default"}, BuildSnapshot: snapshot,
+					ModelSettings: json.RawMessage(test.settings),
+				})
+				if test.reject || (test.xtOnly && snapshot.build.Family != BuildFamilyXT) {
+					require.ErrorContains(t, err, "do not support runtime settings overrides")
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
+	}
+}
 
 func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	t.Parallel()
