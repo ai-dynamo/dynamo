@@ -18,45 +18,17 @@
 //! directly; the adapter only relays the connector metadata that tells the
 //! decode worker where to pull from.
 //!
-//! # Supported protocol
+//! The pinned protocol, the field contract, the fixtures, and the upgrade
+//! checklist live in `PROTOCOL.md` beside this file. The constraints that govern
+//! this module are documented where they are enforced below:
 //!
-//! The handoff shape is pinned to **vLLM v0.29.0**, where the prefill worker
-//! returns `kv_transfer_params` from
-//! `vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py`
-//! (`NixlPullConnectorScheduler::request_finished`):
-//!
-//! | Field | Type | Notes |
-//! |---|---|---|
-//! | `do_remote_prefill` | bool | `true` on the handoff, meaning "the decode side pulls" |
-//! | `do_remote_decode` | bool | `false` on the handoff |
-//! | `remote_block_ids` | array of arrays | per KV cache group; may contain empty groups |
-//! | `remote_engine_id` | string | producer engine id |
-//! | `remote_request_id` | string | producer-side request id |
-//! | `remote_host` | string | side-channel host, **not** an HTTP destination |
-//! | `remote_port` | int | side-channel port |
-//! | `tp_size`, `dcp_size`, `pp_size` | int | producer parallel sizes |
-//! | `remote_num_tokens` | int | tokens the producer actually computed |
-//! | `remote_blocks_expiry_time` | float or null | block lease expiry |
-//! | `transfer_mode` | string | connector transfer mode |
-//!
-//! Unknown fields are preserved verbatim: the connector is the authority on its
-//! own metadata, so a newer vLLM adding a field must still work. An empty
-//! `remote_block_ids` (including empty inner groups) is a **valid** handoff — it
-//! is what a full local prefix-cache hit looks like — and is not treated as a
-//! missing handoff. See the module tests for the fixtures.
-//!
-//! # Deliberate limits
-//!
-//! * The decode destination is the locally configured engine. `remote_host` and
-//!   `remote_port` are connector side-channel information and never become the
-//!   HTTP destination.
-//! * `n != 1` is rejected before the prefill leg rather than silently
-//!   rewritten, because the protocol does not define how multiple handoffs
-//!   would be matched to the returned choices.
-//! * A client-supplied non-empty `kv_transfer_params` is rejected: the adapter
-//!   owns that field on this path.
-//! * Neither leg is retried. A retry could duplicate generation or leak the
-//!   producer's block lease, so retries need their own idempotency design.
+//! * the decode destination is the locally configured engine, so `remote_host`
+//!   and `remote_port` never become an HTTP destination ([`Self::send_decode`]);
+//! * `n != 1` and a client-supplied `kv_transfer_params` are rejected before the
+//!   prefill leg ([`prepare_prefill_request`]);
+//! * an empty `remote_block_ids` is a valid handoff, not a missing one
+//!   ([`validate_prefill_handoff`]);
+//! * neither leg is retried ([`Self::execute`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,6 +76,13 @@ pub const MAX_PREFILL_RESPONSE_BYTES_ENV: &str = "DYN_SIDECAR_MAX_PREFILL_RESPON
 /// request while still bounding what one stream can buffer.
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 
+/// Environment variable overriding the request body read deadline.
+pub const CLIENT_BODY_TIMEOUT_MS_ENV: &str = "DYN_SIDECAR_CLIENT_BODY_TIMEOUT_MS";
+
+/// Default request body read deadline: 30 s, the same order as the sidecar's
+/// drain deadline, so a body that cannot be read in time is a client problem.
+pub const DEFAULT_CLIENT_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Default prefill response cap: 1 MiB. The response is a one-token completion
 /// plus the handoff, so this is orders of magnitude of headroom.
 pub const DEFAULT_MAX_PREFILL_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -117,6 +96,8 @@ pub mod code {
     pub const UNSUPPORTED_PD_VARIANT: &str = "unsupported_pd_variant";
     /// The request body exceeded the configured cap.
     pub const PD_REQUEST_TOO_LARGE: &str = "pd_request_too_large";
+    /// The request body did not arrive within the configured deadline.
+    pub const PD_REQUEST_TIMEOUT: &str = "pd_request_timeout";
     /// The prefill worker returned a successful HTTP response without a usable
     /// handoff.
     pub const INVALID_PREFILL_HANDOFF: &str = "invalid_prefill_handoff";
@@ -138,6 +119,9 @@ pub struct Config {
     pub model: String,
     /// Maximum accepted request body size in bytes.
     pub max_request_bytes: usize,
+    /// Maximum time allowed to read the whole request body. Bounds a client that
+    /// sends an under-cap body slowly enough to hold the handler open.
+    pub client_body_timeout: Duration,
     /// Maximum accepted prefill response size in bytes.
     pub max_prefill_response_bytes: usize,
 }
@@ -147,6 +131,7 @@ impl Default for Config {
         Self {
             model: String::new(),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            client_body_timeout: DEFAULT_CLIENT_BODY_TIMEOUT,
             max_prefill_response_bytes: DEFAULT_MAX_PREFILL_RESPONSE_BYTES,
         }
     }
@@ -213,23 +198,36 @@ impl PdAdapter for VllmNixlAdapter {
         cancellation: CancellationToken,
     ) -> Result<Response<Body>, SidecarError> {
         let (parts, body) = request.into_parts();
-        let body = read_bounded(body, self.config.max_request_bytes)
-            .await
-            .map_err(|error| match error {
-                BoundedRead::TooLarge => SidecarError::adapter(
-                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
-                    code::PD_REQUEST_TOO_LARGE,
-                    format!(
-                        "Request body exceeds the configured {} byte limit",
-                        self.config.max_request_bytes
-                    ),
+        // The configured read timeout only bounds upstream reads, so a client
+        // that dribbles an under-cap body one chunk at a time would otherwise
+        // hold this handler, its task, and its buffer open indefinitely.
+        let body = tokio::time::timeout(
+            self.config.client_body_timeout,
+            read_bounded(body, self.config.max_request_bytes),
+        )
+        .await
+        .map_err(|_| {
+            SidecarError::adapter(
+                axum::http::StatusCode::REQUEST_TIMEOUT,
+                code::PD_REQUEST_TIMEOUT,
+                "Timed out reading the request body",
+            )
+        })?
+        .map_err(|error| match error {
+            BoundedRead::TooLarge => SidecarError::adapter(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                code::PD_REQUEST_TOO_LARGE,
+                format!(
+                    "Request body exceeds the configured {} byte limit",
+                    self.config.max_request_bytes
                 ),
-                BoundedRead::Transport(_) | BoundedRead::Unreadable => SidecarError::adapter(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    code::INVALID_PD_REQUEST,
-                    "Could not read the request body",
-                ),
-            })?;
+            ),
+            BoundedRead::Transport(_) | BoundedRead::Unreadable => SidecarError::adapter(
+                axum::http::StatusCode::BAD_REQUEST,
+                code::INVALID_PD_REQUEST,
+                "Could not read the request body",
+            ),
+        })?;
 
         let original: Value = serde_json::from_slice(&body).map_err(|_| {
             SidecarError::adapter(
@@ -266,6 +264,10 @@ impl VllmNixlAdapter {
     ) -> Result<Value, SidecarError> {
         let mut headers = client_headers.clone();
         crate::proxy::strip_proxy_headers(&mut headers);
+        // This body is parsed here, and the workspace builds reqwest without a
+        // decompression feature, so a compressed response would reach the JSON
+        // parse as opaque bytes.
+        headers.remove(axum::http::header::ACCEPT_ENCODING);
         headers.insert(
             axum::http::header::CONTENT_TYPE,
             axum::http::HeaderValue::from_static("application/json"),

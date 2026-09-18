@@ -46,6 +46,8 @@ pub struct Config {
     pub protocol_version: String,
     /// Maximum accepted request body size, in bytes.
     pub max_request_bytes: usize,
+    /// Maximum time allowed to read a whole request body.
+    pub client_body_timeout: Duration,
     /// Maximum accepted prefill response size, in bytes.
     pub max_prefill_response_bytes: usize,
     /// Model both workers serve. Recorded at startup for diagnosis.
@@ -66,6 +68,10 @@ impl Config {
             adapter_mode: adapter_mode_from_env()?,
             protocol_version: optional_env(crate::vllm_nixl::PROTOCOL_VERSION_ENV)?
                 .unwrap_or_else(|| crate::vllm_nixl::SUPPORTED_PROTOCOL_VERSION.to_string()),
+            client_body_timeout: duration_from_env(
+                crate::vllm_nixl::CLIENT_BODY_TIMEOUT_MS_ENV,
+                crate::vllm_nixl::DEFAULT_CLIENT_BODY_TIMEOUT.as_millis() as u64,
+            )?,
             max_request_bytes: byte_limit_from_env(
                 crate::vllm_nixl::MAX_REQUEST_BYTES_ENV,
                 crate::vllm_nixl::DEFAULT_MAX_REQUEST_BYTES,

@@ -45,6 +45,7 @@ fn build_adapter(config: &Config) -> anyhow::Result<Arc<dyn PdAdapter>> {
                 dynamo_epp_sidecar::vllm_nixl::Config {
                     model: config.model.clone(),
                     max_request_bytes: config.max_request_bytes,
+                    client_body_timeout: config.client_body_timeout,
                     max_prefill_response_bytes: config.max_prefill_response_bytes,
                 },
             )?;
