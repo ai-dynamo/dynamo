@@ -68,16 +68,6 @@ impl SelectionError {
     }
 }
 
-/// HTTP status for a scheduler refusal.
-///
-/// Classification lives on [`KvSchedulerError::rejection`] so that every host
-/// mapping these errors agrees on what a refusal *means*; this function only
-/// renders that meaning in HTTP's vocabulary.
-///
-/// A queue rejection is throttling, not unavailability: the class refused to
-/// admit the request, so the caller should back off. A 503 would invite a
-/// gateway to fail over to another endpoint, which cannot help when the limit
-/// is a fleet-wide policy-class setting.
 pub fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
     match error.rejection() {
         SchedulerRejection::Overloaded | SchedulerRejection::QueueRejected => {
