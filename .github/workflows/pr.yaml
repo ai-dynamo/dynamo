@@ -940,6 +940,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: triton
+      framework: triton
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
