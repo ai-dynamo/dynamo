@@ -452,7 +452,8 @@ impl ModelManager {
             .models
             .iter()
             .filter(|(name, model)| {
-                !catalog.aliases.contains_key(name.as_str()) && model.has_base_deployment()
+                !catalog.aliases.contains_key(name.as_str())
+                    && model.has_runtime_lora_base_deployment()
             })
             .map(|(name, _)| name.clone());
         let base = bases.next()?;
@@ -3238,7 +3239,13 @@ mod tests {
     #[test]
     fn unique_committed_base_ignores_aliases_and_rejects_multiple_primaries() {
         let mm = ModelManager::new();
-        assert!(mm.add_worker_set("base-a", "ns1", make_worker_set("ns1", "abc")));
+        let mut base_card = ModelDeploymentCard::default();
+        base_card.model_input = crate::model_type::ModelInput::Tokens;
+        assert!(mm.add_worker_set(
+            "base-a",
+            "ns1",
+            WorkerSet::new("ns1".to_string(), "abc".to_string(), base_card),
+        ));
         assert!(mm.register_alias("base-a-alias", "base-a"));
         assert!(mm.add_worker_set_arc(
             "base-a-alias",
@@ -3263,7 +3270,39 @@ mod tests {
         ));
         assert_eq!(mm.unique_committed_base_model().as_deref(), Some("base-a"));
 
-        assert!(mm.add_worker_set("base-b", "ns2", make_worker_set("ns2", "def")));
+        let mut second_base_card = ModelDeploymentCard::default();
+        second_base_card.model_input = crate::model_type::ModelInput::Tokens;
+        assert!(mm.add_worker_set(
+            "base-b",
+            "ns2",
+            WorkerSet::new("ns2".to_string(), "def".to_string(), second_base_card,),
+        ));
+        assert_eq!(mm.unique_committed_base_model(), None);
+    }
+
+    #[test]
+    fn runtime_lora_base_requires_frontend_preprocessing() {
+        let mm = ModelManager::new();
+        assert!(mm.add_worker_set("text-base", "text", make_worker_set("text", "abc")));
+        assert_eq!(mm.unique_committed_base_model(), None);
+
+        let mut token_card = ModelDeploymentCard::default();
+        token_card.model_input = crate::model_type::ModelInput::Tokens;
+        assert!(mm.add_worker_set(
+            "token-base",
+            "tokens",
+            WorkerSet::new("tokens".to_string(), "def".to_string(), token_card),
+        ));
+        assert_eq!(
+            mm.unique_committed_base_model().as_deref(),
+            Some("token-base")
+        );
+
+        assert!(mm.add_worker_set(
+            "token-base",
+            "mixed-text",
+            make_worker_set("mixed-text", "ghi"),
+        ));
         assert_eq!(mm.unique_committed_base_model(), None);
     }
 

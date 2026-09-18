@@ -53,9 +53,7 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
-use crate::lora::runtime::{
-    RuntimeLoraConfig, RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model,
-};
+use crate::lora::runtime::{RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model};
 use crate::preprocessor::{
     PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, RUNTIME_LORA_CONTEXT_KEY, decode_base64_to_floats,
 };
@@ -1017,6 +1015,9 @@ fn runtime_lora_selection(
     state: &service_v2::State,
     requested_model: &str,
 ) -> Result<Option<RuntimeLoraSelection>, ErrorResponse> {
+    if requested_model.is_empty() {
+        return Ok(None);
+    }
     let requested_canonical = state.manager().resolve_canonical_name(requested_model);
     if state
         .manager()
@@ -1025,15 +1026,9 @@ fn runtime_lora_selection(
     {
         return Ok(None);
     }
-    let config = RuntimeLoraConfig::from_env().map_err(|error| {
-        ErrorMessage::internal_server_error_with_details(
-            "Runtime LoRA configuration is invalid",
-            error.to_string(),
-        )
-    })?;
     resolve_runtime_lora_model(
         requested_model,
-        &config,
+        state.runtime_lora_config(),
         |name| {
             let canonical = state.manager().resolve_canonical_name(name);
             state.manager().get_committed_model(&canonical).is_some()
@@ -1043,7 +1038,7 @@ fn runtime_lora_selection(
             state
                 .manager()
                 .get_committed_model(&canonical)
-                .filter(|model| model.has_base_deployment())
+                .filter(|model| model.has_runtime_lora_base_deployment())
                 .map(|_| canonical)
         },
         || state.manager().unique_committed_base_model(),

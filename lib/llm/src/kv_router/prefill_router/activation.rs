@@ -390,11 +390,13 @@ impl PrefillRouter {
             )
             .await?;
 
-            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
+            let runtime_lora_filter = context.model_manager.lora_filter_for(&endpoint_id);
+            Arc::new(RoutingHost::new_with_runtime_lora_filter_and_coordinator(
                 push_router,
                 kv_chooser,
                 load_context.clone(),
                 affinity,
+                runtime_lora_filter,
             ))
         } else {
             let affinity = create_affinity_coordinator(

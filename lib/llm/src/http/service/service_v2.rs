@@ -29,6 +29,7 @@ use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
     RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
 };
+use crate::lora::runtime::RuntimeLoraConfig;
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 use anyhow::{Context, Result};
@@ -142,6 +143,7 @@ pub struct State {
     flags: StateFlags,
     cancel_token: CancellationToken,
     // Frontend API behavior read by request handlers after the service is built.
+    runtime_lora_config: RuntimeLoraConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
@@ -154,6 +156,7 @@ pub struct State {
 /// `FrontendApiConfig` is retained in `State` for route and handler decisions.
 struct StateConfig {
     metrics_config: MetricsConfig,
+    runtime_lora_config: RuntimeLoraConfig,
     frontend_api_config: FrontendApiConfig,
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
@@ -555,6 +558,7 @@ impl State {
                 batch_endpoints_enabled: AtomicBool::new(false),
             },
             cancel_token,
+            runtime_lora_config: config.runtime_lora_config,
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
@@ -572,6 +576,10 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub(crate) fn runtime_lora_config(&self) -> &RuntimeLoraConfig {
+        &self.runtime_lora_config
     }
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
@@ -1223,6 +1231,8 @@ impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
         let metrics_config = config.metrics_config.clone();
+        let runtime_lora_config = RuntimeLoraConfig::from_env()
+            .map_err(|error| anyhow::anyhow!("Runtime LoRA configuration is invalid: {error}"))?;
         let model_ready_metrics_prefix = metrics_config.prefix();
         let frontend_api_config = config.frontend_api_config.clone();
         let anthropic_endpoints_enabled = frontend_api_config.anthropic().enabled();
@@ -1261,6 +1271,7 @@ impl HttpServiceConfigBuilder {
             cancel_token,
             StateConfig {
                 metrics_config,
+                runtime_lora_config,
                 frontend_api_config,
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,

@@ -21,6 +21,7 @@ use dynamo_runtime::{
 use crate::{
     kv_router::{FindBestMatchAdmission, FindBestMatchOutcome, routing_host::RoutingHost},
     local_model::runtime_config::ModelRuntimeConfig,
+    lora::LoraFilter,
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -255,18 +256,12 @@ impl RoutingHost {
                         .build()
                 ));
             }
-            if let (Some(lora), Some(lora_name), Some(eligible)) = (
-                self.lora.as_ref(),
+            if let (Some(filter), Some(lora_name), Some(eligible)) = (
+                self.runtime_lora_filter.as_ref(),
                 lora_name.as_deref(),
                 allowed_worker_ids.as_ref(),
             ) {
-                let universe = eligible.iter().copied().collect::<Vec<_>>();
-                allowed_worker_ids = Some(
-                    lora.filter
-                        .filter_worker_ids_for_runtime_lora(lora_name, &universe)
-                        .into_iter()
-                        .collect(),
-                );
+                allowed_worker_ids = Some(pin_runtime_lora_workers(filter, lora_name, eligible));
             }
         }
         let migration_excluded_worker_ids = request
@@ -449,6 +444,18 @@ impl RoutingHost {
     }
 }
 
+fn pin_runtime_lora_workers(
+    filter: &LoraFilter,
+    lora_name: &str,
+    eligible: &HashSet<u64>,
+) -> HashSet<u64> {
+    let universe = eligible.iter().copied().collect::<Vec<_>>();
+    filter
+        .filter_worker_ids_for_runtime_lora(lora_name, &universe)
+        .into_iter()
+        .collect()
+}
+
 fn merge_affinity_pin(
     explicit: Option<(u64, Option<u32>)>,
     affinity: Option<(u64, Option<u32>)>,
@@ -511,10 +518,13 @@ mod tests {
 
     use super::{
         RUNTIME_LORA_SCHEMES_RUNTIME_KEY, constrain_runtime_lora_workers, merge_affinity_pin,
-        pinned_worker_hint, resolve_pinned_worker_rank,
+        pin_runtime_lora_workers, pinned_worker_hint, resolve_pinned_worker_rank,
     };
     use crate::{
         local_model::runtime_config::ModelRuntimeConfig,
+        lora::{
+            filter::LoraFilter, routing::table::LoraRoutingTable, state_tracker::LoraStateTracker,
+        },
         protocols::common::{preprocessor::RoutingHints, timing::RequestPhase},
     };
 
@@ -566,6 +576,19 @@ mod tests {
         let eligible = constrain_runtime_lora_workers(true, None, &workers, &constraints);
 
         assert_eq!(eligible, Some(HashSet::new()));
+    }
+
+    #[test]
+    fn runtime_lora_affinity_pins_unknown_adapter_to_one_worker() {
+        let filter = LoraFilter::new(LoraRoutingTable::new(), LoraStateTracker::new());
+        let eligible = HashSet::from([1, 2, 3]);
+
+        let first = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible);
+        let second = pin_runtime_lora_workers(&filter, "dyn-lora-test", &eligible);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, second);
+        assert!(first.is_subset(&eligible));
     }
 
     #[test]
