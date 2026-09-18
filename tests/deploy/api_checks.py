@@ -64,6 +64,9 @@ def check_embedding_api(
         assert actual.embedding == pytest.approx(
             expected.embedding, rel=1e-2, abs=1e-3
         ), "Embedding differs from corresponding unary result"
+    assert (
+        results["float"].data[0].embedding != results["world"].data[0].embedding
+    ), "Distinct inputs produced identical embeddings"
     assert results["batch"].usage.prompt_tokens == (
         results["float"].usage.prompt_tokens + results["world"].usage.prompt_tokens
     ), "Batch usage differs from unary inputs"
@@ -129,6 +132,9 @@ def _request(
         ) as response:
             record["http_status"] = response.status_code
             if payload.get("stream"):
+                if not response.ok:
+                    record["response"] = response.text
+                    response.raise_for_status()
                 lines = []
                 record["response"] = lines
 

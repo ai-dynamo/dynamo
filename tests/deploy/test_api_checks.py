@@ -250,6 +250,23 @@ def test_limited_case_rejects_zero_tokens_and_wrong_finish(
     assert json.loads(saved["response"])["usage"]["completion_tokens"] == tokens
 
 
+def test_stream_http_error_body_is_preserved(tmp_path):
+    error = response()
+    error.status_code = 500
+    error._content = b'{"error":{"message":"backend exploded"}}'
+    artifact = tmp_path / "stream.json"
+    with pytest.raises(requests.HTTPError):
+        api_checks._request(
+            "http://test/chat",
+            {"model": "model", "stream": True},
+            artifact,
+            request_sender=lambda *args, **kwargs: error,
+        )
+    saved = json.loads(artifact.read_text())
+    assert saved["http_status"] == 500
+    assert saved["response"] == error.text
+
+
 @pytest.fixture
 def embedding_sender():
     def send(url, payload, **kwargs):
@@ -289,13 +306,21 @@ def test_embedding_api_checks_formats_dimensions_and_batch(tmp_path, embedding_s
 
 
 @pytest.mark.parametrize(
-    "fault", ["duplicate", "swap", "zero_usage", "total_usage", "batch_usage"]
+    "fault",
+    ["constant", "duplicate", "swap", "zero_usage", "total_usage", "batch_usage"],
 )
-def test_embedding_rejects_wrong_batch_contents_and_usage(
-    tmp_path, embedding_sender, fault
-):
+def test_embedding_rejects_wrong_contents_and_usage(tmp_path, embedding_sender, fault):
     def send(url, payload, **kwargs):
         result = embedding_sender(url, payload, **kwargs)
+        if fault == "constant":
+            inputs = payload["input"]
+            inputs = inputs if isinstance(inputs, list) else [inputs]
+            dimensions = payload.get("dimensions", 1024)
+            vectors = [[0.3] * dimensions for _ in inputs]
+            if payload.get("encoding_format") == "base64":
+                vectors = [encode_embedding(vector) for vector in vectors]
+            result._content = json.dumps(embedding_body(vectors)).encode()
+            return result
         if not isinstance(payload["input"], list):
             return result
         body = result.json()
