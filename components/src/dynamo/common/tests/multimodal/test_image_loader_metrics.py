@@ -47,7 +47,7 @@ def _mock_fetch_bytes(
     delay: float = 0.0,
     side_effect: Exception | None = None,
 ) -> AsyncMock:
-    async def _fetch(url, timeout, *, policy=None):
+    async def _fetch(url, timeout, *, policy=None, max_bytes=None):
         if delay > 0:
             await asyncio.sleep(delay)
         if side_effect is not None:
