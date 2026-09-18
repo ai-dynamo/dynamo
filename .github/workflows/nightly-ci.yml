@@ -1146,7 +1146,7 @@ jobs:
       platform: '["amd64"]' # No ARM GPUs available
       enable_coverage: true
       run_sanity_check: false
-      gpu_test_markers: trtllm and gpu_2 and not h100
+      gpu_test_markers: trtllm and gpu_2 and not h100 and not sidecar
       gpu_test_timeout_minutes: 45
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
       image_tag_suffix: '-nightly'

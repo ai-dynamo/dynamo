@@ -33,7 +33,11 @@ from tests.utils.constants import DefaultPort
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
-from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
+from tests.utils.router_nvext import (
+    RouterNvextExpectation,
+    require_router_worker_id,
+    validate_router_nvext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +217,41 @@ class ChatPayload(BasePayload):
             f"Expected {self.expected_num_choices} choices, "
             f"got {len(choices)}: {result}"
         )
+
+
+class DisaggregatedChatPayload(ChatPayload):
+    """Require a completed chat request served by distinct prefill and decode workers."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        choices = result["choices"]
+        assert len(choices) == 1, f"Expected one completion, got {choices!r}"
+        assert isinstance(content, str) and content.strip(), "Completion is empty"
+        assert choices[0].get("finish_reason") in {
+            "stop",
+            "length",
+        }, f"Unexpected finish reason: {choices[0]!r}"
+
+        usage = result.get("usage")
+        assert isinstance(usage, dict), f"Missing usage: {result!r}"
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        assert (
+            type(prompt_tokens) is int and prompt_tokens > 0
+        ), f"Expected positive prompt usage: {usage!r}"
+        assert (
+            type(completion_tokens) is int and completion_tokens > 1
+        ), f"Expected decode to generate more than the prefill token: {usage!r}"
+
+        workers = require_router_worker_id(result, context=type(self).__name__)
+        for role in ("prefill_worker_id", "decode_worker_id"):
+            assert (
+                type(workers.get(role)) is int and workers[role] >= 0
+            ), f"Expected a valid {role}: {dict(workers)!r}"
+        assert (
+            workers["prefill_worker_id"] != workers["decode_worker_id"]
+        ), f"Expected distinct prefill and decode workers: {dict(workers)!r}"
 
 
 class RouterNvextChatPayload(ChatPayload):
