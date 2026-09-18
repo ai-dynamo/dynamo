@@ -11,6 +11,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::Span;
 
 use crate::config::environment_names::lifecycle_tracing::{
@@ -197,6 +198,7 @@ impl LifecycleStage {
                 "dynamo.session.source" = tracing::field::Empty,
                 "dynamo.request.terminal.outcome" = tracing::field::Empty,
                 "dynamo.request.terminal.error" = tracing::field::Empty,
+                "dynamo.request.terminal.timestamp_unix_ns" = tracing::field::Empty,
             ),
             Self::RequestPreprocessing => common_span!("request.preprocessing"),
             Self::WorkerAdmission => common_span!("worker.admission"),
@@ -283,10 +285,11 @@ impl LifecycleTrace {
         let span = self.start(LifecycleStage::RequestLifecycle);
         LifecycleRequest {
             span: span.clone(),
-            terminal: LifecycleTerminal(Arc::new(TerminalState {
-                enabled: self.enabled,
-                span,
-                finished: AtomicBool::new(false),
+            terminal: LifecycleTerminal(self.enabled.then(|| {
+                Arc::new(TerminalState {
+                    span,
+                    finished: AtomicBool::new(false),
+                })
             })),
         }
     }
@@ -327,6 +330,10 @@ impl LifecycleTrace {
 }
 
 /// Request root span plus the shared terminal recorder.
+///
+/// The span stays open while detached request work cleans up. Its duration may
+/// therefore extend past client termination; `dynamo.request.terminal.timestamp_unix_ns`
+/// records the first terminal observation, independently of that cleanup.
 pub struct LifecycleRequest {
     span: Span,
     terminal: LifecycleTerminal,
@@ -356,10 +363,9 @@ impl LifecycleRequest {
 
 /// A terminal recorder that is safe to clone across completion and cancellation paths.
 #[derive(Clone)]
-pub struct LifecycleTerminal(Arc<TerminalState>);
+pub struct LifecycleTerminal(Option<Arc<TerminalState>>);
 
 struct TerminalState {
-    enabled: bool,
     span: Span,
     finished: AtomicBool,
 }
@@ -367,25 +373,34 @@ struct TerminalState {
 impl LifecycleTerminal {
     /// Record the first observed terminal result. Later races are ignored.
     pub fn finish(&self, outcome: TerminalOutcome) {
-        if self.0.enabled && !self.0.finished.swap(true, Ordering::AcqRel) {
-            self.0
-                .span
-                .record("dynamo.request.terminal.outcome", outcome.as_str());
-            self.0
-                .span
-                .record("dynamo.request.terminal.error", outcome.is_error());
+        if let Some(state) = &self.0
+            && !state.finished.swap(true, Ordering::AcqRel)
+        {
+            state.record(outcome);
         }
+    }
+}
+
+impl TerminalState {
+    fn record(&self, outcome: TerminalOutcome) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        self.span.record(
+            "dynamo.request.terminal.timestamp_unix_ns",
+            u64::try_from(timestamp.as_nanos()).unwrap_or(u64::MAX),
+        );
+        self.span
+            .record("dynamo.request.terminal.outcome", outcome.as_str());
+        self.span
+            .record("dynamo.request.terminal.error", outcome.is_error());
     }
 }
 
 impl Drop for TerminalState {
     fn drop(&mut self) {
-        if self.enabled && !self.finished.swap(true, Ordering::AcqRel) {
-            self.span.record(
-                "dynamo.request.terminal.outcome",
-                TerminalOutcome::Unknown.as_str(),
-            );
-            self.span.record("dynamo.request.terminal.error", true);
+        if !self.finished.swap(true, Ordering::AcqRel) {
+            self.record(TerminalOutcome::Unknown);
         }
     }
 }
@@ -509,6 +524,15 @@ mod tests {
         let _guard = tracing::subscriber::set_default(subscriber);
         let trace = LifecycleTrace::new(false);
         assert!(trace.identity.is_none());
+        let request = trace.start_request();
+        assert!(
+            request.terminal.0.is_none(),
+            "disabled requests must not allocate terminal state"
+        );
+        let terminal = request.terminal();
+        assert!(terminal.0.is_none());
+        terminal.finish(TerminalOutcome::Success);
+        request.record_session("request-id", None);
         let _span = trace.start(LifecycleStage::RequestPreprocessing);
 
         assert!(captured.lock().unwrap().is_empty());

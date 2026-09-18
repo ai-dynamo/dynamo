@@ -143,13 +143,37 @@ pub(super) fn get_body_limit() -> usize {
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
-/// Records cancellation if an SSE response is dropped before its stream reaches
-/// an explicit terminal outcome.
-struct StreamingLifecycleTerminal(LifecycleTerminal);
+/// Preserve an emitted failure when the response body is dropped before EOF.
+struct StreamingLifecycleTerminal {
+    terminal: LifecycleTerminal,
+    error_signal: StreamErrorSignal,
+}
 
 impl Drop for StreamingLifecycleTerminal {
     fn drop(&mut self) {
-        self.0.finish(TerminalOutcome::Cancelled);
+        let delivered = self
+            .error_signal
+            .terminal_event_emitted()
+            .then(|| terminal_outcome_for_stream_error(&self.error_signal))
+            .flatten();
+        self.terminal.finish(delivered.unwrap_or_else(|| {
+            if std::thread::panicking() {
+                TerminalOutcome::Failed
+            } else {
+                TerminalOutcome::Cancelled
+            }
+        }));
+    }
+}
+
+fn terminal_outcome_for_stream_error(signal: &StreamErrorSignal) -> Option<TerminalOutcome> {
+    if signal
+        .semantic_error()
+        .is_some_and(|error| error.class().normalized() == ErrorClass::DeadlineExceeded)
+    {
+        Some(TerminalOutcome::TimedOut)
+    } else {
+        signal.error_type().map(terminal_outcome_for_error_type)
     }
 }
 
@@ -2407,7 +2431,7 @@ async fn handler_chat_completions(
     body: Body,
 ) -> Result<Response, ErrorResponse> {
     let request_id = get_or_create_request_id(&headers);
-    let lifecycle = LifecycleTrace::frontend_request_without_session(request_id.clone());
+    let lifecycle = LifecycleTrace::frontend_request_without_session(request_id.as_str());
     let lifecycle_request = lifecycle.start_request();
     lifecycle_request.record_session(&request_id, None);
     let request_lifecycle = lifecycle_request.span();
@@ -2478,19 +2502,16 @@ async fn handler_chat_completions(
         endpoint: Endpoint::ChatCompletions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let mut request = match context_from_headers_with_input_trigger(
-        request,
-        request_id.clone(),
-        &headers,
-        |request| Some(classify_chat_request(request)),
-    ) {
-        Ok(request) => request,
-        Err(error) => {
-            lifecycle_request.record_session(&request_id, None);
-            terminal.finish(terminal_outcome_for_error_response(&error));
-            return Err(error);
-        }
-    };
+    let mut request =
+        match context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
+            Some(classify_chat_request(request))
+        }) {
+            Ok(request) => request,
+            Err(error) => {
+                terminal.finish(terminal_outcome_for_error_response(&error));
+                return Err(error);
+            }
+        };
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -2499,16 +2520,20 @@ async fn handler_chat_completions(
     }
     let context = request.context();
 
-    let session_id = request
-        .get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
-        .ok()
-        .flatten()
-        .map(|context| context.session_id.clone());
-    lifecycle_request.record_session(&request_id, session_id.as_deref());
     if lifecycle.is_enabled() {
+        let agent_context = request
+            .get_optional::<AgentContext>(AGENT_CONTEXT_CONTEXT_KEY)
+            .ok()
+            .flatten();
+        lifecycle_request.record_session(
+            context.id(),
+            agent_context
+                .as_ref()
+                .map(|context| context.session_id.as_str()),
+        );
         request.insert_metadata(dynamo_runtime::telemetry::LIFECYCLE_ROOT_METADATA_KEY, "v1");
+        request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.clone());
     }
-    request.insert(LIFECYCLE_TRACE_CONTEXT_KEY, lifecycle.clone());
 
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(
@@ -3725,7 +3750,10 @@ async fn chat_completions(
         // Arm the cancellation fallback before Axum can take ownership of the
         // lazy response body. If the body is dropped without being polled, the
         // guard still records cancellation instead of an unknown outcome.
-        let stream_terminal = StreamingLifecycleTerminal(terminal.clone());
+        let stream_terminal = StreamingLifecycleTerminal {
+            terminal: terminal.clone(),
+            error_signal: monitor_error_signal.clone(),
+        };
         let stream = async_stream::stream! {
             let _stream_terminal = stream_terminal;
             let mut response_streaming = None;
@@ -3740,12 +3768,8 @@ async fn chat_completions(
                 }
                 yield item;
             }
-            if monitor_error_signal.semantic_error().is_some_and(|error| {
-                error.class().normalized() == ErrorClass::DeadlineExceeded
-            }) {
-                terminal.finish(TerminalOutcome::TimedOut);
-            } else if let Some(error_type) = monitor_error_signal.error_type() {
-                terminal.finish(terminal_outcome_for_error_type(error_type));
+            if let Some(outcome) = terminal_outcome_for_stream_error(&monitor_error_signal) {
+                terminal.finish(outcome);
             } else if ctx.is_stopped() || ctx.is_killed() {
                 terminal.finish(TerminalOutcome::Cancelled);
             } else {
@@ -7144,17 +7168,35 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct LifecycleOutcomeCapture(Arc<std::sync::Mutex<Vec<String>>>);
+    struct LifecycleOutcomeCapture(
+        Arc<std::sync::Mutex<Vec<String>>>,
+        Arc<std::sync::Mutex<Vec<u64>>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    );
 
-    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LifecycleOutcomeCapture {
+    impl<S> tracing_subscriber::Layer<S> for LifecycleOutcomeCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_close(&self, id: tracing::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if ctx.span(&id).unwrap().metadata().name() == "request.lifecycle" {
+                self.2.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
         fn on_record(
             &self,
             _id: &tracing::Id,
             values: &tracing::span::Record<'_>,
             _ctx: tracing_subscriber::layer::Context<'_, S>,
         ) {
-            struct OutcomeVisitor<'a>(&'a mut Vec<String>);
+            struct OutcomeVisitor<'a>(&'a mut Vec<String>, &'a mut Vec<u64>);
             impl tracing::field::Visit for OutcomeVisitor<'_> {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "dynamo.request.terminal.timestamp_unix_ns" {
+                        self.1.push(value);
+                    }
+                }
                 fn record_debug(
                     &mut self,
                     field: &tracing::field::Field,
@@ -7171,7 +7213,10 @@ mod tests {
                     }
                 }
             }
-            values.record(&mut OutcomeVisitor(&mut self.0.lock().unwrap()));
+            values.record(&mut OutcomeVisitor(
+                &mut self.0.lock().unwrap(),
+                &mut self.1.lock().unwrap(),
+            ));
         }
     }
 
@@ -7246,9 +7291,11 @@ mod tests {
             let request = LifecycleTrace::new(true).start_request();
             let handler_guard = TaskLifecycleTerminal(Some(request.terminal()));
             let (release, released) = tokio::sync::oneshot::channel();
+            let (started, running) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(
                 classify_lifecycle_response(
                     async move {
+                        started.send(()).unwrap();
                         released.await.unwrap();
                         let mut error = ErrorMessage::internal_server_error("late timeout");
                         error.1.metric_error_type = Some(ErrorType::ResponseTimeout);
@@ -7258,17 +7305,88 @@ mod tests {
                 )
                 .with_current_subscriber(),
             );
+            running.await.unwrap();
             // Axum drops the HTTP handler on disconnect without aborting the
             // spawned task. The first observed terminal event must win.
             drop(handler_guard);
+            drop(request);
             assert_eq!(*capture.0.lock().unwrap(), ["cancelled"]);
+            let timestamps = capture.1.lock().unwrap().clone();
+            assert_eq!(timestamps.len(), 1);
+            assert!(timestamps[0] > 0);
+            assert!(
+                !capture.2.load(std::sync::atomic::Ordering::SeqCst),
+                "pending detached work retains the root span after terminal recording"
+            );
             release.send(()).unwrap();
             assert!(task.await.unwrap().is_err());
-            drop(request);
+            assert!(capture.2.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                *capture.1.lock().unwrap(),
+                timestamps,
+                "late timeout must not replace terminal time"
+            );
         }
         .with_subscriber(subscriber)
         .await;
         assert_eq!(*capture.0.lock().unwrap(), ["cancelled"]);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_stream_drop_preserves_delivered_error_and_panic() {
+        use futures::FutureExt;
+        use http_body_util::BodyExt;
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        for (class, emitted, panic, expected) in [
+            (ErrorClass::DeadlineExceeded, true, false, "timed_out"),
+            (ErrorClass::Internal, true, false, "failed"),
+            (ErrorClass::CapacityExhausted, true, false, "rejected"),
+            (ErrorClass::DeadlineExceeded, false, false, "cancelled"),
+            (ErrorClass::DeadlineExceeded, false, true, "failed"),
+            (ErrorClass::DeadlineExceeded, true, true, "timed_out"),
+        ] {
+            let capture = LifecycleOutcomeCapture::default();
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            async {
+                let request = LifecycleTrace::new(true).start_request();
+                let signal = StreamErrorSignal::default();
+                signal.set_semantic(
+                    metric_error_type_for_class(class),
+                    &DynamoError::builder().class(class).build(),
+                );
+                let guard = StreamingLifecycleTerminal {
+                    terminal: request.terminal(),
+                    error_signal: signal.clone(),
+                };
+                let stream = async_stream::stream! {
+                    let _guard = guard;
+                    if emitted {
+                        signal.mark_terminal_event_emitted();
+                    }
+                    if panic {
+                        panic!("streaming regression probe");
+                    }
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data("probe"));
+                    std::future::pending::<()>().await;
+                };
+                let mut response = Sse::new(stream).into_response();
+                let frame = std::panic::AssertUnwindSafe(response.body_mut().frame())
+                    .catch_unwind()
+                    .await;
+                if panic {
+                    assert!(frame.is_err());
+                } else {
+                    assert!(frame.unwrap().unwrap().is_ok());
+                }
+                drop(response);
+                drop(request);
+            }
+            .with_subscriber(subscriber)
+            .await;
+            assert_eq!(*capture.0.lock().unwrap(), [expected]);
+        }
     }
 
     #[tokio::test]
@@ -7280,7 +7398,10 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(capture.clone());
         async {
             let request = LifecycleTrace::new(true).start_request();
-            let stream_guard = StreamingLifecycleTerminal(request.terminal());
+            let stream_guard = StreamingLifecycleTerminal {
+                terminal: request.terminal(),
+                error_signal: StreamErrorSignal::default(),
+            };
             let body = async_stream::stream! {
                 let _guard = stream_guard;
                 std::future::pending::<()>().await;

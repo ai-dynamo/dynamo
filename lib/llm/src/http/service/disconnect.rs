@@ -119,7 +119,7 @@ impl StreamErrorSignal {
         self.0.terminal_event_emitted.store(true, Ordering::Release);
     }
 
-    fn terminal_event_emitted(&self) -> bool {
+    pub(super) fn terminal_event_emitted(&self) -> bool {
         self.0.terminal_event_emitted.load(Ordering::Acquire)
     }
 
