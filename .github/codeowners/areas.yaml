@@ -1086,6 +1086,10 @@ shared:
   owners:
   - performance
   - backend-sglang
+- glob: lib/mocker/servers/trtllm/
+  owners:
+  - performance
+  - backend-trtllm
 - glob: lib/runtime/src/nvtx.rs
   owners:
   - runtime

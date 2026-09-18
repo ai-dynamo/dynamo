@@ -224,7 +224,7 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
 }
 
 #[tokio::test]
-async fn capacity_rejection_is_an_in_band_overloaded_error() {
+async fn capacity_rejection_is_an_in_band_internal_error() {
     // One 4-token block cannot hold a 5-token prompt, so the scheduler rejects
     // the request after it was admitted.
     let service = TrtllmMockerService::new(
@@ -255,8 +255,11 @@ async fn capacity_rejection_is_an_in_band_overloaded_error() {
             _ => None,
         })
         .expect("expected an in-band EngineError");
-    assert_eq!(error.code, pb::ErrorCode::Overloaded as i32);
-    assert!(error.retryable);
+    // Matches the servicer's post-acceptance default (ERROR_CODE_INTERNAL,
+    // retryable=false). ERROR_CODE_OVERLOADED is reserved upstream for the
+    // consumer-stall watchdog, not for capacity.
+    assert_eq!(error.code, pb::ErrorCode::Internal as i32);
+    assert!(!error.retryable);
     assert!(!responses.iter().any(|response| matches!(
         response.event,
         Some(pb::generate_response::Event::Finished(_))
@@ -300,7 +303,7 @@ async fn zero_max_tokens_is_rejected_rather_than_defaulted() {
 async fn unsupported_request_features_are_refused() {
     let service = service();
     type Mutate = fn(&mut pb::GenerateRequest);
-    let cases: [(&str, Mutate); 4] = [
+    let cases: [(&str, Mutate); 5] = [
         ("multimodal media", |r| {
             r.media.push(pb::MediaItem::default());
         }),
@@ -314,6 +317,16 @@ async fn unsupported_request_features_are_refused() {
         ("cache_salt", |r| {
             r.kv = Some(pb::KvOptions {
                 cache_salt: Some("tenant".to_string()),
+                ..Default::default()
+            })
+        }),
+        // The Mocker samples from its own scheduler and cannot honour a
+        // grammar, so an unconstrained answer would read as success.
+        ("guided decoding", |r| {
+            r.guided = Some(pb::GuidedDecoding {
+                guide: Some(pb::guided_decoding::Guide::JsonSchema(
+                    r#"{"type":"object"}"#.to_string(),
+                )),
                 ..Default::default()
             })
         }),

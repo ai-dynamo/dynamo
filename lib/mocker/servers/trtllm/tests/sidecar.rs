@@ -95,8 +95,10 @@ fn fast_engine_args() -> MockEngineArgs {
         .unwrap()
 }
 
-/// `--model-path` is mandatory and becomes `GenerateRequest.model`, so it has to
-/// match the server's `--model` or every request is NOT_FOUND.
+/// `--model-path` is mandatory and becomes `GenerateRequest.model`. The server
+/// does not compare it against its own `--model` -- only an empty model is
+/// refused -- so this matches the server's name to keep registration and
+/// routing readable, not to get the request served.
 async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> TrtllmSidecarEngine {
     let mut argv = vec![
         "dynamo-trtllm-sidecar".to_string(),
@@ -447,12 +449,19 @@ async fn capacity_rejection_surfaces_as_a_sidecar_error() {
         }
     }
     let error = error.expect("an in-band EngineError must fail the request");
-    // The type, not just the failure: the router sheds and migrates on an
-    // overload, so flattening it to a generic backend error turns a retryable
-    // condition into an opaque 500 with nothing in the suite to catch it.
+    // Deliberately NOT `WorkerOverloaded`. A capacity rejection reaches the
+    // client as the servicer's post-acceptance default, ERROR_CODE_INTERNAL
+    // with retryable=false, so the sidecar must not migrate it: upstream
+    // spends ERROR_CODE_OVERLOADED only on its consumer-stall watchdog, which
+    // measures the sidecar's own backpressure rather than engine capacity.
+    //
+    // This is a real gap in the protocol rather than a preference -- there is
+    // no code today that says "this engine is full, another may have room".
+    // Revisit on both sides together if upstream adds one.
     assert!(
-        matches!(error.error_type(), ErrorType::WorkerOverloaded),
-        "a capacity rejection must reach the router as an overload: {error}"
+        !matches!(error.error_type(), ErrorType::WorkerOverloaded),
+        "a capacity rejection must not be migratable while upstream has no \
+         code for admission pressure: {error}"
     );
 }
 

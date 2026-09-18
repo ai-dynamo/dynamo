@@ -24,8 +24,11 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:50051")]
     listen: SocketAddr,
 
-    /// Model identity exposed by Control.GetModelInfo. The sidecar's
-    /// --model-path must match it or every request is rejected as NOT_FOUND.
+    /// Model identity reported by Control.GetModelInfo, which is the name the
+    /// sidecar registers and the frontend serves. A request naming a different
+    /// model is still served: the real engine serves one, so rejecting a
+    /// mismatch would fail requests that work in production. Only an empty
+    /// model is refused.
     #[arg(long, default_value = "mocker-model")]
     model: String,
 

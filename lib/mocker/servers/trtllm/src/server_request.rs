@@ -54,6 +54,7 @@ pub(super) struct PreparedRequest {
     return_output_logprobs: bool,
     return_prompt_logprobs: bool,
     output_candidates: Option<pb::CandidateTokenSelection>,
+    prompt_candidates: Option<pb::CandidateTokenSelection>,
 }
 
 impl PreparedRequest {
@@ -148,6 +149,7 @@ impl PreparedRequest {
             return_output_logprobs: response.return_output_logprobs == Some(true),
             return_prompt_logprobs: response.return_prompt_logprobs == Some(true),
             output_candidates: response.output_candidates,
+            prompt_candidates: response.prompt_candidates,
         })
     }
 
@@ -201,31 +203,59 @@ impl PreparedRequest {
         }
     }
 
-    fn token_info(&self, token_id: u32, with_logprobs: bool) -> pb::TokenInfo {
+    /// `selection` is the candidate setting for the stream this token belongs
+    /// to: output tokens and prompt tokens are configured separately, and using
+    /// one for the other silently returns nothing when only the other was asked
+    /// for.
+    ///
+    /// `logprob` is an override rather than a computation for one case only --
+    /// the replayed first token of a decode request, whose value was produced
+    /// by the context phase and arrives in the handoff.
+    fn token_info(
+        &self,
+        token_id: u32,
+        with_logprobs: bool,
+        selection: Option<&pb::CandidateTokenSelection>,
+        logprob: Option<f64>,
+    ) -> pb::TokenInfo {
         pb::TokenInfo {
             token_id,
             token: token_text(token_id),
-            logprob: with_logprobs.then(|| selected_logprob(token_id)),
+            logprob: with_logprobs.then(|| logprob.unwrap_or_else(|| selected_logprob(token_id))),
             rank: with_logprobs.then_some(1),
             candidates: if with_logprobs {
-                candidates(token_id, self.output_candidates.as_ref())
+                candidates(token_id, selection)
             } else {
                 Vec::new()
             },
         }
     }
 
-    /// The replayed token's logprob comes from the handoff, not from this
-    /// engine, so a context phase that computed none leaves a hole the decode
-    /// leg cannot fill.
-    fn replays_without_a_logprob(&self, token_id: u32) -> bool {
-        self.replayed_first_token == Some(token_id) && self.replayed_first_logprob.is_none()
+    /// Output position 0 of a decode request is the token the context phase
+    /// already produced, so its logprob belongs to the handoff rather than to
+    /// this engine: replay the received value instead of regenerating one, and
+    /// if the context phase computed none, leave the hole it left.
+    ///
+    /// Keyed on the position, not the token id. The same token can be sampled
+    /// again later in the stream, and those occurrences are this engine's own
+    /// -- they must not inherit the replayed token's logprob or its absence.
+    fn replayed_logprob(&self, token_id: u32, position: usize) -> Option<Replayed> {
+        if position != 0 || self.replayed_first_token != Some(token_id) {
+            return None;
+        }
+        Some(Replayed(self.replayed_first_logprob))
     }
 
-    pub(super) fn token_output(&self, token_id: u32) -> pb::TokenOutput {
+    pub(super) fn token_output(&self, token_id: u32, position: usize) -> pb::TokenOutput {
+        let replayed = self.replayed_logprob(token_id, position);
         let with_logprobs =
-            self.return_output_logprobs && !self.replays_without_a_logprob(token_id);
-        let info = self.token_info(token_id, with_logprobs);
+            self.return_output_logprobs && !matches!(replayed, Some(Replayed(None)));
+        let info = self.token_info(
+            token_id,
+            with_logprobs,
+            self.output_candidates.as_ref(),
+            replayed.and_then(|Replayed(logprob)| logprob),
+        );
         pb::TokenOutput {
             output_index: Some(0),
             text: info.token.clone(),
@@ -238,7 +268,9 @@ impl PreparedRequest {
             tokens: self
                 .prompt_tokens
                 .iter()
-                .map(|token_id| self.token_info(*token_id, true))
+                .map(|token_id| {
+                    self.token_info(*token_id, true, self.prompt_candidates.as_ref(), None)
+                })
                 .collect(),
         })
     }
@@ -357,6 +389,15 @@ fn reject_unsupported(request: &pb::GenerateRequest) -> BoxedStatusResult<()> {
     {
         return unsupported("num_sequences greater than one");
     }
+    // The Mocker samples from its own scheduler, so it cannot honour a grammar.
+    // Answering an unconstrained completion would look like success and quietly
+    // invalidate whatever the caller was asserting -- the same reason the
+    // features above are refused rather than ignored. The sidecar always sends
+    // this field when the request carries a constraint
+    // (`convert::guided_decoding`), so an unsimulated one is always visible here.
+    if request.guided.is_some() {
+        return unsupported("guided decoding");
+    }
     if let Some(kv) = request.kv.as_ref() {
         if kv.bypass_prefix_cache == Some(true) {
             return unsupported("prefix cache bypass");
@@ -383,28 +424,38 @@ fn validate_role(
     session: Option<&pb::KvSessionRef>,
     mode: ServerMode,
 ) -> BoxedStatusResult<()> {
-    let requested = match (context_only, session.is_some()) {
+    let (shape, accepted_by): (&str, &[ServerMode]) = match (context_only, session.is_some()) {
         (true, true) => {
             return Err(Box::new(Status::invalid_argument(
                 "a request cannot be both context_only and carry a kv_session",
             )));
         }
-        (true, false) => ServerMode::Prefill,
-        (false, true) => ServerMode::Decode,
-        (false, false) => ServerMode::Aggregated,
+        (true, false) => ("context_only", &[ServerMode::Prefill]),
+        (false, true) => ("carrying a kv_session", &[ServerMode::Decode]),
+        // Neither marker is the aggregated shape, and it is also what
+        // conditional disaggregation dispatches straight to a decode worker
+        // when it bypasses prefill -- the decode engine is then expected to run
+        // the context phase itself. The sidecar builds exactly this request
+        // (`convert::build_generate_request`, and the
+        // `decode_without_a_prefill_result_runs_the_whole_request` test), so a
+        // decode server that refused it would reject every bypassed request.
+        (false, false) => (
+            "neither context_only nor carrying a kv_session",
+            &[ServerMode::Aggregated, ServerMode::Decode],
+        ),
     };
-    if requested != mode {
+    if !accepted_by.contains(&mode) {
         return Err(Box::new(Status::failed_precondition(format!(
-            "this server runs in {mode} mode, but the request is {}",
-            match requested {
-                ServerMode::Aggregated => "neither context_only nor carrying a kv_session",
-                ServerMode::Prefill => "context_only",
-                ServerMode::Decode => "carrying a kv_session",
-            }
+            "this server runs in {mode} mode, but the request is {shape}"
         ))));
     }
     Ok(())
 }
+
+/// A replayed position's logprob: `None` inside means the context phase
+/// computed none, which is different from this position not being a replay.
+#[derive(Clone, Copy)]
+struct Replayed(Option<f64>);
 
 fn token_text(token_id: u32) -> String {
     format!("<token:{token_id}>")

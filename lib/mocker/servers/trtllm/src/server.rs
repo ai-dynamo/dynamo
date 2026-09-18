@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use clap::ValueEnum;
 use dashmap::DashMap;
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs, WorkerType};
-use dynamo_mocker::live::{LiveEngine, LiveRequest};
+use dynamo_mocker::live::{LiveEngine, LiveEngineConfig, LiveRequest, RequestOutputBuffering};
 use dynamo_mocker::scheduler::MockerMetrics;
 use dynamo_trtllm_sidecar::proto as pb;
 use futures::Stream;
@@ -254,7 +254,18 @@ impl TrtllmMockerService {
             config: Arc::new(config),
             model_info: Arc::new(model_info),
             server_info: Arc::new(server_info),
-            engine: LiveEngine::start(engine_args, DP_RANK)?,
+            // `FullResponse`, not the default `CancelOnOverflow { capacity: 8 }`.
+            // A mocker exists to be driven hard by tests, and shedding a
+            // request because its consumer was briefly slow surfaces to the
+            // client as an internal error -- a failure mode of the harness, not
+            // of the thing under test. Buffering the declared response removes
+            // the race outright instead of widening the window.
+            engine: LiveEngine::start_with_config_and_request_output_buffering(
+                engine_args,
+                DP_RANK,
+                LiveEngineConfig::default(),
+                RequestOutputBuffering::FullResponse,
+            )?,
             request_permits: Arc::new(Semaphore::new(max_concurrent_requests)),
             inflight: Arc::new(DashMap::new()),
             received: Arc::new(Mutex::new(VecDeque::new())),
@@ -496,32 +507,6 @@ impl pb::inference_server::Inference for TrtllmMockerService {
         let (prepared, mut live, permit, guard, claimed) = self.start_generation(request).await?;
         let config = Arc::clone(&self.config);
 
-        // Decouple LiveEngine's small fixed per-request buffer from client and
-        // transport pacing. A pump drains the engine promptly so a bursty
-        // producer racing ahead of a slow gRPC consumer does not trip
-        // LiveEngine's slow-consumer shedding, which would surface to the
-        // client as an internal error rather than as backpressure. Sizing to
-        // the whole token budget is what the vLLM and SGLang mockers do: a
-        // smaller cap just moves the shedding threshold. Dropping the client
-        // stream still cancels unfinished scheduler work.
-        let (signal_tx, mut signal_rx) =
-            tokio::sync::mpsc::channel(prepared.max_output_tokens.saturating_add(1));
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = signal_tx.closed() => break,
-                    signal = live.recv() => {
-                        let Some(signal) = signal else { break };
-                        let completed = signal.completed;
-                        if signal_tx.send(signal).await.is_err() || completed {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
         let stream = async_stream::try_stream! {
             let _permit = permit;
             let _guard = guard;
@@ -544,7 +529,7 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                 if claimed.load(Ordering::Acquire) {
                     break Exit::Aborted;
                 }
-                let Some(signal) = signal_rx.recv().await else {
+                let Some(signal) = live.recv().await else {
                     break Exit::Closed;
                 };
                 if signal.rejected {
@@ -557,10 +542,13 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                 if prepared.is_stop_token(token_id, generated) {
                     break Exit::Stopped(token_id);
                 }
+                // Position before the increment: the first output token is 0,
+                // which is the one a decode request replays from the handoff.
+                let position = generated;
                 generated += 1;
                 yield response(
                     &request_id,
-                    pb::generate_response::Event::Token(prepared.token_output(token_id)),
+                    pb::generate_response::Event::Token(prepared.token_output(token_id, position)),
                 );
                 if signal.completed {
                     break Exit::Completed;
@@ -578,11 +566,21 @@ impl pb::inference_server::Inference for TrtllmMockerService {
                     // An accepted request fails in-band and the RPC still closes
                     // OK; a non-OK status is reserved for validation and
                     // transport failures.
+                    // `Internal`, not `Overloaded`, because that is what the
+                    // servicer does: a failure after acceptance lands in its
+                    // broad `except Exception` and is reported through
+                    // `_engine_error_response`, whose defaults are
+                    // ERROR_CODE_INTERNAL and retryable=false
+                    // (`grpc/openengine/servicer.py`, `formatting.py`).
+                    // `ERROR_CODE_OVERLOADED` has exactly one emitter upstream
+                    // -- the consumer-stall watchdog -- so spending it on
+                    // capacity here would teach the sidecar a mapping no real
+                    // server produces.
                     Exit::Rejected => yield engine_error(
                         &request_id,
-                        pb::ErrorCode::Overloaded,
+                        pb::ErrorCode::Internal,
                         "request exceeds the simulated KV-cache capacity",
-                        true,
+                        false,
                     ),
                     Exit::MissingToken => yield engine_error(
                         &request_id,
