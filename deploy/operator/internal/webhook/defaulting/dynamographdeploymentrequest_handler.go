@@ -57,11 +57,17 @@ const (
 // operator versions 1.0.0 and later.
 type DGDRDefaulter struct {
 	OperatorVersion string
+	// DefaultImage is the DGDR profiler image put into spec.image when a DGDR
+	// is created without one. Set it explicitly when the derived
+	// dynamo-planner:<operatorVersion> tag does not exist (pre-release charts:
+	// rc, nightly); empty keeps the derived default.
+	DefaultImage string
 }
 
-// NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version.
-func NewDGDRDefaulter(operatorVersion string) *DGDRDefaulter {
-	return &DGDRDefaulter{OperatorVersion: operatorVersion}
+// NewDGDRDefaulter creates a new DGDRDefaulter with the given operator version
+// and optional explicit default profiler image.
+func NewDGDRDefaulter(operatorVersion, defaultImage string) *DGDRDefaulter {
+	return &DGDRDefaulter{OperatorVersion: operatorVersion, DefaultImage: defaultImage}
 }
 
 // Default implements admission.CustomDefaulter.
@@ -100,9 +106,13 @@ func (d *DGDRDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-// defaultImageFor returns the default image with a canonical semver tag, or an
-// empty string when the operator version cannot be parsed.
+// defaultImageFor returns the profiler image for spec.image: DefaultImage when
+// set, else the derived image with a canonical semver tag, or an empty string
+// when the operator version cannot be parsed.
 func (d *DGDRDefaulter) defaultImageFor() string {
+	if d.DefaultImage != "" {
+		return d.DefaultImage
+	}
 	version, err := semver.NewVersion(d.OperatorVersion)
 	if err != nil {
 		return ""

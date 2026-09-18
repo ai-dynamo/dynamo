@@ -115,7 +115,7 @@ For the complete and authoritative list of all SGLang metrics, see the [official
 
 ## Forward Pass Metrics (FPM)
 
-> **Availability.** Forward Pass Metrics require SGLang's upstream `sglang.srt.observability.forward_pass_metrics` module and the `ServerArgs` fields (`enable_forward_pass_metrics`, `forward_pass_metrics_worker_id`, `forward_pass_metrics_ipc_name`). These landed in **SGLang v0.5.13** and ship in the current Dynamo runtime (`sglang==0.5.15`), so setting `DYN_FORWARDPASS_METRIC_PORT` enables SGLang-side FPM emission to the NATS event plane via `FpmEventRelay`. The wire-format contract is guarded by `dynamo/sglang/tests/test_fpm_contract.py`. On runtimes older than v0.5.13 the module is absent: the Dynamo-side relay still starts and the worker serves normally, but no SGLang-side FPM payloads are emitted.
+> **Availability.** Forward Pass Metrics require SGLang's upstream `sglang.srt.observability.forward_pass_metrics` module and the `ServerArgs` fields (`enable_forward_pass_metrics`, `forward_pass_metrics_worker_id`, `forward_pass_metrics_ipc_name`). These landed in **SGLang v0.5.13** and ship in the current CUDA Dynamo runtime (`sglang==0.5.17`), so setting `DYN_FORWARDPASS_METRIC_PORT` enables SGLang-side FPM emission to the NATS event plane via `FpmEventRelay`. The wire-format contract is guarded by `dynamo/sglang/tests/test_fpm_contract.py`. On runtimes older than v0.5.13 the module is absent: the Dynamo-side relay still starts and the worker serves normally, but no SGLang-side FPM payloads are emitted.
 
 Forward Pass Metrics provide **per-iteration scheduler telemetry** pushed over ZMQ, giving the [Planner](../../planner/overview.md) real-time visibility into batch composition, queue depth, and GPU forward pass duration. Unlike Prometheus metrics (which are scraped asynchronously and reflect only the latest gauge value), FPM emits a structured message after every scheduler iteration with the exact batch state.
 
@@ -185,7 +185,7 @@ In disaggregated serving, queued request metrics read from the correct engine-sp
 
 | Engine | Queue Source |
 |--------|-------------|
-| Unified (non-disagg) | `waiting_queue` |
+| Aggregated (non-disagg) | `waiting_queue` |
 | Prefill | `disagg_prefill_bootstrap_queue` |
 | Decode | `disagg_decode_prealloc_queue` + `disagg_decode_transfer_queue` |
 
@@ -248,7 +248,8 @@ Key implementation files:
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
-| `DYN_LOGGING_JSONL` | Enable JSONL logging (required for tracing) | `false` | `true` |
+| `DYN_LOGGING_CONSOLE_FORMAT` | Console output format (`readable` or `jsonl`) | `readable` | `readable` |
+| `DYN_LOGGING_JSONL` | Legacy JSONL and local trace-context fallback | `false` | `true` |
 | `OTEL_EXPORT_ENABLED` | Enable OTLP trace export | `false` | `true` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP gRPC endpoint for Tempo | `http://localhost:4317` | `http://tempo:4317` |
 | `OTEL_SERVICE_NAME` | Service name shown in Grafana Tempo | `dynamo` | `dynamo-worker-decode` |
@@ -304,7 +305,7 @@ cd examples/backends/sglang/launch
 Or manually for an aggregated deployment:
 
 ```bash
-export DYN_LOGGING_JSONL=true
+export DYN_LOGGING_CONSOLE_FORMAT=readable
 export OTEL_EXPORT_ENABLED=true
 export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 

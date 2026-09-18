@@ -6,7 +6,7 @@
 //!
 //! ## Offloading
 //! Offloading is the process of moving blocks to a cache level further away from the device.
-//! When blocks are registered (via [`ManagedBlockPool::register_blocks`]), they are automatically sent to the offload manager.
+//! When blocks are registered (via `ManagedBlockPool::register_blocks`), they are automatically sent to the offload manager.
 //! Due to limited bandwidth, the offload manager must prioritize which offloads to perform.
 //! This is indicated by the `priority` parameter to [`OffloadManager::offload`].
 //! When a offload request is received, the offload manager will enqueue it into a priority queue.
@@ -20,17 +20,17 @@
 //! ## Transfer Managers
 //! The offload manager uses two transfer managers to handle the offloading and onboarding of blocks.
 //!
-//! The [`CudaTransferManager`] is responsible for transfers between the device and host.
-//! The [`DiskTransferManager`] is responsible for transfers from host to disk and disk to device.
+//! The `CudaTransferManager` is responsible for transfers between the device and host.
+//! The `DiskTransferManager` is responsible for transfers from host to disk and disk to device.
 //!
 //! ## Worker Threads
 //! The offload manager uses two kinds of worker threads to handle the offloading and onboarding of blocks.
 //!
-//! The [`OffloadManager::offload_worker`] is responsible for offloading blocks.
-//! The [`OffloadManager::onboard_worker`] is responsible for onboarding blocks.
+//! The `OffloadManager::offload_worker` is responsible for offloading blocks.
+//! The `OffloadManager::onboard_worker` is responsible for onboarding blocks.
 //!
 //! The kind of offloads/onboards they perform is dictated by the source and target arguments
-//! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
+//! of the `OffloadManager::offload_worker` and `OffloadManager::onboard_worker` methods.
 
 use super::block::{
     BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock,

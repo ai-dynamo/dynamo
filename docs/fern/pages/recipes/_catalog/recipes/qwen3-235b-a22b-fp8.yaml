@@ -97,7 +97,7 @@ targets:
     type: static-generation
     traffic: 4K ISL / 200 OSL synthetic, concurrency 32, 320 requests
   deploy:
-    asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy.yaml
+    asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/qwen3-235b-a22b-fp8/trtllm/disagg/blackwell/perf.yaml

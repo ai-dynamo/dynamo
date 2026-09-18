@@ -29,7 +29,7 @@ import pickle
 import uuid
 from abc import ABC, abstractmethod
 from queue import Queue
-from typing import Any, Awaitable
+from typing import Any
 
 import torch
 from pydantic import BaseModel
@@ -38,6 +38,11 @@ from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
+
+# Upper bound on how long cleanup() waits for the backend to read a transferred
+# payload before releasing the NIXL-registered buffer anyway. Unbounded waiting
+# pins the buffer for the process lifetime when the read never happens.
+MM_NIXL_CLEANUP_TIMEOUT_S = float(os.environ.get("DYN_MM_NIXL_CLEANUP_TIMEOUT_S", "60"))
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +233,14 @@ class MmKwargsNixlSender(MmKwargsSender):
 
     async def _encode_item(
         self, idx: int, pickled: bytes
-    ) -> tuple[TensorTransferSpec, Awaitable[None]]:
-        """Register pickled bytes with NIXL and return the spec + completion."""
+    ) -> tuple[TensorTransferSpec, Any]:
+        """Register pickled bytes with NIXL and return the spec + operation.
+
+        The second element is the ``ReadableOperation`` itself, typed as ``Any``
+        to match the base hook's opaque ``cleanup_item`` contract and to avoid
+        depending on ``dynamo.nixl_connect``, which is imported lazily so the
+        module stays importable where NIXL is unavailable.
+        """
         with _nvtx.annotate("mm_nixl:register_descriptor", color="magenta"):
             pickled_tensor = torch.frombuffer(bytearray(pickled), dtype=torch.uint8)
             descriptor = self._nixl_connect.Descriptor(pickled_tensor)
@@ -243,7 +254,10 @@ class MmKwargsNixlSender(MmKwargsSender):
             dtype_str="uint8",
             serialized_request=readable_op.metadata().model_dump(),
         )
-        return spec, readable_op.wait_for_completion()
+        # Hand back the operation itself, not just its completion awaitable:
+        # cleanup() must be able to release the registered memory region even
+        # when the remote side never reads it.
+        return spec, readable_op
 
     def _assemble_extra_args(
         self,
@@ -262,15 +276,96 @@ class MmKwargsNixlSender(MmKwargsSender):
         )
         return {"mm_kwargs_nixl": metadata.model_dump()}
 
+    def _release_all(self, items: list[Any]) -> None:
+        """Release every operation. Best-effort by design.
+
+        A broad ``except`` that logs instead of re-raising is deliberate, and
+        is the kind of exception the style guide asks to be justified inline:
+
+        * the sibling ``MmKwargsShmSender.cleanup()`` is best-effort too, so
+          raising here would make the two senders diverge on failure;
+        * the only caller awaits this from a bare ``finally``
+          (``vllm_processor._generator_inner``) with no guard, so a raise would
+          surface as a late exception after the stream has completed and, on a
+          client cancel, would *replace* the in-flight ``CancelledError``;
+        * aborting the loop early would leak the very buffers this frees.
+
+        Releasing every item is what fixes the leak; reporting failures at
+        warning level is enough for monitoring to notice them.
+
+        Each release is a blocking native call (``deregister_memory``). Measured
+        cost on GB200 for 8-20 MB buffers: p50 0.005 ms, p95 0.016 ms, i.e.
+        ~0.02 ms of event-loop time for a 4-image request -- well below the cost
+        of handing off to an executor, so it stays inline.
+        """
+        for op in items:
+            try:
+                # ReadableOperation.__exit__ -> _release() -> deregister.
+                # _release() skips descriptors that are already deregistered,
+                # so this stays safe alongside __del__.
+                op.__exit__(None, None, None)
+            except Exception:
+                logger.warning(
+                    "[NIXL-Sender] failed to release transfer", exc_info=True
+                )
+
     async def cleanup(self, items: list[Any]) -> None:
-        """Await NIXL completion futures so memory regions can be deregistered."""
+        """Await NIXL completion, then release the registered memory regions.
+
+        The wait is bounded. ``ReadableOperation.wait_for_completion()`` only
+        resolves once the backend actually reads the buffer, so a request that
+        is cancelled, rejected, or routed to a worker that dies leaves it
+        pending forever. Because the pending coroutine holds a reference to the
+        operation, the NIXL-registered buffer is never deregistered and the
+        frontend's RSS grows by the size of every un-read payload for the
+        lifetime of the process.
+
+        Releasing in ``finally`` is the part that actually fixes the leak: the
+        timeout alone would stop the hang while still pinning the memory.
+
+        ``return_exceptions=True`` matters for correctness, not just tidiness:
+        without it ``gather`` propagates the first failure while its siblings
+        are still running, and the release below would then deregister buffers
+        whose reads are still in flight.
+
+        Trade-off worth stating: once the timeout elapses the buffer is
+        deregistered, so a backend that reads *later* will see a NIXL transfer
+        error rather than data. That is deliberate -- the alternative is
+        unbounded growth -- and is why the timeout is generous and tunable via
+        ``DYN_MM_NIXL_CLEANUP_TIMEOUT_S``.
+        """
         if not items:
             return
         try:
-            await asyncio.gather(*items)
-            logger.debug("[NIXL-Sender] all transfers completed")
-        except Exception:
-            logger.warning("[NIXL-Sender] transfer completion failed", exc_info=True)
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(op.wait_for_completion() for op in items),
+                    return_exceptions=True,
+                ),
+                timeout=MM_NIXL_CLEANUP_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[NIXL-Sender] %d transfer(s) not read within %.1fs; "
+                "releasing buffers anyway",
+                len(items),
+                MM_NIXL_CLEANUP_TIMEOUT_S,
+            )
+        else:
+            failures = [r for r in results if isinstance(r, BaseException)]
+            if failures:
+                logger.warning(
+                    "[NIXL-Sender] %d of %d transfer(s) failed to complete; "
+                    "first error: %r",
+                    len(failures),
+                    len(items),
+                    failures[0],
+                )
+            else:
+                logger.debug("[NIXL-Sender] all transfers completed")
+        finally:
+            # The release is the actual leak fix, so it must always run.
+            self._release_all(items)
 
 
 # ---------------------------------------------------------------------------

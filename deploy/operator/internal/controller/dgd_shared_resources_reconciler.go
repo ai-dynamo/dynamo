@@ -26,7 +26,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -47,11 +47,11 @@ type dgdSharedResourcesReconciler struct {
 
 func newDGDSharedResourcesReconciler(
 	kubeClient client.Client,
-	recorder record.EventRecorder,
+	recorder events.EventRecorder,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	restConfig *rest.Config,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 	sshKeyManager *secret.SSHKeyManager,
 	rbacManager rbacManager,
 ) *dgdSharedResourcesReconciler {

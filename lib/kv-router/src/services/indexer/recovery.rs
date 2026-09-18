@@ -75,7 +75,10 @@ async fn try_recover_from_peer(
             // peer's dump land in the matching lower-tier slot rather than the
             // device primary. The peer side retags lower-tier events in
             // `Indexer::dump_events`, so the `storage_tier` here is correct.
-            indexer.apply_event_routed(event).await;
+            indexer
+                .apply_event_routed(event)
+                .await
+                .context("peer recovery event was rejected by the local indexer")?;
             total_events += 1;
         }
     }

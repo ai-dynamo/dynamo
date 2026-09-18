@@ -35,6 +35,11 @@ def sandboxed(monkeypatch):
     monkeypatch.setattr(
         install_media_decoders, "_modules_missing_fresh", lambda mods: list(mods)
     )
+    monkeypatch.setattr(
+        install_media_decoders,
+        "_vllm_opencv_spec",
+        lambda: install_media_decoders.VALIDATED_SPECS["opencv-python-headless"],
+    )
     return monkeypatch
 
 
@@ -133,21 +138,26 @@ def test_already_present_installs_nothing(sandboxed):
     assert calls == []
 
 
-def test_vllm_installs_bounded_video_and_audio_specs(sandboxed):
+def test_vllm_installs_video_and_audio(sandboxed):
     present: set[str] = set()
     _set_available(sandboxed, present)
+    sandboxed.setattr(
+        install_media_decoders,
+        "_vllm_opencv_spec",
+        lambda: "opencv-python-headless==5.0.0.93",
+    )
     calls = _record_pip_and_mark(sandboxed, present, "cv2", "av")
     installed = install_media_decoders.install_media_decoders("vllm")
     assert installed == [
-        install_media_decoders.VALIDATED_SPECS["opencv-python-headless"],
+        "opencv-python-headless==5.0.0.93",
         install_media_decoders.VALIDATED_SPECS["av"],
     ]
     (cmd,) = calls
     assert "--break-system-packages" in cmd
+    assert "--force-reinstall" in cmd
+    assert cmd[cmd.index("--only-binary") + 1] == "opencv-python-headless"
     for spec in installed:
         assert spec in cmd
-    # Never installed: pynvvideocodec because the image already ships it as the
-    # NVDEC path, and the rest because no vLLM decode path imports them.
     for banned in ("torchcodec", "pynvvideocodec", "decord2", "libx264"):
         assert not any(banned in part for part in cmd)
 
@@ -172,16 +182,6 @@ def test_trtllm_installs_opencv_only(sandboxed):
     ]
     (cmd,) = calls
     assert install_media_decoders.VALIDATED_SPECS["av"] not in cmd
-
-
-def test_installs_only_missing_modules(sandboxed):
-    present = {"cv2"}  # video carrier present, audio missing
-    _set_available(sandboxed, present)
-    calls = _record_pip_and_mark(sandboxed, present, "av")
-    installed = install_media_decoders.install_media_decoders("vllm")
-    assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
-    (cmd,) = calls
-    assert install_media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd
 
 
 def test_every_install_uses_no_deps(sandboxed):
@@ -256,29 +256,19 @@ def test_dry_run_reports_without_installing(sandboxed):
     assert calls == []
 
 
-def test_pending_subset_installs_only_still_missing(sandboxed):
-    """A racing process may install part of the set while we wait on the lock.
-
-    Probe round 1 (pre-check) sees both vLLM carriers missing; round 2
-    (post-lock re-check) sees cv2 already installed by the racing process, so
-    only the audio carrier installs; round 3 (post-verify) sees everything.
-    """
+def test_racing_install_between_probe_and_lock_runs_no_pip(sandboxed):
+    """Skip pip when a concurrent installer makes both decoders usable."""
     rounds = {"n": 0}
 
     def probe(mods):
         rounds["n"] += 1
-        if rounds["n"] == 1:
-            return list(mods)
-        if rounds["n"] == 2:
-            return [m for m in mods if m != "cv2"]
-        return []
+        return list(mods) if rounds["n"] == 1 else []
 
     sandboxed.setattr(install_media_decoders, "_modules_missing_fresh", probe)
     calls = _record_pip(sandboxed)
-    installed = install_media_decoders.install_media_decoders("vllm")
-    assert installed == [install_media_decoders.VALIDATED_SPECS["av"]]
-    (cmd,) = calls
-    assert install_media_decoders.VALIDATED_SPECS["opencv-python-headless"] not in cmd
+
+    assert install_media_decoders.install_media_decoders("vllm") == []
+    assert calls == []
 
 
 def test_modules_missing_fresh_real_probe():
@@ -308,6 +298,32 @@ def test_probe_treats_present_but_broken_package_as_missing(tmp_path, monkeypatc
     (pkg / "__init__.py").write_text("raise RuntimeError('native libs gone')\n")
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     assert install_media_decoders._modules_missing_fresh(["brokenmod"]) == ["brokenmod"]
+
+
+def test_opencv_spec_falls_back_when_the_version_probe_fails(monkeypatch):
+    """An unreadable OpenCV version must not abort the install.
+
+    A cv2 that raises on import (rather than being absent) kills the probe
+    child, and check=True turns that into CalledProcessError in the caller.
+    The bounded spec is the right answer there, exactly as for an empty probe.
+    """
+
+    def _boom(cmd, **kwargs):
+        raise subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(install_media_decoders.subprocess, "run", _boom)
+    assert (
+        install_media_decoders._vllm_opencv_spec()
+        == install_media_decoders.VALIDATED_SPECS["opencv-python-headless"]
+    )
+
+
+def test_opencv_version_probe_survives_a_broken_cv2(tmp_path, monkeypatch):
+    """The probe child must exit cleanly when importing cv2 raises."""
+    (tmp_path / "cv2.py").write_text("raise RuntimeError('native libs gone')\n")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    spec = install_media_decoders._vllm_opencv_spec()
+    assert spec.startswith("opencv-python-headless")
 
 
 def test_lock_refuses_symlink_and_preserves_target(tmp_path, monkeypatch):
@@ -441,41 +457,138 @@ def test_cli_pip_args_reach_pip(sandboxed):
 # Nothing implicit: the env-var/startup pathway must not creep back.
 # ---------------------------------------------------------------------------
 
-_COMPONENTS_ROOT = Path(__file__).resolve().parents[3]
+# The dynamo package root (parents[2] = .../dynamo). parents[3] would be
+# components/src in the repo but site-packages in an installed layout, where
+# the sweep then walks every third-party package -- including files with
+# Python 2 syntax that ast.parse cannot read.
+_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_no_production_code_invokes_the_installer():
+def test_no_entrypoint_references_the_installer():
     """The installer is operator-run only.
 
     Reviewers rejected implicit installation at worker startup (env-var gated
     hooks in entrypoints): an install that changes the container's codec
-    surface has to be a visible, deliberate step. This sweep keeps any
-    `__main__.py` from calling the installer and the retired env switch from
-    coming back anywhere under components/src.
+    surface has to be a visible, deliberate step. Entrypoints are where
+    startup happens, so no `__main__.py` may reference the installer at all.
+
+    Other production code MAY import its constants -- the actionable
+    unsupported-codec errors single-source their version bounds from
+    VALIDATED_SPECS -- so this sweep is scoped to entrypoints, and the two
+    sweeps below cover the rest: nothing may CALL the installer, and the
+    retired env switch must not come back anywhere.
+    """
+    offenders: list[str] = []
+    for path in sorted(_PACKAGE_ROOT.rglob("__main__.py")):
+        text = path.read_text(encoding="utf-8")
+        if "install_media_decoders" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
+            offenders.append(str(path.relative_to(_PACKAGE_ROOT)))
+    assert not offenders, (
+        f"{offenders} reference the media-decoder installer from an entrypoint; "
+        "it must stay an explicit operator command, never wired into startup"
+    )
+
+
+def _source_calls_installer(source: str) -> bool:
+    """AST-based detection of a call into the installer, aliases included.
+
+    A literal `install_media_decoders(` grep misses
+    `from ... import install_media_decoders as x; x()` and
+    `import ...install_media_decoders as m; m.main()`. Walk the AST instead:
+    collect every name the installer module (or its functions) is bound to,
+    then flag any Call through one of those bindings.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # Not parseable as this interpreter's Python (vendored/py2-era file);
+        # it cannot be importing our installer through the import system.
+        return False
+    fn_aliases: set[str] = set()  # names bound to installer functions
+    mod_aliases: set[str] = set()  # names bound to the installer module
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.endswith("install_media_decoders"):
+                for a in node.names:
+                    if a.name in ("install_media_decoders", "main"):
+                        fn_aliases.add(a.asname or a.name)
+            elif node.module.endswith("common.utils") or node.module == "utils":
+                for a in node.names:
+                    if a.name == "install_media_decoders":
+                        mod_aliases.add(a.asname or a.name)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name.endswith("install_media_decoders"):
+                    mod_aliases.add(a.asname or a.name.split(".")[0])
+    if not fn_aliases and not mod_aliases:
+        return False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        if isinstance(f, ast.Name) and f.id in fn_aliases:
+            return True
+        if isinstance(f, ast.Attribute) and f.attr in (
+            "install_media_decoders",
+            "main",
+        ):
+            root = f.value
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in mod_aliases:
+                return True
+    return False
+
+
+def test_no_production_code_calls_the_installer():
+    """Importing constants is fine; invoking the install is not.
+
+    Calls into the installer (through any import alias) and the retired
+    DYN_ENABLE_MEDIA_DECODERS switch must appear nowhere outside the
+    installer module and its test.
     """
     allowed = {
-        Path("dynamo/common/utils/install_media_decoders.py"),  # the installer itself
-        Path("dynamo/common/tests/test_install_media_decoders.py"),  # this test
+        Path("common/utils/install_media_decoders.py"),  # the installer itself
+        Path("common/tests/test_install_media_decoders.py"),  # this test
     }
     offenders: list[str] = []
-    for path in sorted(_COMPONENTS_ROOT.rglob("*.py")):
-        rel = path.relative_to(_COMPONENTS_ROOT)
+    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+        rel = path.relative_to(_PACKAGE_ROOT)
         if rel in allowed:
             continue
         text = path.read_text(encoding="utf-8")
-        if "install_media_decoders" in text or "DYN_ENABLE_MEDIA_DECODERS" in text:
+        if "DYN_ENABLE_MEDIA_DECODERS" in text or _source_calls_installer(text):
             offenders.append(str(rel))
     assert not offenders, (
-        f"{offenders} reference the media-decoder installer; it must stay an "
-        "explicit operator command, never wired into worker startup"
+        f"{offenders} invoke the media-decoder installer (or resurrect its env "
+        "switch); only an operator may run it"
     )
+
+
+def test_call_detector_sees_through_aliases():
+    """The detector must catch aliased calls and ignore constant imports."""
+    calls = _source_calls_installer
+    direct = "from dynamo.common.utils.install_media_decoders import install_media_decoders\ninstall_media_decoders('vllm')\n"
+    aliased = "from dynamo.common.utils.install_media_decoders import install_media_decoders as x\nx('vllm')\n"
+    mod_alias = (
+        "import dynamo.common.utils.install_media_decoders as m\nm.main(['vllm'])\n"
+    )
+    from_pkg = "from dynamo.common.utils import install_media_decoders as imd\nimd.install_media_decoders('vllm')\n"
+    constants_only = "from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS\nprint(VALIDATED_SPECS)\n"
+    assert calls(direct)
+    assert calls(aliased)
+    assert calls(mod_alias)
+    assert calls(from_pkg)
+    assert not calls(constants_only)
 
 
 def test_installer_module_has_no_env_switches():
     """The module reads no environment variables at all."""
-    source = (
-        _COMPONENTS_ROOT / "dynamo/common/utils/install_media_decoders.py"
-    ).read_text(encoding="utf-8")
+    source = (_PACKAGE_ROOT / "common/utils/install_media_decoders.py").read_text(
+        encoding="utf-8"
+    )
     assert "os.environ" not in source and "getenv" not in source, (
         "install_media_decoders.py reads the environment; configuration belongs in "
         "CLI flags so the install stays explicit and self-describing"

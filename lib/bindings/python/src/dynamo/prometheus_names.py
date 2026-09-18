@@ -23,6 +23,15 @@ Usage (both patterns supported):
     from dynamo.prometheus_names import frontend_service, work_handler
     print(frontend_service.REQUESTS_TOTAL)  # "requests_total"
     print(work_handler.ERRORS_TOTAL)  # "errors_total"
+
+Nested Rust modules become nested classes, so the Python path matches the Rust path:
+    from dynamo.prometheus_names import transport, frontend_service
+    print(transport.tcp.ERRORS_TOTAL)  # "tcp_errors_total"
+    print(transport.nats.ERRORS_TOTAL)  # "nats_errors_total"
+
+    # Nested classes also carry label *values*, not just metric names
+    print(frontend_service.operation.TOKENIZE)  # "tokenize"
+    print(frontend_service.error_type.VALIDATION)  # "validation"
 """
 
 from __future__ import annotations
@@ -59,6 +68,14 @@ class frontend_perf:
     TOKENIZE_SECONDS = "tokenize_seconds"
     # Template application time in preprocessor
     TEMPLATE_SECONDS = "template_seconds"
+    # L1 tokenizer cache hits (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    TOKENIZER_CACHE_HITS_TOTAL = "tokenizer_cache_hits_total"
+    # L1 tokenizer cache misses (cumulative); enabled unless DYN_TOKENIZER_CACHE=0
+    TOKENIZER_CACHE_MISSES_TOTAL = "tokenizer_cache_misses_total"
+    # Tokens returned from the L1 tokenizer prefix cache (cumulative, labeled by model)
+    TOKENIZER_CACHE_CACHED_TOKENS_TOTAL = "tokenizer_cache_cached_tokens_total"
+    # Tokens freshly encoded after an L1 tokenizer prefix-cache lookup (cumulative, labeled by model)
+    TOKENIZER_CACHE_UNCACHED_TOKENS_TOTAL = "tokenizer_cache_uncached_tokens_total"
     # Cumulative detokenization time (microseconds); pair with DETOKENIZE_TOKEN_COUNT
     DETOKENIZE_TOTAL_US = "detokenize_total_us"
     # Total tokens detokenized; use rate(total_us)/rate(count) for per-token average
@@ -74,10 +91,14 @@ class frontend_service:
 
     # Environment variable that overrides the default metric prefix
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
+    # Whether the frontend can route at least one inference request for a model
+    MODEL_READY = "model_ready"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
     REQUESTS_STARTED_TOTAL = "requests_started_total"
+    # Total number of terminal semantic request failures.
+    FAILURES_TOTAL = "failures_total"
     # Number of requests waiting in HTTP queue before receiving the first response (gauge)
     QUEUED_REQUESTS = "queued_requests"
     # Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
@@ -98,6 +119,10 @@ class frontend_service:
     KV_HIT_RATE = "kv_hit_rate"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
+    # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    SHARED_CACHE_HIT_RATE = "shared_cache_hit_rate"
+    # Shared cache blocks beyond device overlap for the selected worker
+    SHARED_CACHE_BEYOND_BLOCKS = "shared_cache_beyond_blocks"
     # Scheduler selections with less overlap than another eligible worker
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
@@ -116,9 +141,7 @@ class frontend_service:
     # Separate from `REQUEST_DURATION_SECONDS` so its buckets can be sized for
     # pooling-model latencies (sub-second) without sacrificing resolution.
     EMBEDDING_LATENCY_SECONDS = "embedding_latency_seconds"
-    # Number of `image_url` content parts per request (histogram). Named
-    # `images_per_request` so the auto-emitted `_sum` (cumulative image volume),
-    # `_count` (requests observed), and `_bucket` all read naturally.
+    # Number of `image_url` content parts per request (histogram)
     IMAGES_PER_REQUEST = "images_per_request"
     # Number of `video_url` content parts per request (histogram)
     VIDEOS_PER_REQUEST = "videos_per_request"
@@ -143,6 +166,8 @@ class frontend_service:
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
     # Total number of request migrations due to worker unavailability
     MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Time from detecting a migratable failure until recovery, terminal failure, or cancellation
+    MODEL_MIGRATION_DURATION_SECONDS = "model_migration_duration_seconds"
     # Total number of times migration was disabled because the sequence length
     # exceeded the configured max_seq_len limit
     MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL = (
@@ -170,7 +195,7 @@ class frontend_service:
     WORKER_LAST_INTER_TOKEN_LATENCY_SECONDS = "worker_last_inter_token_latency_seconds"
     # Number of requests pending in the router's scheduler queue (gauge per worker_type)
     ROUTER_QUEUE_PENDING_REQUESTS = "router_queue_pending_requests"
-    # Number of replicas allocated for a LoRA adapter
+    # Number of replicas allocated for a LoRA adapter (gauge per LoRA)
     LORA_REPLICA_FACTOR = "lora_replica_factor"
     # Whether a LoRA adapter is actively receiving traffic (1=active, 0=inactive)
     LORA_IS_ACTIVE = "lora_is_active"
@@ -188,8 +213,74 @@ class frontend_service:
     LORA_OVERFLOW_COUNT = "lora_overflow_count"
     # Label name for the type of migration
     MIGRATION_TYPE_LABEL = "migration_type"
+    # Label name for the outcome of a migration
+    MIGRATION_OUTCOME_LABEL = "outcome"
     # Label name for tokenizer operation
     OPERATION_LABEL = "operation"
+
+    class error_type:
+        """Error type label values for fine-grained error classification"""
+
+        # No error (used for successful requests)
+        NONE = ""
+        # Client validation error (4xx with "Validation:" prefix)
+        VALIDATION = "validation"
+        # Model or resource not found (404)
+        NOT_FOUND = "not_found"
+        # Service overloaded or rate limited (429 or 529)
+        OVERLOAD = "overload"
+        # Service unavailable because no backend worker can serve the request
+        UNAVAILABLE = "unavailable"
+        # Request cancelled by client or timeout
+        CANCELLED = "cancelled"
+        # Backend accepted the request but stopped responding (response inactivity timeout)
+        RESPONSE_TIMEOUT = "response_timeout"
+        # Internal server error (500 and other unexpected errors)
+        INTERNAL = "internal"
+        # Feature not implemented (501)
+        NOT_IMPLEMENTED = "not_implemented"
+
+    class migration_outcome:
+        """Migration outcome label values"""
+
+        # Migration recovered on another worker
+        SUCCESS = "success"
+        # Migration ended without recovery
+        FAILURE = "failure"
+        # Migration ended because the request was cancelled
+        CANCELLED = "cancelled"
+
+    class migration_type:
+        """Migration type label values"""
+
+        # Migration during initial stream creation (NoResponders error)
+        NEW_REQUEST = "new_request"
+        # Migration during ongoing request (stream disconnected)
+        ONGOING_REQUEST = "ongoing_request"
+
+    class operation:
+        """Operation label values for tokenizer latency metric"""
+
+        # Tokenization operation
+        TOKENIZE = "tokenize"
+        # Detokenization operation
+        DETOKENIZE = "detokenize"
+
+    class request_type:
+        """Request type label values"""
+
+        # Value for streaming requests
+        STREAM = "stream"
+        # Value for unary requests
+        UNARY = "unary"
+
+    class status:
+        """Status label values"""
+
+        # Value for successful requests
+        SUCCESS = "success"
+        # Value for failed requests
+        ERROR = "error"
 
 
 class kv_publisher:
@@ -271,14 +362,6 @@ class kvstats:
     KV_CACHE_HIT_RATE = "kv_cache_hit_rate"
 
 
-class lifecycle:
-    """Worker-lifecycle timing gauges. Set once per worker run by the
-    framework, not by the engine."""
-
-    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
-    DRAIN_TIME_SECONDS = "drain_time_seconds"
-
-
 class labels:
     """Automatically inserted Prometheus label names used across the metrics system"""
 
@@ -307,6 +390,11 @@ class labels:
     WORKER_TYPE = "worker_type"
     # Label for router instance (discovery.instance_id() of the frontend)
     ROUTER_ID = "router_id"
+
+
+class lifecycle:
+    CLEANUP_TIME_SECONDS = "cleanup_time_seconds"
+    DRAIN_TIME_SECONDS = "drain_time_seconds"
 
 
 class model_info:
@@ -377,6 +465,10 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
+    SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
+    # Shared cache blocks beyond device overlap for the selected worker
+    SHARED_CACHE_BEYOND_BLOCKS = "router_shared_cache_beyond_blocks"
     # Scheduler selections with less overlap than another eligible worker
     NON_MAX_OVERLAP_SELECTIONS_TOTAL = "router_non_max_overlap_selections_total"
     # Effective KV overlap blocks lost by non-max-overlap selections
@@ -406,6 +498,10 @@ class routing_overhead:
     SCHEDULING_MS = "overhead_scheduling_ms"
     # Total routing overhead per request
     TOTAL_MS = "overhead_total_ms"
+    # Time spent querying the shared KV cache (Mooncake)
+    SHARED_CACHE_QUERY_MS = "overhead_shared_cache_query_ms"
+    # Total shared cache failures (query and subscriber failures)
+    SHARED_CACHE_ERRORS_TOTAL = "shared_cache_errors_total"
 
 
 class task_tracker:
@@ -436,6 +532,7 @@ class tokio_perf:
     WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
     WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
     WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    QUEUE_OVERLOAD_WARNINGS_TOTAL = "queue_overload_warnings_total"
     BLOCKING_THREADS = "blocking_threads"
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"
@@ -444,6 +541,20 @@ class tokio_perf:
 
 class transport:
     """Transport-specific metrics (TCP / NATS)"""
+
+    class nats:
+        ERRORS_TOTAL = "nats_errors_total"
+
+    class tcp:
+        POOL_ACTIVE = "tcp_pool_active"
+        POOL_IDLE = "tcp_pool_idle"
+        BYTES_SENT_TOTAL = "tcp_bytes_sent_total"
+        BYTES_RECEIVED_TOTAL = "tcp_bytes_received_total"
+        ERRORS_TOTAL = "tcp_errors_total"
+        SERVER_QUEUE_DEPTH = "tcp_server_queue_depth"
+        # Response-server accept failures that triggered a descriptor- or memory-exhaustion
+        # backoff sleep; counts per failed accept, not per backoff episode
+        ACCEPT_BACKOFF_TOTAL = "tcp_accept_backoff_total"
 
 
 class trtllm_additional:
@@ -497,9 +608,8 @@ class work_handler:
     QUEUE_DEPTH = "queue_depth"
     # Configured capacity of the bounded work queue (gauge, static)
     QUEUE_CAPACITY = "queue_capacity"
-    # Total times enqueuing work failed because the dispatcher channel was closed.
-    # tokio bounded mpsc applies backpressure on full — saturation shows up as
-    # rising QUEUE_DEPTH toward QUEUE_CAPACITY.
+    # Requests rejected before TCP worker dispatch because the bounded work queue
+    # was full or the dispatcher channel was closed.
     ENQUEUE_REJECTED_TOTAL = "enqueue_rejected_total"
     # Time spent waiting to acquire a worker-pool permit (histogram)
     PERMIT_WAIT_SECONDS = "permit_wait_seconds"
@@ -509,3 +619,21 @@ class work_handler:
     POOL_CAPACITY = "pool_capacity"
     # Label name for error type classification
     ERROR_TYPE_LABEL = "error_type"
+
+    class error_types:
+        """Error type values for work handler metrics"""
+
+        # Deserialization error
+        DESERIALIZATION = "deserialization"
+        # Invalid message format error
+        INVALID_MESSAGE = "invalid_message"
+        # Response stream creation error
+        RESPONSE_STREAM = "response_stream"
+        # Generation error
+        GENERATE = "generate"
+        # Response serialization error
+        SERIALIZATION = "serialization"
+        # Response publishing error
+        PUBLISH_RESPONSE = "publish_response"
+        # Final message publishing error
+        PUBLISH_FINAL = "publish_final"

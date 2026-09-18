@@ -18,6 +18,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 configure_dynamo_logging()
 
@@ -67,6 +68,8 @@ class EncodeHandler(HandlerBase):
             self.model_type = self.multimodal_processor.model_type
             self.tokenizer = self.multimodal_processor.tokenizer
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -132,6 +135,8 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -153,15 +158,11 @@ class PrefillHandler(HandlerBase):
         ep_disaggregated_params = None
 
         if self.multimodal_processor:
-            # Extract messages from extra_args (set by Rust preprocessor) or fall back to direct field
-            messages = request.get("extra_args", {}).get(
-                "messages", request.get("messages", [])
-            )
             (
                 _,
                 image_urls,
                 embedding_paths,
-            ) = self.multimodal_processor.extract_prompt_and_media(messages)
+            ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
@@ -219,6 +220,8 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:

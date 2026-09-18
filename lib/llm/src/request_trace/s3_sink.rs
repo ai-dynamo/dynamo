@@ -9,9 +9,10 @@
 //! (`{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`);
 //! richer partitioning ships in a follow-up.
 //!
-//! Credentials come from the AWS SDK default provider chain — env vars, IMDS,
-//! IRSA, Pod Identity, and shared profiles are all handled by the SDK. How the
-//! frontend pod is credentialed is a deployment concern, not this sink's.
+//! Credentials come from the shared `object_store` S3 client — environment
+//! variables, IMDS, IRSA, and Pod Identity are supported. Shared AWS config and
+//! credential profiles are not loaded; how the frontend pod is credentialed is
+//! a deployment concern, not this sink's.
 //!
 //! # Upload concurrency
 //!
@@ -31,9 +32,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
-use aws_config::{BehaviorVersion, Region, timeout::TimeoutConfig};
-use aws_sdk_s3::primitives::ByteStream;
 use flate2::{Compression, write::GzEncoder};
+use object_store::{
+    Attribute, Attributes, ClientConfigKey, ObjectStore, RetryConfig,
+    aws::{AmazonS3Builder, AmazonS3ConfigKey},
+    path::Path as ObjectPath,
+};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -48,8 +52,8 @@ const CHANNEL_CAPACITY: usize = 2048;
 const DEFAULT_BUFFER_INITIAL_BYTES: usize = 256 * 1024;
 // Bound S3 upload duration so a stalled endpoint or slow network cannot wedge
 // the worker task indefinitely. `attempt_timeout` covers a single HTTP attempt;
-// `operation_timeout` bounds the full call including SDK retries (three total
-// by default). After the operation timeout expires the batch is discarded with
+// the outer timeout bounds the full call including retries (three total).
+// After the operation timeout expires the batch is discarded with
 // a warning; a persistent retry queue is deferred to a follow-up PR.
 const S3_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 const S3_OPERATION_TIMEOUT: Duration = Duration::from_secs(90);
@@ -91,17 +95,11 @@ impl S3RequestTraceSink {
         let roll_uncompressed_bytes = policy.s3_roll_uncompressed_bytes;
         let flush_interval = Duration::from_millis(policy.s3_flush_interval_ms.max(1));
 
-        let timeout_config = TimeoutConfig::builder()
-            .operation_attempt_timeout(S3_ATTEMPT_TIMEOUT)
-            .operation_timeout(S3_OPERATION_TIMEOUT)
-            .build();
-        let mut loader =
-            aws_config::defaults(BehaviorVersion::latest()).timeout_config(timeout_config);
-        if let Some(region) = policy.s3_region.clone() {
-            loader = loader.region(Region::new(region));
-        }
-        let sdk_config = loader.load().await;
-        let client = aws_sdk_s3::Client::new(&sdk_config);
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            request_trace_s3_builder(&bucket, policy.s3_region.as_deref())
+                .build()
+                .context("building request trace S3 client")?,
+        );
 
         let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
         let shutdown = CancellationToken::new();
@@ -112,14 +110,20 @@ impl S3RequestTraceSink {
             run_id,
         };
         let worker_shutdown = shutdown.clone();
+        // The worker shares the counter with `emit`, so the shutdown total
+        // covers records lost inside the worker as well as records the full
+        // channel turned away.
+        let dropped = Arc::new(AtomicU64::new(0));
+        let worker_dropped = dropped.clone();
         let worker = tokio::spawn(async move {
             run_worker(
-                client,
+                store,
                 upload_options,
                 rx,
                 worker_shutdown,
                 roll_uncompressed_bytes,
                 flush_interval,
+                worker_dropped,
             )
             .await;
         });
@@ -128,28 +132,38 @@ impl S3RequestTraceSink {
             tx,
             shutdown,
             worker: Mutex::new(Some(worker)),
-            dropped: Arc::new(AtomicU64::new(0)),
+            dropped,
         })
     }
 
-    /// Record one dropped record and, only on the first drop, emit a single
-    /// warning. Subsequent drops bump the counter silently; the running total
-    /// is reported once at shutdown. Mirrors the OpenTelemetry Rust
-    /// `BatchLogProcessor` drop-accounting pattern so a degraded S3 endpoint
-    /// cannot flood the log with one line per dropped record. Returns `true`
-    /// when this call emitted the warning (i.e. it was the first drop).
+    /// Record one record dropped by backpressure in `emit`.
     fn note_dropped(&self, reason: &str) -> bool {
-        if self.dropped.fetch_add(1, Ordering::Relaxed) == 0 {
-            tracing::warn!(
-                target: "dynamo_llm::request_trace",
-                reason,
-                "request trace s3: dropping records (batcher backpressure); \
-                 further drops are counted and summarized at shutdown"
-            );
-            true
-        } else {
-            false
-        }
+        note_dropped_records(&self.dropped, 1, reason)
+    }
+}
+
+/// Add `count` lost records to `dropped` and, only on the first loss of the
+/// run, emit a single warning. Later losses bump the counter silently; the
+/// running total is reported once at shutdown and read by the shutdown joiner
+/// through `dropped_records`. Mirrors the OpenTelemetry Rust
+/// `BatchLogProcessor` drop-accounting pattern so a degraded S3 endpoint cannot
+/// flood the log with one line per lost record. Returns `true` when this call
+/// emitted the warning (i.e. it was the first loss).
+fn note_dropped_records(dropped: &AtomicU64, count: u64, reason: &str) -> bool {
+    if count == 0 {
+        return false;
+    }
+    if dropped.fetch_add(count, Ordering::Relaxed) == 0 {
+        tracing::warn!(
+            target: "dynamo_llm::request_trace",
+            reason,
+            count,
+            "request trace s3: dropping records; \
+             further drops are counted and summarized at shutdown"
+        );
+        true
+    } else {
+        false
     }
 }
 
@@ -167,6 +181,10 @@ impl RequestTraceSink for S3RequestTraceSink {
             };
             self.note_dropped(reason);
         }
+    }
+
+    fn dropped_records(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     async fn shutdown(&self) {
@@ -193,21 +211,22 @@ impl RequestTraceSink for S3RequestTraceSink {
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
                 dropped,
-                "request trace s3: dropped records during the run (batcher backpressure)"
+                "request trace s3: dropped records during the run"
             );
         }
     }
 }
 
 async fn run_worker(
-    client: aws_sdk_s3::Client,
+    store: Arc<dyn ObjectStore>,
     options: S3UploadOptions,
     mut rx: mpsc::Receiver<RequestTraceRecord>,
     shutdown: CancellationToken,
     roll_uncompressed_bytes: u64,
     flush_interval: Duration,
+    dropped: Arc<AtomicU64>,
 ) {
-    let uploader = Arc::new(S3Uploader { client, options });
+    let uploader = Arc::new(S3Uploader { store, options });
     let mut batch = JsonlBatch::new();
     let mut seq: u64 = 0;
     let mut flush_tick = tokio::time::interval(flush_interval);
@@ -225,6 +244,7 @@ async fn run_worker(
                 rx.close();
                 while let Some(record) = rx.recv().await {
                     if let Err(error) = batch.push(&record) {
+                        note_dropped_records(&dropped, 1, "serialize_failed");
                         tracing::warn!(
                             target: "dynamo_llm::request_trace",
                             %error,
@@ -234,35 +254,36 @@ async fn run_worker(
                         // Enforce the roll threshold during shutdown too, so a
                         // full channel can't collapse into one oversized PUT
                         // that loses everything on a single upload failure.
-                        upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                        upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                     }
                 }
                 if !batch.is_empty() {
-                    upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                    upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                 }
                 return;
             }
             _ = flush_tick.tick() => {
                 if !batch.is_empty() {
-                    upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                    upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                 }
             }
             message = rx.recv() => {
                 match message {
                     Some(record) => {
                         if let Err(error) = batch.push(&record) {
+                            note_dropped_records(&dropped, 1, "serialize_failed");
                             tracing::warn!(
                                 target: "dynamo_llm::request_trace",
                                 %error,
                                 "request trace s3: serialize failed; dropping record"
                             );
                         } else if batch.uncompressed_bytes() >= roll_uncompressed_bytes {
-                            upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                            upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                         }
                     }
                     None => {
                         if !batch.is_empty() {
-                            upload_ready_batch(&uploader, &mut batch, &mut seq).await;
+                            upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
                         }
                         return;
                     }
@@ -272,12 +293,23 @@ async fn run_worker(
     }
 }
 
-async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, seq: &mut u64) {
+async fn upload_ready_batch(
+    uploader: &Arc<S3Uploader>,
+    batch: &mut JsonlBatch,
+    seq: &mut u64,
+    dropped: &AtomicU64,
+) {
+    // Read the size before `take_finished` empties the batch. Every record in
+    // it is lost if the gzip finalize or the upload fails, and the shutdown
+    // report is only accurate if those losses are counted.
+    let records = batch.records();
     let ready = match batch.take_finished().await {
         Ok(bytes) => bytes,
         Err(error) => {
+            note_dropped_records(dropped, records, "gzip_failed");
             tracing::warn!(
                 target: "dynamo_llm::request_trace",
+                records,
                 %error,
                 "request trace s3: finalize gzip batch failed; discarding"
             );
@@ -289,22 +321,24 @@ async fn upload_ready_batch(uploader: &Arc<S3Uploader>, batch: &mut JsonlBatch, 
     let key = uploader.object_key(SystemTime::now(), this_seq);
     let batch_bytes = ready.len();
     if let Err(error) = uploader.put_object(key.clone(), ready).await {
-        // The SDK exhausted its retries (three total attempts by default,
-        // bounded by the operation timeout). The batch is dropped here rather
+        // The client exhausted its retries (three total attempts, bounded by
+        // the operation timeout). The batch is dropped here rather
         // than requeued; a persistent retry buffer is a follow-up concern
         // tracked in the S3 layout PR.
+        note_dropped_records(dropped, records, "upload_failed");
         tracing::warn!(
             target: "dynamo_llm::request_trace",
             key = %key,
             batch_bytes,
+            records,
             %error,
-            "request trace s3: put_object failed after SDK retries; batch discarded"
+            "request trace s3: put_object failed after retries; batch discarded"
         );
     }
 }
 
 struct S3Uploader {
-    client: aws_sdk_s3::Client,
+    store: Arc<dyn ObjectStore>,
     options: S3UploadOptions,
 }
 
@@ -336,17 +370,45 @@ impl S3Uploader {
     }
 
     async fn put_object(&self, key: String, body: Vec<u8>) -> Result<()> {
-        self.client
-            .put_object()
-            .bucket(&self.options.bucket)
-            .key(key)
-            .content_type("application/gzip")
-            .body(ByteStream::from(body))
-            .send()
-            .await
-            .with_context(|| format!("s3 put_object into bucket {}", self.options.bucket))?;
+        let location = ObjectPath::parse(&key)
+            .with_context(|| format!("invalid request trace S3 object key {key:?}"))?;
+        let attributes = Attributes::from_iter([(Attribute::ContentType, "application/gzip")]);
+        tokio::time::timeout(
+            S3_OPERATION_TIMEOUT,
+            self.store
+                .put_opts(&location, body.into(), attributes.into()),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "s3 put_object into bucket {} timed out",
+                self.options.bucket
+            )
+        })?
+        .with_context(|| format!("s3 put_object into bucket {}", self.options.bucket))?;
         Ok(())
     }
+}
+
+fn request_trace_s3_builder(bucket: &str, region: Option<&str>) -> AmazonS3Builder {
+    let retry_config = RetryConfig {
+        max_retries: 2,
+        retry_timeout: S3_OPERATION_TIMEOUT,
+        ..Default::default()
+    };
+    let mut builder = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+            format!("{}s", S3_ATTEMPT_TIMEOUT.as_secs()),
+        )
+        .with_retry(retry_config);
+    if let Some(region) = region {
+        builder = builder.with_region(region);
+    } else if let Ok(region) = std::env::var("AWS_REGION") {
+        builder = builder.with_region(region);
+    }
+    builder
 }
 
 /// Buffers raw JSONL bytes until the batch is ready to flush; gzip
@@ -371,6 +433,10 @@ impl JsonlBatch {
 
     fn uncompressed_bytes(&self) -> u64 {
         self.raw.len() as u64
+    }
+
+    fn records(&self) -> u64 {
+        self.lines
     }
 
     fn push(&mut self, record: &RequestTraceRecord) -> Result<()> {
@@ -446,6 +512,7 @@ fn utc_date_parts(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 mod tests {
     use super::*;
     use crate::request_trace::{RequestTraceEventType, RequestTraceSchema};
+    use object_store::memory::InMemory;
 
     #[test]
     fn utc_date_parts_epoch() {
@@ -462,15 +529,7 @@ mod tests {
 
     #[test]
     fn object_key_includes_prefix_date_run_and_seq() {
-        let uploader = S3Uploader {
-            client: dummy_client(),
-            options: S3UploadOptions {
-                bucket: "b".to_string(),
-                prefix: "traces/".to_string(),
-                host: "frontend-0".to_string(),
-                run_id: "cafebabe".to_string(),
-            },
-        };
+        let uploader = test_uploader("traces/");
         let at = UNIX_EPOCH + Duration::from_secs(1_784_118_896);
         let key = uploader.object_key(at, 42);
         assert_eq!(
@@ -481,34 +540,119 @@ mod tests {
 
     #[test]
     fn object_key_omits_leading_slash_when_prefix_empty() {
-        let uploader = S3Uploader {
-            client: dummy_client(),
-            options: S3UploadOptions {
-                bucket: "b".to_string(),
-                prefix: String::new(),
-                host: "h".to_string(),
-                run_id: "abc".to_string(),
-            },
-        };
+        let uploader = test_uploader("");
         let key = uploader.object_key(UNIX_EPOCH, 0);
         assert!(!key.starts_with('/'));
-        assert!(key.starts_with("1970/01/01/h-"));
+        assert!(key.starts_with("1970/01/01/frontend-0-"));
     }
 
-    fn dummy_client() -> aws_sdk_s3::Client {
-        // A no-network client. Any subsequent `send()` call would fail, but
-        // pure-Rust key generation does not exercise the transport.
-        let config = aws_sdk_s3::Config::builder()
-            .behavior_version(BehaviorVersion::latest())
-            .region(Region::new("us-east-1"))
-            .build();
-        aws_sdk_s3::Client::from_conf(config)
+    #[tokio::test]
+    async fn put_object_writes_body_and_content_type() {
+        let store = Arc::new(InMemory::new());
+        let uploader = S3Uploader {
+            store: store.clone(),
+            options: test_options(""),
+        };
+        let key = "traces/batch.jsonl.gz";
+        let body = vec![1, 2, 3, 4];
+
+        uploader
+            .put_object(key.to_string(), body.clone())
+            .await
+            .unwrap();
+
+        let result = store.get(&ObjectPath::from(key)).await.unwrap();
+        assert_eq!(
+            result
+                .attributes
+                .get(&Attribute::ContentType)
+                .map(AsRef::as_ref),
+            Some("application/gzip")
+        );
+        assert_eq!(result.bytes().await.unwrap().as_ref(), body.as_slice());
+    }
+
+    #[tokio::test]
+    async fn put_object_preserves_percent_encoded_key() {
+        let store = Arc::new(InMemory::new());
+        let uploader = S3Uploader {
+            store: store.clone(),
+            options: test_options(""),
+        };
+        let key = "traces/%2F/batch.jsonl.gz";
+        let body = vec![1, 2, 3, 4];
+
+        uploader
+            .put_object(key.to_string(), body.clone())
+            .await
+            .unwrap();
+
+        let location = ObjectPath::parse(key).unwrap();
+        let result = store.get(&location).await.unwrap();
+        assert_eq!(result.bytes().await.unwrap().as_ref(), body.as_slice());
+    }
+
+    #[tokio::test]
+    async fn put_object_rejects_key_with_empty_segment() {
+        let uploader = test_uploader("");
+
+        let error = uploader
+            .put_object("traces//batch.jsonl.gz".to_string(), vec![1, 2, 3, 4])
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid request trace S3 object key")
+        );
+    }
+
+    #[test]
+    fn s3_builder_preserves_environment_client_options() {
+        temp_env::with_vars(
+            [
+                ("AWS_ALLOW_HTTP", Some("true")),
+                ("AWS_PROXY_URL", Some("http://proxy.example:8080")),
+            ],
+            || {
+                let builder = request_trace_s3_builder("b", Some("us-west-2"));
+                assert_eq!(
+                    builder
+                        .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp))
+                        .as_deref(),
+                    Some("true")
+                );
+                assert_eq!(
+                    builder
+                        .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::ProxyUrl))
+                        .as_deref(),
+                    Some("http://proxy.example:8080")
+                );
+            },
+        );
+    }
+
+    fn test_uploader(prefix: &str) -> S3Uploader {
+        S3Uploader {
+            store: Arc::new(InMemory::new()),
+            options: test_options(prefix),
+        }
+    }
+
+    fn test_options(prefix: &str) -> S3UploadOptions {
+        S3UploadOptions {
+            bucket: "b".to_string(),
+            prefix: prefix.to_string(),
+            host: "frontend-0".to_string(),
+            run_id: "cafebabe".to_string(),
+        }
     }
 
     /// Build a sink whose bounded channel is never drained, so `emit` hits the
     /// same backpressure path a stalled uploader would cause. The receiver is
     /// returned to the caller and held so the channel stays open (full), not
-    /// closed. No AWS client or worker task is created.
+    /// closed. No S3 client or worker task is created.
     fn stalled_sink(capacity: usize) -> (S3RequestTraceSink, mpsc::Receiver<RequestTraceRecord>) {
         let (tx, rx) = mpsc::channel(capacity);
         let sink = S3RequestTraceSink {
@@ -547,6 +691,7 @@ mod tests {
 
         let dropped = sink.dropped.load(Ordering::Relaxed);
         assert_eq!(dropped, (total - capacity) as u64);
+        assert_eq!(sink.dropped_records(), dropped);
     }
 
     #[test]
@@ -558,5 +703,43 @@ mod tests {
             assert!(!sink.note_dropped("channel_full"));
         }
         assert_eq!(sink.dropped.load(Ordering::Relaxed), 1001);
+    }
+
+    fn batch_of(records: usize) -> JsonlBatch {
+        let mut batch = JsonlBatch::new();
+        for _ in 0..records {
+            batch.push(&sample_record()).unwrap();
+        }
+        batch
+    }
+
+    #[tokio::test]
+    async fn failed_upload_counts_every_record_in_the_batch() {
+        // The uploader builds its key from the prefix, and an empty path
+        // segment makes `put_object` reject the key, so this reaches the same
+        // failure branch a refused or timed-out `PutObject` takes.
+        let uploader = Arc::new(S3Uploader {
+            store: Arc::new(InMemory::new()),
+            options: test_options("traces//bad"),
+        });
+        let mut batch = batch_of(7);
+        let dropped = AtomicU64::new(0);
+        let mut seq = 0;
+
+        upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
+
+        assert_eq!(dropped.load(Ordering::Relaxed), 7);
+    }
+
+    #[tokio::test]
+    async fn successful_upload_counts_no_drops() {
+        let uploader = Arc::new(test_uploader("traces"));
+        let mut batch = batch_of(7);
+        let dropped = AtomicU64::new(0);
+        let mut seq = 0;
+
+        upload_ready_batch(&uploader, &mut batch, &mut seq, &dropped).await;
+
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
     }
 }

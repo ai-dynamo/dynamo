@@ -30,7 +30,7 @@ from typing import Any, Dict
 
 import requests
 
-from tests.utils.managed_deployment import ManagedDeployment
+from tests.deploy.dgd_utils import ManagedDeployment
 
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"

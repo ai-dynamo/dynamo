@@ -9,6 +9,7 @@ use dynamo_runtime::{
 use futures::{Stream, StreamExt, stream};
 use std::sync::Arc;
 
+use crate::grpc::service::dispatch_error_status;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::protocols::openai::ParsingOptions;
 use crate::protocols::openai::completions::{
@@ -37,7 +38,7 @@ pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
-/// for an [`super::OpenAICompletionsStreamingEngine`] and will return a stream of
+/// for an `OpenAICompletionsStreamingEngine` and will return a stream of
 /// responses which will be forward to the client.
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
@@ -119,7 +120,7 @@ pub async fn completion_response_stream(
             );
             return Status::resource_exhausted(e.to_string());
         }
-        Status::internal(format!("Failed to generate completions: {}", e))
+        dispatch_error_status(e.as_ref(), "Failed to generate completions")
     })?;
 
     // capture the context to cancel the stream if the client disconnects

@@ -7,9 +7,11 @@ use dynamo_runtime::{
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{Stream, StreamExt, stream};
+use half::{bf16, f16};
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::grpc::service::dispatch_error_status;
 use crate::http::service::metadata::extract_metadata_from_grpc;
 use crate::types::Annotated;
 
@@ -26,7 +28,7 @@ use crate::http::service::{
 
 use crate::protocols::tensor;
 use crate::protocols::tensor::{
-    NvCreateTensorRequest, NvCreateTensorResponse, Tensor, TensorMetadata,
+    NvCreateTensorRequest, NvCreateTensorResponse, RequestedOutput, Tensor, TensorMetadata,
 };
 
 use crate::grpc::service::kserve::inference;
@@ -49,7 +51,7 @@ pub struct ExtendedNvCreateTensorResponse {
 /// Tensor Request Handler
 ///
 /// This method will handle the incoming request for model type tensor. The endpoint is a "source"
-/// for an [`super::OpenAICompletionsStreamingEngine`] and will return a stream of
+/// for an `OpenAICompletionsStreamingEngine` and will return a stream of
 /// responses which will be forward to the client.
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
@@ -119,7 +121,7 @@ pub async fn tensor_response_stream(
                 .inc_rejection(&model_name, crate::http::service::metrics::Endpoint::Tensor);
             return Status::resource_exhausted(e.to_string());
         }
-        Status::internal(format!("Failed to generate tensor response stream: {}", e))
+        dispatch_error_status(e.as_ref(), "Failed to generate tensor response stream")
     })?;
 
     // capture the context to cancel the stream if the client disconnects
@@ -301,9 +303,19 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             },
             model: request.model_name.clone(),
             tensors: Vec::new(),
+            outputs: Vec::with_capacity(request.outputs.len()),
             parameters,
             nvext: None,
         };
+
+        // Requested outputs select which model outputs come back and how; their
+        // parameters (e.g. `classification`) are interpreted by the worker.
+        for output in &request.outputs {
+            tensor_request.outputs.push(RequestedOutput {
+                name: output.name.clone(),
+                parameters: convert_kserve_to_dynamo_params(&output.parameters)?,
+            });
+        }
 
         // iterate through inputs
         for (idx, input) in request.inputs.into_iter().enumerate() {
@@ -324,7 +336,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             match &input.contents {
                 // If contents is provided in InferInputTensor
                 Some(contents) => {
-                    tensor.set_data_from_tensor_contents(contents);
+                    tensor.set_data_from_tensor_contents(contents)?;
                 }
                 // If not in InferInputTensor, contents is provided in raw_input_contents
                 None => {
@@ -341,7 +353,11 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
 }
 
 impl tensor::Tensor {
-    fn set_data_from_tensor_contents(&mut self, contents: &inference::InferTensorContents) {
+    #[allow(clippy::result_large_err)]
+    fn set_data_from_tensor_contents(
+        &mut self,
+        contents: &inference::InferTensorContents,
+    ) -> Result<(), Status> {
         self.data = match self.metadata.data_type {
             tensor::DataType::Bool => tensor::FlattenTensor::Bool(contents.bool_contents.clone()),
             tensor::DataType::Uint8 => tensor::FlattenTensor::Uint8(
@@ -378,7 +394,15 @@ impl tensor::Tensor {
             tensor::DataType::Bytes => {
                 tensor::FlattenTensor::Bytes(contents.bytes_contents.clone())
             }
-        }
+            tensor::DataType::Float16 | tensor::DataType::BFloat16 => {
+                return Err(Status::invalid_argument(format!(
+                    "FP16/BF16 tensors must be sent via `raw_input_contents`; \
+                     `InferTensorContents` has no typed field for half-precision (input '{}')",
+                    self.metadata.name
+                )));
+            }
+        };
+        Ok(())
     }
 
     #[allow(clippy::result_large_err)]
@@ -532,6 +556,18 @@ impl tensor::Tensor {
                     })
                     .collect(),
             )),
+            tensor::DataType::Float16 => Ok(tensor::FlattenTensor::Float16(
+                raw_input
+                    .chunks_exact(2)
+                    .map(|chunk| f16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect(),
+            )),
+            tensor::DataType::BFloat16 => Ok(tensor::FlattenTensor::BFloat16(
+                raw_input
+                    .chunks_exact(2)
+                    .map(|chunk| bf16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect(),
+            )),
             tensor::DataType::Float32 => Ok(tensor::FlattenTensor::Float32(
                 raw_input
                     .chunks_exact(4)
@@ -593,7 +629,7 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
             if extended_response.set_raw_output_contents {
                 infer_response.add_raw_output_contents(tensor)?;
             } else {
-                infer_response.fill_last_tensor_contents(tensor);
+                infer_response.fill_last_tensor_contents(tensor)?;
             }
         }
 
@@ -638,6 +674,12 @@ impl inference::ModelInferResponse {
             tensor::FlattenTensor::Int64(data) => {
                 data.iter().flat_map(|&x| x.to_le_bytes()).collect()
             }
+            tensor::FlattenTensor::Float16(data) => {
+                data.iter().flat_map(|&x| x.to_le_bytes()).collect()
+            }
+            tensor::FlattenTensor::BFloat16(data) => {
+                data.iter().flat_map(|&x| x.to_le_bytes()).collect()
+            }
             tensor::FlattenTensor::Float32(data) => {
                 data.iter().flat_map(|&x| x.to_le_bytes()).collect()
             }
@@ -658,9 +700,12 @@ impl inference::ModelInferResponse {
         Ok(())
     }
 
-    pub fn fill_last_tensor_contents(&mut self, tensor: &tensor::Tensor) {
+    pub fn fill_last_tensor_contents(
+        &mut self,
+        tensor: &tensor::Tensor,
+    ) -> Result<(), anyhow::Error> {
         if self.outputs.is_empty() {
-            return;
+            return Ok(());
         }
         self.outputs.last_mut().unwrap().contents = match &tensor.data {
             tensor::FlattenTensor::Bool(data) => Some(inference::InferTensorContents {
@@ -720,7 +765,15 @@ impl inference::ModelInferResponse {
                 bytes_contents: data.clone(),
                 ..Default::default()
             }),
+            tensor::FlattenTensor::Float16(_) | tensor::FlattenTensor::BFloat16(_) => {
+                anyhow::bail!(
+                    "FP16/BF16 tensors cannot be returned via `InferTensorContents`; \
+                     use `raw_output_contents` (set_raw_output_contents = true) for output '{}'",
+                    tensor.metadata.name
+                );
+            }
         };
+        Ok(())
     }
 }
 
@@ -753,10 +806,42 @@ impl tensor::DataType {
             tensor::DataType::Int16 => DataType::TypeInt16 as i32,
             tensor::DataType::Int32 => DataType::TypeInt32 as i32,
             tensor::DataType::Int64 => DataType::TypeInt64 as i32,
+            tensor::DataType::Float16 => DataType::TypeFp16 as i32,
+            tensor::DataType::BFloat16 => DataType::TypeBf16 as i32,
             tensor::DataType::Float32 => DataType::TypeFp32 as i32,
             tensor::DataType::Float64 => DataType::TypeFp64 as i32,
             tensor::DataType::Bytes => DataType::TypeString as i32,
         }
+    }
+}
+
+impl DataType {
+    /// The OIP wire name this datatype must be reported as in KServe v2
+    /// `ModelMetadata`, or `None` for `TYPE_INVALID`, which has no wire name.
+    ///
+    /// Not `as_str_name()`, which returns the `model_config.proto` variant name
+    /// (`TYPE_FP32`). That is the config spelling, not the wire spelling the
+    /// `datatype` field carries. Stripping the `TYPE_` prefix is not enough
+    /// either: `TYPE_STRING` is `BYTES` on the wire, the same pairing
+    /// [`tensor::DataType::to_kserve`] already encodes in the other direction.
+    pub fn oip_name(&self) -> Option<&'static str> {
+        Some(match self {
+            DataType::TypeInvalid => return None,
+            DataType::TypeBool => "BOOL",
+            DataType::TypeUint8 => "UINT8",
+            DataType::TypeUint16 => "UINT16",
+            DataType::TypeUint32 => "UINT32",
+            DataType::TypeUint64 => "UINT64",
+            DataType::TypeInt8 => "INT8",
+            DataType::TypeInt16 => "INT16",
+            DataType::TypeInt32 => "INT32",
+            DataType::TypeInt64 => "INT64",
+            DataType::TypeFp16 => "FP16",
+            DataType::TypeFp32 => "FP32",
+            DataType::TypeFp64 => "FP64",
+            DataType::TypeString => "BYTES",
+            DataType::TypeBf16 => "BF16",
+        })
     }
 }
 
@@ -772,6 +857,8 @@ impl std::fmt::Display for tensor::DataType {
             tensor::DataType::Int16 => write!(f, "INT16"),
             tensor::DataType::Int32 => write!(f, "INT32"),
             tensor::DataType::Int64 => write!(f, "INT64"),
+            tensor::DataType::Float16 => write!(f, "FP16"),
+            tensor::DataType::BFloat16 => write!(f, "BF16"),
             tensor::DataType::Float32 => write!(f, "FP32"),
             tensor::DataType::Float64 => write!(f, "FP64"),
             tensor::DataType::Bytes => write!(f, "BYTES"),
@@ -793,10 +880,336 @@ impl FromStr for tensor::DataType {
             "INT16" => Ok(tensor::DataType::Int16),
             "INT32" => Ok(tensor::DataType::Int32),
             "INT64" => Ok(tensor::DataType::Int64),
+            "FP16" => Ok(tensor::DataType::Float16),
+            "BF16" => Ok(tensor::DataType::BFloat16),
             "FP32" => Ok(tensor::DataType::Float32),
             "FP64" => Ok(tensor::DataType::Float64),
             "BYTES" => Ok(tensor::DataType::Bytes),
             _ => Err(anyhow::anyhow!("Invalid data type")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inference::model_infer_request::InferRequestedOutputTensor;
+    use std::collections::HashMap;
+
+    fn param(choice: Option<ParameterChoice>) -> inference::InferParameter {
+        inference::InferParameter {
+            parameter_choice: choice,
+        }
+    }
+
+    fn classification(k: i64) -> HashMap<String, inference::InferParameter> {
+        HashMap::from([(
+            "classification".to_string(),
+            param(Some(ParameterChoice::Int64Param(k))),
+        )])
+    }
+
+    fn requested_output(
+        name: &str,
+        parameters: HashMap<String, inference::InferParameter>,
+    ) -> InferRequestedOutputTensor {
+        InferRequestedOutputTensor {
+            name: name.to_string(),
+            parameters,
+        }
+    }
+
+    fn infer_request(outputs: Vec<InferRequestedOutputTensor>) -> inference::ModelInferRequest {
+        inference::ModelInferRequest {
+            model_name: "classifier".to_string(),
+            outputs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn requested_outputs_keep_their_parameters() {
+        let converted = NvCreateTensorRequest::try_from(infer_request(vec![
+            requested_output("OUTPUT0", classification(3)),
+            requested_output("OUTPUT1", HashMap::new()),
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            converted.outputs,
+            vec![
+                RequestedOutput {
+                    name: "OUTPUT0".to_string(),
+                    parameters: tensor::Parameters::from([(
+                        "classification".to_string(),
+                        tensor::ParameterValue::Int64(3),
+                    )]),
+                },
+                RequestedOutput {
+                    name: "OUTPUT1".to_string(),
+                    parameters: tensor::Parameters::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            serde_json::to_value(&converted.outputs[0]).unwrap(),
+            serde_json::json!({"name": "OUTPUT0", "parameters": {"classification": {"int64": 3}}})
+        );
+    }
+
+    #[test]
+    fn requested_outputs_empty_are_omitted_from_json() {
+        let converted = NvCreateTensorRequest::try_from(infer_request(vec![])).unwrap();
+        assert!(converted.outputs.is_empty());
+        assert!(
+            serde_json::to_value(&converted)
+                .unwrap()
+                .get("outputs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn requested_outputs_valueless_parameter_is_rejected() {
+        let error = NvCreateTensorRequest::try_from(infer_request(vec![requested_output(
+            "OUTPUT0",
+            HashMap::from([("classification".to_string(), param(None))]),
+        )]))
+        .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("classification"));
+    }
+
+    // Golden bytes hardcoded (not derived from to_le_bytes) so a symmetric
+    // break in both encode/decode still fires this test.
+    // FP16 LE for [1.5, -2.25, 3.125, -4.0, 0.5, 100.0, -0.0625, 65504.0].
+    const FP16_GOLDEN_BYTES: [u8; 16] = [
+        0x00, 0x3e, 0x80, 0xc0, 0x40, 0x42, 0x00, 0xc4, 0x00, 0x38, 0x40, 0x56, 0x00, 0xac, 0xff,
+        0x7b,
+    ];
+    // BF16 LE for [1.5, -2.25, 3.125, -4.0].
+    const BF16_GOLDEN_BYTES: [u8; 8] = [0xc0, 0x3f, 0x10, 0xc0, 0x48, 0x40, 0x80, 0xc0];
+
+    fn expected_fp16_values() -> Vec<f16> {
+        vec![
+            f16::from_f32(1.5),
+            f16::from_f32(-2.25),
+            f16::from_f32(3.125),
+            f16::from_f32(-4.0),
+            f16::from_f32(0.5),
+            f16::from_f32(100.0),
+            f16::from_f32(-0.0625),
+            f16::from_f32(65504.0),
+        ]
+    }
+
+    fn expected_bf16_values() -> Vec<bf16> {
+        vec![
+            bf16::from_f32(1.5),
+            bf16::from_f32(-2.25),
+            bf16::from_f32(3.125),
+            bf16::from_f32(-4.0),
+        ]
+    }
+
+    #[test]
+    fn fp16_raw_path_byte_exact_roundtrip() {
+        let mut t = tensor::Tensor {
+            metadata: tensor::TensorMetadata {
+                name: "test".to_string(),
+                data_type: tensor::DataType::Float16,
+                shape: vec![8],
+                parameters: Default::default(),
+            },
+            data: tensor::FlattenTensor::Float16(vec![f16::from_f32(0.0); 8]),
+        };
+
+        let decoded = t.raw_input_to_typed_tensor(&FP16_GOLDEN_BYTES).unwrap();
+        let values = match decoded {
+            tensor::FlattenTensor::Float16(v) => v,
+            other => panic!("expected Float16 variant, got {:?}", other),
+        };
+        assert_eq!(values, expected_fp16_values());
+
+        t.data = tensor::FlattenTensor::Float16(values);
+        let mut response = inference::ModelInferResponse::default();
+        response.add_raw_output_contents(&t).unwrap();
+        assert_eq!(response.raw_output_contents[0], FP16_GOLDEN_BYTES);
+    }
+
+    #[test]
+    fn bf16_raw_path_byte_exact_roundtrip() {
+        let mut t = tensor::Tensor {
+            metadata: tensor::TensorMetadata {
+                name: "test".to_string(),
+                data_type: tensor::DataType::BFloat16,
+                shape: vec![4],
+                parameters: Default::default(),
+            },
+            data: tensor::FlattenTensor::BFloat16(vec![bf16::from_f32(0.0); 4]),
+        };
+
+        let decoded = t.raw_input_to_typed_tensor(&BF16_GOLDEN_BYTES).unwrap();
+        let values = match decoded {
+            tensor::FlattenTensor::BFloat16(v) => v,
+            other => panic!("expected BFloat16 variant, got {:?}", other),
+        };
+        assert_eq!(values, expected_bf16_values());
+
+        t.data = tensor::FlattenTensor::BFloat16(values);
+        let mut response = inference::ModelInferResponse::default();
+        response.add_raw_output_contents(&t).unwrap();
+        assert_eq!(response.raw_output_contents[0], BF16_GOLDEN_BYTES);
+    }
+
+    fn assert_typed_input_rejects_and_hints_raw(dtype: tensor::DataType) {
+        let mut t = tensor::Tensor {
+            metadata: tensor::TensorMetadata {
+                name: "half_input".to_string(),
+                data_type: dtype,
+                shape: vec![0],
+                parameters: Default::default(),
+            },
+            data: tensor::FlattenTensor::Bool(vec![]),
+        };
+        let empty = inference::InferTensorContents::default();
+        let err = t.set_data_from_tensor_contents(&empty).unwrap_err();
+        assert!(
+            err.message().contains("raw_input_contents"),
+            "error must point users at `raw_input_contents`, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn typed_input_path_rejects_half_precision() {
+        for dtype in [tensor::DataType::Float16, tensor::DataType::BFloat16] {
+            assert_typed_input_rejects_and_hints_raw(dtype);
+        }
+    }
+
+    fn assert_typed_output_rejects_and_hints_raw(data: tensor::FlattenTensor) {
+        let t = tensor::Tensor {
+            metadata: tensor::TensorMetadata {
+                name: "half_output".to_string(),
+                data_type: data.data_type(),
+                shape: vec![data.len() as i64],
+                parameters: Default::default(),
+            },
+            data,
+        };
+        let mut response = inference::ModelInferResponse::default();
+        response
+            .outputs
+            .push(inference::model_infer_response::InferOutputTensor::default());
+        let err = response.fill_last_tensor_contents(&t).unwrap_err();
+        assert!(
+            err.to_string().contains("raw_output_contents"),
+            "error must point users at `raw_output_contents`, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn typed_output_path_rejects_half_precision() {
+        for data in [
+            tensor::FlattenTensor::Float16(vec![f16::from_f32(0.0)]),
+            tensor::FlattenTensor::BFloat16(vec![bf16::from_f32(0.0)]),
+        ] {
+            assert_typed_output_rejects_and_hints_raw(data);
+        }
+    }
+
+    #[test]
+    fn half_precision_dtype_wire_contract() {
+        // Display
+        assert_eq!(tensor::DataType::Float16.to_string(), "FP16");
+        assert_eq!(tensor::DataType::BFloat16.to_string(), "BF16");
+
+        // FromStr (inverse of Display)
+        assert_eq!(
+            "FP16".parse::<tensor::DataType>().unwrap(),
+            tensor::DataType::Float16
+        );
+        assert_eq!(
+            "BF16".parse::<tensor::DataType>().unwrap(),
+            tensor::DataType::BFloat16
+        );
+
+        // to_kserve — protobuf enum wire values.
+        assert_eq!(
+            tensor::DataType::Float16.to_kserve(),
+            inference::DataType::TypeFp16 as i32
+        );
+        assert_eq!(
+            tensor::DataType::BFloat16.to_kserve(),
+            inference::DataType::TypeBf16 as i32
+        );
+    }
+}
+
+#[cfg(test)]
+mod oip_datatype_tests {
+    use super::*;
+
+    /// The two branches of `model_metadata` must name a datatype the same way.
+    ///
+    /// The Dynamo branch emits `tensor::DataType`'s `Display`; the Triton branch
+    /// emits `oip_name`. `to_kserve` already pairs the two enums, so composing it
+    /// with `oip_name` has to land back on the same string. This is what fails if
+    /// `oip_name` is ever written as "strip the `TYPE_` prefix": `TYPE_STRING`
+    /// would become `STRING`, but the wire name is `BYTES`.
+    #[test]
+    fn both_metadata_branches_agree_on_every_datatype_name() {
+        for dt in [
+            tensor::DataType::Bool,
+            tensor::DataType::Uint8,
+            tensor::DataType::Uint16,
+            tensor::DataType::Uint32,
+            tensor::DataType::Uint64,
+            tensor::DataType::Int8,
+            tensor::DataType::Int16,
+            tensor::DataType::Int32,
+            tensor::DataType::Int64,
+            tensor::DataType::Float32,
+            tensor::DataType::Float64,
+            tensor::DataType::Bytes,
+        ] {
+            let triton = DataType::try_from(dt.to_kserve())
+                .expect("to_kserve must yield a valid model_config DataType");
+            let expected = dt.to_string();
+            assert_eq!(
+                triton.oip_name(),
+                Some(expected.as_str()),
+                "{dt} reports a different name through the Triton branch"
+            );
+        }
+    }
+
+    /// `datatype` carries the OIP wire name, never the `model_config.proto`
+    /// variant name that `as_str_name()` returns.
+    #[test]
+    fn oip_names_are_wire_names_not_protobuf_variant_names() {
+        assert_eq!(DataType::TypeString.oip_name(), Some("BYTES"));
+        assert_eq!(DataType::TypeFp32.oip_name(), Some("FP32"));
+        assert_eq!(DataType::TypeBf16.oip_name(), Some("BF16"));
+        assert_eq!(DataType::TypeInvalid.oip_name(), None);
+
+        for dt in [
+            DataType::TypeBool,
+            DataType::TypeUint8,
+            DataType::TypeInt64,
+            DataType::TypeFp16,
+            DataType::TypeFp64,
+            DataType::TypeString,
+            DataType::TypeBf16,
+        ] {
+            let name = dt.oip_name().expect("a valid datatype has a wire name");
+            assert!(
+                !name.starts_with("TYPE_"),
+                "{name} is the model_config spelling, not the wire spelling"
+            );
         }
     }
 }

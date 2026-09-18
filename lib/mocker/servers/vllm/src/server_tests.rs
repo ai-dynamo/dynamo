@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use prost_types_v14 as prost_types;
+use tonic_v14 as tonic;
+
 use super::request::*;
 use super::*;
 use futures::StreamExt;
@@ -12,6 +15,7 @@ use std::collections::BTreeMap;
 fn admitting_args() -> MockEngineArgs {
     MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(4096)
         .max_num_seqs(Some(64))
         .max_num_batched_tokens(Some(1024))
@@ -42,6 +46,14 @@ fn request(id: &str) -> pb::GenerateRequest {
         }),
         ..Default::default()
     }
+}
+
+#[test]
+fn lora_requests_are_rejected() {
+    let mut request = request("lora");
+    request.lora_name = "adapter".to_string();
+    let error = PreparedRequest::new(request, &MockerServerConfig::default()).unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
 }
 
 #[test]
@@ -155,12 +167,14 @@ fn text_prompts_fail_with_an_actionable_status() {
     assert!(error.message().contains("token_ids"));
 }
 
-#[test]
-fn service_rejects_non_vllm_or_multi_rank_engines() {
-    let sglang = MockEngineArgs::builder()
+#[tokio::test]
+async fn service_rejects_non_vllm_or_multi_rank_engines() {
+    let mut sglang = MockEngineArgs::builder()
         .engine_type(EngineType::Sglang)
         .build()
         .unwrap();
+    // Service-specific errors must take priority over general validation.
+    sglang.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), sglang)
             .err()
@@ -169,7 +183,8 @@ fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("engine_type")
     );
 
-    let multi_rank = MockEngineArgs::builder().dp_size(2).build().unwrap();
+    let mut multi_rank = MockEngineArgs::builder().dp_size(2).build().unwrap();
+    multi_rank.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), multi_rank)
             .err()
@@ -178,10 +193,11 @@ fn service_rejects_non_vllm_or_multi_rank_engines() {
             .contains("dp_size")
     );
 
-    let disaggregated = MockEngineArgs::builder()
+    let mut disaggregated = MockEngineArgs::builder()
         .worker_type(WorkerType::Prefill)
         .build()
         .unwrap();
+    disaggregated.num_gpu_blocks = 0;
     assert!(
         VllmMockerService::new(MockerServerConfig::default(), disaggregated)
             .err()
@@ -201,12 +217,50 @@ fn service_rejects_non_vllm_or_multi_rank_engines() {
             .to_string()
             .contains("max_concurrent_requests")
     );
+
+    let mut invalid = admitting_args();
+    invalid.num_gpu_blocks = 0;
+    assert!(
+        VllmMockerService::new(MockerServerConfig::default(), invalid)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("num_gpu_blocks")
+    );
+}
+
+/// Regression: a mocker without RL capabilities could classify an unsupported
+/// RPC as a caller or runtime-state error, causing clients to mis-handle
+/// capability absence; this test catches it at the Control RPC boundary.
+#[tokio::test]
+async fn unsupported_rl_control_reports_unimplemented() {
+    let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
+    let server_info = pb::control_server::Control::get_server_info(
+        &service,
+        Request::new(pb::GetServerInfoRequest {}),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert!(server_info.rl_capabilities.is_none());
+
+    let error = pb::control_server::Control::pause_generation(
+        &service,
+        Request::new(pb::PauseGenerationRequest {
+            mode: pb::PauseMode::Keep as i32,
+            clear_cache: Some(false),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]
 async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
     let args = MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(1)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -219,7 +273,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
         ids: vec![1, 2, 3, 4, 5],
     }));
 
-    let error = pb::generate_server::Generate::generate(&service, Request::new(oversized))
+    let error = pb::inference_server::Inference::generate(&service, Request::new(oversized))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::ResourceExhausted);
@@ -229,6 +283,7 @@ async fn unary_generate_maps_capacity_rejection_to_resource_exhausted() {
 async fn concurrent_request_limit_rejects_a_stalled_stream() {
     let args = MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(128)
         .max_num_seqs(Some(1))
         .speedup_ratio(0.01)
@@ -245,18 +300,18 @@ async fn concurrent_request_limit_rejects_a_stalled_stream() {
     let mut first_request = request("stalled");
     first_request.stopping.as_mut().unwrap().max_new_tokens = 100;
     let first =
-        pb::generate_server::Generate::generate_stream(&service, Request::new(first_request))
+        pb::inference_server::Inference::generate_stream(&service, Request::new(first_request))
             .await
             .unwrap();
 
     let mut queued_request = request("queued");
     queued_request.stopping.as_mut().unwrap().max_new_tokens = 100;
     let queued =
-        pb::generate_server::Generate::generate_stream(&service, Request::new(queued_request))
+        pb::inference_server::Inference::generate_stream(&service, Request::new(queued_request))
             .await
             .unwrap();
 
-    let error = match pb::generate_server::Generate::generate_stream(
+    let error = match pb::inference_server::Inference::generate_stream(
         &service,
         Request::new(request("rejected")),
     )
@@ -311,11 +366,15 @@ fn decode_rejects_a_handoff_missing_the_opacity_sentinel() {
 async fn unary_generate_accumulates_output_and_terminal_metadata() {
     let service = VllmMockerService::new(MockerServerConfig::default(), admitting_args()).unwrap();
 
-    let response =
-        pb::generate_server::Generate::generate(&service, Request::new(request("unary")))
-            .await
-            .unwrap()
-            .into_inner();
+    let mut routed_request = Request::new(request("unary"));
+    routed_request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        tonic::metadata::MetadataValue::from(DP_RANK),
+    );
+    let response = pb::inference_server::Inference::generate(&service, routed_request)
+        .await
+        .unwrap()
+        .into_inner();
 
     assert!(response.prompt_info.is_some());
     let outputs = response
@@ -333,6 +392,16 @@ async fn unary_generate_accumulates_output_and_terminal_metadata() {
     );
     assert_eq!(finish.num_output_tokens, 2);
     assert_eq!(service.active_request_count(), 0);
+
+    let mut wrong_rank_request = Request::new(request("wrong-rank"));
+    wrong_rank_request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        tonic::metadata::MetadataValue::from(DP_RANK + 1),
+    );
+    let error = pb::inference_server::Inference::generate(&service, wrong_rank_request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
 #[tokio::test]
@@ -342,6 +411,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     // the rejection arrives as a later stream item after prompt info.
     let args = MockEngineArgs::builder()
         .block_size(4)
+        .enable_prefix_caching(false)
         .num_gpu_blocks(1)
         .max_num_seqs(Some(8))
         .max_num_batched_tokens(Some(64))
@@ -355,7 +425,7 @@ async fn streaming_generate_maps_capacity_rejection_to_resource_exhausted() {
     }));
 
     let mut stream =
-        pb::generate_server::Generate::generate_stream(&service, Request::new(oversized))
+        pb::inference_server::Inference::generate_stream(&service, Request::new(oversized))
             .await
             .expect("streaming RPC opens before the scheduler rejects")
             .into_inner();
@@ -384,10 +454,11 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
     let mut bursty = request("bursty");
     bursty.stopping.as_mut().unwrap().max_new_tokens = 50;
 
-    let mut stream = pb::generate_server::Generate::generate_stream(&service, Request::new(bursty))
-        .await
-        .unwrap()
-        .into_inner();
+    let mut stream =
+        pb::inference_server::Inference::generate_stream(&service, Request::new(bursty))
+            .await
+            .unwrap()
+            .into_inner();
 
     // Stall the consumer so the instant producer fills and overflows the fixed
     // per-request buffer before we read anything.
@@ -415,4 +486,58 @@ async fn streaming_survives_a_producer_that_outruns_a_stalled_consumer() {
     );
     assert_eq!(finish.num_output_tokens, 50);
     assert_eq!(service.active_request_count(), 0);
+}
+
+#[tokio::test]
+async fn kv_event_discovery_follows_regular_mocker_rules() {
+    for (mode, prefix_caching, expected_sources) in [
+        (ServerMode::Aggregated, true, 1),
+        (ServerMode::Prefill, true, 1),
+        (ServerMode::Decode, true, 0),
+        (ServerMode::Aggregated, false, 0),
+    ] {
+        let mut args = admitting_args();
+        args.enable_prefix_caching = prefix_caching;
+        let service = VllmMockerService::new(
+            MockerServerConfig {
+                mode,
+                ..Default::default()
+            },
+            args,
+        )
+        .unwrap();
+        assert_eq!(
+            pb::control_server::Control::get_kv_event_sources(
+                &service,
+                Request::new(pb::GetKvEventSourcesRequest {})
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .sources
+            .len(),
+            expected_sources
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_kv_publisher_is_not_advertised() {
+    let occupied = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let mut args = admitting_args();
+    args.enable_prefix_caching = true;
+    args.zmq_kv_events_port = Some(occupied.local_addr().unwrap().port());
+    let service = VllmMockerService::new(MockerServerConfig::default(), args).unwrap();
+    assert_eq!(
+        pb::control_server::Control::get_kv_event_sources(
+            &service,
+            Request::new(pb::GetKvEventSourcesRequest {})
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .sources
+        .len(),
+        0
+    );
 }

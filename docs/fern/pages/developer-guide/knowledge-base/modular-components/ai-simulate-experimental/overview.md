@@ -1,33 +1,56 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: AI Simulate (Experimental)
-subtitle: Experimental simulation and configuration-search tools for Dynamo deployments
+title: AISimulate (Experimental)
+subtitle: Backend-neutral simulation and configuration-search tools
 ---
 
 > [!WARNING]
-> **Experimental.** AI Simulate is intended for evaluation and feedback, not production capacity
+> **Experimental.** AISimulate is intended for evaluation and feedback, not production capacity
 > planning. Its Python APIs, configuration schemas, search results, and deployment output may
-> change without a standard deprecation period. It provides no SLA, accuracy, or
-> configuration-optimality guarantees.
+> change without a standard deprecation period.
 
-AI Simulate is a standalone Python distribution in the Dynamo repository. It contains simulation
-and configuration-search tools that use Dynamo models and replay without making those tools part
-of the stable `ai-dynamo` Python API.
+AISimulate is a standalone Python distribution. It provides inference-engine forward-pass
+simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
-## Spica
+Use `aisimulate predict --stack engine` for an engine-only prediction. Use `aisimulate predict
+--stack dynamo` to add Dynamo Router and Planner adapters. Both commands read the same YAML schema;
+the `ai-dynamo` package owns and validates the optional `router` and `planner` sections. Use
+`aisimulate recommend` with the same stack selection to search configuration domains.
 
-[Spica](spica-experimental/overview.md) is AI Simulate's first package. It searches engine, router, Planner, and
-parallelism settings with a black-box optimizer, accepts pinned G2 host-offload settings, and
-conditionally searches router cache-hit weights. It evaluates candidates with Dynamo Replay and
-supports scalar and Pareto-front objectives.
+> [!WARNING]
+> The former Dynamo online replay adapter has no replacement in the unified CLI yet. `aisimulate
+> predict` and `aisimulate recommend` are offline-only. Online replay will return in a future
+> release.
 
-Spica requires the matching Dynamo runtime from the same source revision. Follow the
-[Spica development setup](spica-experimental/overview.md#develop), then invoke the package module:
+## Sweeper
+
+[Sweeper](sweeper-experimental/overview.md) searches backend deployment settings against an injected replay runner.
+Its core owns backend search, candidate orchestration, scoring, and the versioned `ReplaySpec`
+contract.
+
+Optional adapters extend the search without adding a Dynamo dependency to AISimulate. The
+`ai-dynamo` wheel registers the `dynamo.planner` and `dynamo.router` adapters. Selecting either
+adapter imports its Dynamo implementation and adds a versioned runtime hook to the replay
+specification.
+
+KVBM search settings are deprecated and are not supported by the AISimulate engine and replay
+path. They have no adapter migration.
+
+## Install
+
+AISimulate requires Python 3.11 through 3.13. Dynamo itself still supports Python 3.10, but the
+`aisimulate` dependency and its CLI are not installed in a Python 3.10 environment.
+
+The `dynamo-planner` image installs the published `aisimulate==0.12.0` wheel from its local
+wheelhouse. Dynamo builds `aisimulate-core==0.12.0` from crates.io instead of vendoring the
+AISimulate source tree.
+
+For Dynamo source development, install the published AISimulate wheel, Dynamo, and the Planner
+dependencies from the Dynamo repository root:
 
 ```bash
-python -m aisimulate.spica --config examples/aisimulate/spica/configs/smart_sweep.yaml
+python3 -m pip install "aisimulate==0.12.0"
+python3 -m pip install --no-deps -e .
+python3 -m pip install -r container/deps/requirements.planner.txt
 ```
-
-The `dynamo-planner` container builds and installs this distribution. AI Simulate is not included
-in the `ai-dynamo` wheel and does not add an `ai-dynamo[spica]` extra or a console script.

@@ -15,7 +15,7 @@ spec:
           name: main
     replicas: 1
     type: frontend
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -24,6 +24,7 @@ spec:
           - Qwen/Qwen3-8B
           - --disaggregation-mode
           - decode
+          - --disable-hybrid-kv-cache-manager
           - --kv-transfer-config
           - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           - --max-model-len
@@ -44,7 +45,7 @@ spec:
           workingDir: /workspace/examples/backends/vllm
     replicas: 2
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:
@@ -53,6 +54,7 @@ spec:
           - Qwen/Qwen3-8B
           - --disaggregation-mode
           - prefill
+          - --disable-hybrid-kv-cache-manager
           - --max-model-len
           - "32000"
           - --enforce-eager

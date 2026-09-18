@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Sidecar unit-test harness: design and implementation plan
+# Shared CPU integration-test harness for sidecars
 
 ## Goal and scope
 
@@ -13,18 +13,16 @@ construction, and assertions wherever the sidecar contract is the same. Keep
 native protocol details in small framework adapters. Add future tests to these
 boundaries instead of creating another independent fake server for each test.
 
-This implements the shared-testkit direction of the
-[sidecar testing plan](https://docs.google.com/document/d/146cWxYabWmNAy-tx-sQ9i7JeQvDf-J_3aOg5kuk_a9E/edit?tab=t.0).
 The initial scope is four scenario families: streaming, failures, cancellation,
 and cleanup. Each runs against both frameworks, giving eight registered tests.
 TensorRT-LLM remains outside this increment because it has no corresponding
 Mocker server.
 
-The unit-test strategy has two distinct execution paths. Pure unit tests call
+The testing strategy has two distinct execution paths. Pure unit tests call
 conversion or parsing functions directly. Tests of actual sidecar generation and
 lifecycle use a real localhost connection to a CPU-only Mocker. These are Rust
-integration tests, or Tier 2 in the plan, even though they serve the same fast
-pre-merge testing goal. They need no inference-engine installation, model
+integration tests that serve the same fast pre-merge testing goal. They need no
+inference-engine installation, model
 download, GPU device, Python process, container, or external discovery service.
 Building still requires the repository's ordinary Rust workspace prerequisites.
 
@@ -106,9 +104,8 @@ available for future assertions about fields beyond token IDs.
 
 Source responses are recorded before deliberate stream alteration. Expected
 tokens come from those Mocker responses, not a fixed synthetic token sequence.
-Injected post-terminal replay is excluded from that expected sequence. vLLM's
-adapter accumulates native deltas; SGLang's adapter observes the latest cumulative
-sequence in this branch's protocol.
+Injected post-terminal replay is excluded from that expected sequence. Both
+adapters accumulate the native token deltas emitted by their pinned protocols.
 
 ## Four scenarios that exercise the foundation
 
@@ -126,9 +123,8 @@ request and assertion helpers without requiring identical native tokens across
 frameworks.
 
 Premature EOF remains a typed error in this branch: `Unknown` for vLLM and
-`EngineShutdown` for SGLang. The source plan's cancellation expectation differs;
-this testing refactor preserves the actual sidecar behavior instead of changing
-that production contract implicitly.
+`EngineShutdown` for SGLang. These tests preserve the sidecar's production error
+contract.
 
 ## Adding the rest of the suite
 
@@ -171,16 +167,14 @@ execution can also be checked with `CUDA_VISIBLE_DEVICES=` and
 
 Retain the existing Mocker `tests/sidecar.rs` suites when migrating these four
 scenarios. They cover logprobs, scheduler cancellation, and prefill/decode handoff
-that these shared scenarios do not replace. The removed prototype scenario and
-fixture files are relocated and refactored here; their removal is not a reduction
-in test coverage.
+that these shared scenarios do not replace. This harness adds coverage without
+removing those suites.
 
 For this increment, acceptance requires eight shared cases passing, including
 two-request cancellation isolation, the existing Mocker sidecar integration
 tests passing, formatting and Clippy passing, and no production sidecar/Mocker
-behavior changes. Before merging with a newer base, adapt the protocol adapters
-to that base and rerun validation; this branch still uses its original native
-protocol APIs.
+behavior changes. When native protocol APIs change, update the adapters and
+rerun both the shared cases and the retained Mocker integration suites.
 
 ## Limits of the evidence
 

@@ -27,12 +27,26 @@ from urllib.parse import unquote, urlparse
 from urllib.request import url2pathname
 
 from dynamo.common.http.url_validator import (
+    SOURCE_LABEL_LIMIT,
     UrlValidationError,
     UrlValidationPolicy,
+    describe_media_source,
     validate_local_path,
 )
 
 logger = logging.getLogger(__name__)
+
+# describe_media_source now lives beside the validators, which have to bound a
+# client-supplied source in their own messages and cannot import this package
+# (it pulls in torch). Re-exported here because callers import it from here.
+__all__ = [
+    "LOCAL_MEDIA_SCHEMES",
+    "SOURCE_LABEL_LIMIT",
+    "decode_data_uri",
+    "describe_media_source",
+    "is_local_media_url",
+    "read_local_media_bytes",
+]
 
 # Schemes this module can turn into bytes. http(s) is deliberately absent: it
 # belongs to fetch_bytes, which applies SSRF revalidation on every redirect hop.
@@ -44,7 +58,7 @@ def is_local_media_url(url: str) -> bool:
     return urlparse(url).scheme in LOCAL_MEDIA_SCHEMES
 
 
-def _decode_data_uri(url: str) -> bytes:
+def decode_data_uri(url: str) -> bytes:
     """Decode a ``data:`` URI body to bytes.
 
     Only base64 payloads are accepted: a percent-encoded body would have to be
@@ -72,7 +86,7 @@ async def read_local_media_bytes(url: str, policy: UrlValidationPolicy) -> bytes
     """
     scheme = urlparse(url).scheme
     if scheme == "data":
-        return _decode_data_uri(url)
+        return decode_data_uri(url)
     if scheme != "file":
         raise UrlValidationError(f"Unsupported local media scheme: {scheme!r}")
 

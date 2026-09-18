@@ -76,13 +76,19 @@ struct Diagnostic {
 }
 
 #[derive(Debug, Clone)]
+struct Warning {
+    code: DiagnosticCode,
+    since: Instant,
+    dp_ranks: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
 enum WorkerIssue {
-    MissingSince(Instant),
-    Warned {
-        code: DiagnosticCode,
+    MissingSince {
         since: Instant,
-        dp_ranks: Vec<u32>,
+        previous_warning: Option<Warning>,
     },
+    Warned(Warning),
 }
 
 struct SourceHealthState {
@@ -134,8 +140,8 @@ impl SourceHealthState {
         self.issues
             .values()
             .filter_map(|issue| match issue {
-                WorkerIssue::MissingSince(since) => Some(*since + SOURCE_JOIN_GRACE),
-                WorkerIssue::Warned { .. } => None,
+                WorkerIssue::MissingSince { since, .. } => Some(*since + SOURCE_JOIN_GRACE),
+                WorkerIssue::Warned(_) => None,
             })
             .min()
     }
@@ -191,20 +197,34 @@ fn reconcile_worker(
         return missing_source(worker_id, missing_ranks, previous, now);
     }
 
-    match previous {
-        Some(WorkerIssue::Warned {
-            since, dp_ranks, ..
-        }) => (
+    if statuses
+        .iter()
+        .any(|(_, status)| matches!(status, KvSourceStatus::Suppressed))
+    {
+        // Suppression hands this worker to the V2 controller. Clear any legacy
+        // warning state without claiming that the replacement source recovered.
+        return (None, None);
+    }
+
+    let previous_warning = match previous {
+        Some(WorkerIssue::Warned(warning)) => Some(warning),
+        Some(WorkerIssue::MissingSince {
+            previous_warning, ..
+        }) => previous_warning,
+        None => None,
+    };
+    match previous_warning {
+        Some(warning) => (
             None,
             Some(Diagnostic {
                 code: DiagnosticCode::SourceRecovered,
                 worker_id,
                 kv_event_publishing_enabled: true,
-                waited: now.saturating_duration_since(since),
-                dp_ranks,
+                waited: now.saturating_duration_since(warning.since),
+                dp_ranks: warning.dp_ranks,
             }),
         ),
-        Some(WorkerIssue::MissingSince(_)) | None => (None, None),
+        None => (None, None),
     }
 }
 
@@ -216,22 +236,25 @@ fn immediate_warning(
     previous: Option<WorkerIssue>,
     now: Instant,
 ) -> (Option<WorkerIssue>, Option<Diagnostic>) {
-    if matches!(
-        previous,
-        Some(WorkerIssue::Warned {
-            code: current,
-            ..
-        }) if current == code
-    ) {
-        return (previous, None);
+    let previous_warning = match previous {
+        Some(WorkerIssue::Warned(warning)) => Some(warning),
+        Some(WorkerIssue::MissingSince {
+            previous_warning, ..
+        }) => previous_warning,
+        None => None,
+    };
+    if let Some(warning) = previous_warning
+        && warning.code == code
+    {
+        return (Some(WorkerIssue::Warned(warning)), None);
     }
 
     (
-        Some(WorkerIssue::Warned {
+        Some(WorkerIssue::Warned(Warning {
             code,
             since: now,
             dp_ranks: dp_ranks.clone(),
-        }),
+        })),
         Some(Diagnostic {
             code,
             worker_id,
@@ -249,21 +272,18 @@ fn missing_source(
     now: Instant,
 ) -> (Option<WorkerIssue>, Option<Diagnostic>) {
     match previous {
-        Some(
-            issue @ WorkerIssue::Warned {
-                code: DiagnosticCode::SourceNotObserved,
-                ..
-            },
-        ) => (Some(issue), None),
-        Some(WorkerIssue::MissingSince(since))
+        Some(WorkerIssue::Warned(warning)) if warning.code == DiagnosticCode::SourceNotObserved => {
+            (Some(WorkerIssue::Warned(warning)), None)
+        }
+        Some(WorkerIssue::MissingSince { since, .. })
             if now.saturating_duration_since(since) >= SOURCE_JOIN_GRACE =>
         {
             (
-                Some(WorkerIssue::Warned {
+                Some(WorkerIssue::Warned(Warning {
                     code: DiagnosticCode::SourceNotObserved,
                     since,
                     dp_ranks: dp_ranks.clone(),
-                }),
+                })),
                 Some(Diagnostic {
                     code: DiagnosticCode::SourceNotObserved,
                     worker_id,
@@ -273,8 +293,21 @@ fn missing_source(
                 }),
             )
         }
-        Some(WorkerIssue::MissingSince(since)) => (Some(WorkerIssue::MissingSince(since)), None),
-        Some(WorkerIssue::Warned { .. }) | None => (Some(WorkerIssue::MissingSince(now)), None),
+        Some(issue @ WorkerIssue::MissingSince { .. }) => (Some(issue), None),
+        Some(WorkerIssue::Warned(warning)) => (
+            Some(WorkerIssue::MissingSince {
+                since: now,
+                previous_warning: Some(warning),
+            }),
+            None,
+        ),
+        None => (
+            Some(WorkerIssue::MissingSince {
+                since: now,
+                previous_warning: None,
+            }),
+            None,
+        ),
     }
 }
 
@@ -410,6 +443,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(endpoint),
             recovery_expected: HashMap::new(),
             kv_event_publishing_enabled: capabilities.into_iter().collect(),
+            kv_event_source_mode: HashMap::new(),
             sources,
         }
     }
@@ -554,6 +588,79 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
         assert!(state.reconcile(&active, now + SOURCE_JOIN_GRACE).is_empty());
+    }
+
+    #[test]
+    fn suppressing_a_missing_legacy_source_does_not_report_recovery() {
+        let worker = WorkerWithDpRank::new(7, 0);
+        let missing = view([(7, Some(true))], [missing(7, 0)]);
+        let suppressed = view([(7, Some(true))], [(worker, KvSourceStatus::Suppressed)]);
+        let now = Instant::now();
+        let mut state = required_state();
+
+        assert!(state.reconcile(&missing, now).is_empty());
+        let warning = state.reconcile(&missing, now + SOURCE_JOIN_GRACE);
+        assert_eq!(warning[0].code, DiagnosticCode::SourceNotObserved);
+
+        assert!(
+            state
+                .reconcile(&suppressed, now + SOURCE_JOIN_GRACE)
+                .is_empty()
+        );
+        assert!(state.next_deadline().is_none());
+    }
+
+    #[test]
+    fn ambiguous_source_recovers_after_transient_missing_state() {
+        let ambiguous = view([(7, Some(true))], [ambiguous(7, 0)]);
+        let missing = view([(7, Some(true))], [missing(7, 0)]);
+        let active = view([(7, Some(true))], [active(7, 0)]);
+        let now = Instant::now();
+        let mut state = required_state();
+
+        let warning = state.reconcile(&ambiguous, now);
+        assert_eq!(warning.len(), 1);
+        assert_eq!(warning[0].code, DiagnosticCode::SourceAmbiguous);
+
+        assert!(
+            state
+                .reconcile(&missing, now + Duration::from_millis(1))
+                .is_empty()
+        );
+
+        let recovered = state.reconcile(&active, now + Duration::from_millis(2));
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
+        assert_eq!(recovered[0].waited, Duration::from_millis(2));
+        assert!(
+            state
+                .reconcile(&active, now + Duration::from_millis(3))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ambiguous_source_that_stays_missing_reports_missing_source() {
+        let ambiguous = view([(7, Some(true))], [ambiguous(7, 0)]);
+        let missing = view([(7, Some(true))], [missing(7, 0)]);
+        let active = view([(7, Some(true))], [active(7, 0)]);
+        let now = Instant::now();
+        let mut state = required_state();
+
+        let ambiguity_warning = state.reconcile(&ambiguous, now);
+        assert_eq!(ambiguity_warning.len(), 1);
+        assert_eq!(ambiguity_warning[0].code, DiagnosticCode::SourceAmbiguous);
+
+        let missing_since = now + Duration::from_millis(1);
+        assert!(state.reconcile(&missing, missing_since).is_empty());
+        let missing_warning = state.reconcile(&missing, missing_since + SOURCE_JOIN_GRACE);
+        assert_eq!(missing_warning.len(), 1);
+        assert_eq!(missing_warning[0].code, DiagnosticCode::SourceNotObserved);
+
+        let recovered = state.reconcile(&active, missing_since + SOURCE_JOIN_GRACE);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].code, DiagnosticCode::SourceRecovered);
+        assert_eq!(recovered[0].waited, SOURCE_JOIN_GRACE);
     }
 
     #[test]

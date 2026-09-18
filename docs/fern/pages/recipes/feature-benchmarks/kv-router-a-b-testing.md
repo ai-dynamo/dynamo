@@ -129,7 +129,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.uid
-    VllmDecodeWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
@@ -221,7 +221,7 @@ spec:
       envs:
         - name: DYN_ROUTER_MODE
           value: kv  # KEY DIFFERENCE: Enable KV Smart Router
-    VllmDecodeWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 8
@@ -321,7 +321,7 @@ spec:
 
 Apply it: `kubectl apply -f pvc-model-cache.yaml`
 
-Then reference the existing PVC in your DynamoGraphDeployment by adding the following under `spec` (and under `VllmDecodeWorker`, add `volumeMounts`):
+Then reference the existing PVC in your DynamoGraphDeployment by adding the following under `spec` (and under `worker`, add `volumeMounts`):
 
 ```yaml
 spec:
@@ -330,7 +330,7 @@ spec:
       name: model-cache
       size: "0"
   services:
-    VllmDecodeWorker:
+    worker:
       volumeMounts:
         - mountPoint: /root/.cache/huggingface
           name: model-cache
@@ -391,12 +391,12 @@ For this A/B comparison, we use the [**Mooncake FAST'25 Toolagent Trace**](https
 
 These two requests share blocks 46–57 (12 blocks × 512 tokens = ~6,144 tokens of shared prefix) — a tool agent continuing the same session with accumulated context. Each hash ID represents a **512-token block**, and the hash includes both the current block and all preceding blocks, preserving the pattern of prefix reuse while protecting user privacy. The **KV Smart Router** routes requests with matching hash IDs to the same worker, maximizing cache hits.
 
-If you reproduce this benchmark with `python -m dynamo.replay`, keep that dataset fact separate from
-the replay engine configuration:
+If you reproduce this benchmark with `aisimulate predict --stack dynamo`, keep that dataset fact
+separate from the engine configuration:
 
-- use `--trace-block-size 512` for the Mooncake/toolagent trace itself
-- keep engine `block_size` in `--extra-engine-args` aligned with the runtime you want to mimic
-  (for the published vLLM deployment, that is typically `64`)
+- set `traffic.source.block_size: 512` for the Mooncake/toolagent trace itself
+- keep `engine.workers.<role>.kv_cache.block_size` aligned with the runtime you want to mimic (for
+  the published vLLM deployment, that is typically `64`)
 
 **Key Dataset Properties:**
 - ✅ **Realistic timing:** Request arrival patterns from production tool-agent workloads
@@ -452,7 +452,7 @@ spec:
           - -lc
           - |
             apt-get update -qq && apt-get install -y -qq tmux > /dev/null 2>&1
-            pip install -q aiperf==0.10.0
+            pip install -q aiperf==0.12.0
             echo "Benchmark pod ready (tmux + aiperf installed)."
             sleep infinity
         imagePullPolicy: IfNotPresent
@@ -744,7 +744,7 @@ The deployment YAMLs in this guide set `failureThreshold: 60`, allowing up to 32
 
 ```bash
 kubectl patch dynamographdeployment <deployment-name> -n dynamo-bench --type='json' \
-  -p='[{"op": "replace", "path": "/spec/services/VllmDecodeWorker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 80}]'
+  -p='[{"op": "replace", "path": "/spec/services/worker/extraPodSpec/mainContainer/startupProbe/failureThreshold", "value": 80}]'
 ```
 
 The relevant startup probe fields:
@@ -803,7 +803,7 @@ Replace the Mooncake trace with your own JSONL file:
 For advanced testing, add separate prefill workers:
 
 ```yaml
-VllmPrefillWorker:
+prefill:
   componentType: worker
   replicas: 2
   # ... configuration

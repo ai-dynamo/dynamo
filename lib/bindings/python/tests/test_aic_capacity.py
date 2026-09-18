@@ -228,7 +228,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
 
     with pytest.raises(
         RuntimeError,
-        match=r"aiconfigurator-core.*install the 'mocker' extra",
+        match=r"aisimulate.*not installed",
     ):
         estimate_num_gpu_blocks(
             backend_name="vllm",
@@ -262,6 +262,11 @@ def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch)
         )
 
     assert exc_info.value is missing_dependency
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_default_version_uses_queryable_slot(backend):
+    assert resolve_backend_version(backend, None) == "current"
 
 
 def test_trtllm_version_resolution():

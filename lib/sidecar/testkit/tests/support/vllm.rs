@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use dynamo_backend_common::BackendError;
 use dynamo_mocker::common::protocols::EngineType;
 use dynamo_sidecar_testkit::control::{Controller, Protocol};
@@ -9,7 +12,8 @@ use dynamo_vllm_mocker::{MockerServerConfig, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::{
     self as pb,
-    generate_server::{Generate, GenerateServer},
+    control_server::ControlServer,
+    inference_server::{Inference, InferenceServer},
 };
 use futures::stream::BoxStream;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -40,9 +44,19 @@ impl SidecarFixture for Fixture {
             inner: service.clone(),
             control,
         };
+        let control_service = service.clone();
+        let (health, health_service) = tonic_health::server::health_reporter();
+        health
+            .set_serving::<ControlServer<VllmMockerService>>()
+            .await;
+        health
+            .set_serving::<InferenceServer<ControlledService>>()
+            .await;
         let server = TestServer::start(move |listener, shutdown| async move {
             tonic::transport::Server::builder()
-                .add_service(GenerateServer::new(controlled))
+                .add_service(InferenceServer::new(controlled))
+                .add_service(ControlServer::new(control_service))
+                .add_service(health_service)
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown.await;
                 })
@@ -59,21 +73,20 @@ impl SidecarFixture for Fixture {
     }
 
     async fn engine(&self) -> Self::Engine {
-        VllmSidecarEngine::from_args(Some(vec![
+        let argv = vec![
             "dynamo-vllm-sidecar".into(),
-            "--vllm-endpoint".into(),
+            "--grpc-endpoint".into(),
             self.server.endpoint(),
-            "--model-path".into(),
-            self.config.model.clone(),
             "--grpc-connections".into(),
             self.config.connections.to_string(),
             "--grpc-startup-deadline-secs".into(),
             "5".into(),
             "--grpc-connect-attempt-timeout-secs".into(),
             "1".into(),
-        ]))
-        .unwrap()
-        .0
+        ];
+        tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)).unwrap().0)
+            .await
+            .unwrap()
     }
 
     fn eof_error() -> BackendError {
@@ -96,7 +109,7 @@ struct ControlledService {
 }
 
 #[tonic::async_trait]
-impl Generate for ControlledService {
+impl Inference for ControlledService {
     type GenerateStreamStream = BoxStream<'static, Result<pb::GenerateResponse, Status>>;
 
     async fn generate(

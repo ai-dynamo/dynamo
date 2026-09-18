@@ -149,6 +149,9 @@ class LLMServerManager:
             "dynamo.vllm",
             "--model",
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+            "--disaggregation-mode",
+            "decode",
+            "--disable-hybrid-kv-cache-manager",
             "--block-size",
             "16",
             "--max-model-len",
@@ -166,6 +169,7 @@ class LLMServerManager:
             os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
             "--disaggregation-mode",
             "prefill",
+            "--disable-hybrid-kv-cache-manager",
             "--block-size",
             "16",
             "--max-model-len",
@@ -300,6 +304,7 @@ class LLMServerManager:
 
         prefiller_env = self.env.copy()
         prefiller_env["CUDA_VISIBLE_DEVICES"] = "1"
+        prefiller_env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "20097"
 
         # Launch frontend first
         self.process_frontend = subprocess.Popen(

@@ -11,7 +11,7 @@ lower-level worker path, and a packaging path:
 | Path | Use when |
 | --- | --- |
 | [Writing Unified Backends](writing-unified-backends.md) | You are writing a new token-in-token-out engine in Python or Rust and want Dynamo to own the runtime lifecycle. |
-| [Python Workers (lower-level)](writing-python-workers.md) | You need the older `register_model` and `serve_endpoint` path for features the unified backend does not cover yet. |
+| [Python Workers (lower-level)](writing-python-workers.md) | You need direct control of `register_model`, `serve_endpoint`, or the request payload. |
 | [Runtime Containers](runtime-containers.md) | You need to package a built-in or custom backend into a deployable Dynamo image. |
 
 The unified backend path is the preferred starting point for new custom engines.
@@ -20,9 +20,8 @@ start the engine, stream generated chunks, handle cancellation, drain, and clean
 up. The Dynamo framework owns runtime registration, signal handling, model
 registration, and graceful shutdown.
 
-Use the lower-level Python worker path when your backend needs features that are
-still outside the unified contract, such as multimodal, LoRA adapter management,
-logprobs, engine-specific routes, or custom request handling.
+Use the lower-level Python worker path when your backend must own model
+registration, endpoint serving, request handling, or lifecycle behavior.
 
 If your custom engine uses KV-aware routing, [publish KV events](publish-kv-events.md)
 so the Dynamo router can track which workers hold each prefix.

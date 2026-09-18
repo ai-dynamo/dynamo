@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use dynamo_llm::http::service::service_v2::HttpService;
+use dynamo_llm::http::service::{Metrics, service_v2::HttpService};
 use dynamo_llm::model_card::ModelDeploymentCard;
-use dynamo_llm::protocols::codec::create_message_stream;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
+use dynamo_llm::protocols::{Annotated, codec::create_message_stream};
 use dynamo_runtime::CancellationToken;
+use dynamo_runtime::error::DynamoError;
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
@@ -36,13 +37,15 @@ pub struct HarnessService {
     pub base_url: String,
     pub client: reqwest::Client,
     pub engine: Arc<ScriptedChatEngine>,
+    #[allow(dead_code)]
+    pub metrics: Arc<Metrics>,
     cancel: CancellationToken,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
 impl HarnessService {
     pub async fn start(scripts: impl IntoIterator<Item = Script>) -> Self {
-        let engine = Arc::new(ScriptedChatEngine::new(scripts));
+        let engine = Arc::new(ScriptedChatEngine::new(scripts.into_iter().map(Ok)));
         Self::start_with_engine(engine).await
     }
 
@@ -51,7 +54,15 @@ impl HarnessService {
         (Self::start_with_engine(Arc::new(engine)).await, gate)
     }
 
-    async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
+    #[allow(dead_code)]
+    pub async fn start_with_backend_error(chunks: Script, error: DynamoError) -> Self {
+        Self::start_with_engine(Arc::new(ScriptedChatEngine::with_backend_error(
+            chunks, error,
+        )))
+        .await
+    }
+
+    pub async fn start_with_engine(engine: Arc<ScriptedChatEngine>) -> Self {
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
@@ -68,6 +79,7 @@ impl HarnessService {
             .expect("failed to build harness HTTP service");
 
         let card = ModelDeploymentCard::with_name_only(MODEL);
+        let metrics = service.state_clone().metrics_clone();
         service
             .model_manager()
             .add_chat_completions_model(MODEL, card.mdcsum(), engine.clone())
@@ -82,6 +94,7 @@ impl HarnessService {
             base_url,
             client,
             engine,
+            metrics,
             cancel,
             join: Some(join),
         }
@@ -140,7 +153,9 @@ pub async fn load_sse_fixture(path: impl AsRef<Path>) -> Result<Script> {
         })?;
         match message.data.as_deref() {
             Some("[DONE]") => break,
-            Some(_) => chunks.push(message.decode_data::<NvCreateChatCompletionStreamResponse>()?),
+            Some(_) => chunks.push(Annotated::from_data(
+                message.decode_data::<NvCreateChatCompletionStreamResponse>()?,
+            )),
             None => {
                 return Err(anyhow!(
                     "fixture {} contains an SSE event without data",
@@ -297,7 +312,7 @@ fn canonicalize_in_place(
 }
 
 fn is_service_generated_object_id(id: &str) -> bool {
-    ["msg_", "resp_", "fc_", "req_"]
+    ["msg_", "resp_", "fc_", "req_", "toolu_"]
         .iter()
         .any(|prefix| id.starts_with(prefix))
 }

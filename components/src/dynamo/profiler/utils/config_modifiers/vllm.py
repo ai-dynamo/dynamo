@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+import re
 from typing import Tuple
 from uuid import uuid4
 
@@ -27,7 +28,10 @@ from dynamo.profiler.utils.config import (
 from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
 from dynamo.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
 from dynamo.profiler.utils.dgd_template import load_dgd_template
-from dynamo.profiler.utils.model_info import get_mamba_cache_align_block_size
+from dynamo.profiler.utils.model_info import (
+    get_mamba_cache_align_block_size,
+    get_model_context_length,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -43,23 +47,43 @@ DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv
 
 
 def _get_valued_arg(args: list[str], key: str) -> str | None:
+    value = None
     for i, arg in enumerate(args):
         if arg == key and i + 1 < len(args):
-            return args[i + 1]
+            value = args[i + 1]
         if isinstance(arg, str) and arg.startswith(f"{key}="):
-            return arg.split("=", 1)[1]
-    return None
+            value = arg.split("=", 1)[1]
+    return value
 
 
 def _set_valued_arg(args: list[str], key: str, value: str) -> list[str]:
-    for i, arg in enumerate(args):
-        if arg == key and i + 1 < len(args):
-            args[i + 1] = value
-            return args
-        if isinstance(arg, str) and arg.startswith(f"{key}="):
-            args[i] = f"{key}={value}"
-            return args
-    return set_argument_value(args, key, value)
+    return set_unique_argument_value(args, key, value)
+
+
+def _parse_human_readable_int(value: str) -> int:
+    """Match vLLM's decimal lowercase and binary uppercase size suffixes."""
+    value = value.strip()
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
+    if match is None:
+        return int(value)
+
+    number, suffix = match.groups()
+    if suffix.islower():
+        multiplier = {
+            "k": 10**3,
+            "m": 10**6,
+            "g": 10**9,
+            "t": 10**12,
+        }[suffix]
+        return int(float(number) * multiplier)
+
+    multiplier = {
+        "K": 2**10,
+        "M": 2**20,
+        "G": 2**30,
+        "T": 2**40,
+    }[suffix]
+    return int(number) * multiplier
 
 
 def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[str]:
@@ -87,10 +111,28 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
     return finalized
 
 
+def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
+    filtered_args: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--disaggregation-mode":
+            index += 2
+            continue
+        if arg.startswith("--disaggregation-mode="):
+            index += 1
+            continue
+        filtered_args.append(arg)
+        index += 1
+    return filtered_args
+
+
 class VllmV1ConfigModifier(BaseConfigModifier):
     BACKEND = "vllm"
     # vllm uses a different arg for model path
     WORKER_MODEL_PATH_ARG = "--model"
+    # vllm reads the context window cap from --max-model-len
+    GENERATED_CONTEXT_LENGTH_ARGS = ("--max-model-len",)
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
@@ -220,6 +262,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = validate_and_get_worker_args(worker_service, backend="vllm")
             args = break_arguments(args)
 
+            # The decode candidate is standalone after its prefill peer is removed.
+            args = _remove_disaggregation_mode_args(args)
+
             # enable prefix caching
             if "--enable-prefix-caching" not in args:
                 args = append_argument(args, "--enable-prefix-caching")
@@ -284,6 +329,50 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         return _set_valued_arg(args, "--max-num-batched-tokens", str(mamba_align_floor))
 
     @classmethod
+    def _apply_model_context_window_ceiling(
+        cls, args: list[str], model_name_or_path: str | None
+    ) -> list[str]:
+        """Keep generated ``--max-model-len`` within the model's context window."""
+        if not model_name_or_path:
+            return args
+
+        current = _get_valued_arg(args, "--max-model-len")
+        if current is None:
+            return args
+        try:
+            current_value = _parse_human_readable_int(current)
+        except ValueError:
+            logger.warning(
+                "Cannot validate non-integer vLLM --max-model-len value %r",
+                current,
+            )
+            return args
+
+        try:
+            context_length = get_model_context_length(model_name_or_path)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.warning(
+                "Could not derive the model context window for %s; leaving "
+                "--max-model-len=%s unchanged.",
+                model_name_or_path,
+                current,
+                exc_info=True,
+            )
+            return args
+        if context_length is None:
+            return args
+
+        target_value = min(current_value, context_length)
+        if target_value < current_value:
+            logger.warning(
+                "Clamping vLLM --max-model-len from %d to model context window %d for %s.",
+                current_value,
+                context_length,
+                model_name_or_path,
+            )
+        return set_unique_argument_value(args, "--max-model-len", str(target_value))
+
+    @classmethod
     def apply_model_runtime_constraints(
         cls, config: dict, model_name_or_path: str | None
     ) -> dict:
@@ -295,7 +384,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
                 exc_info=True,
             )
             return config
-        for component_type in (SubComponentType.DECODE,):
+        for component_type in (SubComponentType.PREFILL, SubComponentType.DECODE):
             try:
                 worker_service = get_worker_component_from_config(
                     cfg, backend="vllm", sub_component_type=component_type
@@ -322,6 +411,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
                     exc_info=True,
                 )
                 continue
+            args = cls._apply_model_context_window_ceiling(args, model_name_or_path)
             args = cls._apply_mamba_cache_align_token_floor(args, model_name_or_path)
             main_container.args = args
         return cfg.model_dump()

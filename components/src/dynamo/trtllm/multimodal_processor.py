@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
-import httpx
+import aiohttp
 import torch
 from safetensors.torch import load as safetensors_load
 from safetensors.torch import load_file as safetensors_load_file
@@ -35,7 +35,12 @@ from dynamo.common.http.url_validator import (
     UrlValidationPolicy,
     validate_media_url,
 )
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    video_decoder_missing,
+)
 from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.media_source import describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -82,6 +87,52 @@ class TokenizerProtocol(Protocol):
         clean_up_tokenization_spaces: bool = True,
     ) -> str:
         ...
+
+
+def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Per-request processor overrides, canonical field first.
+
+    Presence-based: an explicit top-level {} must not fall through to extra_args.
+    """
+    mm_kwargs = request.get("mm_processor_kwargs")
+    if mm_kwargs is None:
+        mm_kwargs = (request.get("extra_args") or {}).get("mm_processor_kwargs")
+    return mm_kwargs
+
+
+def _is_safetensors_url(url: str) -> bool:
+    """True when the URL path (not query) ends with ``.safetensors``."""
+    return urlparse(url).path.lower().endswith(".safetensors")
+
+
+def _urls_from_multi_modal_items(
+    items: Any,
+) -> Tuple[List[str], List[str]]:
+    """Split ``multi_modal_data`` image items into image URLs and embedding paths."""
+    image_urls: List[str] = []
+    embedding_paths: List[str] = []
+    if not isinstance(items, list):
+        return image_urls, embedding_paths
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("Url"), str):
+            url = item["Url"]
+        elif isinstance(item, str):
+            url = item
+        else:
+            continue
+        if not url:
+            continue
+        if _is_safetensors_url(url):
+            embedding_paths.append(url)
+        else:
+            image_urls.append(url)
+    return image_urls, embedding_paths
+
+
+def request_messages(request: Dict[str, Any]) -> List[Dict]:
+    extra_args = request.get("extra_args") or {}
+    messages = extra_args.get("messages") or request.get("messages") or []
+    return messages if isinstance(messages, list) else []
 
 
 class MultimodalRequestProcessor:
@@ -176,7 +227,7 @@ class MultimodalRequestProcessor:
             return next(iter(data.values()))
         return data
 
-    def load_tensor_from_path_or_url(
+    async def load_tensor_from_path_or_url(
         self, path: str
     ) -> "torch.Tensor | Dict[str, torch.Tensor]":
         """Load tensors from a local .safetensors path or URL.
@@ -199,8 +250,32 @@ class MultimodalRequestProcessor:
             if parsed.scheme not in ("http", "https"):
                 raise RuntimeError(f"Unsupported URL scheme: {parsed.scheme}")
             try:
-                with httpx.Client(timeout=300.0) as client:
-                    with client.stream("GET", path) as resp:
+                # Per-operation budget (connect + per-read), not a single
+                # whole-request cap: a large embedding on a slow link keeps
+                # downloading as long as it makes progress, while a stalled
+                # connect or a read that hangs still fast-fails at 300s.
+                timeout = aiohttp.ClientTimeout(sock_connect=300.0, sock_read=300.0)
+                # trust_env=True honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY, which
+                # aiohttp ignores by default.
+                async with aiohttp.ClientSession(
+                    timeout=timeout, trust_env=True
+                ) as client:
+                    # Do not follow redirects: this path applies no destination
+                    # policy, so following Location would turn one unvalidated
+                    # fetch into an attacker-chained multi-hop one.
+                    async with client.get(path, allow_redirects=False) as resp:
+                        # raise_for_status() only fires at >= 400, so a 3xx would
+                        # otherwise fall through to an empty-body read and surface
+                        # as a cryptic "safetensors: empty buffer". Redirecting
+                        # .safetensors URLs are common (CDN / presigned), so give
+                        # the operator an actionable message. Do not echo Location
+                        # or the path — both are caller-controlled and unbounded.
+                        if 300 <= resp.status < 400:
+                            raise RuntimeError(
+                                f"Embedding URL returned HTTP {resp.status}; this "
+                                "path does not follow redirects because it applies "
+                                "no destination policy. Supply the final URL."
+                            )
                         resp.raise_for_status()
                         content_length = resp.headers.get("content-length")
                         if (
@@ -214,7 +289,7 @@ class MultimodalRequestProcessor:
                             )
                         chunks = []
                         downloaded = 0
-                        for chunk in resp.iter_bytes():
+                        async for chunk in resp.content.iter_chunked(1 << 20):
                             downloaded += len(chunk)
                             if downloaded > self.max_file_size_bytes:
                                 raise RuntimeError(
@@ -224,8 +299,8 @@ class MultimodalRequestProcessor:
                                 )
                             chunks.append(chunk)
                         content = b"".join(chunks)
-                    data = safetensors_load(content)
-                    return self._unwrap_safetensors(data)
+                data = safetensors_load(content)
+                return self._unwrap_safetensors(data)
             except RuntimeError:
                 raise
             except Exception as e:
@@ -287,12 +362,34 @@ class MultimodalRequestProcessor:
                         if not url:
                             continue
                         self.modality = "image"
-                        if url.endswith(".safetensors"):
+                        if _is_safetensors_url(url):
                             embedding_paths.append(url)
                         else:
                             image_urls.append(url)
 
         return "".join(text_parts), image_urls, embedding_paths
+
+    def extract_prompt_and_media_from_request(
+        self, request: Dict[str, Any]
+    ) -> Tuple[str, List[str], List[str]]:
+        """Extract text and media URLs, preferring ``multi_modal_data``.
+
+        The frontend strips inline ``data:`` payloads from
+        ``extra_args.messages`` so the request plane carries a single copy of
+        the media in ``multi_modal_data``. Chat-template structure still lives
+        in ``extra_args.messages``.
+        """
+        text, image_urls, embedding_paths = self.extract_prompt_and_media(
+            request_messages(request)
+        )
+        mm_data = request.get("multi_modal_data")
+        if isinstance(mm_data, dict):
+            mm_urls, mm_emb = _urls_from_multi_modal_items(mm_data.get("image_url"))
+            if mm_urls:
+                image_urls = mm_urls
+            if mm_emb:
+                embedding_paths = mm_emb
+        return text, image_urls, embedding_paths
 
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
@@ -335,12 +432,21 @@ class MultimodalRequestProcessor:
 
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
-        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
+        extra_args = request.get("extra_args") or {}
+        mm_kwargs = resolve_mm_processor_kwargs(request)
+        if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+            raise HttpStatusError(
+                400,
+                "Malformed mm_processor_kwargs field: expected an object",
+                str(mm_kwargs),
+            )
+        processed_inputs: Dict[str, Any] = {
+            "mm_processor_kwargs": mm_kwargs if mm_kwargs is not None else {}
+        }
 
         # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
-        extra_args = request.get("extra_args") or {}
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
@@ -397,7 +503,7 @@ class MultimodalRequestProcessor:
                         )
                         continue
 
-                    if url.endswith(".safetensors"):
+                    if _is_safetensors_url(url):
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch
@@ -429,7 +535,7 @@ class MultimodalRequestProcessor:
                 if embedding_paths:
                     try:
                         raw_loaded = [
-                            self.load_tensor_from_path_or_url(path)
+                            await self.load_tensor_from_path_or_url(path)
                             for path in embedding_paths
                         ]
                         loaded_embeddings = []
@@ -462,13 +568,21 @@ class MultimodalRequestProcessor:
             videos = []
             for item in video_items:
                 url = item.get("Url") if isinstance(item, dict) else item
+                # Everything user-supplied that can reach an error message or a
+                # log line goes through this bounded label: a data: URI carries
+                # the entire media payload inline, so echoing one back would
+                # serialize megabytes of base64 to the client and to every log
+                # sink that records the failure.
+                source = describe_media_source(
+                    url if isinstance(url, str) else str(item)
+                )
                 if not isinstance(url, str):
                     raise HttpStatusError(
-                        400, f"Unsupported video item: {item!r}", str(item)
+                        400, f"Unsupported video item: {source}", source
                     )
                 if urlparse(url).scheme in ("", "file"):
                     raise HttpStatusError(
-                        400, "Local file access is not allowed for video", url
+                        400, "Local file access is not allowed for video", source
                     )
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
@@ -479,7 +593,8 @@ class MultimodalRequestProcessor:
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
-                        if should_use_nvdec(probe_video_codec(content)):
+                        codec = probe_video_codec(content)
+                        if should_use_nvdec(codec):
                             try:
                                 nvdec_video = await asyncio.to_thread(
                                     _nvdec_video_data, content, self.num_video_frames
@@ -498,27 +613,59 @@ class MultimodalRequestProcessor:
                             ) as video_file:
                                 await asyncio.to_thread(video_file.write, content)
                                 await asyncio.to_thread(video_file.flush)
-                                videos.append(
-                                    await async_load_video(
-                                        video_file.name, self.num_video_frames
+                                try:
+                                    videos.append(
+                                        await async_load_video(
+                                            video_file.name, self.num_video_frames
+                                        )
                                     )
-                                )
+                                except ImportError as exc:
+                                    # The vendor loader needs cv2, which the
+                                    # image deliberately omits; its bare error
+                                    # names neither codec nor remedy. Carry its
+                                    # text as the cause so the underlying
+                                    # reason still reaches the client.
+                                    raise video_decoder_missing(
+                                        "trtllm",
+                                        "opencv-python-headless",
+                                        "cv2",
+                                        codec,
+                                        cause=str(exc),
+                                    ) from exc
                     else:
-                        videos.append(
-                            await async_load_video(
-                                normalized_url, self.num_video_frames
+                        try:
+                            videos.append(
+                                await async_load_video(
+                                    normalized_url, self.num_video_frames
+                                )
                             )
-                        )
+                        except ImportError as exc:
+                            # No bytes fetched on this branch, so no codec probe.
+                            raise video_decoder_missing(
+                                "trtllm",
+                                "opencv-python-headless",
+                                "cv2",
+                                None,
+                                cause=str(exc),
+                            ) from exc
                 except UrlValidationError as e:
-                    raise HttpStatusError(400, str(e), url) from e
+                    raise HttpStatusError(400, str(e), source) from e
                 except HttpStatusError:
                     raise
+                except MissingMediaDecoderError as e:
+                    # A missing decoder is deployment configuration, not a bad
+                    # request: 500, not the 400 the generic handler below
+                    # assigns. The actionable text (codec, bounded spec,
+                    # installer command, vendor cause) is the message.
+                    raise HttpStatusError(
+                        500, f"Failed to load video ({source}): {e}", source
+                    ) from e
                 except Exception as e:
                     status = getattr(e, "status", None) or getattr(e, "code", None)
                     raise HttpStatusError(
                         status if isinstance(status, int) and status >= 400 else 400,
-                        f"Failed to load video ({url}): {e}",
-                        url,
+                        f"Failed to load video ({source}): {e}",
+                        source,
                     ) from e
             if videos:
                 processed_mm_data["video"] = videos
@@ -562,8 +709,17 @@ class MultimodalRequestProcessor:
         # Post-expansion prompt length, so an omitted max_tokens can be sized
         # against the real context usage rather than the unexpanded placeholders.
         mm_data = processed_inputs.get("multi_modal_data")
-        expanded_len = self._expanded_prompt_len(
-            token_ids, mm_data.get("image") if mm_data else None
+        # Skipped when the request overrides the processor: the sizing
+        # calculator is not override-aware (Qwen2-VL ignores the kwargs while
+        # counting) and is not guaranteed non-mutating (Gemma-4 writes them
+        # into class-level defaults). Falling back to the engine default beats
+        # a stale or leaked estimate.
+        expanded_len = (
+            None
+            if processed_inputs.get("mm_processor_kwargs")
+            else self._expanded_prompt_len(
+                token_ids, mm_data.get("image") if mm_data else None
+            )
         )
         if expanded_len is not None:
             processed_inputs["expanded_prompt_len"] = expanded_len

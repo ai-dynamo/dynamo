@@ -6,7 +6,7 @@ use crate::protocols::{
     Annotated,
     codec::{Message, SseCodecError},
     convert_sse_stream,
-    openai::stream_aggregator::{StreamAggregable, aggregate_typed_stream},
+    openai::stream_aggregator::{StreamAggregable, aggregate_stream},
 };
 
 use dynamo_runtime::{engine::DataStream, error::DynamoError};
@@ -48,7 +48,7 @@ impl NvCreatePoolingResponse {
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreatePoolingResponse>>,
     ) -> Result<NvCreatePoolingResponse, DynamoError> {
-        aggregate_typed_stream(stream).await
+        aggregate_stream(stream).await
     }
 }
 

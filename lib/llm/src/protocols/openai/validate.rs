@@ -7,6 +7,9 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
+use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
+use super::tools::{ToolChoiceError, validate_openai_tool_choice};
+
 //
 // Hyperparameter Contraints
 //
@@ -22,8 +25,6 @@ pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
 pub const MIN_TOP_P: f32 = 0.0;
 /// Maximum allowed value for OpenAI's `top_p` sampling option
 pub const MAX_TOP_P: f32 = 1.0;
-/// Allowed range of values for OpenAI's `top_p` sampling option
-pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
 /// Minimum allowed value for `min_p`
 pub const MIN_MIN_P: f32 = 0.0;
@@ -90,8 +91,8 @@ pub const MAX_STOP_SEQUENCES: usize = 32;
 /// Maximum allowed number of tools.
 pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
-/// Maximum allowed length for function names
-pub const MAX_FUNCTION_NAME_LENGTH: usize = 96;
+/// Both `/v1/messages` and `/v1/responses` define a 128-character tool-name limit.
+pub const MAX_FUNCTION_NAME_LENGTH: usize = 128;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
@@ -108,6 +109,7 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "detokenize",
     "allowed_token_ids",
     "bad_words_token_ids",
+    "logprob_token_ids",
 ];
 
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
@@ -145,8 +147,15 @@ fn validate_no_unsupported_fields_with_ignore(
         anyhow::bail!("`cache_salt` must be a string");
     }
     if let Some(value) = unsupported_fields.get("stop_token_ids") {
-        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+        let token_ids: Vec<crate::types::TokenIdType> = serde_json::from_value(value.clone())
             .map_err(|_| anyhow::anyhow!("`stop_token_ids` must be an array of token IDs"))?;
+        if token_ids.len() > MAX_STOP_SEQUENCES {
+            return Err(crate::protocols::common::invalid_argument_error(format!(
+                "Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                token_ids.len()
+            )));
+        }
     }
     if let Some(value) = unsupported_fields.get("detokenize")
         && !value.is_boolean()
@@ -161,6 +170,10 @@ fn validate_no_unsupported_fields_with_ignore(
         serde_json::from_value::<Vec<Vec<crate::types::TokenIdType>>>(value.clone()).map_err(
             |_| anyhow::anyhow!("`bad_words_token_ids` must be an array of token ID arrays"),
         )?;
+    }
+    if let Some(value) = unsupported_fields.get("logprob_token_ids") {
+        serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
+            .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
     }
     Ok(())
 }
@@ -198,6 +211,21 @@ pub fn validate_response_format(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
                 );
             }
+
+            // Schema must be a JSON object — numbers, strings, arrays, and
+            // booleans are not valid JSON Schema documents.
+            if !json_schema.schema.is_object() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` must be a JSON object, got {}",
+                    match &json_schema.schema {
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::Bool(_) => "boolean",
+                        _ => "non-object",
+                    }
+                );
+            }
             Ok(())
         }
     }
@@ -221,7 +249,7 @@ pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Erro
 /// Validates the top_p parameter
 pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(p) = top_p
-        && !(MIN_TOP_P..=MAX_TOP_P).contains(&p)
+        && !(p.is_finite() && p > MIN_TOP_P && p <= MAX_TOP_P)
     {
         anyhow::bail!(
             "Top_p must be between {} and {}, got {}",
@@ -424,11 +452,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     anyhow::bail!("Stop sequences array cannot be empty");
                 }
                 if sequences.len() > MAX_STOP_SEQUENCES {
-                    anyhow::bail!(
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
                         "Maximum of {} stop sequences allowed, got {}",
                         MAX_STOP_SEQUENCES,
                         sequences.len()
-                    );
+                    )));
                 }
                 for (i, sequence) in sequences.iter().enumerate() {
                     if sequence.is_empty() {
@@ -441,11 +469,11 @@ pub fn validate_stop(stop: &Option<dynamo_protocols::types::Stop>) -> Result<(),
                     anyhow::bail!("Stop token IDs array cannot be empty");
                 }
                 if token_ids.len() > MAX_STOP_SEQUENCES {
-                    anyhow::bail!(
+                    return Err(crate::protocols::common::invalid_argument_error(format!(
                         "Maximum of {} stop token IDs allowed, got {}",
                         MAX_STOP_SEQUENCES,
                         token_ids.len()
-                    );
+                    )));
                 }
             }
         }
@@ -572,25 +600,26 @@ pub fn validate_tool_choice(
 ) -> Result<(), anyhow::Error> {
     use dynamo_protocols::types::ChatCompletionToolChoiceOption;
 
-    let tools_empty = tools.is_none_or(|tools| tools.is_empty());
-
-    match tool_choice {
-        Some(ChatCompletionToolChoiceOption::Required) if tools_empty => {
-            anyhow::bail!("tool_choice is \"required\" but tools is empty");
+    match validate_openai_tool_choice(tool_choice.as_ref(), tools) {
+        Ok(()) => Ok(()),
+        Err(ToolChoiceError::EmptyTools) => {
+            anyhow::bail!("tool_choice is \"required\" but tools is empty")
         }
-        Some(ChatCompletionToolChoiceOption::Named(named)) => {
-            let tools = tools.unwrap_or(&[]);
-            if !tools.iter().any(|t| t.function.name == named.function.name) {
-                anyhow::bail!(
-                    "tool named \"{}\" in tool_choice is not present in tools",
-                    named.function.name
-                );
+        Err(ToolChoiceError::MissingTools) => match tool_choice {
+            Some(ChatCompletionToolChoiceOption::Required) => {
+                anyhow::bail!("tool_choice is \"required\" but tools is empty")
             }
+            Some(ChatCompletionToolChoiceOption::Named(named)) => anyhow::bail!(
+                "tool named \"{}\" in tool_choice is not present in tools",
+                named.function.name
+            ),
+            _ => Err(ToolChoiceError::MissingTools.into()),
+        },
+        Err(ToolChoiceError::ToolNotFound(name)) => {
+            anyhow::bail!("tool named \"{name}\" in tool_choice is not present in tools")
         }
-        _ => {}
+        Err(error) => Err(error.into()),
     }
-
-    Ok(())
 }
 
 /// Validates reasoning effort parameter
@@ -772,12 +801,23 @@ pub fn validate_suffix(suffix: Option<&str>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+const MAX_OUTPUT_TOKENS: u32 = 1_048_576;
+
 /// Validates max_tokens parameter
 pub fn validate_max_tokens(max_tokens: Option<u32>) -> Result<(), anyhow::Error> {
     if let Some(tokens) = max_tokens
         && tokens == 0
     {
         anyhow::bail!("Max tokens must be greater than 0, got {}", tokens);
+    }
+    if let Some(tokens) = max_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
+            tokens
+        );
     }
     Ok(())
 }
@@ -791,6 +831,15 @@ pub fn validate_max_completion_tokens(
     {
         anyhow::bail!(
             "Max completion tokens must be greater than 0, got {}",
+            tokens
+        );
+    }
+    if let Some(tokens) = max_completion_tokens
+        && tokens > MAX_OUTPUT_TOKENS
+    {
+        anyhow::bail!(
+            "Max completion tokens must not exceed {}, got {}",
+            MAX_OUTPUT_TOKENS,
             tokens
         );
     }
@@ -824,6 +873,57 @@ pub fn validate_chat_template_args(
         && args.contains_key("chat_template")
     {
         anyhow::bail!("`chat_template` is not supported inside `chat_template_args`");
+    }
+    Ok(())
+}
+
+/// Rejects a request with conflicting guided-decoding options.
+///
+/// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
+/// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
+/// the call at the request-validation boundary: every other field is checked here, where
+/// a failure becomes a 400 naming the problem, while guided decoding was checked only
+/// later inside `extract_sampling_options`. By that point the error is an untyped
+/// `anyhow` with nothing for the HTTP layer to branch on, so a malformed request was
+/// reported to the caller as `500 Internal Server Error`.
+///
+/// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
+/// which also passes `None` for it.
+pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
+    extract_guided_decoding_options(request)?;
+    Ok(())
+}
+
+/// vLLM `ChatCompletionRequest` (`mode="before"`): both flags true on the raw
+/// payload is an error. Omitted `add_generation_prompt` finalizes to true (vLLM
+/// 0.27.1 and the Python frontend), so `continue_final_message=true` requires
+/// an explicit `add_generation_prompt=false`. Generic HuggingFace continuation
+/// is not assistant-only; last-message role is checked at truncation time.
+pub fn validate_continue_final_message(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if continue_final_message != Some(true) {
+        return Ok(());
+    }
+    if add_generation_prompt.unwrap_or(true) {
+        anyhow::bail!(
+            "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        );
+    }
+    Ok(())
+}
+
+/// Chat-template generation controls are meaningless on `/v1/completions`.
+/// Reject them so they are not silently ignored after landing on `CommonExt`.
+pub fn validate_chat_only_generation_flags(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if add_generation_prompt.is_some() || continue_final_message.is_some() {
+        anyhow::bail!(
+            "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
+        );
     }
     Ok(())
 }
@@ -873,6 +973,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_no_unsupported_fields_accepts_logprob_token_ids() {
+        let fields = HashMap::from([("logprob_token_ids".to_string(), json!([14, 15]))]);
+        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_malformed_logprob_token_ids() {
+        for bad in [json!(["notanint"]), json!(7), json!([[1, 2]]), json!([-1])] {
+            let fields = HashMap::from([("logprob_token_ids".to_string(), bad)]);
+            let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
+            assert!(err.to_string().contains("must be an array of token IDs"));
+        }
+    }
+
+    #[test]
     fn validate_no_unsupported_fields_rejects_unknown_fields_by_default() {
         let err = validate_no_unsupported_fields_with_ignore(&unknown_fields(), false).unwrap_err();
         assert!(err.to_string().contains("Unsupported parameter(s)"));
@@ -893,5 +1008,104 @@ mod tests {
         let err =
             validate_no_unsupported_fields_with_ignore(&unsupported_fields, true).unwrap_err();
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn validate_top_p_rejects_zero() {
+        let err = validate_top_p(Some(0.0)).unwrap_err();
+        assert!(err.to_string().contains("Top_p"));
+    }
+
+    #[test]
+    fn validate_top_p_accepts_valid_values() {
+        validate_top_p(Some(0.1)).unwrap();
+        validate_top_p(Some(1.0)).unwrap();
+        validate_top_p(None).unwrap();
+    }
+
+    #[test]
+    fn validate_response_format_rejects_non_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": { "name": "test", "schema": 42 }
+        }))
+        .unwrap();
+        let err = validate_response_format(&Some(fmt)).unwrap_err();
+        assert!(err.to_string().contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn validate_response_format_accepts_valid_object_schema() {
+        let fmt = serde_json::from_value(json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "test",
+                "schema": { "type": "object", "properties": {} }
+            }
+        }))
+        .unwrap();
+        validate_response_format(&Some(fmt)).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_accepts_up_to_max_sequences() {
+        let max_strings = Some(dynamo_protocols::types::Stop::StringArray(
+            (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect(),
+        ));
+        validate_stop(&max_strings).unwrap();
+
+        let max_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(
+            (0..MAX_STOP_SEQUENCES as u32).collect(),
+        ));
+        validate_stop(&max_token_ids).unwrap();
+    }
+
+    #[test]
+    fn validate_stop_rejects_over_max_sequences() {
+        let over_max_strings = Some(dynamo_protocols::types::Stop::StringArray(
+            (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect(),
+        ));
+        let err = validate_stop(&over_max_strings).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+
+        let over_max_token_ids = Some(dynamo_protocols::types::Stop::TokenIdArray(
+            (0..=MAX_STOP_SEQUENCES as u32).collect(),
+        ));
+        let err = validate_stop(&over_max_token_ids).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+    }
+
+    #[test]
+    fn validate_no_unsupported_fields_rejects_over_max_stop_token_ids() {
+        let over_max: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let unsupported_fields = HashMap::from([("stop_token_ids".to_string(), json!(over_max))]);
+
+        let err = validate_no_unsupported_fields(&unsupported_fields).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+                MAX_STOP_SEQUENCES,
+                MAX_STOP_SEQUENCES + 1
+            )
+        );
+
+        let at_max: Vec<u32> = (0..MAX_STOP_SEQUENCES as u32).collect();
+        let ok_fields = HashMap::from([("stop_token_ids".to_string(), json!(at_max))]);
+        validate_no_unsupported_fields(&ok_fields).unwrap();
     }
 }

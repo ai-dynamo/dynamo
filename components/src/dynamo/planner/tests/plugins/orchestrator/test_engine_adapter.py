@@ -327,6 +327,43 @@ def test_project_scale_to_no_change_returns_none():
     assert adapter._project_scale_to(outcome, wc) is None
 
 
+def test_project_scale_to_raises_baseline_to_component_floors():
+    cfg = _disagg_config_sla_no_budget()
+    cfg.prefill_min_endpoint = 3
+    cfg.decode_min_endpoint = 4
+    adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
+    wc = WorkerCounts(ready_num_prefill=1, ready_num_decode=2)
+    outcome = _apply_outcome(
+        [
+            ComponentTarget(sub_component_type="prefill", replicas=1),
+            ComponentTarget(sub_component_type="decode", replicas=2),
+        ],
+        proposed=set(),
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill == 3
+    assert decision.num_decode == 4
+
+
+def test_project_scale_to_raises_agg_baseline_to_runtime_legacy_floor():
+    cfg = _agg_config_throughput_on()
+    cfg.min_endpoint = 3
+    adapter = OrchestratorEngineAdapter(cfg, _caps())
+    wc = WorkerCounts(ready_num_decode=1)
+    outcome = _apply_outcome(
+        [ComponentTarget(sub_component_type="decode", replicas=1)], proposed=set()
+    )
+
+    decision = adapter._project_scale_to(outcome, wc)
+
+    assert decision is not None
+    assert decision.num_prefill is None
+    assert decision.num_decode == 3
+
+
 def test_project_scale_to_single_component_proposal():
     # Agg-mode proposals mention only decode; prefill stays None (no opinion),
     # decode changed → decision emitted.
@@ -370,6 +407,43 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
 
     assert dec is not None
     assert dec.num_prefill + dec.num_decode <= 4
+
+
+@pytest.mark.parametrize(
+    ("gpu_cost_per_replica", "expected_replicas"),
+    [
+        pytest.param(None, 2, id="legacy-fallback"),
+        pytest.param(4, 2, id="zero-gpu-sidecar"),
+        pytest.param(5, 1, id="one-gpu-sidecar"),
+    ],
+)
+def test_final_gpu_budget_uses_replica_cost(
+    gpu_cost_per_replica: int | None, expected_replicas: int
+):
+    """Auxiliary GPUs affect the final clamp, not the engine width."""
+
+    config = PlannerConfig(
+        mode="agg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+    )
+    capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=4,
+            gpu_cost_per_replica=gpu_cost_per_replica,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=16384,
+        )
+    )
+    adapter = OrchestratorEngineAdapter(config, capabilities)
+
+    assert adapter._apply_gpu_final_budget(
+        None, 3, WorkerCounts(ready_num_decode=1)
+    ) == (None, expected_replicas)
 
 
 def test_project_scale_to_budget_preserves_single_component_target_mask():
@@ -511,26 +585,50 @@ def test_power_off_partial_proposal_keeps_joint_gpu_clamp():
     assert adapter._apply_gpu_final_budget(None, 7, wc) == (None, 4)
 
 
-def test_project_scale_to_does_not_apply_budget_on_baseline_only_noop():
+@pytest.mark.asyncio
+async def test_tick_reconciles_runtime_gpu_budget_on_baseline_only_noop():
     cfg = PlannerConfig(
         mode="disagg",
         enable_load_scaling=True,
         enable_throughput_scaling=True,
         optimization_target="sla",
         served_model_name="test",
-        max_gpu_budget=4,
+        max_gpu_budget=16,
         min_gpu_budget=-1,
     )
     adapter = OrchestratorEngineAdapter(cfg, _disagg_caps())
-    wc = WorkerCounts(ready_num_prefill=6, ready_num_decode=6)
+    initial_tick = adapter.initial_tick(start_s=0.0)
+    worker_counts = WorkerCounts(
+        ready_num_prefill=6,
+        ready_num_decode=6,
+        expected_num_prefill=6,
+        expected_num_decode=6,
+    )
     outcome = _apply_outcome(
         [
             ComponentTarget(sub_component_type="prefill", replicas=6),
             ComponentTarget(sub_component_type="decode", replicas=6),
-        ]
+        ],
+        proposed=set(),
     )
 
-    assert adapter._project_scale_to(outcome, wc) is None
+    async def hold_tick(ctx, baseline, *, tick_now=None):
+        return outcome
+
+    adapter._orchestrator.tick = hold_tick  # type: ignore[method-assign]
+
+    # Simulate the runtime API mutating the shared PlannerConfig after the
+    # adapter has been constructed. The plugins otherwise HOLD at (6, 6).
+    cfg.max_gpu_budget = 4
+    effects = await adapter.tick(
+        initial_tick,
+        TickInput(now_s=initial_tick.at_s, worker_counts=worker_counts),
+    )
+
+    assert effects.scale_to is not None
+    assert effects.scale_to.num_prefill is not None
+    assert effects.scale_to.num_decode is not None
+    assert effects.scale_to.num_prefill + effects.scale_to.num_decode <= 4
 
 
 def test_tick_input_to_context_maps_observations_and_fpm():

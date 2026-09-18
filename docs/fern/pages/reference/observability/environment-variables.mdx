@@ -29,7 +29,7 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
     ```bash
     export DYN_SYSTEM_PORT=8081
-    export DYN_LOGGING_JSONL=true
+    export DYN_LOGGING_CONSOLE_FORMAT=jsonl
     export DYN_LOG=info
 
     # Frontend (serves dynamo_frontend_* on DYN_HTTP_PORT, default 8000)
@@ -51,8 +51,8 @@ Every Dynamo process reads its own environment at startup, so set these on each 
       name: vllm-agg-tracing
     spec:
       envs:                              # applied to every component
-        - name: DYN_LOGGING_JSONL
-          value: "true"
+        - name: DYN_LOGGING_CONSOLE_FORMAT
+          value: "jsonl"
         - name: OTEL_EXPORT_ENABLED
           value: "true"
         - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
@@ -103,7 +103,13 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 </ParamField>
 
 <ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="19090">
-  Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Use distinct values per worker (e.g. `19090` prefill, `19091` decode) to avoid collisions.
+  Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Each NIXL agent binds its own exporter, so every agent needs a port of its own; two agents pointed at the same port leave the second unable to bind and the process exits.
+
+  Give each worker a non-overlapping value when workers share a network namespace. Because each value is the base of an eight-port range (see below), `19090` for the prefill worker leaves `19098` as the next free base for the decode worker.
+
+  Within a single worker, treat this as the **base** of a range rather than one port. SGLang runs one scheduler process per node-local GPU and each builds its own NIXL agent, so Dynamo gives node-local rank *i* the port `base + i` and the operator declares the whole range on the pod as `nixl`, `nixl-1`, … so Prometheus scrapes every rank. Leave room for as many consecutive ports as the pod has GPUs (up to 8).
+
+  Set it to a literal port between 1 and 65535. The operator reads this value to declare the range as container ports, so while NIXL Prometheus telemetry is on it rejects a value taken from `valueFrom`, and one that is not a usable port, rather than let the exporters bind a range nothing scrapes.
 
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>
@@ -150,8 +156,14 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 ## Logging
 
+<ParamField path="DYN_LOGGING_CONSOLE_FORMAT" type="string" default="readable">
+  Console output format. Supported values are `readable` and `jsonl`; surrounding whitespace is ignored. When unset or blank, Dynamo falls back to `DYN_LOGGING_JSONL` for backward compatibility. This setting does not control OTLP export.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>readable</Badge> <Badge intent="note" minimal>jsonl</Badge></span>
+</ParamField>
+
 <ParamField path="DYN_LOGGING_JSONL" type="boolean" default="false">
-  Emit logs as JSONL. When enabled, logs include `trace_id` and `span_id` fields and spans are created per request. Recommended for Loki.
+  Legacy JSONL switch used when `DYN_LOGGING_CONSOLE_FORMAT` is unset or blank. It also remains a local trace-context enablement signal for backward compatibility when the new setting explicitly selects readable output.
 </ParamField>
 
 <ParamField path="DYN_LOGGING_SPAN_EVENTS" type="boolean" default="false">
@@ -264,6 +276,60 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 
 See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for topology support and file semantics.
 
+## FPM self-benchmark collection
+
+These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mode`), which measures whole-model forward-pass latencies for the FPM performance database. They have no effect on serving.
+
+<ParamField path="DYN_BENCH_KV_WARMUP" type="string" default="on">
+  KV warm-up master switch. When on, eligible decode benchmark points read attention KV produced by real prefill chains. By default, eligibility requires a MoE model with expert parallelism and no recurrent-state layers. With `DYN_BENCHMARK_RANDOMIZE_KDA_STATE=true`, hybrid MoE models are also eligible without expert parallelism; their attention KV is real and their recurrent states remain synthetic. Set `off` to force the legacy synthetic-KV path.
+
+  All eligible configurations require prefix caching, a loadable tokenizer, and enough seeding dataset content for the model length. Configurations that do not meet these requirements skip warm-up and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+</ParamField>
+
+<ParamField path="DYN_BENCHMARK_RANDOMIZE_KDA_STATE" type="boolean" default="false">
+  **Experimental.** Equivalent to `--benchmark-randomize-kda-state`. Requires `--benchmark-mode decode` or `agg`, recurrent cache groups, and the standard vLLM GPU worker with either model runner V1 or V2; custom workers and GMS are unsupported. Applies to every node, including headless workers.
+
+  Initializes each decode measurement request's private KDA/Mamba state with deterministic uniform values in `[-0.01, 0.01]`, in the cache tensors' existing dtypes. The generator is seeded by request ID, layer, rank, and tensor index without changing the model's RNG stream. Initialization completes in the discarded admission step; steady decode steps update these states normally. Initialization is disabled before serving starts.
+
+  With `DYN_BENCH_KV_WARMUP=on`, hybrid MoE models can use real attention KV from prefill chains even without expert parallelism. Their recurrent states remain synthetic; the source chain's states are never borrowed or modified. Existing dataset, prefix-cache, and capacity requirements still apply. Without a usable chain, attention KV follows the existing synthetic fallback.
+
+  Artifacts distinguish `real_attention_kv_random_kda` from `fake_attention_kv_random_kda` and record the distribution in `recurrent_state`. These values are performance-test inputs, not valid context history or a guarantee of real-workload performance parity.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_DATASET" type="string">
+  Seeding-text dataset: a local path or an `http(s)` URL. Defaults to the ShareGPT V3 conversation dump; the default download is verified against a digest pinned in code.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_CACHE_DIR" type="string">
+  Cache directory for a downloaded dataset. Defaults to `fpm_datasets/` next to `HF_HOME`, falling back to `/tmp/fpm_datasets`.
+</ParamField>
+
+<ParamField path="DYN_BENCH_KV_WARMUP_SHA256" type="string">
+  Expected sha256 of the dataset file. Required to pin a custom `DYN_BENCH_KV_WARMUP_DATASET` download; overrides the built-in digest for the default dataset.
+</ParamField>
+
+<ParamField path="DYN_BENCH_GIANT_KV_THRESHOLD" type="integer" default="1000000">
+  Total-KV-read threshold (tokens) above which a fake-injected decode point is measured with repeated steady steps. Points served from the real-KV warm-up chains always repeat. Set `0` to apply repeat protection to every point.
+</ParamField>
+
+<ParamField path="DYN_BENCH_GIANT_KV_REPEATS" type="integer" default="3">
+  Steady-step repeat count for real-KV points and for fake-injected points above the threshold; the recorded latency is the median. The warm-up chains reserve this many steady writes per request.
+</ParamField>
+
+<ParamField path="DYN_BENCH_PREFILL_CONTENT" type="string">
+  Content source for synthetic benchmark prompts: unset keeps salt-seeded random token ids; `sharegpt` draws deterministic windows from a real-text token pool; `sharegpt_chain` reuses the KV warm-up chain texts so seeded and measured requests share one construction.
+</ParamField>
+
+<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="off">
+  Real-KV seeding for prefill points that read past KV. Accepts `on`, `1`, or `true` (case-insensitive); anything else keeps the synthetic prefix blocks that are registered in the prefix cache but never computed. When on, the seeded prefix is first computed by a real, unbooked prefill pass (staging; slots already deep enough are not re-run), an unbooked same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache. The expected hit length is validated before admission; on a miss the chain is re-staged once and the point is skipped on a second miss (`real_seed_injection_failed`, `real_seed_warm_injection_failed`, `real_seed_cache_validation_failed`). All ranks of an attention-DP group must agree on the setting (it is part of the grid-invariants digest). Dense-attention models measure the same either way; sparse-attention and hybrid-KV models need it for deep past-KV points.
+</ParamField>
+
+<ParamField path="DYN_BENCH_POOL_TAG" type="string">
+  Optional tag mixed into the real-text pool draw so repeated collections sample different content windows under otherwise identical settings.
+</ParamField>
+
+Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance. Decode rows carry `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), or `unstamped` (decode point that never reached injection). Prefill rows that read past KV carry `real_prefix` (real-KV seeding on) or `fake_prefix` (synthetic prefix blocks); other prefill rows are `not_applicable`.
+
 ## Request tracing
 
 <ParamField path="DYN_REQUEST_TRACE" type="boolean">
@@ -315,11 +381,11 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_BUCKET" type="string">
-  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`; startup fails if unset.
+  Destination bucket for the `s3` sink. Required when `DYN_REQUEST_TRACE_SINKS` includes `s3`. When it is unset, the `s3` sink fails to initialize: Dynamo logs a warning carrying the underlying error, starts no sink from that `DYN_REQUEST_TRACE_SINKS` list, and keeps serving. Startup does not fail. See [Sink Behavior](request-traces.mdx#sink-behavior).
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
-  Region override for the `s3` sink. When unset the AWS SDK resolves the region from the environment, profile, or IMDS.
+  Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">

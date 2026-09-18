@@ -3,7 +3,10 @@
 
 """Unit tests for the AIC-spec integration in profiler DGD generation."""
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 try:
     from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
@@ -15,6 +18,7 @@ try:
     from dynamo.profiler.utils.dgd_generation import (
         _build_planner_config,
         _inject_mocker_aic_args,
+        _load_latest_database_version,
         build_aic_interpolation_spec,
         build_aic_perf_model_spec,
         enable_vllm_benchmark_mode,
@@ -34,6 +38,39 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
+    def raise_missing_root(_):
+        raise ModuleNotFoundError(name="aiconfigurator_core")
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
+        raise_missing_root,
+    )
+
+    assert _load_latest_database_version() is None
+
+
+@pytest.mark.parametrize(
+    "missing_module",
+    ["aiconfigurator_core.sdk.operations.attention", "unrelated_dependency"],
+)
+def test_aic_import_propagates_internal_or_unrelated_missing_module(
+    monkeypatch, missing_module
+):
+    def raise_missing_dependency(_):
+        raise ModuleNotFoundError(name=missing_module)
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.dgd_generation.importlib.import_module",
+        raise_missing_dependency,
+    )
+
+    with pytest.raises(ModuleNotFoundError) as exc_info:
+        _load_latest_database_version()
+
+    assert exc_info.value.name == missing_module
 
 
 def _dgdr(
@@ -276,18 +313,21 @@ class TestInjectMockerAicArgs:
         assert out[out.index("--aic-attention-dp-size") + 1] == "8"
         # trtllm is not a mocker engine_type; leave --engine-type alone.
         assert "--engine-type" not in out
+        assert out[out.index("--aic-backend-version") + 1] == "current"
 
     def test_matches_engine_type_for_vllm(self):
         spec = self._spec("vllm")
         out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
         assert out[out.index("--engine-type") + 1] == "vllm"
         assert out[out.index("--aic-backend") + 1] == "vllm"
+        assert out[out.index("--aic-backend-version") + 1] == "current"
 
     def test_matches_engine_type_for_sglang(self):
         spec = self._spec("sglang")
         out = _inject_mocker_aic_args([], spec, spec.decode_pick)
         assert out[out.index("--engine-type") + 1] == "sglang"
         assert out[out.index("--aic-backend") + 1] == "sglang"
+        assert out[out.index("--aic-backend-version") + 1] == "current"
 
 
 class TestBuildPlannerConfigEmbedsAicSpec:
@@ -331,7 +371,17 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
-    def test_aic_perf_model_threads_into_planner_config(self):
+    def test_aic_perf_model_threads_into_planner_config(self, monkeypatch):
+        resolved_versions = []
+
+        def resolve_backend_version(*, system, backend):
+            resolved_versions.append((system, backend))
+            return "0.24.0"
+
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            resolve_backend_version,
+        )
         planner = PlannerConfig(
             enable_throughput_scaling=True,
             enable_load_scaling=False,
@@ -360,8 +410,57 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.aic_perf_model.hf_id == dgdr.model
         assert cfg.aic_perf_model.system == "h200_sxm"
         assert cfg.aic_perf_model.backend == "vllm"
+        assert cfg.aic_perf_model.backend_version == "0.24.0"
         assert cfg.aic_perf_model.prefill_pick == prefill_pick
         assert cfg.aic_perf_model.decode_pick == decode_pick
+        assert resolved_versions == [("h200_sxm", "vllm")]
+
+    def test_aic_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            lambda **_: None,
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=PickedParallelConfig(tp=1),
+            best_decode_pick=PickedParallelConfig(tp=2),
+            resolved_backend="vllm",
+            system="unknown_system",
+        )
+
+        assert spec is None
+
+    def test_aic_perf_model_falls_back_when_sdk_is_unavailable(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            None,
+        )
+        planner = PlannerConfig(
+            enable_throughput_scaling=True,
+            enable_load_scaling=False,
+            optimization_target="sla",
+        )
+        dgdr = _dgdr(planner=planner)
+
+        spec = build_aic_perf_model_spec(
+            dgdr,
+            best_prefill_pick=PickedParallelConfig(tp=1),
+            best_decode_pick=PickedParallelConfig(tp=2),
+            resolved_backend="vllm",
+            system="h200_sxm",
+        )
+
+        assert spec is None
+        assert "AISimulate's AIC perf model is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),
@@ -510,28 +609,31 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("VllmPrefillWorker", "prefill"),
-                    _component("VllmDecodeWorker", "decode"),
+                    _component("custom-prefill", "prefill"),
+                    _component("custom-decode", "decode"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
         components = _component_map(cfg)
-        assert _benchmark_mode(components["VllmPrefillWorker"]) == "prefill"
-        assert _benchmark_mode(components["VllmDecodeWorker"]) == "decode"
+        assert _benchmark_mode(components["custom-prefill"]) == "prefill"
+        assert _benchmark_mode(components["custom-decode"]) == "decode"
         assert "env" not in _main_container(components["Frontend"])
 
-    def test_agg_sets_single_worker(self):
+    @pytest.mark.parametrize(
+        "worker_name", ["worker", "VllmDecodeWorker", "VllmWorker", "custom-worker"]
+    )
+    def test_agg_resolves_worker_by_type(self, worker_name: str):
         cfg = {
             "spec": {
                 "components": [
                     _component("Frontend", "frontend"),
-                    _component("VllmWorker", "worker"),
+                    _component(worker_name, "worker"),
                 ]
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        assert _benchmark_mode(_component_map(cfg)["VllmWorker"]) == "agg"
+        assert _benchmark_mode(_component_map(cfg)[worker_name]) == "agg"
 
     def test_agg_template_sets_single_generic_worker(self):
         cfg = load_dgd_template("vllm", "agg")
@@ -543,8 +645,20 @@ class TestEnableVllmBenchmarkMode:
             for component in cfg["spec"]["components"]
             if component["type"] == "worker"
         )
-        assert worker["name"] == "VllmDecodeWorker"
+        assert worker["name"] == "worker"
         assert _benchmark_mode(worker) == "agg"
+
+    def test_real_agg_template_sets_single_worker(self):
+        repository_root = Path(__file__).resolve().parents[6]
+        template_path = repository_root / "examples/backends/vllm/deploy/agg.yaml"
+        cfg = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+
+        components = _component_map(cfg)
+        assert "worker" in components
+        assert "decode" not in components
+
+        enable_vllm_benchmark_mode(cfg)
+        assert _benchmark_mode(components["worker"]) == "agg"
 
     def test_idempotent_replaces_existing_value(self):
         # Simulates a user override that sets DYN_BENCHMARK_MODE to an
@@ -553,7 +667,7 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component(
-                        "VllmDecodeWorker",
+                        "decode",
                         "decode",
                         env=[
                             {"name": "SOMETHING_ELSE", "value": "keep"},
@@ -564,7 +678,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        component = _component_map(cfg)["VllmDecodeWorker"]
+        component = _component_map(cfg)["decode"]
         env = _main_container(component)["env"]
         names = [e["name"] for e in env]
         assert names.count("DYN_BENCHMARK_MODE") == 1
@@ -572,13 +686,13 @@ class TestEnableVllmBenchmarkMode:
         # Unrelated env vars are preserved.
         assert {"name": "SOMETHING_ELSE", "value": "keep"} in env
 
-    def test_non_vllm_components_unchanged(self):
+    def test_non_worker_components_unchanged(self):
         cfg = {
             "spec": {
                 "components": [
-                    _component("prefill", "prefill"),
-                    _component("decode", "decode"),
                     _component("Frontend", "frontend"),
+                    _component("Planner", "planner"),
+                    _component("Gateway", "epp"),
                 ]
             }
         }
@@ -591,7 +705,7 @@ class TestEnableVllmBenchmarkMode:
             "spec": {
                 "components": [
                     _component(
-                        "VllmPrefillWorker",
+                        "prefill",
                         "prefill",
                         image="nvcr.io/foo:1.0",
                         args=["--model-path", "x"],
@@ -600,7 +714,7 @@ class TestEnableVllmBenchmarkMode:
             }
         }
         enable_vllm_benchmark_mode(cfg)
-        component = _component_map(cfg)["VllmPrefillWorker"]
+        component = _component_map(cfg)["prefill"]
         mc = _main_container(component)
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]

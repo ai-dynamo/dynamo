@@ -30,7 +30,7 @@ use crate::PyAsyncRequestStream;
 use dynamo_runtime::pipeline::ManyIn;
 
 use super::context::{Context, callable_accepts_kwarg};
-use super::errors::{extract_http_like_error, py_exception_to_backend_error};
+use super::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
 use crate::python_payload::{PythonPayload, PythonResponseItem};
 
 /// Add bindings from this crate to the provided module
@@ -55,7 +55,7 @@ fn detect_has_context(generator: &PyObject) -> bool {
 
 /// Boxed Rust stream of items yielded by a Python async generator. Each
 /// item is either a `PyObject` frame or the `PyErr` the generator raised.
-type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
+pub(crate) type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 
 /// Invoke the Python `generate` callable and convert the async generator it
 /// returns into a Rust [`Stream`] of `PyObject` items.
@@ -71,28 +71,34 @@ type PyItemStream = Pin<Box<dyn Stream<Item = PyResult<Py<PyAny>>> + Send>>;
 /// it can block for an unbounded time, which would park the tokio reactor.
 /// The returned stream polls `__anext__` only when its consumer requests an
 /// item, preventing Python from mutating a reused object before it is consumed.
-async fn invoke_generator<F, G>(
+pub(crate) async fn invoke_generator<F, G>(
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     to_python_input: F,
-    to_python_context: Option<G>,
+    to_python_kwargs: Option<G>,
 ) -> Result<PyItemStream>
 where
     F: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
-    G: FnOnce(Python) -> PyResult<Py<PyAny>> + Send + 'static,
+    G: FnOnce(Python) -> PyResult<Vec<(&'static str, Py<PyAny>)>> + Send + 'static,
 {
     let stream = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| {
             let python_input = to_python_input(py)?;
 
-            let gen_result = match to_python_context {
-                Some(to_python_context) => {
-                    let py_ctx = to_python_context(py)?;
+            // The closure returns the FULL kwarg list rather than just the
+            // context, so a caller needing several keyword arguments builds
+            // them all under one GIL acquisition. The push-egress path relies
+            // on this to pass `context` and `response_sender` together.
+            let gen_result = match to_python_kwargs {
+                Some(to_python_kwargs) => {
+                    let kwargs = to_python_kwargs(py)?;
                     let kwarg = PyDict::new(py);
-                    kwarg.set_item("context", py_ctx)?;
+                    for (name, value) in kwargs {
+                        kwarg.set_item(name, value)?;
+                    }
                     generator.call(py, (python_input,), Some(&kwarg))
                 }
-                // Legacy: no `context` arg.
+                // Legacy: no keyword arguments at all.
                 None => generator.call1(py, (python_input,)),
             }?;
 
@@ -310,7 +316,7 @@ where
             let ctx = ctx.clone();
             move |py: Python<'_>| {
                 Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                    .map(|context| context.into_any())
+                    .map(|context| vec![("context", context.into_any())])
             }
         }),
     )
@@ -318,6 +324,41 @@ where
 
     let response_stream = forward_responses(stream, ctx, id);
     Ok(ResponseStream::new(response_stream, context.context()))
+}
+
+/// Convert one Python response object into the wire value.
+///
+/// Yields tagged with `_dynamo_annotated: True` are wire `Annotated<R>`
+/// envelopes; everything else is plain data.
+///
+/// Used by the typed pull path via [`process_item`]. The direct request-plane
+/// paths — pull and push alike — instead go through
+/// `python_payload::parse_python_response`, which keeps the payload a
+/// `PythonPayload` so it transcodes straight into the wire codec.
+///
+/// The caller owns the error mapping; the GIL is already held.
+fn depythonize_annotated<Resp>(
+    bound: &Bound<'_, PyAny>,
+) -> Result<Annotated<Resp>, pythonize::PythonizeError>
+where
+    Resp: for<'de> Deserialize<'de>,
+{
+    let is_envelope = bound
+        .downcast::<PyDict>()
+        .ok()
+        .and_then(|d| {
+            d.get_item(pyo3::intern!(bound.py(), "_dynamo_annotated"))
+                .ok()
+                .flatten()
+        })
+        .and_then(|v| v.is_truthy().ok())
+        .unwrap_or(false);
+
+    if is_envelope {
+        depythonize::<Annotated<Resp>>(bound)
+    } else {
+        depythonize::<Resp>(bound).map(Annotated::from_data)
+    }
 }
 
 async fn process_item<Resp>(
@@ -328,22 +369,7 @@ where
 {
     let item = item.map_err(|e| ResponseProcessingError::Dynamo(map_python_exception(e)))?;
     let response = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| {
-            let bound = item.into_bound(py);
-            // Yields tagged with `_dynamo_annotated: True` are wire
-            // Annotated<R> envelopes; everything else is plain data.
-            let is_envelope = bound
-                .downcast::<PyDict>()
-                .ok()
-                .and_then(|d| d.get_item("_dynamo_annotated").ok().flatten())
-                .and_then(|v| v.is_truthy().ok())
-                .unwrap_or(false);
-            if is_envelope {
-                depythonize::<Annotated<Resp>>(&bound)
-            } else {
-                depythonize::<Resp>(&bound).map(Annotated::from_data)
-            }
-        })
+        Python::with_gil(|py| depythonize_annotated::<Resp>(&item.into_bound(py)))
     })
     .await
     .map_err(|e| ResponseProcessingError::Offload(e.to_string()))?
@@ -357,27 +383,17 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
         error.display(py);
 
         if let Some((backend_err, message)) = py_exception_to_backend_error(py, &error) {
-            return DynamoError::builder()
+            let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend_err))
-                .message(message)
-                .build();
+                .message(message.clone());
+            if backend_err == BackendError::InvalidArgument {
+                builder = builder.public_message(message);
+            }
+            return builder.build();
         }
 
-        if let Some((code, message)) = extract_http_like_error(py, &error) {
-            let backend_err = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
-            } else {
-                BackendError::Unknown
-            };
-            let json_msg = serde_json::json!({
-                "message": message,
-                "code": code,
-            })
-            .to_string();
-            return DynamoError::builder()
-                .error_type(ErrorType::Backend(backend_err))
-                .message(json_msg)
-                .build();
+        if let Some(error) = http_like_error_to_dynamo(py, &error) {
+            return error;
         }
 
         if error.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
@@ -415,7 +431,7 @@ pub(crate) fn map_python_exception(error: PyErr) -> DynamoError {
 
 /// Channel depth between the response-forwarding task and the consumer of
 /// the engine's output stream.
-const RESPONSE_CHANNEL_DEPTH: usize = 128;
+pub(crate) const RESPONSE_CHANNEL_DEPTH: usize = 128;
 
 /// Drain the Python response stream on a spawned task, deserialize each item
 /// into `Resp` via [`process_item`], and forward it as an [`Annotated`] frame
@@ -708,7 +724,7 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
                 let ctx = ctx.clone();
                 move |py: Python<'_>| {
                     Py::new(py, Context::new(ctx, current_trace_context, None, metadata))
-                        .map(|c| c.into_any())
+                        .map(|c| vec![("context", c.into_any())])
                 }
             }),
         )
@@ -716,5 +732,38 @@ impl AsyncEngine<ManyIn<PythonPayload>, ManyOut<PythonResponseItem>, Error>
 
         let response_stream = unbuffered_python_response_stream(stream, ctx.clone(), request_id);
         Ok(ResponseStream::new(response_stream, ctx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::errors::error_class_for_http_status;
+    use dynamo_runtime::error::ErrorClass;
+
+    #[test]
+    fn http_statuses_map_to_semantic_classes() {
+        assert_eq!(error_class_for_http_status(400), ErrorClass::InvalidRequest);
+        assert_eq!(
+            error_class_for_http_status(415),
+            ErrorClass::UnsupportedMedia
+        );
+        assert_eq!(error_class_for_http_status(429), ErrorClass::RateLimited);
+        assert_eq!(error_class_for_http_status(499), ErrorClass::Cancelled);
+        assert_eq!(error_class_for_http_status(418), ErrorClass::InvalidRequest);
+        assert_eq!(error_class_for_http_status(501), ErrorClass::NotImplemented);
+        assert_eq!(
+            error_class_for_http_status(502),
+            ErrorClass::BackendProtocol
+        );
+        assert_eq!(error_class_for_http_status(503), ErrorClass::Unavailable);
+        assert_eq!(
+            error_class_for_http_status(504),
+            ErrorClass::DeadlineExceeded
+        );
+        assert_eq!(
+            error_class_for_http_status(529),
+            ErrorClass::CapacityExhausted
+        );
+        assert_eq!(error_class_for_http_status(500), ErrorClass::Internal);
     }
 }

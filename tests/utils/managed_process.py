@@ -8,6 +8,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -16,6 +17,7 @@ import psutil
 import requests
 
 from tests.utils.constants import DefaultPort, DynamoPortRange
+from tests.utils.http_checks import check_health_ready as check_health_ready
 from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
@@ -186,6 +188,9 @@ class ManagedProcess:
     _log_path = None
     _tee_proc = None
     _sed_proc = None
+    _startup_cancelled: threading.Event = field(
+        default_factory=threading.Event, init=False, repr=False
+    )
 
     @property
     def log_path(self):
@@ -208,6 +213,7 @@ class ManagedProcess:
     def __enter__(self):
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
+            self._check_startup_cancelled()
             # self._command_name = self.command[0]
             if self.display_name:
                 self._command_name = self.display_name
@@ -228,6 +234,7 @@ class ManagedProcess:
 
             self._terminate_all_matching_process_names()  # Name-based cleanup (NOT xdist safe)
             self._start_process()
+            self._check_startup_cancelled()
             time.sleep(self.delayed_start)
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)
@@ -243,6 +250,24 @@ class ManagedProcess:
                     "Error during cleanup in __enter__: %s", cleanup_err
                 )
             raise
+
+    def prepare_startup(self) -> None:
+        """Reset cancellation before scheduling a new startup attempt."""
+        self._startup_cancelled.clear()
+
+    def cancel_startup(self) -> None:
+        """Ask an in-progress ``__enter__`` call to stop and clean up.
+
+        Startup remains owned by the calling thread. Health-check loops observe
+        this signal and raise, which routes cleanup through ``__enter__``'s
+        existing exception path instead of racing a cross-thread ``__exit__``.
+        """
+        self._startup_cancelled.set()
+
+    def _check_startup_cancelled(self) -> None:
+        """Stop startup promptly when its owning thread receives cancellation."""
+        if self._startup_cancelled.is_set():
+            raise RuntimeError("Managed process startup was cancelled")
 
     def _cleanup_stragglers(self):
         """Clean up straggler processes - called during exit and signal handling.
@@ -637,6 +662,7 @@ class ManagedProcess:
 
     def _check_process_alive(self, context=""):
         """Check if the main process is still alive. Raises RuntimeError if dead."""
+        self._check_startup_cancelled()
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
             self._logger.error(
@@ -957,14 +983,6 @@ class DynamoFrontendProcess(ManagedProcess):
             env.update(extra_env)
 
         log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            self._logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
 
         super().__init__(
             command=command,

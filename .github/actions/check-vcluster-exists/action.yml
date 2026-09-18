@@ -22,7 +22,7 @@ runs:
   using: "composite"
   steps:
     - name: Install vCluster CLI
-      uses: ./.github/actions/install-vcluster-cli
+      uses: $/.github/actions/install-vcluster-cli
 
     - name: Check if vCluster exists
       id: check

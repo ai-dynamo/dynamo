@@ -9,9 +9,9 @@ import uuid
 from typing import Any, AsyncGenerator, Dict, List
 
 from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
-from vllm_omni.entrypoints.utils import load_and_resolve_stage_configs
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.output_modalities import (
     RequestType,
@@ -35,6 +35,7 @@ from dynamo.vllm.omni.types import StageOutput
 from dynamo.vllm.omni.utils import (
     ensure_awaited,
     is_empty_payload,
+    resolve_stage_configs,
     shm_deserialize,
     unwrap_connector_payload,
 )
@@ -52,24 +53,21 @@ class OmniStageRouter:
     ) -> None:
         self.config = config
         self.connectors: dict[tuple[str, str], Any] = {}
-        (
-            resolved_stage_configs_path,
-            self.stage_configs,
-            _omni_lb_policy,
-        ) = load_and_resolve_stage_configs(
+        resolved_path, self.stage_configs = resolve_stage_configs(
             config.model,
-            stage_configs_path,
-            kwargs={},
-            trust_remote_code=getattr(
-                getattr(config, "engine_args", None), "trust_remote_code", False
+            trust_remote_code=bool(
+                getattr(
+                    getattr(config, "engine_args", None), "trust_remote_code", False
+                )
             ),
+            deploy_config_path=stage_configs_path,
         )
         self.stage_clients: Dict[str, Any] = {}
 
         # Initialize connectors so the router can fetch final-stage output
         # via connector.get() instead of SHM -- enabling multi-node deployments.
         connector_configs_path = _ensure_stage_connectors(
-            resolved_stage_configs_path,
+            resolved_path,
             self.stage_configs,
         )
         # Only register NixlConnector if it's actually used in stage configs
@@ -322,6 +320,7 @@ async def init_omni_stage_router(
         worker_type=WorkerType.Aggregated,
         needs=[],
     )
+    register_model_taint_route(runtime, generate_endpoint)
     logger.info("OmniStageRouter registered at '%s'", generate_endpoint)
 
     try:

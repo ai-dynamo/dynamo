@@ -28,12 +28,13 @@ from gpu_memory_service.client.torch.allocator import (
     gms_use_mem_pool,
     is_scratch,
 )
-from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import (
     GMS_TAGS,
     get_socket_path,
     is_scratch_kv_enabled,
 )
+from gpu_memory_service.common.vmm import get_vmm_device_type
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
     get_gms_lock_mode,
@@ -72,6 +73,16 @@ apply_scratch_kv_patches()
 
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
+
+def kv_reuse_enabled() -> bool:
+    """Opt in to committing the KV layout so it survives this engine (default off).
+
+    Consequence worth knowing: the GMS server holds the KV pages after this engine
+    dies, so sleep no longer returns KV memory to the device for this tag.
+    """
+    return os.getenv("DYN_GMS_PERSIST_KV", "0") not in ("0", "", "false", "False")
+
+
 # MX imports — only when MX_ENABLED=1 (modelexpress is an optional dependency).
 # Pause/resume serving lifecycle is implemented in modelexpress.lifecycle, which
 # composes publish/unpublish_metadata + register_tensors + MxClient/NIXL
@@ -89,8 +100,15 @@ if os.environ.get("MX_ENABLED", "0") == "1":
         ) from e
 
 
-# Import Worker after patches are applied
-from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
+# Import the correct base Worker class for the active platform.
+# XPUWorker provides XPU device init, oneCCL, and XPUModelRunner;
+# Worker (gpu_worker) is the CUDA default.
+from vllm.platforms import current_platform as _cp  # noqa: E402
+
+if _cp.is_xpu():
+    from vllm.v1.worker.xpu_worker import XPUWorker as _BaseWorker  # noqa: E402
+else:
+    from vllm.v1.worker.gpu_worker import Worker as _BaseWorker  # noqa: E402
 
 
 def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
@@ -131,7 +149,7 @@ def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     return adjusted_local_rank
 
 
-class GMSWorker(Worker):
+class GMSWorker(_BaseWorker):
     """vLLM Worker subclass with GMS integration."""
 
     def init_device(self) -> None:
@@ -145,7 +163,9 @@ class GMSWorker(Worker):
         # Set CUDA device first. Do not mutate self.local_rank here; the parent
         # Worker will apply the same DP adjustment during super().init_device().
         device = _get_dp_adjusted_local_rank(self.local_rank, self.parallel_config)
-        current_platform.set_device(torch.device(f"cuda:{device}"))
+        current_platform.set_device(
+            torch.device(f"{get_vmm_device_type().value}:{device}")
+        )
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
         # Lock type is determined by model_loader_extra_config, set upstream by
@@ -160,6 +180,7 @@ class GMSWorker(Worker):
             device,
             mode=mode,
             tag="weights",
+            timeout_ms=self.gms_ro_connect_timeout_ms,
         )
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
@@ -262,19 +283,13 @@ class GMSWorker(Worker):
         # KV cache. Publish before connector setup, allocation, or warm-up.
         publish_pending_gms_write()
 
-        from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-
         device = self.local_rank
         socket = get_socket_path(device, "kv_cache")
         if is_scratch_kv_enabled():
             # Client-local scratch only — no GMS server session at init.
             # wake_up will connect RW and allocate fresh server backing.
             scratch_mgr = get_or_create_scratch_manager(socket, device, tag="kv_cache")
-            # The scratch pool is scoped to the KV tensors by
-            # patch_kv_cache_pool_scope(), not the whole initialize_kv_cache.
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            super().initialize_from_config(kv_cache_config)
             # Visible summary of scratch engagement (GMS worker logs are routed
             # through vLLM's handler by configure_gms_worker_logging()).
             n_scratch, virtual_bytes, physical_bytes = scratch_mgr.scratch_summary()
@@ -304,10 +319,9 @@ class GMSWorker(Worker):
                 mode=RequestedLockType.RW,
                 tag="kv_cache",
             )
-            with gms_use_mem_pool("kv_cache", torch.device(f"cuda:{device}")):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
+            super().initialize_from_config(kv_cache_config)
         else:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            super().initialize_from_config(kv_cache_config)
 
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
@@ -435,34 +449,53 @@ class GMSWorker(Worker):
             # registration.
             was_scratch = is_scratch(kv_cache_manager)
             assert kv_cache_manager.is_unmapped, "GMS kv_cache is not unmapped"
-            kv_cache_manager.connect(RequestedLockType.RW)
+            # "Adopt if there is anything, otherwise build one." A standby is granted
+            # RW_DATA and reattaches; the first engine is granted RW and allocates.
+            # Same call either way; the granted mode says which happened.
+            kv_cache_manager.connect(
+                RequestedLockType.RW_DATA_OR_RW
+                if kv_reuse_enabled()
+                else RequestedLockType.RW
+            )
+            adopted = kv_cache_manager.granted_lock_type == GrantedLockType.RW_DATA
             if was_scratch:
                 # Move scratch bookkeeping from _scratch_mappings into _mappings
                 # as preserved-VA records and flip subsequent allocations on
                 # this mempool to server-backed create_mapping.
                 kv_cache_manager.prepare_scratch_for_reallocation()
-            kv_cache_manager.reallocate_all_handles(tag="kv_cache")
-            kv_cache_manager.remap_all_vas()
-            self.model_runner.post_kv_cache_wake_up()
+            if adopted:
+                # A prior engine committed its KV layout, so the server kept the pages
+                # when it died. Reattach the same bytes by name rather than allocating
+                # an empty pool; remap is RW-writable, so this engine keeps serving.
+                logger.info(
+                    "[GMS] KV reuse: adopting %d committed kv_cache allocations "
+                    "from a prior engine (skipping fresh reallocation)",
+                    len(kv_cache_manager.list_handles(tag="kv_cache")),
+                )
+                # If the inherited layout does not fit (a standby that profiled a
+                # different num_gpu_blocks), remap raises and the wake fails. Recovering
+                # in place is a follow-up; for now pin identical geometry across engines.
+                kv_cache_manager.remap_all_vas()
+            else:
+                kv_cache_manager.reallocate_all_handles(tag="kv_cache")
+                kv_cache_manager.remap_all_vas()
+            # Seal the shape. The atomic boundary for KV durability: from here the
+            # pages outlive this engine. Dying before it leaves a half-built pool the
+            # server discards. Skipped when we adopted an already-sealed layout.
+            if kv_reuse_enabled() and not adopted:
+                commit = kv_cache_manager.commit_layout()
+                logger.info(
+                    "[GMS] KV layout committed (hash %s...): %d allocations now "
+                    "outlive this engine; session narrowed to %s",
+                    commit.memory_layout_hash[:16],
+                    len(kv_cache_manager.mappings),
+                    commit.granted_lock_type.name,
+                )
             if was_scratch:
                 self._register_kv_caches_with_nixl()
 
     def _register_kv_caches_with_nixl(self) -> None:
-        """Fire the NixlConnector KV-cache registration after deferred KV swap.
-
-        During scratch phase the patches.patch_register_kv_caches gate intercepts
-        register_kv_caches(dict) and stashes the dict on the connector as
-        self._scratch_kv_pending. We replay that here, NOT
-        self.model_runner.kv_caches — the latter is the list-of-tensors view
-        set by vLLM, and NixlConnector.register_kv_caches does kv_caches.values()
-        which requires the dict form.
-
-        Imports from the package root (vllm.distributed.kv_transfer) — the
-        kv_connector.v1.base re-exports were unreliable across vLLM versions
-        and a silent ImportError here would make this a no-op, leaving
-        NixlConnectorWorker.kv_topo=None and crashing on the first
-        scheduler tick.
-        """
+        """Replay deferred NIXL registration after restoring real KV backing."""
         from vllm.distributed.kv_transfer import (
             get_kv_transfer_group,
             has_kv_transfer_group,
@@ -472,16 +505,10 @@ class GMSWorker(Worker):
             return
         group = get_kv_transfer_group()
         pending = getattr(group, "_scratch_kv_pending", None)
-        if not pending:
-            # Nothing was stashed — either no deferred registration, or a
-            # non-NixlConnector connector that didn't hit the patched path.
+        if pending is None:
             return
         group.register_kv_caches(pending)
-        # Drop the stash so a second call is a no-op.
-        try:
-            delattr(group, "_scratch_kv_pending")
-        except AttributeError:
-            pass
+        delattr(group, "_scratch_kv_pending")
         logger.info(
             "[GMS] Registered %d kv_cache tensors with KV transfer group",
             len(pending),
@@ -501,5 +528,9 @@ class GMSWorker(Worker):
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
         if tag == "kv_cache":
-            return gms_use_mem_pool("kv_cache", torch.device("cuda", self.local_rank))
+            if not (is_scratch_kv_enabled() or self.model_config.enable_sleep_mode):
+                return nullcontext()
+            return gms_use_mem_pool(
+                "kv_cache", torch.device(get_vmm_device_type().value, self.local_rank)
+            )
         return super()._maybe_get_memory_pool_context(tag)

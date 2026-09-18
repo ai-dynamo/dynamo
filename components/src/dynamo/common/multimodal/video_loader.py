@@ -14,8 +14,10 @@
 # limitations under the License.
 
 import asyncio
+import functools
 import logging
 import os
+import re
 from typing import Any, Awaitable, Dict, Final, List
 from urllib.parse import urlparse
 
@@ -26,6 +28,10 @@ from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
     validate_media_url,
+)
+from dynamo.common.multimodal.codec_errors import (
+    MissingMediaDecoderError,
+    video_decoder_missing,
 )
 from dynamo.common.multimodal.media_source import (
     is_local_media_url,
@@ -39,6 +45,34 @@ from dynamo.common.multimodal.nvdec_decoder import (
 from dynamo.common.utils.runtime import run_async
 
 logger = logging.getLogger(__name__)
+
+
+def _attributable_to_cv2(exc: BaseException, media_io: Any | None = None) -> bool:
+    """Identify OpenCV errors without relabeling failures from other video backends."""
+    if getattr(exc, "name", None) == "cv2" or "cv2" in str(exc):
+        return True
+    return (
+        isinstance(exc, ValueError)
+        and str(exc) == "Could not open video stream"
+        and (getattr(media_io, "kwargs", None) or {}).get("backend", "opencv")
+        == "opencv"
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _cv2_lacks_video_backend() -> bool:
+    """Return whether OpenCV is broken or lacks FFmpeg and GStreamer."""
+    try:
+        import cv2
+    except ImportError:
+        return False
+    except Exception:  # noqa: BLE001 - a broken import has no usable video backend
+        return True
+    build_info = cv2.getBuildInformation()
+    return not any(
+        re.search(rf"^\s*{backend}:\s*YES", build_info, re.MULTILINE | re.IGNORECASE)
+        for backend in ("FFMPEG", "GSTREAMER")
+    )
 
 
 URL_VARIANT_KEY: Final = "Url"
@@ -114,18 +148,23 @@ class VideoLoader:
 
         return self._vllm_media_connector
 
-    def _create_vllm_video_io(self) -> Any:
+    def _create_vllm_video_io(
+        self, media_io_kwargs: Dict[str, Any] | None = None
+    ) -> Any:
         _, VideoMediaIO, ImageMediaIO = _require_vllm_video_media()
+        video_io_kwargs = VideoMediaIO.merge_kwargs(
+            {"num_frames": self._num_frames}, media_io_kwargs or {}
+        )
         return VideoMediaIO(
             ImageMediaIO(image_mode="RGB"),
-            num_frames=self._num_frames,
+            **video_io_kwargs,
         )
 
     async def _load_video_with_vllm(
-        self, video_url: str
+        self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None
     ) -> tuple[np.ndarray, Dict[str, Any]]:
         normalized_url = await validate_media_url(video_url, self._url_policy)
-        media_io = self._create_vllm_video_io()
+        media_io = self._create_vllm_video_io(media_io_kwargs)
 
         # HTTP(S) goes through our SSRF-safe fetcher so each redirect hop is
         # revalidated; vLLM's own fetcher honors redirects without re-checking.
@@ -134,15 +173,7 @@ class VideoLoader:
             content = await fetch_bytes(
                 normalized_url, self._http_timeout, policy=self._url_policy
             )
-            # Dual decode path: hardware-decode H.264/H.265 on NVDEC; every other
-            # codec falls through to vLLM's software decoder below. Note the
-            # runtime images purge the software decode wheels (opencv/av/decord/
-            # torchcodec) for codec compliance, so that fallback only resolves
-            # where a decoder has been installed separately.
-            decoded = await self._maybe_decode_with_nvdec(content)
-            if decoded is not None:
-                return decoded
-            return await asyncio.to_thread(media_io.load_bytes, content)
+            return await self._decode_video_bytes(content, media_io)
 
         # file:// and data: never touch the network, but they still deserve
         # hardware decode: without this they reach only the software decoder,
@@ -152,44 +183,87 @@ class VideoLoader:
         # connector below uses, so this adds no local-read surface.
         if is_local_media_url(normalized_url):
             content = await read_local_media_bytes(normalized_url, self._url_policy)
-            decoded = await self._maybe_decode_with_nvdec(content)
-            if decoded is not None:
-                return decoded
-            return await asyncio.to_thread(media_io.load_bytes, content)
+            return await self._decode_video_bytes(content, media_io)
 
         connector = self._get_vllm_media_connector()
         return await connector.load_from_url_async(
             normalized_url, media_io, fetch_timeout=self._http_timeout
         )
 
-    async def _maybe_decode_with_nvdec(
-        self, content: bytes
-    ) -> tuple[np.ndarray, Dict[str, Any]] | None:
-        """Hardware-decode H.264/H.265 via NVDEC, or None to use the software path.
+    async def _decode_video_bytes(
+        self, content: bytes, media_io: Any
+    ) -> tuple[np.ndarray, Dict[str, Any]]:
+        """Decode video bytes: H.264/H.265 on NVDEC, all else software.
 
-        Returns None for VP8/VP9/AV1 (handled by the existing decoder), when NVDEC
-        is unavailable, or when NVDEC fails -- the caller then falls back to the
-        software decoder, which surfaces the actionable "unsupported codec" error
-        if it also cannot decode.
+        vLLM ships OpenCV for still images without video backends. Translate
+        its decode failures into install guidance; preserve other backends.
+
+        The NVDEC path honors the two ``media_io_kwargs`` that decide *which*
+        frames come back -- ``num_frames`` and ``fps`` -- because it samples
+        uniformly just as vLLM does. Backend-specific keys (``video_backend``,
+        ``seek_mode``, ...) name decoders NVDEC is not and are ignored for
+        H.264/H.265. Only vLLM's video backend owns the full
+        ``media_io_kwargs`` contract, so it is reached for royalty-free codecs,
+        or for every clip when ``DYN_DISABLE_NVDEC=1``.
         """
         codec = probe_video_codec(content)
-        if not should_use_nvdec(codec):
-            return None
+        if should_use_nvdec(codec):
+            try:
+                return await asyncio.to_thread(
+                    decode_video_nvdec,
+                    content,
+                    **self._extract_nvdec_args(media_io),
+                )
+            except Exception as exc:  # noqa: BLE001 - fall back to software decode
+                logger.warning(
+                    "NVDEC decode failed for a %s clip (%s); using software decode",
+                    codec,
+                    exc,
+                )
         try:
-            return await asyncio.to_thread(
-                decode_video_nvdec, content, self._num_frames
-            )
-        except Exception as exc:  # noqa: BLE001 - fall back to software decode
-            logger.warning(
-                "NVDEC decode failed for a %s clip (%s); using software decode",
+            return await asyncio.to_thread(media_io.load_bytes, content)
+        except ImportError as exc:
+            if not _attributable_to_cv2(exc):
+                raise
+            raise video_decoder_missing(
+                "vllm", "opencv-python-headless", "cv2", codec, cause=str(exc)
+            ) from exc
+        except (OSError, SystemError, ValueError) as exc:
+            # Confirm both the error source and missing video support.
+            if not (_attributable_to_cv2(exc, media_io) and _cv2_lacks_video_backend()):
+                raise
+            raise video_decoder_missing(
+                "vllm",
+                "opencv-python-headless",
+                "cv2",
                 codec,
-                exc,
-            )
-            return None
+                cause=str(exc),
+            ) from exc
 
-    async def load_video(self, video_url: str) -> tuple[np.ndarray, Dict[str, Any]]:
+    def _extract_nvdec_args(self, media_io: Any) -> dict[str, Any]:
+        num_frames = getattr(media_io, "num_frames", self._num_frames)
+        if not isinstance(num_frames, int) or num_frames < 1:
+            num_frames = self._num_frames
+
+        fps = (getattr(media_io, "kwargs", None) or {}).get("fps", -1)
         try:
-            frames, metadata = await self._load_video_with_vllm(video_url)
+            fps = float(fps)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring non-numeric video media_io fps: %r", fps)
+            fps = -1.0
+
+        return {
+            "num_frames": num_frames,
+            "fps": fps,
+        }
+
+    async def load_video(
+        self, video_url: str, media_io_kwargs: Dict[str, Any] | None = None
+    ) -> tuple[np.ndarray, Dict[str, Any]]:
+        try:
+            frames, metadata = await self._load_video_with_vllm(
+                video_url, media_io_kwargs
+            )
             if frames.size == 0:
                 raise ValueError(
                     f"Failed to extract video frames from {video_url}. Decoded clip is empty."
@@ -202,6 +276,12 @@ class VideoLoader:
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
             logger.error("URL rejected loading video: '%s'", video_url)
+            raise
+        except MissingMediaDecoderError:
+            # Already actionable (names the codec and the install); a missing
+            # decoder is deployment configuration, not a bad request, so keep
+            # the type instead of degrading it to the ValueError below.
+            logger.error("No decoder available for video: '%s'", video_url)
             raise
         except Exception as exc:
             logger.error("Error loading video from %s: %s", video_url, exc)
@@ -221,18 +301,63 @@ class VideoLoader:
         if metadata is None:
             raise ValueError("Decoded video metadata is required")
 
-        return np.ascontiguousarray(frames), metadata
+        return np.ascontiguousarray(frames), self._normalize_frontend_metadata(
+            metadata, len(frames)
+        )
+
+    @staticmethod
+    def _normalize_frontend_metadata(
+        metadata: Dict[str, Any], frame_count: int
+    ) -> Dict[str, Any]:
+        """Convert Rust decoder metadata to vLLM's video metadata contract."""
+        if "frames_indices" in metadata:
+            return metadata
+
+        rust_metadata = metadata.get("Video", metadata)
+        try:
+            source_fps = float(rust_metadata["source_fps"])
+            source_duration = float(rust_metadata["source_duration"])
+            sampled_timestamps = rust_metadata["sampled_timestamps"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Decoded video metadata does not match the Dynamo frontend format"
+            ) from exc
+
+        if source_fps <= 0 or source_duration <= 0:
+            raise ValueError("Decoded video source fps and duration must be positive")
+        if (
+            not isinstance(sampled_timestamps, list)
+            or len(sampled_timestamps) != frame_count
+        ):
+            raise ValueError(
+                "Decoded video timestamp count must match the transferred frame count"
+            )
+
+        frame_indices = [
+            max(0, round(float(timestamp) * source_fps))
+            for timestamp in sampled_timestamps
+        ]
+        total_num_frames = max(frame_count, round(source_duration * source_fps))
+        return {
+            "fps": source_fps,
+            "duration": source_duration,
+            "frames_indices": frame_indices,
+            "total_num_frames": total_num_frames,
+            "video_backend": "dynamo_frontend",
+            "do_sample_frames": False,
+        }
 
     async def load_video_batch(
         self,
         video_mm_items: List[Dict[str, Any]],
+        media_io_kwargs: Dict[str, Any] | None = None,
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
         for item in video_mm_items:
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
-                video_futures.append(self.load_video(url))
+                video_futures.append(self.load_video(url, media_io_kwargs))
                 logger.debug("Preparing to load video from URL: %s...", url[:80])
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self._enable_frontend_decoding:
@@ -249,6 +374,8 @@ class VideoLoader:
         collective_exceptions: list[str] = []
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
+        decoder_error: MissingMediaDecoderError | None = None
+        value_error: ValueError | None = None
         for media_item, result in zip(video_mm_items, results):
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
@@ -262,6 +389,12 @@ class VideoLoader:
                     status_error = result
                 elif url_error is None and isinstance(result, UrlValidationError):
                     url_error = result
+                elif decoder_error is None and isinstance(
+                    result, MissingMediaDecoderError
+                ):
+                    decoder_error = result
+                elif value_error is None and isinstance(result, ValueError):
+                    value_error = result
                 continue
             frames, metadata = result
             loaded_videos.append((np.ascontiguousarray(frames), metadata))
@@ -270,6 +403,15 @@ class VideoLoader:
             raise status_error
         if url_error is not None:
             raise url_error
+
+        if decoder_error is not None:
+            # Keep the actionable type: the generic aggregate below would erase
+            # it, and a missing decoder is deployment configuration handlers
+            # must be able to distinguish from a bad request.
+            raise decoder_error
+
+        if value_error is not None:
+            raise value_error
 
         if collective_exceptions:
             raise Exception("".join(collective_exceptions))

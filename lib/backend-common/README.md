@@ -5,18 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Dynamo Rust Backend (`dynamo-backend-common`)
 
-> **Work in progress.** The unified backend covers aggregated and
-> disaggregated (prefill/decode) inference, metrics + Prometheus
-> bridging, KV event publishing, KV-aware (DP-rank) routing,
-> health-check canaries, OpenTelemetry tracing, request-side
-> guided decoding, and both completion-side and prompt-side
-> logprobs. Multimodal, diffusion (image/video/DLLM), LoRA, engine
-> routes (pause/resume, profiling, weight updates), text-in-text-out,
-> and snapshot/CRIU are still on the non-unified path. See the
-> [Python package README](../../components/src/dynamo/common/backend/README.md#feature-gaps)
-> for the per-engine matrix. The Python `Worker`
-> ([`dynamo.common.backend`](../../components/src/dynamo/common/backend/))
-> is a thin shim over this crate.
+`dynamo-backend-common` provides the shared Rust engine contract and Worker
+lifecycle. Engine implementations own inference behavior; the Worker owns
+runtime registration, endpoint serving, cancellation monitoring, and shutdown.
+The Python `Worker`
+([`dynamo.common.backend`](../../components/src/dynamo/common/backend/)) is a
+thin shim over this crate.
 
 > **Looking for a walkthrough?** Start with
 > [Writing Unified Backends](../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
@@ -25,8 +19,7 @@ SPDX-License-Identifier: Apache-2.0
 > disaggregation contract, error taxonomy, and the conformance kit.
 
 A two-type abstraction that separates **runtime integration** (common
-across all backends) from **engine logic** (vLLM, SGLang, TRT-LLM, your
-custom engine, etc.).
+across all backends) from **engine logic** in your custom engine.
 
 ## Architecture
 
@@ -186,9 +179,9 @@ these decorate `PreprocessedRequest` on decode-bound requests. Prefill
 terminals carry their handoff payload via the engine's terminal chunk
 (e.g. `disaggregated_params`).
 
-For backends with an internal KV transport (vLLM `NixlConnector`,
-TRT-LLM's transceiver), leave `EngineConfig.bootstrap_host`/`port` `None`
-— only SGLang uses the Dynamo-level handshake today.
+For backends with an internal KV transport, leave
+`EngineConfig.bootstrap_host`/`port` as `None`. Set them only when the engine
+uses a Dynamo-level bootstrap handshake.
 
 ## Request / Response Contract
 

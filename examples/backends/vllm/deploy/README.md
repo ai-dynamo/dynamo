@@ -16,22 +16,22 @@ Basic deployment pattern with frontend and a single decode worker.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode disabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
 Enhanced aggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: OpenAI-compatible API server (with kv router mode enabled)
-- `VLLMDecodeWorker`: Single worker handling both prefill and decode
+- `worker`: Single worker handling both prefill and decode
 
 ### 3. **Disaggregated Deployment** (`disagg.yaml`)
 High-performance deployment with separated prefill and decode workers.
 
 **Architecture:**
 - `Frontend`: HTTP API server coordinating between workers
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 - Communication via NIXL transfer backend
 
 ### 4. **Disaggregated Router Deployment** (`disagg_router.yaml`)
@@ -39,8 +39,8 @@ Advanced disaggregated deployment with KV cache routing capabilities.
 
 **Architecture:**
 - `Frontend`: HTTP API server with KV-aware routing
-- `VLLMDecodeWorker`: Specialized decode-only worker
-- `VLLMPrefillWorker`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
+- `decode`: Specialized decode-only worker
+- `prefill`: Specialized prefill-only worker (`--disaggregation-mode prefill`)
 
 ### 5. **Global Planner Deployments** (see [`examples/global_planner/`](../../../global_planner/))
 Centralized scaling across multiple DGDs via GlobalPlanner. Examples include single-endpoint multi-pool and multi-model GPU budget patterns. See the [global planner examples](../../../global_planner/) for details.
@@ -50,6 +50,20 @@ Centralized scaling across multiple DGDs via GlobalPlanner. Examples include sin
 Hardware-specific templates for Intel XPU GPUs using Kubernetes DRA.
 
 See [`xpu/README.md`](./xpu/README.md) for available templates, prerequisites, and usage.
+
+### 7. **Aggregated + LMCache MP Deployment** (`v1beta1/agg_lmcache.yaml`)
+Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet, sharing tensors with the worker via cross-Pod CUDA IPC. See the [Deploy LMCache MP guide](../../../../docs/fern/pages/kubernetes/kv-cache-offloading/lmcache.mdx) for the full recipe.
+
+**Architecture:**
+- `Frontend`: OpenAI-compatible API server
+- `worker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
+- `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
+
+### 8. **Aggregated KVCR Deployments** (`kvcr/`)
+
+Two-node aggregated deployments with a process-local KVCR tier or a resilient
+KVCR memory-service sidecar. See [`kvcr/README.md`](./kvcr/README.md) for image,
+RDMA, and lifecycle requirements.
 
 ## CRD Structure
 
@@ -220,6 +234,32 @@ After deployment, forward the frontend service to access the API:
 ```bash
 kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8000:8000
 ```
+
+### 6. Update worker routing taints
+
+The operator enables the worker system server on port `9090`. Select one vLLM worker pod and forward that port:
+
+```bash
+export WORKER_POD=$(kubectl get pods -n "$NAMESPACE" \
+  -l nvidia.com/dynamo-component=decode \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl port-forward -n "$NAMESPACE" pod/"$WORKER_POD" 9090:9090
+```
+
+In another terminal, replace the caller-managed routing taints for that worker:
+
+```bash
+curl --fail-with-body \
+  -X POST http://localhost:9090/engine/update/model_taints \
+  -H 'Content-Type: application/json' \
+  -d '{"taints":["capacity/fast"]}'
+```
+
+The `taints` array is a replacement, not a merge. Send an empty array to clear caller-managed taints. Dynamo preserves generated `dynamo.topology/` taints and rejects callers that use that reserved prefix. The request updates only the selected worker pod; repeat it for each target worker.
+
+Dynamic taint updates require every frontend/router consumer and the target worker to run a Dynamo version containing this API and the value-aware discovery watcher. Mixed-version operation is unsupported: an older frontend/router can retain stale taints even after the worker reports a successful update. For a safe rollout, upgrade all frontends/routers first, then upgrade workers, and only then enable taint updates.
+
+The system endpoint has no user-facing authentication layer. Keep port `9090` on a trusted control network or use `kubectl port-forward`; do not expose it publicly.
 
 ## Configuration Options
 

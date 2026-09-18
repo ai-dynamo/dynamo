@@ -109,8 +109,10 @@ The override is optional in the CRD schema but conditionally required by admissi
 
 The main image remains required when an override is set. Sidecar image tags are not used for
 runtime-version detection. The override declares the Dynamo runtime packaged in the image; it is
-not the CUDA, inference-engine, operator, Git, or image-build version. It does not rewrite the
-image or change the rendered Pod, and changing only this field does not trigger a worker rollout.
+not the CUDA, inference-engine, operator, Git, or image-build version. It does not change the
+image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a worker
+rollout. Keep it consistent with the image's runtime version.
+
 For compatibility, an existing component created without its pod configuration or main image can
 still be updated while that field remains missing. New components must provide both, and adding,
 changing, or removing the image applies current admission validation.

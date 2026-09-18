@@ -1,6 +1,6 @@
 ---
 name: dynamo-router-starter
-description: Start or patch Dynamo router modes and run router endpoint smoke checks. Use for round-robin, KV-aware, least-loaded, or device-aware routing setup; use recipe-runner for recipe deployment and troubleshoot for failure diagnosis.
+description: Start or patch Dynamo router modes and run router endpoint smoke checks. Use for round-robin, KV-aware, least-loaded, or device-aware routing setup; use deploy-dynamo-recipe for recipe deployment and troubleshoot-dynamo for failure diagnosis.
 license: Apache-2.0
 metadata:
   author: Dan Gil <dagil@nvidia.com>
@@ -53,7 +53,7 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
 
 For Kubernetes, inspect the selected recipe `deploy.yaml` and locate the
 frontend service. If the recipe is not already deployed, use
-`dynamo-recipe-runner` first.
+`deploy-dynamo-recipe` first.
 
 ### 2. Enable KV Routing
 
@@ -102,7 +102,7 @@ When comparing round-robin vs KV routing:
 - do not claim throughput improvement from a single chat request
 
 If the endpoint is unhealthy or workers are missing, switch to
-`dynamo-troubleshoot`.
+`troubleshoot-dynamo`.
 
 ## Available Scripts
 
@@ -151,7 +151,8 @@ Return:
 
 ## Limitations
 
-- Smoke test is one chat completion; it is not a benchmark. Use `dynamo-benchmark` for throughput/latency numbers.
+- Smoke testing is not benchmarking. Use `configure-aiperf-benchmark`, `run-aiperf-benchmark`, and
+  `analyze-aiperf-results` for throughput or latency claims.
 - KV-aware mode without worker KV-event publication degrades to approximate mode; this skill flags but does not fix the underlying worker config.
 - Mode comparisons require matched workloads; cross-mode latency claims need separate benchmark runs.
 
@@ -160,7 +161,7 @@ Return:
 | Symptom | Likely cause | Next step |
 |---|---|---|
 | `/v1/models` returns empty list | No worker registered with the frontend | Verify worker pods are Ready; confirm they connect to the same etcd/NATS |
-| Smoke chat request times out | Frontend up, workers not serving | Switch to `dynamo-troubleshoot`; inspect worker logs |
+| Smoke chat request times out | Frontend up, workers not serving | Switch to `troubleshoot-dynamo`; inspect worker logs |
 | KV mode hangs | Workers do not publish KV cache events | Set `DYN_ROUTER_USE_KV_EVENTS=false` (approximate mode) |
 | Connection refused on port-forward | Port-forward dropped or wrong service name | Re-run port-forward; verify the frontend service name matches the recipe |
 

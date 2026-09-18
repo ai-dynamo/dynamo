@@ -38,7 +38,7 @@ _DGD = {
     "spec": {
         "components": [
             {
-                "name": "VllmPrefillWorker",
+                "name": "prefill",
                 "type": "prefill",
                 "replicas": 2,
                 "podTemplate": {
@@ -56,7 +56,7 @@ _DGD = {
                 },
             },
             {
-                "name": "VllmDecodeWorker",
+                "name": "decode",
                 "type": "decode",
                 "replicas": 2,
                 "podTemplate": {
@@ -103,6 +103,8 @@ def _bare_adapter(capabilities):
         enable_power_awareness=True,
         total_gpu_power_limit=5000,
         min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
         min_gpu_budget=-1,
         max_gpu_budget=-1,
         mode="disagg",

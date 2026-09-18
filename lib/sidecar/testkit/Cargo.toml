@@ -29,3 +29,5 @@ dynamo-sglang-sidecar = { path = "../sglang" }
 rstest = "0.26"
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
+tonic-v14 = { workspace = true }
+tonic-health-v14 = { workspace = true }

@@ -13,20 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib
 import json
 import logging
 import uuid
+from collections.abc import Callable
 from typing import Any, Optional
 
 import numpy as np
 import yaml
 
+from dynamo._internal.aic import (
+    DEFAULT_BACKEND_VERSIONS as _MOCKER_AIC_BACKEND_VERSIONS,
+)
 from dynamo.common.utils.paths import get_workspace_dir
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
-from dynamo.planner.config.backend_components import (
-    MockerComponentName,
-    VllmComponentName,
-)
+from dynamo.planner.config.backend_components import MockerComponentName
 from dynamo.planner.config.parallelization import (
     PickedParallelConfig,
     picked_to_aic_model_config_kwargs,
@@ -42,12 +44,14 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_main_container_dict,
     set_argument_value,
+    set_unique_env_value,
 )
 from dynamo.profiler.utils.config_modifiers.trtllm import enable_trtllm_chunked_prefill
 from dynamo.profiler.utils.dgd_template import load_dgd_template
 from dynamo.profiler.utils.profile_common import (
     ProfilerOperationalConfig,
     derive_planner_image,
+    is_kv_router_enabled,
     is_mocker_enabled,
     is_planner_enabled,
     needs_mocker_aic_perf_model,
@@ -55,6 +59,19 @@ from dynamo.profiler.utils.profile_common import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
+    try:
+        perf_database = importlib.import_module("aiconfigurator_core.sdk.perf_database")
+    except ModuleNotFoundError as e:
+        if e.name != "aiconfigurator_core":
+            raise
+        return None
+    return perf_database.get_latest_database_version
+
+
+get_latest_database_version = _load_latest_database_version()
 
 # ConfigMap name prefixes (a 4-char UUID suffix is appended at runtime
 # so that multiple deployments in the same namespace don't collide)
@@ -94,12 +111,14 @@ def assemble_final_config(
        ``DYN_BENCHMARK_MODE`` on each worker so the ``get_perf_metrics``
        endpoint is populated at runtime. The planner consumes this as
        priority 1 of its bootstrap chain, superseding AIC and files.
-    4. **Planner** — inject the Planner service + planner-config ConfigMap.
+    4. **KV router** — configure the frontend for KV-cache-aware routing when
+       ``features.kvRouter.enabled`` is true.
+    5. **Planner** — inject the Planner service + planner-config ConfigMap.
        When ``aic_perf_model`` is given, it is embedded so the planner can
        initialize its direct AIC core model with native identity. When
        ``aic_spec`` is given (rapid mode), it is embedded so the planner can
        run AIC interpolation at bootstrap if the endpoint is unavailable.
-    5. **Profile data** — attach interpolation-data ConfigMap when mocker
+    6. **Profile data** — attach interpolation-data ConfigMap when mocker
        or planner-thorough is enabled. The ConfigMap is only emitted when
        the picked config is disaggregated AND the interpolation NPZ files
        were produced on disk; rapid-mode deployments never emit it (the
@@ -111,12 +130,15 @@ def assemble_final_config(
 
     mocker = is_mocker_enabled(dgdr)
     planner = is_planner_enabled(dgdr)
+    kv_router = is_kv_router_enabled(dgdr)
     profile = needs_profile_data(dgdr)
 
     if not mocker and resolved_backend == "trtllm":
         enable_trtllm_chunked_prefill(dgd_config)
 
     if not mocker and not planner:
+        if kv_router:
+            enable_kv_router(dgd_config)
         apply_runtime_version_override(dgdr, dgd_config)
         return dgd_config
 
@@ -131,6 +153,9 @@ def assemble_final_config(
         base = generate_mocker_config(dgdr, aic_spec=aic_spec)
     else:
         base = dgd_config
+
+    if kv_router:
+        enable_kv_router(base)
 
     # Step 2: for vLLM deployments, turn on the per-worker self-benchmark so
     # the get_perf_metrics endpoint is available to the planner. Mocker
@@ -181,69 +206,88 @@ def apply_runtime_version_override(dgdr, config_dict: dict) -> None:
             component["runtimeVersionOverride"] = override
 
 
-def _vllm_worker_roles() -> dict[str, str]:
-    """Canonical DGD component name → DYN_BENCHMARK_MODE role.
+def enable_kv_router(config_dict: dict) -> None:
+    """Configure the generated frontend to use KV-cache-aware routing.
 
-    Sourced from :class:`VllmComponentName` so we stay in sync with the
-    rest of the planner/profiler if the k8s service names are ever
-    renamed.
+    Sets ``DYN_ROUTER_MODE=kv`` on the frontend's main container rather than
+    editing its command/args. ``--router-mode`` reads ``DYN_ROUTER_MODE`` as its
+    env fallback, so this avoids reasoning about whether the module entrypoint
+    lives in ``command`` or ``args`` (e.g. the ``command``-form produced by the
+    PVC/model-path flow), and any explicit user ``--router-mode`` override still
+    wins because flags take precedence over env vars. Frontends with an
+    unexpected generated shape are left unchanged so this final assembly step
+    does not discard profiling results.
     """
-    return {
-        VllmComponentName.prefill_worker_k8s_name: "prefill",
-        VllmComponentName.decode_worker_k8s_name: "decode",
-        VllmComponentName.agg_worker_k8s_name: "agg",
-    }
-
-
-def enable_vllm_benchmark_mode(config_dict: dict) -> None:
-    """Set ``DYN_BENCHMARK_MODE`` on every vLLM worker in *config_dict*.
-
-    Mutates ``config_dict`` in place. Each recognised worker component
-    (``VllmPrefillWorker`` / ``VllmDecodeWorker`` / ``VllmWorker``) gets the
-    mode matching its role so its startup self-benchmark publishes
-    ForwardPassMetrics via the ``get_perf_metrics`` endpoint.
-
-    Idempotent: if ``DYN_BENCHMARK_MODE`` is already set (e.g. via user
-    overrides) the existing entry is replaced with the role-correct value.
-
-    A single generic ``type: worker`` component is aggregate even when its
-    planner-facing name is ``VllmDecodeWorker``.
-    """
-    worker_roles = _vllm_worker_roles()
     components = config_dict.get("spec", {}).get("components", [])
     if not isinstance(components, list):
         components = []
-    generic_workers = [
-        component
-        for component in components
-        if isinstance(component, dict)
-        and component.get("type") == "worker"
-        and component.get("name") in worker_roles
-    ]
-    aggregate_worker_name = (
-        generic_workers[0].get("name") if len(generic_workers) == 1 else None
-    )
 
-    for component_name, canonical_mode in worker_roles.items():
-        component = get_component_dict(config_dict, component_name)
-        if component is None:
+    found_frontend = False
+    for component in components:
+        if not isinstance(component, dict) or component.get("type") != "frontend":
             continue
-        mode = "agg" if component_name == aggregate_worker_name else canonical_mode
+        found_frontend = True
+        container = get_main_container_dict(component)
+        if container is None:
+            logger.warning(
+                "Skipping KV router configuration for frontend %r because it has no main container",
+                component.get("name"),
+            )
+            continue
+        container["env"] = set_unique_env_value(
+            container.get("env"), "DYN_ROUTER_MODE", "kv"
+        )
+
+    if not found_frontend:
+        logger.warning(
+            "Skipping KV router configuration because the generated DGD has no frontend component"
+        )
+
+
+_VLLM_BENCHMARK_MODE_BY_COMPONENT_TYPE = {
+    "prefill": "prefill",
+    "decode": "decode",
+    "worker": "agg",
+}
+
+
+def enable_vllm_benchmark_mode(config_dict: dict) -> None:
+    """Set ``DYN_BENCHMARK_MODE`` on every typed vLLM worker.
+
+    The caller invokes this only for vLLM deployments. Worker roles are resolved
+    from the v1beta1 ``spec.components[].type`` field, so custom and legacy
+    component names receive the same benchmark mode as canonical names.
+
+    Mutates ``config_dict`` in place. The operation is idempotent: an existing
+    ``DYN_BENCHMARK_MODE`` entry is replaced with the role-correct value.
+    """
+    components = config_dict.get("spec", {}).get("components", [])
+    if not isinstance(components, list):
+        return
+
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        mode = _VLLM_BENCHMARK_MODE_BY_COMPONENT_TYPE.get(component.get("type"))
+        if mode is None:
+            continue
         main_container = get_main_container_dict(component)
         if main_container is None:
             continue
         env_list = main_container.get("env") or []
         main_container["env"] = env_list
-        # Strip any existing DYN_BENCHMARK_MODE; append canonical value.
+        # Strip any existing DYN_BENCHMARK_MODE; append the type-derived value.
         env_list[:] = [
-            e
-            for e in env_list
-            if not (isinstance(e, dict) and e.get("name") == "DYN_BENCHMARK_MODE")
+            entry
+            for entry in env_list
+            if not (
+                isinstance(entry, dict) and entry.get("name") == "DYN_BENCHMARK_MODE"
+            )
         ]
         env_list.append({"name": "DYN_BENCHMARK_MODE", "value": mode})
         logger.info(
             "Enabled vLLM self-benchmark on component %s (DYN_BENCHMARK_MODE=%s)",
-            component_name,
+            component.get("name", "<unnamed>"),
             mode,
         )
 
@@ -400,6 +444,11 @@ def _inject_mocker_aic_args(
     if "--aic-perf-model" not in args_list:
         args_list.append("--aic-perf-model")
     args_list = set_argument_value(args_list, "--aic-backend", aic_spec.backend)
+    backend_version = _MOCKER_AIC_BACKEND_VERSIONS.get(aic_spec.backend)
+    if backend_version is not None:
+        args_list = set_argument_value(
+            args_list, "--aic-backend-version", backend_version
+        )
     args_list = set_argument_value(args_list, "--aic-system", aic_spec.system)
     args_list = set_argument_value(args_list, "--aic-tp-size", str(kwargs["tp_size"]))
     args_list = set_argument_value(
@@ -707,10 +756,31 @@ def build_aic_perf_model_spec(
     if mode in ("decode", "agg", "disagg") and best_decode_pick is None:
         return None
 
+    if get_latest_database_version is None:
+        logger.warning(
+            "AISimulate's AIC perf model is unavailable; Planner will use FPM regression "
+            "instead of native AIC estimates."
+        )
+        return None
+
+    backend_version = get_latest_database_version(
+        system=system,
+        backend=resolved_backend,
+    )
+    if backend_version is None:
+        logger.warning(
+            "No AIC performance database is available for system=%s, backend=%s; "
+            "Planner will use FPM regression instead of native AIC estimates.",
+            system,
+            resolved_backend,
+        )
+        return None
+
     return AICPerfModelSpec(
         hf_id=dgdr.model,
         system=system,
         backend=resolved_backend,
+        backend_version=backend_version,
         prefill_pick=best_prefill_pick,
         decode_pick=best_decode_pick,
     )

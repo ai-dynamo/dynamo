@@ -61,15 +61,15 @@ impl SidecarFixture for Fixture {
     async fn engine(&self) -> Self::Engine {
         let argv = vec![
             "dynamo-sglang-sidecar".into(),
-            "--sglang-endpoint".into(),
+            "--grpc-endpoint".into(),
             self.server.endpoint(),
-            "--sglang-connections".into(),
+            "--grpc-connections".into(),
             self.config.connections.to_string(),
-            "--connect-timeout-secs".into(),
+            "--grpc-connect-attempt-timeout-secs".into(),
             "1".into(),
-            "--health-poll-interval-secs".into(),
+            "--grpc-retry-interval-secs".into(),
             "1".into(),
-            "--health-deadline-secs".into(),
+            "--grpc-startup-deadline-secs".into(),
             "5".into(),
         ];
         tokio::task::spawn_blocking(move || SglangSidecarEngine::from_args(Some(argv)).unwrap().0)
@@ -166,7 +166,6 @@ impl Protocol for Adapter {
     }
 
     fn record_tokens(response: &Self::Response, tokens: &mut Vec<u32>) -> bool {
-        tokens.clear();
         tokens.extend(
             response
                 .output_ids

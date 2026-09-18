@@ -120,7 +120,7 @@ if __name__ == "__main__":
 
 ## K8s Examples
 
-For basic Kubernetes deployment with the KV Router, see the [Kubernetes Deployment section](router-guide.md#kubernetes-deployment) in the Router Guide.
+For basic Kubernetes deployment with the KV Router, see [Dynamo Frontend Routing](../../../../kubernetes/kv-aware-routing/dynamo-frontend.md).
 
 ### Complete K8s Examples
 
@@ -334,4 +334,5 @@ For deployments with multiple worker pools, the **Global Router** enables hierar
 
 - **[Router README](overview.md)**: Quick start guide for the KV Router
 - **[Configuration and Tuning](configuration-and-tuning.md)**: Router flags and production setup
+- **[Prioritize Premium Requests with Policy Classes](deficit-round-robin.md#prioritize-premium-requests-with-policy-classes)**: Give premium traffic a larger service share while regular traffic continues to progress
 - **[Router Design](router-design.md)**: Architecture details and event transport modes

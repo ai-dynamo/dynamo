@@ -11,7 +11,7 @@
 //! corresponding entry to the macro invocation below to keep Python exceptions
 //! in sync.
 
-use dynamo_runtime::error::BackendError;
+use dynamo_runtime::error::{BackendError, DynamoError, ErrorClass};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -138,11 +138,10 @@ define_dynamo_exceptions!(
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
 ///
-/// SECURITY: `.message` is forwarded verbatim to clients on 4xx responses
-/// (HTTP protocol contract). Python callers must ensure it contains no
-/// internal state, file paths, traceback strings, or backend identifiers.
-/// Non-4xx codes (including 5xx) are sanitized downstream — the original
-/// message survives in server logs only.
+/// SECURITY: `.message` is diagnostic-only. HTTP-like exceptions can wrap remote
+/// fetch failures whose text includes URLs or internal connection details. The
+/// semantic status is preserved, but client renderers use the class catalog
+/// unless the producer raised an explicitly public Dynamo exception.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
     let code = value
@@ -157,4 +156,90 @@ pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, Stri
         })?;
     let message = value.getattr("message").ok()?.extract::<String>().ok()?;
     Some((code, message))
+}
+
+/// Map an explicit Python HTTP exception status to Dynamo's semantic class.
+pub fn error_class_for_http_status(code: u16) -> ErrorClass {
+    match code {
+        400 => ErrorClass::InvalidRequest,
+        401 => ErrorClass::Unauthenticated,
+        403 => ErrorClass::PermissionDenied,
+        404 => ErrorClass::NotFound,
+        408 => ErrorClass::DeadlineExceeded,
+        409 => ErrorClass::Conflict,
+        413 => ErrorClass::PayloadTooLarge,
+        415 => ErrorClass::UnsupportedMedia,
+        431 => ErrorClass::PayloadTooLarge,
+        429 => ErrorClass::RateLimited,
+        499 => ErrorClass::Cancelled,
+        501 => ErrorClass::NotImplemented,
+        502 => ErrorClass::BackendProtocol,
+        503 => ErrorClass::Unavailable,
+        504 => ErrorClass::DeadlineExceeded,
+        529 => ErrorClass::CapacityExhausted,
+        402 | 405..=407 | 410..=412 | 414 | 416..=428 | 430 | 432..=498 => {
+            ErrorClass::InvalidRequest
+        }
+        _ => ErrorClass::Internal,
+    }
+}
+
+pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    let (code, message) = extract_http_like_error(py, err)?;
+    Some(build_http_like_error(code, message))
+}
+
+fn build_http_like_error(code: u16, message: String) -> DynamoError {
+    let legacy_message = serde_json::json!({
+        "message": message,
+        "code": code,
+    })
+    .to_string();
+
+    DynamoError::builder()
+        .class(error_class_for_http_status(code))
+        .diagnostic(legacy_message)
+        .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct LegacyDynamoError {
+        message: String,
+    }
+
+    #[derive(Deserialize)]
+    struct LegacyHttpError {
+        code: u16,
+        message: String,
+    }
+
+    #[test]
+    fn http_like_errors_support_semantic_and_legacy_readers() {
+        for (code, expected_class) in [
+            (409, ErrorClass::Conflict),
+            (415, ErrorClass::UnsupportedMedia),
+            (503, ErrorClass::Unavailable),
+        ] {
+            let error = build_http_like_error(code, "private backend detail".to_string());
+            assert_eq!(error.class(), expected_class);
+            assert_eq!(error.public_message(), None);
+
+            let wire = serde_json::to_value(&error).expect("serialize DynamoError");
+            let semantic: DynamoError =
+                serde_json::from_value(wire.clone()).expect("semantic reader");
+            assert_eq!(semantic.class(), expected_class);
+            assert_eq!(semantic.public_message(), None);
+
+            let legacy: LegacyDynamoError = serde_json::from_value(wire).expect("legacy reader");
+            let legacy_http: LegacyHttpError =
+                serde_json::from_str(&legacy.message).expect("legacy HTTP payload");
+            assert_eq!(legacy_http.code, code);
+            assert_eq!(legacy_http.message, "private backend detail");
+        }
+    }
 }

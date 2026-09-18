@@ -17,7 +17,7 @@
 //!
 //! Hash synthesis for external (vLLM / TRT-LLM) sources delegates entirely to
 //! [`dynamo_kv_hashing`]: the consolidator builds a single-block [`Request`] for each
-//! event, gets the [`BlockHash`] via [`Request::block_hashes`], and chains via
+//! event, gets the `BlockHash` via [`Request::block_hashes`], and chains via
 //! [`PositionalLineageHash::extend`] from the parent's PLH. KVBM events arrive with a
 //! PLH already computed by the upstream registry.
 

@@ -154,7 +154,6 @@ Validate that the Dynamo CRDs were installed
 
 ```bash
 kubectl get crds | grep dynamo
-dynamocheckpoints.nvidia.com                      2026-03-17T13:18:05Z
 dynamocomponentdeployments.nvidia.com             2026-03-17T13:18:06Z
 dynamographdeploymentrequests.nvidia.com          2026-03-17T13:18:08Z
 dynamographdeployments.nvidia.com                 2026-03-17T13:18:09Z
@@ -235,7 +234,7 @@ Then copy the new recipe's manifest and apply again.
 
 This example deploys a disaggregated prefill/decode Dynamo Inference Graph that uses NIXL with the LIBFABRIC backend using [Elastic Fabric Adapter (EFA)](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html) for high-throughput KV-cache transfer between workers.
 
-It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the Dynamo EFA-enabled vLLM container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1-efa-amd64` that ships with the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) pre-installed.
+It targets `g7e.12xlarge` instances, which support GPUDirect RDMA, and uses the Dynamo EFA-enabled vLLM container `nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0-efa` that ships with the [EFA Installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-changelog.html) pre-installed.
 
 *Note: For a full list of EFA-supported instance types, see [the AWS EC2 Docs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html#efa-instance-types).*
 
@@ -289,8 +288,8 @@ NAME                                                              READY   STATUS
 dynamo-platform-dynamo-operator-controller-manager-ff54b5dstgcq   1/1     Running   0          39m
 dynamo-platform-nats-0                                            2/2     Running   0          39m
 vllm-disagg-frontend-85f8476887-wwtwk                             1/1     Running   0          2m13s
-vllm-disagg-vllmdecodeworker-510a1741-7666987b-tp58w              1/1     Running   0          2m13s
-vllm-disagg-vllmprefillworker-510a1741-54f76d7954-tjgn8           1/1     Running   0          2m13s
+vllm-disagg-decode-510a1741-7666987b-tp58w              1/1     Running   0          2m13s
+vllm-disagg-prefill-510a1741-54f76d7954-tjgn8           1/1     Running   0          2m13s
 ```
 
 ```bash
@@ -344,7 +343,7 @@ NAME                                                              READY   STATUS
 dynamo-platform-dynamo-operator-controller-manager-ff54b5dstgcq   1/1     Running   0          12m
 dynamo-platform-nats-0                                            2/2     Running   0          12m
 vllm-agg-frontend-ff8457bcf-tq9jh                                 1/1     Running   0          4m46s
-vllm-agg-vllmdecodeworker-d0a70291-759df94478-8lc74               1/1     Running   0          4m46s
+vllm-agg-decode-d0a70291-759df94478-8lc74               1/1     Running   0          4m46s
 ```
 
 Watch logs

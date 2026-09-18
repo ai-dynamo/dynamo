@@ -12,7 +12,7 @@ use crate::kv_router::protocols::WorkerWithDpRank;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::lora::routing::RendezvousHasher;
 use crate::lora::routing::table::LoraRoutingTable;
-use crate::lora::state_tracker::LoraStateTracker;
+use crate::lora::state_tracker::{LoraObservedSnapshot, LoraStateTracker};
 
 type WorkerId = u64;
 
@@ -21,6 +21,12 @@ type WorkerId = u64;
 pub struct LoraFilter {
     routing_table: LoraRoutingTable,
     state_tracker: LoraStateTracker,
+}
+
+impl dynamo_kv_router::scheduling::LoraWorkerFilter for LoraFilter {
+    fn filter_worker_ids_for_lora(&self, lora_name: &str, available: &[WorkerId]) -> Vec<WorkerId> {
+        self.filter_worker_ids_for_lora(Some(lora_name), available)
+    }
 }
 
 impl LoraFilter {
@@ -43,8 +49,13 @@ impl LoraFilter {
     /// The HRW pin ranks by worker id (dp_rank collapsed to 0, since the filter operates on worker
     /// ids): it need not match the controller's exact pin — that worker is unavailable here — only
     /// be deterministic given the same available set.
-    fn bounded_fallback(&self, lora_name: &str, available: &[u64]) -> Vec<u64> {
-        let loaded = self.state_tracker.get_loaded_workers(lora_name);
+    fn bounded_fallback(
+        &self,
+        observed: &LoraObservedSnapshot,
+        lora_name: &str,
+        available: &[u64],
+    ) -> Vec<u64> {
+        let loaded = observed.get_loaded_workers(lora_name);
         if !loaded.is_empty() {
             let loaded_ids: HashSet<u64> = loaded.iter().map(|w| w.worker_id).collect();
             let live_loaded: Vec<u64> = available
@@ -89,17 +100,43 @@ impl LoraFilter {
         lora_name: Option<&str>,
         available: &[u64],
     ) -> Vec<u64> {
+        self.filter_worker_ids_for_lora_with_pin(lora_name, available, None)
+    }
+
+    pub(crate) fn filter_worker_ids_for_lora_with_pin(
+        &self,
+        lora_name: Option<&str>,
+        available: &[u64],
+        pinned_worker: Option<u64>,
+    ) -> Vec<u64> {
         let Some(lora_name) = lora_name else {
             return available.to_vec();
         };
+        let observed = self.state_tracker.snapshot();
+        let eligible = observed.eligible_workers(lora_name, available);
+        let mut selected = self.filter_observed(&observed, lora_name, &eligible);
+        if let Some(pin) = pinned_worker
+            && eligible.contains(&pin)
+            && !selected.contains(&pin)
+        {
+            selected.push(pin);
+        }
+        selected
+    }
 
+    fn filter_observed(
+        &self,
+        observed: &LoraObservedSnapshot,
+        lora_name: &str,
+        available: &[u64],
+    ) -> Vec<u64> {
         let Some(config) = self.routing_table.get_config(lora_name) else {
             // No routing-table entry yet (controller disabled, or before the first tick).
             // Prefer workers that actually have this adapter loaded (from the state tracker)
             // so we don't scatter to every worker; fall back to all available only when none
             // are known-loaded. This makes the "loaded-worker fallback" real even when dynamic
             // allocation (the controller) is disabled.
-            let loaded = self.state_tracker.get_loaded_workers(lora_name);
+            let loaded = observed.get_loaded_workers(lora_name);
             if !loaded.is_empty() {
                 // O(1) membership instead of scanning `loaded` per available worker
                 // (this fallback runs on every LoRA request when allocation is disabled).
@@ -128,7 +165,7 @@ impl LoraFilter {
         let replica_id_set: HashSet<u64> = config.replica_set.iter().map(|w| w.worker_id).collect();
 
         if config.is_active {
-            let loaded = self.state_tracker.get_loaded_workers(lora_name);
+            let loaded = observed.get_loaded_workers(lora_name);
             let loaded_ids: HashSet<u64> = loaded.iter().map(|w| w.worker_id).collect();
 
             // Prefer: replica set ∩ loaded ∩ available
@@ -165,7 +202,7 @@ impl LoraFilter {
                 lora = lora_name,
                 "Replica set workers all unavailable; using bounded fallback (no scatter)"
             );
-            self.bounded_fallback(lora_name, available)
+            self.bounded_fallback(observed, lora_name, available)
         } else {
             // Inactive: cold-start pin
             if let Some(pin_id) = config.replica_set.first().map(|w| w.worker_id)
@@ -182,7 +219,7 @@ impl LoraFilter {
                 lora = lora_name,
                 "Cold-start pin worker unavailable; using bounded fallback (no scatter)"
             );
-            self.bounded_fallback(lora_name, available)
+            self.bounded_fallback(observed, lora_name, available)
         }
     }
 

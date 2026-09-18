@@ -1,26 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use std::net::SocketAddr;
 
 use anyhow::Context;
 use clap::Parser;
 use dynamo_mocker::common::protocols::MockEngineArgs;
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
-use dynamo_vllm_sidecar::proto::generate_server::GenerateServer;
+use dynamo_vllm_sidecar::proto::control_server::ControlServer;
+use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "dynamo-vllm-mocker-server",
-    about = "Run a CPU-only, Mocker-backed implementation of vLLM's native Generate gRPC API"
+    about = "Run a CPU-only, Mocker-backed implementation of vLLM's native gRPC API"
 )]
 struct Args {
     /// Address on which to expose the vLLM-compatible gRPC service.
     #[arg(long, default_value = "127.0.0.1:50051")]
     listen: SocketAddr,
 
-    /// Model name accepted in Generate requests. The empty model used by the
-    /// Dynamo vLLM sidecar is always accepted.
+    /// Model name exposed by the mock server.
     #[arg(long, default_value = "mocker-model")]
     model: String,
 
@@ -51,7 +54,7 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load --extra-engine-args from {path}"))?,
     };
-    args.normalized().context("invalid Mocker engine arguments")
+    Ok(args)
 }
 
 #[tokio::main]
@@ -81,8 +84,17 @@ async fn main() -> anyhow::Result<()> {
         mode = %service.config().mode,
         "starting Mocker-backed vLLM gRPC server"
     );
+    let (health, health_service) = tonic_health::server::health_reporter();
+    health
+        .set_serving::<ControlServer<VllmMockerService>>()
+        .await;
+    health
+        .set_serving::<InferenceServer<VllmMockerService>>()
+        .await;
     tonic::transport::Server::builder()
-        .add_service(GenerateServer::new(service))
+        .add_service(InferenceServer::new(service.clone()))
+        .add_service(ControlServer::new(service))
+        .add_service(health_service)
         .serve_with_shutdown(args.listen, async {
             let _ = tokio::signal::ctrl_c().await;
         })

@@ -1,0 +1,811 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! HTTP regressions for validation performed by protocol adapters.
+
+use std::sync::Arc;
+
+use dynamo_llm::{
+    discovery::UNKNOWN_METRIC_MODEL,
+    http::service::metrics::{Endpoint, ErrorType, RequestType, Status},
+    protocols::{Annotated, openai::chat_completions::NvCreateChatCompletionStreamResponse},
+};
+use dynamo_runtime::{
+    config::environment_names::llm::{
+        DYN_DISABLE_FRONTEND_NVEXT, DYN_ENABLE_ANTHROPIC_API,
+        DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
+    },
+    error::{DynamoError, ErrorType as DynamoErrorType},
+};
+use serde_json::{Value, json};
+use serial_test::serial;
+
+#[allow(dead_code)]
+#[path = "common/http_harness.rs"]
+mod http_harness;
+#[path = "common/ports.rs"]
+mod ports;
+#[allow(dead_code)]
+#[path = "common/scripted_chat_engine.rs"]
+mod scripted_chat_engine;
+
+use http_harness::{HarnessService, MODEL, load_agent_fixture};
+use scripted_chat_engine::{Script, ScriptedChatEngine};
+
+const BASE_ENV: [(&str, Option<&str>); 3] = [
+    (DYN_ENABLE_ANTHROPIC_API, Some("1")),
+    (DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0")),
+    (DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS, None),
+];
+
+fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
+    let mut env = BASE_ENV.to_vec();
+    env.push((DYN_DISABLE_FRONTEND_NVEXT, Some("1")));
+    env
+}
+
+async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
+    svc.client
+        .post(format!("{}{path}", svc.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedError {
+    Validation,
+    NotImplemented,
+    UnsupportedContent,
+}
+
+impl ExpectedError {
+    fn status(self) -> reqwest::StatusCode {
+        match self {
+            Self::Validation => reqwest::StatusCode::BAD_REQUEST,
+            Self::NotImplemented => reqwest::StatusCode::NOT_IMPLEMENTED,
+            Self::UnsupportedContent => reqwest::StatusCode::BAD_REQUEST,
+        }
+    }
+
+    fn anthropic_type(self) -> &'static str {
+        match self {
+            Self::Validation => "invalid_request_error",
+            Self::NotImplemented => "api_error",
+            Self::UnsupportedContent => "invalid_request_error",
+        }
+    }
+}
+
+async fn assert_openai_error(response: reqwest::Response, expected: ExpectedError, message: &str) {
+    let status = expected.status();
+    assert_eq!(response.status(), status);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"].as_u64(), Some(u64::from(status.as_u16())));
+    assert!(
+        body["message"].as_str().is_some_and(|actual| actual
+            .to_ascii_lowercase()
+            .contains(&message.to_ascii_lowercase())),
+        "unexpected OpenAI error body: {body}"
+    );
+}
+
+async fn assert_anthropic_error(
+    response: reqwest::Response,
+    expected: ExpectedError,
+    message: &str,
+) {
+    assert_eq!(response.status(), expected.status());
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], expected.anthropic_type());
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|actual| actual.contains(message)),
+        "unexpected Anthropic error body: {body}"
+    );
+}
+
+async fn assert_anthropic_status(
+    response: reqwest::Response,
+    status: reqwest::StatusCode,
+    error_type: &str,
+    message: &str,
+) {
+    assert_eq!(response.status(), status);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["type"], "error");
+    assert_eq!(body["error"]["type"], error_type);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|actual| actual.contains(message)),
+        "unexpected Anthropic error body: {body}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_anthropic_cache_salt_is_rejected_when_nvext_is_disabled() {
+    temp_env::async_with_vars(nvext_disabled_env(), async {
+        let svc = HarnessService::start(Vec::new()).await;
+        for streaming in [false, true] {
+            let response = post_json(
+                &svc,
+                "/v1/messages",
+                json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "stream": streaming,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "nvext": {
+                        "cache_salt": 42,
+                        "agent_hints": {"priority": 5}
+                    }
+                }),
+            )
+            .await;
+
+            assert_anthropic_error(
+                response,
+                ExpectedError::Validation,
+                "invalid nvext.cache_salt: expected a string or null",
+            )
+            .await;
+            let request_type = if streaming {
+                RequestType::Stream
+            } else {
+                RequestType::Unary
+            };
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[(ErrorType::Validation, 1), (ErrorType::Internal, 0)],
+            );
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+fn assert_error_metrics(
+    svc: &HarnessService,
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+    expected: &[(ErrorType, u64)],
+) {
+    assert_error_metrics_for_model(svc, MODEL, endpoint, request_type, expected);
+}
+
+fn assert_error_metrics_for_model(
+    svc: &HarnessService,
+    model: &str,
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+    expected: &[(ErrorType, u64)],
+) {
+    for (error_type, expected) in expected {
+        assert_eq!(
+            svc.metrics.get_request_counter(
+                model,
+                endpoint,
+                request_type,
+                &Status::Error,
+                error_type,
+            ),
+            *expected,
+            "unexpected {error_type:?} count for {endpoint}/{request_type}"
+        );
+    }
+}
+
+fn tool_name_requests(name: &str) -> [(&'static str, Value, bool); 3] {
+    [
+        (
+            "/v1/messages",
+            json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "name": name,
+                    "input_schema": {"type": "object", "properties": {}}
+                }]
+            }),
+            true,
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": MODEL,
+                "input": "ping",
+                "tools": [{
+                    "type": "function",
+                    "name": name,
+                    "parameters": {"type": "object", "properties": {}}
+                }]
+            }),
+            false,
+        ),
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "parameters": {"type": "object", "properties": {}}
+                    }
+                }]
+            }),
+            false,
+        ),
+    ]
+}
+
+fn dynamo_error(error_type: DynamoErrorType, message: &str) -> anyhow::Error {
+    anyhow::Error::new(
+        DynamoError::builder()
+            .error_type(error_type)
+            .message(message)
+            .build(),
+    )
+}
+
+fn backend_error_script(status: reqwest::StatusCode, message: &str) -> Script {
+    vec![Annotated::<NvCreateChatCompletionStreamResponse> {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: Some(vec![
+            json!({
+                "message": message,
+                "code": status.as_u16(),
+            })
+            .to_string(),
+        ]),
+        error: None,
+    }]
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_conversion_distinguishes_invalid_from_unsupported() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (stream, content, expected, message) in [
+            (
+                true,
+                json!({"type": "input_image", "file_id": "file_123"}),
+                ExpectedError::UnsupportedContent,
+                "image input by file_id",
+            ),
+            (
+                false,
+                json!({
+                    "type": "input_file",
+                    "file_url": "https://example.com/report.pdf"
+                }),
+                ExpectedError::UnsupportedContent,
+                "file input content",
+            ),
+            (
+                false,
+                json!({"type": "input_image"}),
+                ExpectedError::Validation,
+                "requires file_id or image_url",
+            ),
+            (
+                true,
+                json!({"type": "input_file"}),
+                ExpectedError::Validation,
+                "requires exactly one of file_data, file_id, or file_url",
+            ),
+        ] {
+            let response = post_json(
+                &svc,
+                "/v1/responses",
+                json!({
+                    "model": MODEL,
+                    "stream": stream,
+                    "input": [{"role": "user", "content": [content]}]
+                }),
+            )
+            .await;
+            assert_openai_error(response, expected, message).await;
+        }
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(
+                &svc,
+                &Endpoint::Responses,
+                &request_type,
+                &[
+                    (ErrorType::NotImplemented, 1),
+                    (ErrorType::Validation, 1),
+                    (ErrorType::Internal, 0),
+                ],
+            );
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_tools_reject_unsupported_and_malformed_definitions() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (stream, tool_choice) in [
+            (false, None),
+            (true, Some(json!({"type": "tool", "name": "web_search"}))),
+        ] {
+            let mut body = json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{
+                    "type": "web_search_20260209",
+                    "name": "web_search"
+                }]
+            });
+            if let Some(tool_choice) = tool_choice {
+                body["tool_choice"] = tool_choice;
+            }
+            let response = post_json(&svc, "/v1/messages", body).await;
+            assert_anthropic_error(
+                response,
+                ExpectedError::NotImplemented,
+                "server tool type \"web_search_20260209\" is not supported",
+            )
+            .await;
+        }
+
+        let response = post_json(
+            &svc,
+            "/v1/messages",
+            json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "stream": false,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "tools": [{"name": "get_weather"}]
+            }),
+        )
+        .await;
+        assert_anthropic_error(
+            response,
+            ExpectedError::Validation,
+            "tools[0].input_schema: field required",
+        )
+        .await;
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            let validation = match &request_type {
+                RequestType::Unary => 1,
+                RequestType::Stream => 0,
+            };
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[
+                    (ErrorType::NotImplemented, 1),
+                    (ErrorType::Validation, validation),
+                    (ErrorType::Internal, 0),
+                ],
+            );
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_backend_error_events_record_status_classification() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let overload_status = reqwest::StatusCode::from_u16(529).unwrap();
+        let cancelled_status = reqwest::StatusCode::from_u16(499).unwrap();
+        let engine = Arc::new(ScriptedChatEngine::new(
+            [
+                backend_error_script(cancelled_status, "backend cancellation context"),
+                backend_error_script(reqwest::StatusCode::SERVICE_UNAVAILABLE, "worker offline"),
+                backend_error_script(reqwest::StatusCode::TOO_MANY_REQUESTS, "rate limited"),
+                backend_error_script(overload_status, "pool overloaded"),
+                backend_error_script(reqwest::StatusCode::NOT_FOUND, "missing backend model"),
+                backend_error_script(reqwest::StatusCode::BAD_REQUEST, "bad backend request"),
+                backend_error_script(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "backend panic"),
+            ]
+            .into_iter()
+            .map(Ok),
+        ));
+        let svc = HarnessService::start_with_engine(engine).await;
+
+        for (status, error_type, message) in [
+            (cancelled_status, "api_error", "Request cancelled"),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "overloaded_error",
+                "Internal server error",
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "Too Many Requests",
+            ),
+            (overload_status, "overloaded_error", "Internal server error"),
+            (
+                reqwest::StatusCode::NOT_FOUND,
+                "not_found_error",
+                "Not Found",
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "Bad Request",
+            ),
+            (
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "Internal server error",
+            ),
+        ] {
+            let response = post_json(
+                &svc,
+                "/v1/messages",
+                json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "stream": false,
+                    "messages": [{"role": "user", "content": "ping"}]
+                }),
+            )
+            .await;
+            assert_anthropic_status(response, status, error_type, message).await;
+        }
+
+        assert_error_metrics(
+            &svc,
+            &Endpoint::AnthropicMessages,
+            &RequestType::Unary,
+            &[
+                (ErrorType::Cancelled, 1),
+                (ErrorType::Unavailable, 1),
+                (ErrorType::Overload, 2),
+                (ErrorType::NotFound, 1),
+                (ErrorType::Validation, 1),
+                (ErrorType::Internal, 1),
+            ],
+        );
+
+        assert_eq!(svc.engine.take_requests().await.len(), 7);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_handler_errors_record_classification_with_response() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let mut failures = Vec::new();
+        for _ in 0..2 {
+            failures.extend([
+                dynamo_error(DynamoErrorType::ResourceExhausted, "too busy"),
+                dynamo_error(DynamoErrorType::Unavailable, "no worker"),
+                dynamo_error(DynamoErrorType::Cancelled, "client went away"),
+                dynamo_error(DynamoErrorType::InvalidArgument, "bad backend input"),
+                anyhow::anyhow!("generation failed"),
+            ]);
+        }
+        let engine = Arc::new(ScriptedChatEngine::new(
+            failures.into_iter().map(Err::<Script, _>),
+        ));
+        let svc = HarnessService::start_with_engine(engine).await;
+
+        for (stream, request_type) in [(false, RequestType::Unary), (true, RequestType::Stream)] {
+            for (status, error_type, message) in [
+                (
+                    reqwest::StatusCode::from_u16(529).unwrap(),
+                    "overloaded_error",
+                    "Service temporarily overloaded",
+                ),
+                (
+                    reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    "overloaded_error",
+                    "Service temporarily unavailable",
+                ),
+                (
+                    reqwest::StatusCode::from_u16(499).unwrap(),
+                    "api_error",
+                    "Request cancelled",
+                ),
+                (
+                    reqwest::StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "Invalid request",
+                ),
+                (
+                    reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                    "api_error",
+                    "Internal server error",
+                ),
+            ] {
+                let response = post_json(
+                    &svc,
+                    "/v1/messages",
+                    json!({
+                        "model": MODEL,
+                        "max_tokens": 16,
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "ping"}]
+                    }),
+                )
+                .await;
+                assert_anthropic_status(response, status, error_type, message).await;
+            }
+
+            let response = post_json(
+                &svc,
+                "/v1/messages",
+                json!({
+                    "model": "missing-model",
+                    "max_tokens": 16,
+                    "stream": stream,
+                    "messages": [{"role": "user", "content": "ping"}]
+                }),
+            )
+            .await;
+            assert_anthropic_status(
+                response,
+                reqwest::StatusCode::NOT_FOUND,
+                "not_found_error",
+                "Model 'missing-model' not found",
+            )
+            .await;
+
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[
+                    (ErrorType::Overload, 1),
+                    (ErrorType::Unavailable, 1),
+                    (ErrorType::Cancelled, 1),
+                    (ErrorType::Validation, 1),
+                    (ErrorType::Internal, 1),
+                ],
+            );
+            assert_error_metrics_for_model(
+                &svc,
+                UNKNOWN_METRIC_MODEL,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[(ErrorType::NotFound, 1)],
+            );
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[(ErrorType::NotFound, 0)],
+            );
+        }
+
+        assert_eq!(svc.engine.take_requests().await.len(), 10);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+// `reqwest::send` completes when response headers arrive. A 400 for `stream: true`
+// proves converted-request validation ran before the HTTP 200 SSE response was committed.
+#[tokio::test]
+#[serial]
+async fn converted_validation_errors_are_returned_before_streaming_headers() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (stream, field) in [
+            (false, json!({"top_p": 2.0})),
+            (true, json!({"temperature": 3.0})),
+        ] {
+            let mut body = json!({"model": MODEL, "input": "ping", "stream": stream});
+            body.as_object_mut()
+                .unwrap()
+                .extend(field.as_object().unwrap().clone());
+            let response = post_json(&svc, "/v1/responses", body).await;
+            assert_openai_error(response, ExpectedError::Validation, "must be").await;
+        }
+
+        for (stream, field) in [
+            (false, json!({"temperature": 3.0})),
+            (true, json!({"top_p": 2.0})),
+        ] {
+            let mut body = json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "ping"}]
+            });
+            body.as_object_mut()
+                .unwrap()
+                .extend(field.as_object().unwrap().clone());
+            let response = post_json(&svc, "/v1/messages", body).await;
+            assert_anthropic_error(response, ExpectedError::Validation, "must be").await;
+        }
+
+        for endpoint in [Endpoint::Responses, Endpoint::AnthropicMessages] {
+            for request_type in [RequestType::Unary, RequestType::Stream] {
+                assert_error_metrics(
+                    &svc,
+                    &endpoint,
+                    &request_type,
+                    &[(ErrorType::Validation, 1), (ErrorType::Internal, 0)],
+                );
+            }
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn responses_reject_empty_input_and_required_tool_choice_without_tools() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (body, message) in [
+            (
+                json!({"model": MODEL, "input": [], "max_tokens": 10}),
+                "messages",
+            ),
+            (
+                json!({
+                    "model": MODEL,
+                    "input": "ping",
+                    "tools": [],
+                    "tool_choice": "required"
+                }),
+                "tool_choice is \"required\"",
+            ),
+        ] {
+            let response = post_json(&svc, "/v1/responses", body).await;
+            assert_openai_error(response, ExpectedError::Validation, message).await;
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn anthropic_content_validation_applies_to_messages_and_count_tokens() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+
+        for (path, body, expected, message) in [
+            (
+                "/v1/messages",
+                json!({
+                    "model": MODEL,
+                    "max_tokens": 10,
+                    "stream": true,
+                    "messages": [{"role": "user", "content": ["hello"]}]
+                }),
+                ExpectedError::Validation,
+                "content blocks must be objects",
+            ),
+            (
+                "/v1/messages",
+                json!({
+                    "model": MODEL,
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": []}]
+                }),
+                ExpectedError::Validation,
+                "must contain at least one content block",
+            ),
+            (
+                "/v1/messages/count_tokens",
+                json!({
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": ["hello"]}]
+                }),
+                ExpectedError::Validation,
+                "content blocks must be objects",
+            ),
+            (
+                "/v1/messages",
+                json!({
+                    "model": MODEL,
+                    "max_tokens": 16,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "future_block_type", "value": 1},
+                            {"type": "text", "text": "ping"}
+                        ]
+                    }]
+                }),
+                ExpectedError::UnsupportedContent,
+                "content block type \"future_block_type\"",
+            ),
+        ] {
+            let response = post_json(&svc, path, body).await;
+            assert_anthropic_error(response, expected, message).await;
+        }
+
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            let not_implemented = match &request_type {
+                RequestType::Unary => 1,
+                RequestType::Stream => 0,
+            };
+            assert_error_metrics(
+                &svc,
+                &Endpoint::AnthropicMessages,
+                &request_type,
+                &[
+                    (ErrorType::Validation, 1),
+                    (ErrorType::NotImplemented, not_implemented),
+                    (ErrorType::Internal, 0),
+                ],
+            );
+        }
+
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn tool_name_limit_is_shared_across_protocols() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let valid_script = load_agent_fixture("text.sse").await.unwrap();
+        let svc =
+            HarnessService::start([valid_script.clone(), valid_script.clone(), valid_script]).await;
+
+        let max_length_tool_name = "a".repeat(128);
+        for (path, body, _) in tool_name_requests(&max_length_tool_name) {
+            let response = post_json(&svc, path, body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+
+        let too_long_tool_name = "a".repeat(129);
+        for (path, body, anthropic) in tool_name_requests(&too_long_tool_name) {
+            let response = post_json(&svc, path, body).await;
+            if anthropic {
+                assert_anthropic_error(response, ExpectedError::Validation, "128 character limit")
+                    .await;
+            } else {
+                assert_openai_error(response, ExpectedError::Validation, "128 character limit")
+                    .await;
+            }
+        }
+
+        assert_eq!(svc.engine.take_requests().await.len(), 3);
+        svc.shutdown().await;
+    })
+    .await;
+}

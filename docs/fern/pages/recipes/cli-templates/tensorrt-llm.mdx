@@ -38,8 +38,7 @@ The default model is `Qwen/Qwen3-0.6B`.
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `http://localhost:4317` | OpenTelemetry Protocol endpoint that receives traces. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
 
-**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing; `--unified` uses the unified
-backend entry point.
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing.
 
 **Pass-through arguments:** Additional unrecognized arguments are forwarded to the backend worker command.
 
@@ -197,8 +196,7 @@ The default model is `Qwen/Qwen3-0.6B`.
 | `DYN_SYSTEM_PORT1` | `8081` | System and metrics port for the first worker. |
 | `DYN_SYSTEM_PORT2` | `8082` | System and metrics port for the second worker. |
 
-**Command-line flags:** `--unified` uses the unified backend entry point; `--enable-otel` enables
-OpenTelemetry tracing.
+**Command-line flags:** `--enable-otel` enables OpenTelemetry tracing.
 
 ```bash
 ./launch/disagg.sh

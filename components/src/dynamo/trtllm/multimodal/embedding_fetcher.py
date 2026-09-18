@@ -8,18 +8,21 @@ Provides utility functions for fetching image embeddings from remote encoder
 with per-URL caching support.
 """
 
+import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
+from dynamo.common.http import HttpStatusError
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
+from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -152,8 +155,35 @@ async def _fetch_embeddings_with_cache(
     uncached_indices = []
     uncached_hashes = []
 
+    # Overrides change the embeddings for a URL, so they are part of cache
+    # identity; without them the hash is unchanged, so existing entries stay valid.
+    mm_kwargs = (
+        resolve_mm_processor_kwargs(request) if isinstance(request, dict) else None
+    )
+    # Reject before the lookup, not after: normalizing a malformed value to None
+    # would hash the plain URL and serve a cache hit with 200, while the
+    # aggregated path 400s on the same input.
+    if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+        raise HttpStatusError(
+            400,
+            "Malformed mm_processor_kwargs field: expected an object",
+            str(mm_kwargs),
+        )
+    if not mm_kwargs:
+        mm_kwargs = None
+
+    def _cache_key(url: str) -> str:
+        # JSON-encode the pair rather than concatenating: `url + salt` is ambiguous,
+        # so a URL ending in another request's serialized overrides would collide
+        # with it and be served the wrong embeddings.
+        if mm_kwargs is None:
+            return MultimodalHasher.hash_bytes(url.encode())
+        return MultimodalHasher.hash_bytes(
+            json.dumps([url, mm_kwargs], sort_keys=True, default=str).encode()
+        )
+
     for i, url in enumerate(image_urls):
-        url_hash = MultimodalHasher.hash_bytes(url.encode())
+        url_hash = _cache_key(url)
         cached = cache.get(url_hash)
         if cached is not None:
             embeddings_with_index.append((i, cached.tensor))
@@ -219,6 +249,16 @@ def _create_request_with_urls(
     import copy
 
     modified_request = copy.deepcopy(original_request)
+
+    mm_data = modified_request.get("multi_modal_data")
+    if isinstance(mm_data, dict) and isinstance(mm_data.get("image_url"), list):
+        filtered_items: List[Any] = []
+        for item in mm_data["image_url"]:
+            if isinstance(item, dict) and item.get("Url") in image_urls:
+                filtered_items.append(item)
+            elif isinstance(item, str) and item in image_urls:
+                filtered_items.append(item)
+        mm_data["image_url"] = filtered_items
 
     # Extract messages
     messages = modified_request.get("extra_args", {}).get(

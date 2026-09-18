@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap;
@@ -24,6 +25,7 @@ const CACHE_SEMANTICS_DEFAULT_V1: &[u8] = b"dynamo/indexer-cache-semantics/defau
 const CACHE_SEMANTICS_EXPLICIT_V1: &[u8] = b"dynamo/indexer-cache-semantics/explicit/v1";
 const ROUTING_SCOPE_DEFAULT_V1: &[u8] = b"dynamo/indexer-routing-scope/default/v1";
 const ROUTING_SCOPE_EXPLICIT_V1: &[u8] = b"dynamo/indexer-routing-scope/explicit/v1";
+const STABLE_DP_SLOT_EXPLICIT_V1: &[u8] = b"dynamo/stable-dp-slot/explicit/v1";
 
 #[cfg(any(
     feature = "standalone-indexer",
@@ -146,11 +148,23 @@ macro_rules! digest_identity {
                     .finish()
             }
         }
+
+        impl FromStr for $name {
+            type Err = IdentityParseError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Ok(Self::new(
+                    parse_fixed_hex::<16>(value)?,
+                    IdentitySource::Explicit,
+                ))
+            }
+        }
     };
 }
 
 digest_identity!(CacheSemanticsId);
 digest_identity!(RoutingScopeId);
+digest_identity!(StableDpSlotId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct IndexerDomainId {
@@ -188,6 +202,20 @@ impl fmt::Display for IndexerDomainId {
     }
 }
 
+impl FromStr for IndexerDomainId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (cache_semantics, routing_scope) = value
+            .split_once(':')
+            .ok_or(IdentityParseError::InvalidIndexerDomain)?;
+        if routing_scope.contains(':') {
+            return Err(IdentityParseError::InvalidIndexerDomain);
+        }
+        Ok(Self::new(cache_semantics.parse()?, routing_scope.parse()?))
+    }
+}
+
 /// Control-plane-stable identity for one logical DC inside a routing federation.
 ///
 /// NOTE: This value survives process restarts, scaling, endpoint replacement, and producer
@@ -209,6 +237,14 @@ impl DcId {
 impl fmt::Display for DcId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:016x}", self.0)
+    }
+}
+
+impl FromStr for DcId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(u64::from_be_bytes(parse_fixed_hex::<8>(value)?)))
     }
 }
 
@@ -243,6 +279,76 @@ impl fmt::Display for PoolId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}/{}", self.indexer_domain, self.dc_id)
     }
+}
+
+impl FromStr for PoolId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (indexer_domain, dc_id) = value
+            .split_once('/')
+            .ok_or(IdentityParseError::InvalidPool)?;
+        if dc_id.contains('/') {
+            return Err(IdentityParseError::InvalidPool);
+        }
+        Ok(Self::new(indexer_domain.parse()?, dc_id.parse()?))
+    }
+}
+
+/// Stable identity for one durable data-parallel slot inside a cache pool.
+///
+/// The digest is resolved from explicit configuration. It must not be derived
+/// from a worker ID, DRT connection ID, rank ordering, or a transport endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CacheOwnerId {
+    pool: PoolId,
+    slot: StableDpSlotId,
+}
+
+impl CacheOwnerId {
+    pub const fn new(pool: PoolId, slot: StableDpSlotId) -> Self {
+        Self { pool, slot }
+    }
+
+    pub const fn pool(self) -> PoolId {
+        self.pool
+    }
+
+    pub const fn slot(self) -> StableDpSlotId {
+        self.slot
+    }
+}
+
+impl fmt::Display for CacheOwnerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.pool, self.slot)
+    }
+}
+
+impl FromStr for CacheOwnerId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (pool, slot) = value
+            .rsplit_once('/')
+            .ok_or(IdentityParseError::InvalidCacheOwner)?;
+        if slot.contains('/') {
+            return Err(IdentityParseError::InvalidCacheOwner);
+        }
+        Ok(Self::new(pool.parse()?, slot.parse()?))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IdentityParseError {
+    #[error("identity must use lowercase hexadecimal with the exact encoded width")]
+    InvalidHex,
+    #[error("indexer domain must be `<cache-semantics-id>:<routing-scope-id>`")]
+    InvalidIndexerDomain,
+    #[error("pool ID must be `<indexer-domain-id>/<dc-id>`")]
+    InvalidPool,
+    #[error("cache owner ID must be `<pool-id>/<stable-dp-slot-id>`")]
+    InvalidCacheOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -395,6 +501,20 @@ impl CanonicalIdentityMaterial {
         Self { source, bytes }
     }
 
+    /// Canonical material for a stable DP slot.
+    ///
+    /// Unlike indexer-domain identities, a durable slot has no derived
+    /// fallback. Callers must supply explicit, deployment-stable material.
+    pub fn stable_dp_slot(explicit: &ExplicitIdentityMap) -> Self {
+        let mut bytes = Vec::new();
+        append_framed(&mut bytes, STABLE_DP_SLOT_EXPLICIT_V1);
+        append_selected_material(&mut bytes, &[], Some(explicit));
+        Self {
+            source: IdentitySource::Explicit,
+            bytes,
+        }
+    }
+
     pub const fn source(&self) -> IdentitySource {
         self.source
     }
@@ -459,6 +579,32 @@ fn validate_entries(entries: &BTreeMap<String, String>) -> Result<(), IdentitySp
         }
     }
     Ok(())
+}
+
+fn parse_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], IdentityParseError> {
+    if value.len() != N * 2
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(IdentityParseError::InvalidHex);
+    }
+
+    let mut result = [0; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(pair[0]);
+        let low = hex_nibble(pair[1]);
+        result[index] = high << 4 | low;
+    }
+    Ok(result)
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => unreachable!("parse_fixed_hex validates every nibble"),
+    }
 }
 
 fn write_digest(formatter: &mut fmt::Formatter<'_>, digest: &[u8; 16]) -> fmt::Result {
@@ -567,5 +713,21 @@ mod tests {
         assert_eq!(semantics.to_string(), "abababababababababababababababab");
         assert_eq!(routing.to_string(), "01010101010101010101010101010101");
         assert_eq!(DcId::new(1).to_string(), "0000000000000001");
+    }
+
+    #[test]
+    fn cache_owner_canonical_string_round_trips_at_configuration_boundary() {
+        let owner = CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([0xcd; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(7),
+            ),
+            StableDpSlotId::new([0xef; 16], IdentitySource::Explicit),
+        );
+        assert_eq!(owner.to_string().parse::<CacheOwnerId>().unwrap(), owner);
+        assert!("ab/7/ef".parse::<CacheOwnerId>().is_err());
     }
 }

@@ -18,6 +18,7 @@ import pytest
 
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.media_source import (
+    describe_media_source,
     is_local_media_url,
     read_local_media_bytes,
 )
@@ -110,3 +111,35 @@ async def test_malformed_data_uri_rejected(url, match):
 async def test_unsupported_scheme_rejected():
     with pytest.raises(UrlValidationError, match="Unsupported local media scheme"):
         await read_local_media_bytes("s3://bucket/clip.mp4", UrlValidationPolicy())
+
+
+def test_describe_media_source_elides_a_data_uri_payload() -> None:
+    """A data: URI is the whole media payload; describing one must never
+    reproduce it, only its type and size."""
+    payload = "A" * 100_000
+    label = describe_media_source(f"data:video/mp4;base64,{payload}")
+
+    assert payload not in label
+    assert "data:video/mp4" in label
+    assert "payload elided" in label
+    assert len(label) < 100
+
+
+def test_describe_media_source_keeps_an_ordinary_url_intact() -> None:
+    url = "https://example.com/clip.mp4"
+    assert describe_media_source(url) == url
+
+
+def test_describe_media_source_bounds_an_overlong_url() -> None:
+    url = "https://example.com/" + "a" * 500
+    label = describe_media_source(url)
+
+    assert label.startswith("https://example.com/")
+    assert len(label) < len(url)
+    assert str(len(url)) in label  # keeps the true size visible
+
+
+def test_describe_media_source_survives_a_non_string() -> None:
+    """The video loop labels whatever it was handed, including malformed
+    items, before it has established the input is a string."""
+    assert describe_media_source(None) == "<non-string media source>"  # type: ignore[arg-type]

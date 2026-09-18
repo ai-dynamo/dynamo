@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use prost_types_v14 as prost_types;
+use tonic_v14 as tonic;
+
 use std::collections::BTreeMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
@@ -68,6 +71,9 @@ impl PreparedRequest {
         mut request: pb::GenerateRequest,
         config: &MockerServerConfig,
     ) -> BoxedStatusResult<Self> {
+        if !request.lora_name.is_empty() {
+            return Err(Status::unimplemented("LoRA is not supported by the mock server").into());
+        }
         if !request.model.is_empty() && request.model != config.model {
             return Err(Status::not_found(format!(
                 "model '{}' is not served; expected '{}'",
@@ -291,6 +297,7 @@ impl PreparedRequest {
                 finish_reason: pb::finish_info::FinishReason::Length as i32,
                 stop_reason: None,
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
+                ec_transfer_params: None,
             }),
         }
     }

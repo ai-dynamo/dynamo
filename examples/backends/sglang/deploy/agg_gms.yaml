@@ -40,7 +40,6 @@ spec:
           - --tp
           - "1"
           - --trust-remote-code
-          - --skip-tokenizer-init
           - --load-format
           - gms
           command:

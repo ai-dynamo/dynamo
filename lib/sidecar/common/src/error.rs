@@ -1,7 +1,54 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::fmt;
+
 use dynamo_backend_common::{BackendError, DynamoError, ErrorType};
+
+#[derive(Debug)]
+pub enum SidecarStartupError {
+    Cli(clap::Error),
+    Dynamo(DynamoError),
+}
+
+impl SidecarStartupError {
+    pub fn into_dynamo(self) -> DynamoError {
+        match self {
+            Self::Cli(error) => invalid_argument(error.to_string()),
+            Self::Dynamo(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for SidecarStartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cli(error) => error.fmt(formatter),
+            Self::Dynamo(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for SidecarStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cli(error) => Some(error),
+            Self::Dynamo(error) => Some(error),
+        }
+    }
+}
+
+impl From<clap::Error> for SidecarStartupError {
+    fn from(error: clap::Error) -> Self {
+        Self::Cli(error)
+    }
+}
+
+impl From<DynamoError> for SidecarStartupError {
+    fn from(error: DynamoError) -> Self {
+        Self::Dynamo(error)
+    }
+}
 
 fn backend(kind: BackendError, message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
@@ -34,7 +81,20 @@ pub fn connection_timeout(message: impl Into<String>) -> DynamoError {
 }
 
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
-    let kind = match status.code() {
+    status_to_dynamo_parts(rpc, status.message(), status.code())
+}
+
+#[cfg(feature = "tonic-v14")]
+pub fn status_to_dynamo_v14(rpc: &str, status: tonic_v14::Status) -> DynamoError {
+    status_to_dynamo_parts(
+        rpc,
+        status.message(),
+        tonic::Code::from_i32(status.code() as i32),
+    )
+}
+
+fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> DynamoError {
+    let kind = match code {
         tonic::Code::InvalidArgument
         | tonic::Code::NotFound
         | tonic::Code::OutOfRange
@@ -45,10 +105,7 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,
     };
-    backend(
-        kind,
-        format!("{rpc}: {} ({:?})", status.message(), status.code()),
-    )
+    backend(kind, format!("{rpc}: {message} ({code:?})"))
 }
 
 #[cfg(test)]

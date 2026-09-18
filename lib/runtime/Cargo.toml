@@ -18,6 +18,8 @@ ignored = ["mio"]
 default = []
 integration = []
 testing-etcd = [] # Tests that require an active ETCD server
+# White-box helpers for cross-crate lifecycle tests. Never enabled by a normal build.
+testing = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 compute-validation = [] # Enable validation and timing for compute macros
 tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO_BUSY_POLL)
@@ -45,20 +47,26 @@ derive_builder = { workspace = true }
 derive-getters = { workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
+fastrand = "2"
 futures = { workspace = true }
+fs4 = { workspace = true }
 humantime = { workspace = true }
+libc = { workspace = true }
 parking_lot = { workspace = true }
 prometheus = { workspace = true }
+quinn = { workspace = true }
 rand = { workspace = true }
+rcgen = { workspace = true }
 reqwest = { workspace = true }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+rustls = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
@@ -69,6 +77,8 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
+opentelemetry-proto = { workspace = true }
+tonic = { version = "0.14", default-features = false, features = ["transport"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
@@ -86,7 +96,6 @@ educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 # FSEvents omits deletes for FileStore's revision-zero hard-link publication path.
 notify = { version = "6.1", default-features = false, features = ["macos_kqueue"] }
-libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
 # `release_max_level_debug` compiles out `log::trace!` in release builds (a
 # compile-time `STATIC_MAX_LEVEL` check — no runtime cost, cannot be overridden).
@@ -105,7 +114,7 @@ once_cell = { version = "1" }
 percent-encoding = { version = "2.3.2" } # also used by tonic, reqwest, axum, etc
 rayon = { version = "1.10" }
 regex = { version = "1" }
-socket2 = { version = "0.5.8" }
+socket2 = { version = "0.5.8", features = ["all"] }
 tokio-rayon = { version = "2.1" }
 
 # Kubernetes discovery backend
@@ -127,4 +136,8 @@ harness = false
 
 [[bench]]
 name = "tcp_codec_perf"
+harness = false
+
+[[bench]]
+name = "ingress_response_encode"
 harness = false

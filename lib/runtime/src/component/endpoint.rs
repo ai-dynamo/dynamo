@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     component::{DeviceType, Endpoint, Instance, TransportType},
     distributed::RequestPlaneMode,
-    pipeline::network::{PushWorkHandler, ingress::push_endpoint::PushEndpoint},
+    pipeline::network::{
+        PushWorkHandler, RequestPlanePayloadCodec, ingress::push_endpoint::PushEndpoint,
+    },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::nats,
@@ -181,6 +183,7 @@ impl EndpointConfigBuilder {
                 instance_id: connection_id,
                 transport: transport.clone(),
                 device_type: endpoint_device_type(),
+                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
             };
             tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
             let guard = system_health.lock();
@@ -236,6 +239,7 @@ impl EndpointConfigBuilder {
             endpoint: endpoint_id.name.clone(),
             transport,
             device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
         let discovery_instance = match discovery.register(discovery_spec).await {
@@ -246,7 +250,9 @@ impl EndpointConfigBuilder {
                     error = %e,
                     "Unable to register service for discovery"
                 );
-                let _ = server.unregister_endpoint(&endpoint_name_for_task).await;
+                let _ = server
+                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                    .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
                 }
@@ -279,7 +285,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup)
+                .unregister_endpoint(&endpoint_name_for_cleanup, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -400,6 +406,7 @@ impl Endpoint {
             instance_id,
             transport,
             device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         });
 
         let discovery = drt.discovery();
@@ -442,6 +449,7 @@ impl Endpoint {
             endpoint: endpoint_id.name,
             transport,
             device_type: endpoint_device_type(),
+            request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
         let discovery = drt.discovery();

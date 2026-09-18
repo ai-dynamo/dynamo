@@ -50,7 +50,11 @@ Dynamo also recognizes the current stable identity headers emitted by the follow
     - `x-claude-code-parent-agent-id` for nested children; top-level children fall back to `x-claude-code-session-id`
   </Tab>
   <Tab title="Codex">
-    Dynamo maps `session-id` to `session_id`.
+    Dynamo maps Codex's per-agent thread headers:
+
+    - `thread-id` to `session_id`
+    - `x-codex-parent-thread-id` to `parent_session_id` for child threads
+
   </Tab>
   <Tab title="OpenCode">
     Dynamo maps:

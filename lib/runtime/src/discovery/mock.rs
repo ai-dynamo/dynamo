@@ -3,15 +3,14 @@
 
 use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
-    DiscoverySpec, DiscoveryStream, diff_discovery_instances, endpoint_instances,
-    validate_event_source_reregistration,
+    DiscoverySpec, DiscoveryStream, ModelCardInstanceId, model_with_updated_taints,
+    reconcile_discovery_snapshot, validate_event_source_reregistration,
+    validate_model_reregistration,
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 /// Shared in-memory registry for mock discovery
@@ -203,12 +202,33 @@ impl Discovery for MockDiscovery {
                     validate_event_source_reregistration(existing, &instance)?;
                     return Ok(existing.clone());
                 }
-                DiscoveryInstance::Model { .. } | DiscoveryInstance::EventChannel { .. } => {}
+                DiscoveryInstance::Model { .. } => {
+                    validate_model_reregistration(existing, &instance)?;
+                    return Ok(existing.clone());
+                }
+                DiscoveryInstance::EventChannel { .. } => {}
             }
         }
         instances.push(instance.clone());
 
         Ok(instance)
+    }
+
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
+        let target_id = DiscoveryInstanceId::Model(id);
+        let mut instances = self.registry.instances.lock().unwrap();
+        let existing = instances
+            .iter_mut()
+            .find(|existing| existing.id() == target_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!("model discovery record {target_id:?} is not registered")
+            })?;
+        *existing = model_with_updated_taints(existing, taints)?;
+        Ok(())
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
@@ -240,8 +260,7 @@ impl Discovery for MockDiscovery {
         let registry = self.registry.clone();
 
         let stream = async_stream::stream! {
-            let mut known_ids = HashSet::<DiscoveryInstanceId>::new();
-            let mut known_endpoints = HashMap::new();
+            let mut known_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
 
             loop {
                 let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = {
@@ -249,24 +268,18 @@ impl Discovery for MockDiscovery {
                     instances
                         .iter()
                         .filter(|instance| matches_query(instance, &query))
-                        .map(|instance| (instance.id(), instance.clone()))
+                        .cloned()
+                        .map(|instance| (instance.id(), instance))
                         .collect()
                 };
 
-                let (upserted, removed) =
-                    diff_discovery_instances(&known_ids, &known_endpoints, &current);
-
-                for instance in upserted {
-                    yield Ok(DiscoveryEvent::Added(instance));
+                let (events, reconciled) =
+                    reconcile_discovery_snapshot(&known_instances, current);
+                for event in events {
+                    yield Ok(event);
                 }
 
-                for id in removed {
-                    yield Ok(DiscoveryEvent::Removed(id));
-                }
-
-                known_endpoints = endpoint_instances(&current);
-                known_ids = current.into_keys().collect();
-
+                known_instances = reconciled;
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             }
         };
@@ -296,6 +309,7 @@ mod tests {
             endpoint: "endpoint".to_string(),
             transport: TransportType::Tcp(transport.to_string()),
             device_type: None,
+            request_plane_codec: None,
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
 
@@ -359,6 +373,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_taint_updates_use_the_authoritative_registry() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let model = client
+            .register(DiscoverySpec::Model {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+                card_json: serde_json::json!({
+                    "display_name": "model",
+                    "runtime_config": {"taints": ["a"]}
+                }),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+        let DiscoveryInstanceId::Model(id) = model.id() else {
+            unreachable!()
+        };
+
+        client
+            .update_model_taints(id.clone(), HashSet::from(["b".to_string()]))
+            .await
+            .unwrap();
+        client
+            .update_model_taints(id.clone(), HashSet::from(["a".to_string()]))
+            .await
+            .unwrap();
+
+        let stored = client
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["a"])
+        );
+
+        client.unregister(model).await.unwrap();
+        assert!(
+            client
+                .update_model_taints(id, HashSet::new())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn same_id_model_registration_preserves_updated_taints_without_duplicates() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let spec = DiscoverySpec::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {"taints": ["initial"]}
+            }),
+            model_suffix: None,
+        };
+        let original = client.register(spec.clone()).await.unwrap();
+        let DiscoveryInstanceId::Model(id) = original.id() else {
+            unreachable!()
+        };
+        client
+            .update_model_taints(id, HashSet::from(["updated".to_string()]))
+            .await
+            .unwrap();
+
+        let replayed = client.register(spec).await.unwrap();
+        let models = client
+            .list(DiscoveryQuery::EndpointModels {
+                namespace: "ns".to_string(),
+                component: "worker".to_string(),
+                endpoint: "generate".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(models, vec![replayed.clone()]);
+        let DiscoveryInstance::Model { card_json, .. } = replayed else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["updated"])
+        );
+    }
+
+    #[tokio::test]
+    async fn model_taint_update_rejects_foreign_worker_id() {
+        let client = MockDiscovery::new(Some(7), SharedMockRegistry::new());
+        let foreign_id = ModelCardInstanceId {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 8,
+            model_suffix: None,
+        };
+
+        let error = client
+            .update_model_taints(foreign_id, HashSet::new())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("this discovery client owns worker 7")
+        );
+    }
+
+    #[tokio::test]
     async fn test_mock_discovery_add_and_remove() {
         let registry = SharedMockRegistry::new();
         let client1 = MockDiscovery::new(Some(1), registry.clone());
@@ -370,6 +505,7 @@ mod tests {
             endpoint: "test-ep".to_string(),
             transport: crate::component::TransportType::Nats("test-subject".to_string()),
             device_type: None,
+            request_plane_codec: None,
         };
 
         let query = DiscoveryQuery::Endpoint {
@@ -473,40 +609,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_rejects_distinct_base_cards_with_same_source_path_on_same_endpoint() {
-        let registry = SharedMockRegistry::new();
-        let discovery1 = MockDiscovery::new(Some(1), registry.clone());
-        let discovery2 = MockDiscovery::new(Some(2), registry);
-        let spec = |display_name: &str| DiscoverySpec::Model {
-            namespace: "ns".to_string(),
-            component: "comp".to_string(),
-            endpoint: "generate".to_string(),
-            card_json: serde_json::json!({
-                "display_name": display_name,
-                "source_path": "org/base-model",
-            }),
-            model_suffix: None,
-        };
-
-        discovery1.register(spec("public-name-a")).await.unwrap();
-        let err = discovery2
-            .register(spec("public-name-b"))
-            .await
-            .unwrap_err();
-
-        assert!(err.to_string().contains(
-            "Cannot register model 'public-name-b' on endpoint 'ns/comp/generate': a different model 'public-name-a' is already registered there"
-        ));
-
-        let instances = discovery1
-            .list(DiscoveryQuery::EndpointModels {
+    async fn register_non_lora_alias_compatibility() {
+        for (name, source_a, source_b, compatible) in [
+            ("alias-b", Some("org/base"), Some("org/base"), true),
+            ("alias-a", Some("/mount/a"), Some("/mount/b"), true),
+            ("alias-b", Some("org/base"), Some("org/other"), false),
+            ("alias-b", Some("org/base"), None, false),
+            ("alias-b", None, Some("org/base"), false),
+            ("alias-b", Some(""), Some(""), false),
+        ] {
+            let registry = SharedMockRegistry::new();
+            let discovery1 = MockDiscovery::new(Some(1), registry.clone());
+            let discovery2 = MockDiscovery::new(Some(2), registry);
+            let spec = |display_name: &str, source_path: Option<&str>| DiscoverySpec::Model {
                 namespace: "ns".to_string(),
                 component: "comp".to_string(),
                 endpoint: "generate".to_string(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(instances.len(), 1);
+                card_json: serde_json::json!({
+                    "display_name": display_name,
+                    "source_path": source_path,
+                }),
+                model_suffix: None,
+            };
+            discovery1
+                .register(spec("alias-a", source_a))
+                .await
+                .unwrap();
+            let result = discovery2.register(spec(name, source_b)).await;
+            assert_eq!(
+                result.is_ok(),
+                compatible,
+                "{name}: {source_a:?}, {source_b:?}: {result:?}"
+            );
+            if let Err(err) = result {
+                assert!(
+                    err.to_string()
+                        .contains("a different model 'alias-a' is already registered there")
+                );
+            }
+            let instances = discovery1
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: "ns".to_string(),
+                    component: "comp".to_string(),
+                    endpoint: "generate".to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn register_shared_source_requires_disjoint_served_names() {
+        for (name_b, aliases_a, aliases_b, compatible) in [
+            ("b", vec!["b"], vec![], false),
+            ("b", vec![], vec!["a"], false),
+            ("b", vec!["shared"], vec!["shared"], false),
+            ("b", vec!["a", "extra-a"], vec!["b", "extra-b"], true),
+            ("a", vec!["shared"], vec!["shared"], true),
+        ] {
+            let registry = SharedMockRegistry::new();
+            let first = MockDiscovery::new(Some(1), registry.clone());
+            let second = MockDiscovery::new(Some(2), registry);
+            let spec = |name: &str, aliases: Vec<&str>| DiscoverySpec::Model {
+                namespace: "ns".into(),
+                component: "comp".into(),
+                endpoint: "generate".into(),
+                card_json: serde_json::json!({
+                    "display_name": name,
+                    "aliases": aliases,
+                    "source_path": "org/base",
+                }),
+                model_suffix: None,
+            };
+            let incumbent = first.register(spec("a", aliases_a)).await.unwrap();
+            let result = second.register(spec(name_b, aliases_b)).await;
+            assert_eq!(result.is_ok(), compatible, "{result:?}");
+            let instances = first
+                .list(DiscoveryQuery::EndpointModels {
+                    namespace: "ns".into(),
+                    component: "comp".into(),
+                    endpoint: "generate".into(),
+                })
+                .await
+                .unwrap();
+            assert!(instances.contains(&incumbent));
+            assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+        }
+    }
+
+    #[tokio::test]
+    async fn register_checks_every_existing_model() {
+        // B is compatible with A by name and C by source, but A and C conflict.
+        for order in [[0, 1, 2], [2, 1, 0]] {
+            let registry = SharedMockRegistry::new();
+            let cards = [("a", "/mount/a"), ("a", "/mount/b"), ("b", "/mount/b")];
+            let mut accepted = Vec::new();
+            for (position, index) in order.into_iter().enumerate() {
+                let discovery = MockDiscovery::new(Some(index as u64 + 1), registry.clone());
+                let (name, source) = cards[index];
+                let result = discovery
+                    .register(DiscoverySpec::Model {
+                        namespace: "ns".into(),
+                        component: "comp".into(),
+                        endpoint: "generate".into(),
+                        card_json: serde_json::json!({"display_name": name, "source_path": source}),
+                        model_suffix: None,
+                    })
+                    .await;
+                if position < 2 {
+                    accepted.push(result.unwrap());
+                } else {
+                    assert!(result.is_err());
+                    let instances = discovery
+                        .list(DiscoveryQuery::EndpointModels {
+                            namespace: "ns".into(),
+                            component: "comp".into(),
+                            endpoint: "generate".into(),
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(instances.len(), accepted.len());
+                    assert!(accepted.iter().all(|instance| instances.contains(instance)));
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -587,6 +814,58 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_base_and_lora_require_distinct_served_names() {
+        for (adapter_name, compatible) in [("base", false), ("alias", false), ("adapter", true)] {
+            for adapter_first in [false, true] {
+                let registry = SharedMockRegistry::new();
+                let first = MockDiscovery::new(Some(1), registry.clone());
+                let second = MockDiscovery::new(Some(2), registry);
+                let base = DiscoverySpec::Model {
+                    namespace: "ns".into(),
+                    component: "comp".into(),
+                    endpoint: "generate".into(),
+                    card_json: serde_json::json!({
+                        "display_name": "base",
+                        "aliases": ["alias"],
+                        "source_path": "org/base",
+                    }),
+                    model_suffix: None,
+                };
+                let adapter = lora_model_spec(
+                    "ns",
+                    "comp",
+                    "generate",
+                    adapter_name,
+                    "org/base",
+                    adapter_name,
+                );
+                let (incumbent, newcomer) = if adapter_first {
+                    (adapter, base)
+                } else {
+                    (base, adapter)
+                };
+                let incumbent = first.register(incumbent).await.unwrap();
+                let result = second.register(newcomer).await;
+                assert_eq!(
+                    result.is_ok(),
+                    compatible,
+                    "{adapter_name}, adapter_first={adapter_first}: {result:?}"
+                );
+                let instances = first
+                    .list(DiscoveryQuery::EndpointModels {
+                        namespace: "ns".into(),
+                        component: "comp".into(),
+                        endpoint: "generate".into(),
+                    })
+                    .await
+                    .unwrap();
+                assert!(instances.contains(&incumbent));
+                assert_eq!(instances.len(), if compatible { 2 } else { 1 });
+            }
+        }
     }
 
     #[tokio::test]

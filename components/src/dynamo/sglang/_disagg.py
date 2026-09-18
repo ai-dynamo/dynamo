@@ -1,14 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Disaggregation helpers shared by the legacy (`init_llm.py`,
-`register.py`) and unified (`llm_engine.py`) entry points.
+"""Disaggregation helpers used by the SGLang worker.
 
-* :func:`compute_bootstrap_address` — resolve the `(host, port)` triple a
+* :func:`compute_bootstrap_address` — resolve the `(host, port)` pair a
   prefill worker advertises to decode peers from a live `sgl.Engine`.
-  Returns `(None, None)` on any failure so legacy callers can keep their
-  graceful-degradation behaviour; the unified path treats `None` as a
-  fatal configuration error and raises.
+  Returns `(None, None)` on any failure so callers can degrade gracefully.
 
 * :func:`get_sglang_worker_group_id` — normalize the SGLang multinode
   `dist_init_addr` into a runtime-data key that non-leader workers can use
@@ -23,15 +20,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
+from collections.abc import Mapping
+from typing import Any, Optional
 
 import sglang as sgl
+
+from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang.engine_generate import native_generate_payload
 
 # Matches the prior in-tree value. Long enough for the slowest cold-start
 # we've seen (TP8 70B with FlashInfer JIT).
 _PREFILL_WARMUP_TIMEOUT_S = 1800.0
 
 SGLANG_WORKER_GROUP_ID_KEY = "sglang_worker_group_id"
+
+
+def validate_disagg_parallel_sampling(request: Mapping[str, Any]) -> None:
+    """Reject parallel samples before creating a single-room KV handoff."""
+    inner_request = request.get("request", request)
+    native_payload = native_generate_payload(inner_request)
+    sampling_options = [
+        inner_request.get("sampling_options"),
+        request.get("sampling_params"),
+        {"n": inner_request.get("n")},
+    ]
+    if native_payload is not None:
+        sampling_options.append(native_payload.get("sampling_params"))
+    for options in sampling_options:
+        if options is None:
+            continue
+        if not isinstance(options, Mapping):
+            raise InvalidArgument(
+                "SGLang disaggregated sampling parameters must be an object."
+            )
+        if options.get("n") not in (None, 1):
+            # Prefill produces one bootstrap room. SGLang expands parallel
+            # decode samples into independent transfers that cannot all finish.
+            raise InvalidArgument(
+                "SGLang disaggregated serving supports only n=1. "
+                "Use aggregated serving or send separate n=1 requests.",
+            )
 
 
 def _network_address_cls():
@@ -49,8 +77,7 @@ def compute_bootstrap_address(
 
     Returns `(None, None)` when the engine doesn't advertise a
     `disaggregation_bootstrap_port` or when address resolution raises.
-    Caller decides whether `None` is fatal — legacy `register.py` treats
-    it as soft-skip; the unified path treats it as a fatal misconfig.
+    Callers treat `(None, None)` as a soft skip.
     """
     # Deferred to function body so pre-commit test collection can import
     # `_disagg` without sglang installed.

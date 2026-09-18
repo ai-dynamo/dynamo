@@ -156,7 +156,7 @@ Which parallelization mappings it sweeps depends on the model architecture:
 Beyond the strategy-specific rules covered under [Thorough](#thorough), the profiler enforces these at validation, before any GPUs are used:
 
 - **`sla.e2eLatency` cannot be combined with an explicit `sla.ttft` or `sla.itl`** — provide only one form. The request is rejected otherwise.
-- **An unachievable SLA is not fatal.** The profiler logs a warning, relaxes the SLA to the best achievable value, and continues.
+- **An unachievable SLA is handled per search strategy, and SLA targets are never relaxed.** With `searchStrategy: rapid`, profiling fails and no DGD is generated when no AIC experiment returns an SLA-feasible configuration (architectures AIC does not support fall back to the naive estimator instead). With `searchStrategy: thorough`, the profiler selects the closest measured configuration and logs a warning naming the best achievable latency. The generated DGD carries the SLA you submitted. The planner config carries your `sla.ttft` and `sla.itl` unless `features.planner` sets explicit values, which take precedence, and an `sla.e2eLatency` target is not propagated to the planner. See [SLA Cannot Be Met](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#sla-cannot-be-met) in the Profiler guide.
 - **A target load that exceeds the GPU budget is not fatal.** The profiler logs a warning and returns its best effort within budget.
 - **A model that spans more GPUs than one node provides needs a gang scheduler** (Grove or LWS); see [Multinode Orchestration](../installation/multinode-orchestration.md).
 
@@ -173,7 +173,7 @@ spec:
       enabled: true
 ```
 
-Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. For how the simulated backend works and how it models performance, see [Live Simulation with Mocker](../operations/simulation-with-dynosim/mocker-live-simulation.mdx).
+Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. Profiler-managed deployments and the public `python3 -m dynamo.mocker` command use the same live Mocker worker runtime.
 
 ## Accessing profiling artifacts
 
@@ -211,5 +211,5 @@ The interpolation `.npz` files are the same data the Planner consumes for autosc
 | Full field table and lifecycle | [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx) |
 | Copy-ready DGDR manifests | [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx) |
 | Runtime autoscaling from profiling data | [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md) |
-| Simulate engines without GPUs | [Live Simulation with Mocker](../operations/simulation-with-dynosim/mocker-live-simulation.mdx) |
+| Simulate engines without GPUs | [Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) |
 | Profiling algorithm internals and interpolation schema | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |

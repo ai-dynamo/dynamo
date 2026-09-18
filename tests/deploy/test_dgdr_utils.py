@@ -1,0 +1,409 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Unit tests for DynamoGraphDeploymentRequest lifecycle helpers."""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import aiohttp
+import pytest
+from kubernetes_asyncio import config
+
+import tests.deploy.test_dgdr as dgdr_tests
+from tests.deploy.dgdr_utils import (
+    DGDRCleanupError,
+    DGDRTestConfig,
+    ManagedDGDR,
+    parse_final_dgd,
+    parse_served_model_ids,
+    run_lifecycle,
+    unique_name,
+)
+
+pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+def test_all_dgdr_tests_have_ci_suite_prefix() -> None:
+    prefixes = (
+        "test_dgdr_validation_",
+        "test_dgdr_profiling_",
+        "test_dgdr_lifecycle_",
+    )
+    unassigned = sorted(
+        name
+        for name, value in vars(dgdr_tests).items()
+        if name.startswith("test_dgdr_")
+        and callable(value)
+        and not name.startswith(prefixes)
+    )
+    assert not unassigned, f"DGDR tests missing a CI suite prefix: {unassigned}"
+
+
+@pytest.mark.parametrize("name_prefix", ["", "ci-" + "x" * 60])
+def test_unique_name_fits_profiler_and_grove_limits(name_prefix: str) -> None:
+    config_ = DGDRTestConfig(
+        namespace="dgdr-lifecycle-30007208578-1",
+        image="test",
+        name_prefix=name_prefix,
+    )
+    name = unique_name(config_, "lifecycle-ready")
+
+    assert len(f"{name}-dgd") + len("TRTLLMPrefillWorker") <= 45
+    assert len(f"{config_.namespace}-{name}-dgd") <= 63
+
+
+async def test_init_propagates_unexpected_incluster_errors(monkeypatch) -> None:
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    error = RuntimeError("broken in-cluster configuration")
+    monkeypatch.setattr(
+        config,
+        "load_incluster_config",
+        MagicMock(side_effect=error),
+    )
+
+    with pytest.raises(RuntimeError, match="broken in-cluster configuration"):
+        await ManagedDGDR(
+            DGDRTestConfig(namespace="test-namespace", image="test")
+        ).init()
+
+
+async def test_init_falls_back_when_incluster_config_is_unavailable(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("KUBECONFIG", raising=False)
+    monkeypatch.setattr(
+        config,
+        "load_incluster_config",
+        MagicMock(side_effect=config.ConfigException("not running in a cluster")),
+    )
+    load_kube_config = AsyncMock()
+    monkeypatch.setattr(config, "load_kube_config", load_kube_config)
+    manager = ManagedDGDR(DGDRTestConfig(namespace="test-namespace", image="test"))
+
+    try:
+        await manager.init()
+        load_kube_config.assert_awaited_once_with()
+    finally:
+        await manager.close()
+
+
+def initialized_manager() -> ManagedDGDR:
+    manager = ManagedDGDR(DGDRTestConfig(namespace="test-namespace", image="test"))
+    manager.custom = MagicMock()
+    manager.core = MagicMock()
+    manager.batch = MagicMock()
+    manager.apiextensions = MagicMock()
+    return manager
+
+
+def vcluster_connection_error() -> aiohttp.ClientConnectorError:
+    connection_key = MagicMock(host="127.0.0.1", port=8443, ssl=True)
+    return aiohttp.ClientConnectorError(
+        connection_key,
+        ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("", "must contain at least one YAML document"),
+        ("kind: ConfigMap", "must be a DynamoGraphDeployment"),
+    ],
+)
+def test_parse_final_dgd_rejects_invalid_external_data(
+    content: str, message: str
+) -> None:
+    with pytest.raises(AssertionError, match=message):
+        parse_final_dgd(content)
+
+
+def test_parse_served_model_ids_matches_exact_ids() -> None:
+    content = '{"data": [{"id": "Qwen/Qwen3-0.6B"}, {"id": "Qwen3"}]}'
+
+    assert parse_served_model_ids(content) == {"Qwen/Qwen3-0.6B", "Qwen3"}
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_manifest_explicitly_trusts_known_remote_model(backend: str) -> None:
+    manager = SimpleNamespace(
+        config=DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            backend=backend,
+            mocker=False,
+        )
+    )
+
+    dgdr = dgdr_tests.manifest(manager, "remote-code")
+
+    overrides = dgdr["spec"]["overrides"]
+    assert overrides["trustRemoteCode"] is True
+    assert "dgd" not in overrides
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_manifest_does_not_pass_real_backend_args_to_mocker(backend: str) -> None:
+    manager = SimpleNamespace(
+        config=DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            backend=backend,
+        )
+    )
+
+    dgdr = dgdr_tests.manifest(manager, "mocker")
+
+    assert "overrides" not in dgdr["spec"]
+
+
+@pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
+def test_parse_served_model_ids_rejects_invalid_responses(content: str) -> None:
+    with pytest.raises(AssertionError, match="model-list response"):
+        parse_served_model_ids(content)
+
+
+async def test_lifecycle_uses_deployment_timeout_after_profiling() -> None:
+    manager = ManagedDGDR(
+        DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            profiling_timeout=17,
+            deploy_timeout=11,
+        )
+    )
+    manager.create = AsyncMock()
+    manager.wait_for_phase_at_least = AsyncMock(
+        return_value={"status": {"profilingJobName": "profiling-job"}}
+    )
+    manager.wait_for_phase = AsyncMock(
+        return_value={"status": {"dgdName": "deployment"}}
+    )
+
+    await run_lifecycle(
+        manager,
+        {"metadata": {"name": "request"}, "spec": {}},
+        verify_configmap=False,
+    )
+
+    manager.wait_for_phase.assert_awaited_once_with("request", "Deployed", 11)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_retries_vcluster_connection_refusals(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
+    manager.get = AsyncMock(
+        side_effect=[
+            aiohttp.ClientConnectorError(
+                connection_key,
+                ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+            ),
+            {"status": {"phase": "Ready"}},
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    result = await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert result == {"status": {"phase": "Ready"}}
+    assert manager.get.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+@pytest.mark.timeout(30)
+async def test_wait_for_phase_limits_vcluster_connection_retries(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    connection_key = MagicMock(host="127.0.0.1", port=1234, ssl=False)
+    manager.get = AsyncMock(
+        side_effect=aiohttp.ClientConnectorError(
+            connection_key,
+            ConnectionRefusedError(111, "vCluster tunnel unavailable"),
+        )
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
+        await manager.wait_for_phase("request", "Ready", timeout=30)
+
+    assert manager.get.await_count == 4
+    assert sleep.await_count == 3
+
+
+async def test_get_output_dgd_retries_vcluster_connection_refusal(
+    monkeypatch,
+) -> None:
+    manager = initialized_manager()
+    assert manager.core is not None
+    manager.core.read_namespaced_config_map = AsyncMock(
+        side_effect=[
+            vcluster_connection_error(),
+            SimpleNamespace(data={"final_config.yaml": "kind: DynamoGraphDeployment"}),
+        ]
+    )
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    result = await manager.get_output_dgd("request")
+
+    assert result["kind"] == "DynamoGraphDeployment"
+    assert manager.core.read_namespaced_config_map.await_count == 2
+    sleep.assert_awaited_once_with(5)
+
+
+async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:
+    manager = initialized_manager()
+    assert manager.custom is not None
+    manager._created_names = ["request"]
+    manager.get = AsyncMock(side_effect=[vcluster_connection_error(), None])
+    manager.custom.delete_namespaced_custom_object = AsyncMock(
+        side_effect=[vcluster_connection_error(), None]
+    )
+    manager._wait_until_dgdr_absent = AsyncMock()
+    manager._delete_output_configmap = AsyncMock()
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
+
+    await manager.cleanup(failed=False)
+
+    assert manager.get.await_count == 2
+    assert manager.custom.delete_namespaced_custom_object.await_count == 2
+    assert sleep.await_count == 2
+    assert manager._created_names == []
+
+
+async def test_cleanup_reports_all_failures_and_retains_failed_names() -> None:
+    manager = initialized_manager()
+    manager._created_names = ["first", "second", "third"]
+    calls = []
+
+    async def cleanup_name(name: str, failed: bool) -> None:
+        calls.append((name, failed))
+        if name != "second":
+            raise RuntimeError(f"could not delete {name}")
+
+    manager._cleanup_name = AsyncMock(side_effect=cleanup_name)
+
+    with pytest.raises(DGDRCleanupError) as error:
+        await manager.cleanup(failed=True)
+
+    assert calls == [("third", True), ("second", True), ("first", True)]
+    assert [name for name, _ in error.value.failures] == ["third", "first"]
+    assert manager._created_names == ["first", "third"]
+
+
+async def test_profiling_failure_diagnostics_include_job_and_pod_logs() -> None:
+    manager = initialized_manager()
+    assert manager.batch is not None
+    assert manager.core is not None
+
+    job = MagicMock()
+    job.to_str.return_value = "profiling job"
+    manager.batch.read_namespaced_job = AsyncMock(return_value=job)
+
+    pod = MagicMock()
+    pod.metadata.name = "profiling-pod"
+    pod.spec.init_containers = []
+    pod.spec.containers = [SimpleNamespace(name="profiler")]
+    pod.to_str.return_value = "profiling pod"
+    manager.core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[pod])
+    )
+    manager.core.read_namespaced_pod_log = AsyncMock(return_value="profiler logs")
+
+    await manager._log_diagnostics({"status": {"profilingJobName": "profiling-job"}})
+
+    manager.batch.read_namespaced_job.assert_awaited_once_with(
+        "profiling-job", "test-namespace"
+    )
+    manager.core.list_namespaced_pod.assert_awaited_once_with(
+        "test-namespace", label_selector="job-name=profiling-job"
+    )
+    manager.core.read_namespaced_pod_log.assert_awaited_once_with(
+        "profiling-pod",
+        "test-namespace",
+        container="profiler",
+        tail_lines=300,
+    )
+
+
+@pytest.mark.parametrize("diagnostic", ["dgd", "job", "pods", "logs"])
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_failed_test_cleanup_survives_diagnostic_transport_errors(
+    monkeypatch, caplog, diagnostic, recovers
+) -> None:
+    manager = initialized_manager()
+    manager._created_names = ["request"]
+    manager.get = AsyncMock(
+        return_value={
+            "status": {"dgdName": "deployment", "profilingJobName": "profiling"}
+        }
+    )
+    job = MagicMock()
+    job.to_str.return_value = "profiling job"
+    pod = MagicMock()
+    pod.metadata.name = "worker"
+    pod.spec.init_containers = []
+    pod.spec.containers = [
+        SimpleNamespace(name="first"),
+        SimpleNamespace(name="second"),
+    ]
+    pod.to_str.return_value = "worker pod"
+    manager.get_dgd = AsyncMock(return_value={"kind": "DynamoGraphDeployment"})
+    manager.batch.read_namespaced_job = AsyncMock(return_value=job)
+    manager.core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[pod])
+    )
+    manager.core.read_namespaced_pod_log = AsyncMock(return_value="container logs")
+    readers = {
+        "dgd": manager.get_dgd,
+        "job": manager.batch.read_namespaced_job,
+        "pods": manager.core.list_namespaced_pod,
+        "logs": manager.core.read_namespaced_pod_log,
+    }
+    reader = readers[diagnostic]
+    failures_left = 1 if recovers else 4
+
+    async def read(*args, **kwargs):
+        nonlocal failures_left
+        if failures_left:
+            failures_left -= 1
+            raise vcluster_connection_error()
+        return reader.return_value
+
+    reader.side_effect = read
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", AsyncMock())
+    manager.custom.delete_namespaced_custom_object = AsyncMock()
+    manager._wait_until_dgdr_absent = AsyncMock()
+    manager._wait_until_dgd_absent = AsyncMock()
+    manager._delete_profiling_job = AsyncMock()
+    manager._delete_output_configmap = AsyncMock()
+
+    await manager.cleanup(failed=True)
+
+    assert failures_left == 0
+    deleted = [
+        call.kwargs["name"]
+        for call in manager.custom.delete_namespaced_custom_object.await_args_list
+    ]
+    assert deleted == ["request", "deployment"]
+    manager._wait_until_dgdr_absent.assert_awaited_once_with("request")
+    manager._wait_until_dgd_absent.assert_awaited_once_with("deployment")
+    manager._delete_profiling_job.assert_awaited_once_with("profiling")
+    manager._delete_output_configmap.assert_awaited_once_with("request")
+    assert manager._created_names == []
+    if not recovers:
+        assert "Could not" in caplog.text
+    if diagnostic == "logs":
+        assert any(
+            call.kwargs["container"] == "second" for call in reader.await_args_list
+        )
+    if diagnostic in ("dgd", "job"):
+        assert reader.await_count == (2 if recovers else 4)

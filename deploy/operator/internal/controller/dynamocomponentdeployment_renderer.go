@@ -21,9 +21,11 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sync"
 
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -35,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -54,14 +57,14 @@ type dcdWorkloadRenderer struct {
 	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commonController.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newDCDWorkloadRenderer(
 	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *dcdWorkloadRenderer {
 	return &dcdWorkloadRenderer{
 		reader:                reader,
@@ -86,17 +89,18 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	if err != nil {
 		return nil, nil, err
 	}
+	containerGPUs := r.containerGPUCount(ctx, dcd)
 
 	leaderLabels := make(map[string]string, len(podLabels))
 	maps.Copy(leaderLabels, podLabels)
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels)
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels, containerGPUs)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	workerLabels := make(map[string]string, len(podLabels))
 	maps.Copy(workerLabels, podLabels)
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels, containerGPUs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -104,12 +108,22 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
 }
 
+func (r *dcdWorkloadRenderer) containerGPUCount(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) dynamo.ContainerGPUCount {
+	return sync.OnceValues(func() (int64, error) {
+		return dynamo.ResolveContainerGPUs(ctx, r.reader, dcd.Namespace, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	})
+}
+
 func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader)
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader, containerGPUs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
@@ -129,8 +143,9 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker)
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker, containerGPUs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
@@ -150,6 +165,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	role dynamo.Role,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
 	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
@@ -184,30 +200,9 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		podLabels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 	}
 
-	var checkpointInfo *checkpoint.CheckpointInfo
-	if checkpointConfig := dynamo.GetCheckpoint(component); r.runtimeConfig.Gate.Enabled(features.Checkpoint) && checkpointConfig != nil {
-		info, err := checkpoint.ResolveCheckpointForService(
-			ctx,
-			r.reader,
-			dcd.Namespace,
-			dynamo.ToAlphaCheckpointConfig(checkpointConfig),
-			r.runtimeConfig.Gate,
-		)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to resolve checkpoint")
-		}
-		if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
-			info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
-		}
-		if err := gms.OverlayClients(
-			&info.GPUMemoryService,
-			info.CheckpointName,
-			info.Exists,
-			dynamo.GetGPUMemoryService(component),
-		); err != nil {
-			return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
-		}
-		checkpointInfo = info
+	checkpointInfo, err := r.resolveCheckpointInfo(ctx, dcd, component)
+	if err != nil {
+		return nil, err
 	}
 
 	podSpec, err := dynamo.GenerateBasePodSpecForController(
@@ -216,7 +211,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		r.config,
 		role,
 		commonconsts.MultinodeDeploymentTypeLWS,
-		checkpointInfo,
+		containerGPUs,
 		dynamo.GenerateBasePodSpecForControllerOptions{
 			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
 		},
@@ -224,23 +219,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate base pod spec")
 	}
-	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
-		if checkpointInfo == nil ||
-			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyWaitForCheckpoint) {
-			if err := checkpoint.InjectCheckpointIntoPodSpecWithStorageConfig(
-				ctx,
-				r.reader,
-				dcd.Namespace,
-				podSpec,
-				checkpointInfo,
-				r.config.Checkpoint.Storage,
-				r.config.Checkpoint.EffectiveSeccompProfile(),
-			); err != nil {
-				return nil, errors.Wrap(err, "failed to inject checkpoint config")
-			}
-		}
-	}
-
 	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
 	}
@@ -252,19 +230,10 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		podLabels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
 	}
 
-	if checkpointInfo != nil &&
-		(checkpointInfo.StartupPolicy == "" ||
-			string(checkpointInfo.StartupPolicy) == string(nvidiacomv1beta1.CheckpointStartupPolicyImmediate)) {
-		if err := checkpoint.ApplyRestoreCandidateMetadata(podLabels, podAnnotations, checkpointInfo); err != nil {
+	if r.runtimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := checkpoint.ApplyRestoreCandidateMetadata(podAnnotations, checkpointInfo); err != nil {
 			return nil, errors.Wrap(err, "failed to apply checkpoint candidate metadata")
 		}
-	} else if err := checkpoint.ApplyRestorePodMetadataWithStorageConfig(
-		podLabels,
-		podAnnotations,
-		checkpointInfo,
-		r.config.Checkpoint.Storage,
-	); err != nil {
-		return nil, errors.Wrap(err, "failed to apply checkpoint metadata")
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -289,6 +258,123 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		},
 		Spec: *podSpec,
 	}, nil
+}
+
+func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (*checkpoint.CheckpointInfo, error) {
+	checkpointConfig := dynamo.GetCheckpoint(component)
+	if !r.runtimeConfig.Gate.Enabled(features.Checkpoint) || checkpointConfig == nil {
+		return nil, nil
+	}
+
+	alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
+	expectedCompatibilityHash := dynamo.GetPodTemplateAnnotations(component)[commonconsts.SnapshotCandidateCompatibilityHashAnnotation]
+	automaticSnapshotJob, err := automaticSnapshotJobReferenceForDCD(dcd)
+	if err != nil {
+		return nil, err
+	}
+	var info *checkpoint.CheckpointInfo
+	if checkpointConfig.CheckpointRef == nil || *checkpointConfig.CheckpointRef == "" {
+		// A DGD-generated DCD temporarily has no reference while its automatic
+		// SnapshotJob is pending.
+		startupPolicy := alphaCheckpointConfig.StartupPolicy
+		if startupPolicy == "" {
+			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+		}
+		info = &checkpoint.CheckpointInfo{
+			Enabled:                   true,
+			AutomaticCapture:          automaticSnapshotJob != nil,
+			StartupPolicy:             startupPolicy,
+			SnapshotCompatibilityHash: expectedCompatibilityHash,
+			AutomaticSnapshotJob:      automaticSnapshotJob,
+		}
+		// Preserve an explicit capture target across the pending-to-Ready handoff.
+		if alphaCheckpointConfig.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
+		}
+	} else {
+		info, err = checkpoint.ResolvePodSnapshotForService(
+			ctx,
+			r.reader,
+			dcd.Namespace,
+			alphaCheckpointConfig,
+			expectedCompatibilityHash,
+			podSnapshotUseForDCD(dcd, automaticSnapshotJob),
+		)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to resolve checkpoint")
+		}
+		if automaticSnapshotJob != nil {
+			info.AutomaticCapture = true
+			info.AutomaticSnapshotJob = automaticSnapshotJob
+		}
+	}
+	if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
+		info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
+	}
+
+	serviceGMS := dynamo.GetGPUMemoryService(component)
+	if info.NativeSnapshot != nil {
+		err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
+	} else {
+		err = gms.OverlayClients(&info.GPUMemoryService, info.CheckpointName, info.Exists, serviceGMS)
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
+	}
+	return info, nil
+}
+
+func podSnapshotUseForDCD(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	automaticSnapshotJob *checkpoint.SnapshotJobReference,
+) checkpoint.PodSnapshotUse {
+	if automaticSnapshotJob == nil {
+		return checkpoint.ExplicitPodSnapshotUse()
+	}
+	ownerUID, managed := managedDGDUIDForDCD(dcd)
+	if !managed {
+		return checkpoint.ExplicitPodSnapshotUse()
+	}
+	return checkpoint.ManagedPodSnapshotUse(ownerUID)
+}
+
+func automaticSnapshotJobReferenceForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (*checkpoint.SnapshotJobReference, error) {
+	if _, managed := managedDGDUIDForDCD(dcd); !managed {
+		return nil, nil
+	}
+	reference, found, err := checkpoint.AutomaticSnapshotJobReferenceFromAnnotations(
+		dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid automatic SnapshotJob restore candidate")
+	}
+	if !found {
+		return nil, nil
+	}
+	return reference, nil
+}
+
+func managedDGDUIDForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (types.UID, bool) {
+	// A concrete DGD controller reference selects the supported managed path;
+	// Kubernetes authorization remains the security boundary for Snapshot access.
+	controller := metav1.GetControllerOf(dcd)
+	if controller == nil ||
+		controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind ||
+		controller.UID == "" {
+		return "", false
+	}
+
+	// Accept any served DGD API version from Dynamo's API group.
+	groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
+	if err != nil || groupVersion.Group != nvidiacomv1beta1.GroupVersion.Group {
+		return "", false
+	}
+
+	return controller.UID, true
 }
 
 func (r *dcdWorkloadRenderer) generateService(

@@ -67,12 +67,9 @@ class SnapshotConfig:
             self._cleanup_ready_and_sentinels()
 
         if event == "restore":
-            logger.info("Restore sentinel detected")
-            logger.info("Resuming model after restore")
-            await pause_controller.resume()
-            pause_controller.mark_resumed()
-            # The checkpoint is complete; post-restore model registration may
-            # need normal Hugging Face cache/download behavior.
+            # Stay paused so backends can refresh restore env, create the
+            # runtime, then call elect_and_wake().
+            logger.info("Restore sentinel detected; returning application-paused")
             os.environ.pop("HF_HUB_OFFLINE", None)
             return True
 
@@ -90,10 +87,11 @@ class SnapshotConfig:
             await asyncio.sleep(SENTINEL_POLL_INTERVAL_SEC)
 
     def _cleanup_ready_and_sentinels(self) -> None:
+        # Keep restore-complete for the kubelet startup probe; the snapshot agent
+        # removes it before restoring the next container incarnation.
         for name in (
             READY_FOR_SNAPSHOT_FILE,
             SNAPSHOT_COMPLETE_FILE,
-            RESTORE_COMPLETE_FILE,
         ):
             path = os.path.join(self.control_dir, name)
             try:
@@ -174,3 +172,56 @@ class EngineSnapshotController(Generic[EngineT]):
             self.pause_controller,
             *self.pause_args,
         )
+
+
+async def elect_and_wake(
+    pause_controller: Any,
+    runtime: Any | None = None,
+    *,
+    lock_path: str | None = None,
+    failover_metrics: Any = None,
+) -> Any | None:
+    """Elect a single engine via flock, then wake it.
+
+    Shared by both failover flows. The engine must already be paused: a
+    snapshot-restored engine arrives that way, and a cold-start shadow sleeps
+    itself before calling. With no ``lock_path`` there is no election and the
+    engine simply resumes.
+
+    Returns the acquired lock, or None when no election ran. The flock lives on
+    the lock's open fd, so callers need not retain it: the kernel releases it
+    when the process exits.
+    """
+    if lock_path is None:
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH")
+
+    lock = None
+    if lock_path:
+        if failover_metrics is not None:
+            failover_metrics.set_state("standby")
+        if runtime is not None:
+            # Healthy while paused, so Kubernetes does not kill the standby
+            # during a long outage.
+            # TODO(failover): no engine monitor watches this engine while we
+            # block below, so a standby that dies here keeps reporting healthy
+            # until it wins the lock and fails to wake.
+            runtime.set_health_status(True)
+        logger.info(
+            "[Shadow] Engine paused, startup probe now passing, waiting for lock"
+        )
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{os.environ.get('ENGINE_ID', '0')}")
+        logger.info("[Shadow] Lock acquired, waking engine")
+        if failover_metrics is not None:
+            failover_metrics.set_state("waking")
+            if lock.was_contended:
+                # Only a contended acquire is a failover; a bootup is not a switch.
+                failover_metrics.record_switch_attempt()
+
+    await pause_controller.resume()
+    pause_controller.mark_resumed()
+    if lock is not None:
+        logger.info("[Shadow] Engine awake, registering with discovery")
+    return lock
