@@ -127,7 +127,7 @@ const testCases = [
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/trtllm/proto/trtllm_service.proto',
+    file: 'lib/sidecar/trtllm/proto/openengine/v1/generation.proto',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },
