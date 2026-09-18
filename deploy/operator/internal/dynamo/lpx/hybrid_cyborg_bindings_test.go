@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,7 +27,6 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 		Models:          []string{"default"},
 		RuntimeBuildRef: "model-build",
 		BuildSnapshot:   normalizeTestSnapshot(t, snapshot),
-		ModelSettings:   json.RawMessage(`{"prop_sync":false}`),
 	})
 	require.NoError(t, err)
 	projection := projectionBatch[0]
@@ -97,7 +95,7 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 				fixture.partitions[index].id = uint32(index)
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX, `{"prop_sync":false}`)
+			projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineLPX)
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")

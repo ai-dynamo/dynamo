@@ -11529,11 +11529,6 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
-                          settings:
-                            description: settings configure model placement. Runtime options belong in role pod templates.
-                            nullable: true
-                            type: object
-                            x-kubernetes-preserve-unknown-fields: true
                         required:
                           - buildId
                         type: object
@@ -21072,11 +21067,6 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
-                          settings:
-                            description: settings configure model placement. Runtime options belong in role pod templates.
-                            nullable: true
-                            type: object
-                            x-kubernetes-preserve-unknown-fields: true
                         required:
                           - buildId
                         type: object

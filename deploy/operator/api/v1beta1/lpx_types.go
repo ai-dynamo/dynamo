@@ -3,21 +3,13 @@
 
 package v1beta1
 
-import (
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-)
+import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-// LPXConfig identifies the component's compiled model and placement settings.
+// LPXConfig identifies the component's compiled model.
 type LPXConfig struct {
 	// buildId references the immutable model build.
 	// +kubebuilder:validation:MinLength=1
 	BuildID string `json:"buildId"`
-	// settings configure model placement. Runtime options belong in role pod templates.
-	// +optional
-	// +kubebuilder:validation:Type=object
-	// +nullable
-	Settings *apiextensionsv1.JSON `json:"settings,omitempty"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.

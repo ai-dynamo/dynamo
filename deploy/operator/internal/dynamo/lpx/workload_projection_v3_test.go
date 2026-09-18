@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"encoding/json"
 	"testing"
 
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
@@ -206,17 +205,11 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 		}]}
 	}`, string(spec.AllocationMetadata.Raw))
 
-	t.Log("Reject model settings that disable a manifest-selected chain")
-	intent.ModelSettings = json.RawMessage(`{"prop_sync":false}`)
-	_, err = appendModelProjections(nil, intent)
-	require.ErrorContains(t, err, "manifest-selected prop-sync chains require settings.prop_sync=true")
-
-	t.Log("Reject global prop sync without manifest-selected evidence in an LPU-only build")
+	t.Log("Reject a multi-partition LPU-only build without its complete manifest-selected chain")
 	fixture.selectedPropSyncChains = nil
 	intent.BuildSnapshot = normalizeTestSnapshot(t, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
-	intent.ModelSettings = json.RawMessage(`{"prop_sync":true}`)
 	_, err = appendModelProjections(nil, intent)
-	require.ErrorContains(t, err, "settings.prop_sync=true requires a manifest-selected prop-sync chain")
+	require.ErrorContains(t, err, "LPU-only workloads require a complete adjacent prop-sync connector chain")
 
 	t.Log("Extend the native selected chain across three HX artifacts with distinct opaque topology names")
 	third := fixture.partitions[0]
@@ -226,7 +219,6 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2, 3}}
 	writeTestV3CapnpManifest(t, buildDir, fixture)
 	intent.BuildSnapshot = normalizeTestSnapshot(t, acquireTestSnapshot(t, buildDir))
-	intent.ModelSettings = nil
 	projectionBatch, err = appendModelProjections(nil, intent)
 	require.NoError(t, err)
 	projection = projectionBatch[0]
@@ -256,7 +248,7 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 	snapshot := acquireTestSnapshot(t, buildDir)
 
 	t.Log("Project the multi-node prop-sync chain")
-	projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineSingle, "")
+	projection := projectTestBuild(t, normalizeTestSnapshot(t, snapshot), PipelineSingle)
 
 	t.Log("Project logical connections from the source partition's final node")
 	spec := projection.RequestSpec(&MaterializationPlan{}, "agents")

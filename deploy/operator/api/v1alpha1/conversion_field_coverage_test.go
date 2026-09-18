@@ -62,7 +62,6 @@ DynamoComponentDeploymentSpec.experimental.grove.forceScalingGroup
 DynamoComponentDeploymentSpec.frontendSidecar
 DynamoComponentDeploymentSpec.globalDynamoNamespace
 DynamoComponentDeploymentSpec.lpx.buildId
-DynamoComponentDeploymentSpec.lpx.settings
 DynamoComponentDeploymentSpec.minAvailable
 DynamoComponentDeploymentSpec.modelRef.name
 DynamoComponentDeploymentSpec.modelRef.revision
@@ -136,7 +135,6 @@ DynamoGraphDeploymentSpec.components.experimental.grove.forceScalingGroup
 DynamoGraphDeploymentSpec.components.frontendSidecar
 DynamoGraphDeploymentSpec.components.globalDynamoNamespace
 DynamoGraphDeploymentSpec.components.lpx.buildId
-DynamoGraphDeploymentSpec.components.lpx.settings
 DynamoGraphDeploymentSpec.components.minAvailable
 DynamoGraphDeploymentSpec.components.modelRef.name
 DynamoGraphDeploymentSpec.components.modelRef.revision

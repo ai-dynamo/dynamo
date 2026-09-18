@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -24,7 +23,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	t.Log("Project a hybrid engine with the longest PCS name and maximum scheduling replica count")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	projection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyHx16x8x2x3, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
+	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
 	projection.configuredBuild.IOFPGACount = 1
 	projection.configuredBuild.IOFanoutFactor = 1

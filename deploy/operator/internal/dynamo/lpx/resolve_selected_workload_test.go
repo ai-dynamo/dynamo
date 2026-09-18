@@ -15,7 +15,6 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
@@ -170,14 +169,12 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Acquire the selected family fixtures: shared XT build or distinct HX snapshots")
 			var draftSnapshot, targetSnapshot *BuildSnapshot
-			var settings *apiextensionsv1.JSON
 			if test.family == BuildFamilyHX {
 				draftSnapshot = acquireTestSnapshot(t, writeV3CompilerFixture(t))
 				targetSnapshot = acquireTestSnapshot(t, writeV3CompilerFixture(t))
 			} else {
 				draftSnapshot = acquireTestSnapshot(t, writeV2CompilerFixture(t))
 				targetSnapshot = draftSnapshot
-				settings = &apiextensionsv1.JSON{Raw: []byte(`{ "prop_sync": true }`)}
 			}
 
 			t.Log("Build a selected SpecDecode DGD for the fixture's manifest generation")
@@ -185,8 +182,6 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				testLPXComponent("lpx", "target-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 				testLPXComponent("small", "draft-build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}),
 			)
-			dgd.Spec.Components[0].LPX.Settings = settings
-			dgd.Spec.Components[1].LPX.Settings = settings.DeepCopy()
 			dgd.Spec.Components[1].Replicas = ptr.To(int32(2))
 			compiledAgentCount := int32(1)
 			if test.family == BuildFamilyXT {

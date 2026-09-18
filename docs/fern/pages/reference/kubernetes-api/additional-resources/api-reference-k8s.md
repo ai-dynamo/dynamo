@@ -2509,7 +2509,7 @@ _Appears in:_
 
 
 
-LPXConfig identifies the component's compiled model and placement settings.
+LPXConfig identifies the component's compiled model.
 
 
 
@@ -2520,7 +2520,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
-| `settings` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io)_ | settings configure model placement. Runtime options belong in role pod templates. |  | Type: object <br />Optional: \{\} <br /> |
 
 
 #### MockerSpec

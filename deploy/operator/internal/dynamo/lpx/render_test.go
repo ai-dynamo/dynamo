@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -81,7 +80,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Seed conflicting runtime annotations and a nondefault mount")
-			projection := projectRenderFixture(t, test.family, test.pipeline, test.snapshot)
+			projection := projectRenderFixture(t, test.pipeline, test.snapshot)
 			require.NotEqual(t, projection.Digest().String(), projection.CompilerSnapshotDigest())
 			pcs := renderTestPCS(test.pipeline == PipelineLPX)
 			pcs.Annotations = map[string]string{
@@ -157,7 +156,7 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 
 	t.Log("Project an LPU-only model with template-owned runtime settings")
 	snapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
-	projection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyXt8888, PipelineSingle, snapshot)
+	projection := projectRenderFixture(t, PipelineSingle, snapshot)
 
 	t.Log("Construct a base PodSpec with model binding and custom placement")
 	modelAnnotationSource := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
@@ -315,14 +314,11 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	}
 }
 
-func projectRenderFixture(t *testing.T, family lpxv1alpha1.TargetFamily, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
+func projectRenderFixture(t *testing.T, pipeline Pipeline, snapshot *BuildSnapshot) *ModelProjection {
 	t.Helper()
 	intent := ModelProjectionInput{
 		Pipeline: pipeline,
 		Models:   []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: normalizeTestSnapshot(t, snapshot),
-	}
-	if family == lpxv1alpha1.TargetFamilyXt8888 {
-		intent.ModelSettings = json.RawMessage(`{"prop_sync":true}`)
 	}
 	projectionBatch, err := appendModelProjections(nil, intent)
 	require.NoError(t, err)

@@ -6,14 +6,10 @@
 package lpx
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"hash"
-	"maps"
-	"slices"
 )
 
 const (
@@ -27,46 +23,16 @@ const (
 // appendModelProjections appends one component's immutable model projections to
 // the caller-owned destination, which may be nil. Existing elements are unchanged.
 // intent.BuildSnapshot contains a normalized, non-nil build; Models is nonempty
-// and Pipeline is selected by the validated resolver. ModelSettings is API-validated
-// JSON: omitted, null or an object. Source inputs are not mutated; discard error results.
+// and Pipeline is selected by the validated resolver. Source inputs are not mutated;
+// discard error results.
 func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	const propSyncSetting = "prop_sync"
-
-	modelSettings, modelSettingsObject := canonicalModelSettings(intent.ModelSettings)
-	intent.ModelSettings = modelSettings
-
-	// Hybrid runtimes read their manifests directly; only XT scheduler controls are consumed here.
-	if intent.Pipeline == PipelineLPX {
-		for key := range modelSettingsObject {
-			if intent.BuildSnapshot.build.Family != BuildFamilyXT ||
-				(key != propSyncSetting && key != "prop_sync_multiple_load_sets") {
-				return nil, fmt.Errorf("hybrid %s workloads do not support runtime settings overrides", intent.BuildSnapshot.build.Family)
-			}
-		}
-	} else {
-		// Conductor templates own runtime configuration; model settings only affect placement.
-		for _, key := range slices.Sorted(maps.Keys(modelSettingsObject)) {
-			switch key {
-			case "cpu_embeddings", propSyncSetting, "prop_sync_multiple_load_sets":
-				if _, ok := modelSettingsObject[key].(bool); !ok {
-					return nil, fmt.Errorf("model settings.%s must be a boolean", key)
-				}
-				if intent.BuildSnapshot.build.Family == BuildFamilyHX && key != propSyncSetting {
-					return nil, fmt.Errorf("model settings.%s is not used for HX placement; configure runtime options in the conductor podTemplate", key)
-				}
-			default:
-				return nil, fmt.Errorf("model settings.%s is a runtime setting; configure it in the conductor podTemplate", key)
-			}
-		}
-	}
-
 	var projections []*ModelProjection
 	var err error
 	switch intent.BuildSnapshot.build.Family {
 	case BuildFamilyXT:
-		projections, err = appendV2ModelProjections(dst, intent, modelSettingsObject)
+		projections, err = appendV2ModelProjections(dst, intent)
 	case BuildFamilyHX:
-		projections, err = appendV3ModelProjections(dst, intent, modelSettingsObject)
+		projections, err = appendV3ModelProjections(dst, intent)
 	default:
 		return nil, fmt.Errorf("unsupported LPX target family %q", intent.BuildSnapshot.build.Family)
 	}
@@ -104,27 +70,6 @@ func workloadSetDigest(projections []*ModelProjection) (WorkloadDigest, error) {
 	return transcript.sum(), nil
 }
 
-// canonicalModelSettings canonicalizes an API-validated optional JSON object.
-func canonicalModelSettings(raw json.RawMessage) (json.RawMessage, map[string]any) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-		return nil, make(map[string]any)
-	}
-
-	// Decode the admitted object while preserving number spellings for identity.
-	decoder := json.NewDecoder(bytes.NewReader(trimmed))
-	decoder.UseNumber()
-	var object map[string]any
-	_ = decoder.Decode(&object)
-
-	// Decoder-owned values encode infallibly in memory; drop Encoder's documented trailing newline.
-	var output bytes.Buffer
-	encoder := json.NewEncoder(&output)
-	encoder.SetEscapeHTML(false)
-	_ = encoder.Encode(object)
-	return output.Bytes()[:output.Len()-1], object
-}
-
 func newModelProjectionTranscripts(intent ModelProjectionInput, projectionVersion string) []digestTranscript {
 	// Each logical model owns a fresh hash while sharing the component's canonical inputs.
 	transcripts := make([]digestTranscript, len(intent.Models))
@@ -155,7 +100,6 @@ func newModelProjectionTranscripts(intent ModelProjectionInput, projectionVersio
 		transcript.field("workload-mode", []byte(mode))
 
 		transcript.field("model", []byte(model))
-		transcript.field("model-settings", intent.ModelSettings)
 	}
 	return transcripts
 }

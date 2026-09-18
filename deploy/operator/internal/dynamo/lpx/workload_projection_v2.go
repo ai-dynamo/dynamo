@@ -14,52 +14,26 @@ import (
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 )
 
-const (
-	v2ProjectionVersion               = "v2-xt-node-local/v1"
-	maxPropSyncMultipleLoadSetsOffset = int64(3)
-)
+const v2ProjectionVersion = "v2-xt-node-local/v1"
 
 //nolint:gocyclo // V2 projection validates one complete transformation.
-func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInput, modelSettings map[string]any) ([]*ModelProjection, error) {
+func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
 	configured := *intent.BuildSnapshot.build
 	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
 		intent.Pipeline == PipelineSpecDecode
-	build := &configured
-	ioFPGACount, ioFanoutFactor := build.IOFPGACount, build.IOFanoutFactor
-	propSyncEnabled := build.CompilationMode == BuildCompilationModeLPUOnly && len(build.SelectedPropSyncChains) > 0
+	ioFPGACount, ioFanoutFactor := configured.IOFPGACount, configured.IOFanoutFactor
 	connectorBuild := intent.BuildSnapshot.build
 
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
 	if usesResolvedRuntime {
-		cpuEmbeddings := configured.SupportsCPUEmbeddings
-		if value, overridden := modelSettings["cpu_embeddings"]; overridden {
-			cpuEmbeddings = value.(bool)
-		}
 		if err := configured.consumeRuntimeSelectedPropSyncChain(); err != nil {
 			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
 		}
 
 		// Omit host-only embeddings by retaining a view of the immutable source partitions.
-		if cpuEmbeddings && configured.SupportsCPUEmbeddings && configured.StandaloneTokenEmbeddings &&
+		if configured.SupportsCPUEmbeddings && configured.StandaloneTokenEmbeddings &&
 			len(configured.Partitions) > 1 && configured.Partitions[0].SourcePartitionID == 0 {
 			configured.Partitions = configured.Partitions[1:]
-		}
-	}
-	if value, present := modelSettings["prop_sync"]; present {
-		enabled, ok := value.(bool)
-		if !ok {
-			return nil, fmt.Errorf("model settings.prop_sync must be a boolean")
-		}
-		propSyncEnabled = enabled
-	}
-	maxInterPartitionOffset := int64(0)
-	if value, present := modelSettings["prop_sync_multiple_load_sets"]; present {
-		multiple, ok := value.(bool)
-		if !ok {
-			return nil, fmt.Errorf("model settings.prop_sync_multiple_load_sets must be a boolean")
-		}
-		if multiple {
-			maxInterPartitionOffset = maxPropSyncMultipleLoadSetsOffset
 		}
 	}
 
@@ -70,12 +44,6 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	for index := range transcripts {
 		transcript := &transcripts[index]
 		transcript.field("input-embeddings-on-gpu", []byte{1})
-		if propSyncEnabled {
-			transcript.field("effective-prop-sync", []byte{1})
-		} else {
-			transcript.field("effective-prop-sync", []byte{0})
-		}
-		transcript.intField("max-inter-partition-offset", maxInterPartitionOffset)
 		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
 	}
 
@@ -96,7 +64,7 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 			transcripts[modelIndex].field("xt-shape", []byte(shape))
 		}
 	}
-	connectors, err := v2Connectors(connectorBuild, partitions, propSyncEnabled, maxInterPartitionOffset)
+	connectors, err := v2Connectors(connectorBuild, partitions)
 	if err != nil {
 		return nil, err
 	}
@@ -177,15 +145,10 @@ func xtShape(chipCount int) (lpxv1alpha1.Xt8888PartitionShape, int64, error) {
 func v2Connectors(
 	build *Build,
 	partitions []BuildPartition,
-	propSyncEnabled bool,
-	maxOffset int64,
 ) ([]lpxv1alpha1.PropSyncConnectorRequest, error) {
-	// Require compiler-authored relationships whenever prop-sync is enabled.
+	// Only compiler-selected relationships impose placement constraints.
 	if len(build.SelectedPropSyncChains) == 0 {
-		if !propSyncEnabled {
-			return []lpxv1alpha1.PropSyncConnectorRequest{}, nil
-		}
-		return nil, fmt.Errorf("manifest v2 settings.prop_sync=true requires a selected prop-sync chain")
+		return []lpxv1alpha1.PropSyncConnectorRequest{}, nil
 	}
 
 	// Validate explicit chains before ordering their scheduler edges.
@@ -215,7 +178,7 @@ func v2Connectors(
 		if i+1 >= len(partitions) {
 			break
 		}
-		offset := maxOffset
+		offset := int64(0)
 		connectors = append(connectors, lpxv1alpha1.PropSyncConnectorRequest{
 			FromPartitionID: fmt.Sprintf("partition-%03d", i),
 			ToPartitionID:   fmt.Sprintf("partition-%03d", i+1),

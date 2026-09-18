@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -95,13 +94,12 @@ func normalizeTestSnapshot(t *testing.T, snapshot *BuildSnapshot) NormalizedBuil
 	return normalized
 }
 
-func projectTestBuild(t *testing.T, snapshot NormalizedBuildSnapshot,
-	pipeline Pipeline, settings string) *ModelProjection {
+func projectTestBuild(t *testing.T, snapshot NormalizedBuildSnapshot, pipeline Pipeline) *ModelProjection {
 	t.Helper()
 
-	t.Log("Project the caller-owned normalized build with the requested model settings")
+	t.Log("Project the caller-owned normalized build for the selected pipeline")
 	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: snapshot, ModelSettings: json.RawMessage(settings),
+		Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: snapshot,
 	})
 	require.NoError(t, err)
 	return projectionBatch[0]

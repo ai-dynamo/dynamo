@@ -26,7 +26,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c27c1242c5beb1b585c26d005fcbf0844369c7b173e3b6547b18aa62bd4b3351
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
@@ -43,7 +43,7 @@ spec:
         nvidia.com/extra-resources-hash: dc7a6b2e2078e8215ec068db5b51870b05382a0252a8e8c788c34b1173fe44ca
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:1b19ea57d294e47602beabc264d0173ec31a48c53cb5c411a0dd53e19a4880f1
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c27c1242c5beb1b585c26d005fcbf0844369c7b173e3b6547b18aa62bd4b3351
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
@@ -204,7 +204,7 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c27c1242c5beb1b585c26d005fcbf0844369c7b173e3b6547b18aa62bd4b3351
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
@@ -343,7 +343,7 @@ spec:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
         scheduling.lpu.nvidia.com/dgd-uid: 44444444-4444-4444-8444-444444444444
-        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8fdccd781b4850f821d63b39d26c3a176fc1a06c246b350af31af22c7542bd64
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c27c1242c5beb1b585c26d005fcbf0844369c7b173e3b6547b18aa62bd4b3351
       cliqueNames:
       - agt
       - cond

@@ -3667,7 +3667,7 @@ preferredWeight is required and used only when enforcement is "preferred". Highe
 </Accordion>
 
 <Accordion id="lpxconfig" title="LPXConfig">
-LPXConfig identifies the component's compiled model and placement settings.
+LPXConfig identifies the component's compiled model.
 
 
 **Kind:** `type`
@@ -3676,12 +3676,6 @@ LPXConfig identifies the component's compiled model and placement settings.
 <ParamField path="buildId" type="string">
 buildId references the immutable model build.
 **Validation:** MinLength: 1
-</ParamField>
-
-<ParamField path="settings" type="JSON">
-settings configure model placement. Runtime options belong in role pod templates.
-See [JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#json-v1-apiextensions-k8s-io).
-**Validation:** Type: object  Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 

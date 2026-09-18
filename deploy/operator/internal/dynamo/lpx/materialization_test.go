@@ -12,7 +12,6 @@ import (
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/validation"
 )
@@ -24,8 +23,8 @@ func TestPlanMaterializationBounds(t *testing.T) {
 	snapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	hybrid := newV2CompilerFixture()
 	hybrid.compilationMode = manifestcapnp.CompilationMode_lpx
-	hybridProjection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyXt8888, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)))
-	lpuOnlyProjection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyXt8888, PipelineSingle, snapshot)
+	hybridProjection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, hybrid)))
+	lpuOnlyProjection := projectRenderFixture(t, PipelineSingle, snapshot)
 
 	t.Log("Reserve readable roles at the maximum PCS length and scheduling replica count")
 	for _, test := range []struct {

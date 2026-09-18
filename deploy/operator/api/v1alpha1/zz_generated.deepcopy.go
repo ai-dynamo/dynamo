@@ -461,7 +461,7 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 	if in.LPX != nil {
 		in, out := &in.LPX, &out.LPX
 		*out = new(v1beta1.LPXConfig)
-		(*in).DeepCopyInto(*out)
+		**out = **in
 	}
 	if in.Checkpoint != nil {
 		in, out := &in.Checkpoint, &out.Checkpoint

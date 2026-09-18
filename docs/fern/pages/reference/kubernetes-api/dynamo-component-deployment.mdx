@@ -59,7 +59,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="lpx" type="LPXConfig">
-  DGD-only compiled-model configuration. Set `buildId`; see [LPXConfig](full-api-reference.mdx#lpxconfig) for the field definitions. LPU-only Single and SpecDecode accept only boolean placement `settings`: `prop_sync`, plus XT-only `cpu_embeddings` and `prop_sync_multiple_load_sets`. Runtime options belong in the conductor pod template.
+  DGD-only compiled-model configuration. Set `buildId`; placement comes from the build manifest. Runtime options belong in role pod templates. See [LPXConfig](full-api-reference.mdx#lpxconfig).
 </ParamField>
 
 <ParamField path="replicas" type="integer">

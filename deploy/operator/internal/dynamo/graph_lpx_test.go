@@ -244,9 +244,6 @@ func TestLPXInputRevision(t *testing.T) {
 			lpx.ServingComponent(d).TopologyConstraint = &v1beta1.TopologyConstraint{PackDomain: "rack"}
 		}},
 		{"component/build", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).LPX.BuildID = "next-build" }},
-		{"component/settings", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{"prop_sync":false}`)}
-		}},
 		{"agent/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
 			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(int32(4))
 		}},

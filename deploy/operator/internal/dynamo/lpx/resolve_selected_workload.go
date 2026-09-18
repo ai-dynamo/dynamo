@@ -7,7 +7,6 @@ package lpx
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -50,10 +49,7 @@ func ResolveSelectedWorkload(
 	for index, stage := range components {
 		model := stage.LPX
 		configuredModel := stage.ComponentName
-		var modelSettings json.RawMessage
-		if model.Settings != nil {
-			modelSettings = model.Settings.Raw
-		}
+
 		// A validated selection has at most two models, so only the preceding projection can share its build.
 		if len(projections) == 0 || projections[len(projections)-1].runtimeBuildRef != model.BuildID {
 			rawSnapshot, acquireErr := source.AcquireBuildSnapshot(ctx, model.BuildID)
@@ -99,7 +95,6 @@ func ResolveSelectedWorkload(
 			Models:          modelNames,
 			RuntimeBuildRef: model.BuildID,
 			BuildSnapshot:   snapshot,
-			ModelSettings:   modelSettings,
 		}
 		projected, err := appendModelProjections(projections, intent)
 		if err != nil {

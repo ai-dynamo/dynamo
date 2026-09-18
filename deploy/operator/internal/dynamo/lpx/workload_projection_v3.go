@@ -20,7 +20,7 @@ const (
 	v3HXLogicalDeviceCount   = 16
 )
 
-func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput, modelSettings map[string]any) ([]*ModelProjection, error) {
+func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
 	runtimeBuild := *intent.BuildSnapshot.build
 	manifestPartitions := runtimeBuild.Partitions
 	selectedPropSyncChains := runtimeBuild.SelectedPropSyncChains
@@ -30,22 +30,6 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	// Keep physical artifacts in the scheduler projection; the runtime uses resolved partition metadata.
 	runtimeBuild.Partitions = nil
 	runtimeBuild.SelectedPropSyncChains = nil
-	propSyncEnabled := runtimeBuild.CompilationMode == BuildCompilationModeLPUOnly && len(selectedPropSyncChains) > 0
-	if value, overridden := modelSettings["prop_sync"]; overridden {
-		enabled, ok := value.(bool)
-		if !ok {
-			return nil, fmt.Errorf("model settings.prop_sync must be a boolean")
-		}
-		propSyncEnabled = enabled
-	}
-	if runtimeBuild.CompilationMode == BuildCompilationModeLPUOnly {
-		if len(selectedPropSyncChains) > 0 && !propSyncEnabled {
-			return nil, fmt.Errorf("V3 manifest-selected prop-sync chains require settings.prop_sync=true")
-		}
-		if len(selectedPropSyncChains) == 0 && propSyncEnabled {
-			return nil, fmt.Errorf("V3 settings.prop_sync=true requires a manifest-selected prop-sync chain")
-		}
-	}
 
 	allocationMetadata, connectors, err := projectV3PropSync(manifestPartitions, selectedPropSyncChains, intent.Pipeline)
 	if err != nil {

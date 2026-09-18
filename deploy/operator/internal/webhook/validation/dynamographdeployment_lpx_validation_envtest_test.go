@@ -8,7 +8,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	k8sptr "k8s.io/utils/ptr"
 )
 
@@ -31,7 +30,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"},
 				}}}
-				component.LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{"stop_tokens":[1],"custom_runtime_knob":{"enabled":true}}`)}
 				component.Roles[0].PodTemplate.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 					RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
 						NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{{
@@ -104,13 +102,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Components[0].ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
 			}),
 			wantCELErr: "spec.components[0]: Invalid value: scalingAdapter is not supported when type is lpx",
-		},
-		{
-			name: "LPX settings must be an object",
-			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`[]`)}
-			}),
-			wantSchemaErr: `spec.components[0].lpx.settings: Invalid value: spec.components[0].lpx.settings in body must be of type object: "array"`,
 		},
 		{
 			name:        "LPX integration availability is deferred to the child controller",
@@ -475,8 +466,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"},
 				}}}
 				setBetaLPXSpecDec(dgd, k8sptr.To(int32(2)))
-				dgd.Spec.Components[0].LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{"draft_runtime":{"enabled":true}}`)}
-				dgd.Spec.Components[1].LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`null`)}
 			}),
 		},
 		{

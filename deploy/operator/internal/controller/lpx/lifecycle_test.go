@@ -37,7 +37,6 @@ import (
 	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -1751,10 +1750,7 @@ func newLPXTestSource(pipeline lpx.Pipeline, buildID string) *nvidiacomv1beta1.D
 		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "lpx", ComponentType: nvidiacomv1beta1.ComponentTypeLPX, Replicas: &one,
-				LPX: &nvidiacomv1beta1.LPXConfig{
-					BuildID:  buildID,
-					Settings: &apiextensionsv1.JSON{Raw: []byte(`{"prop_sync":true}`)},
-				},
+				LPX: &nvidiacomv1beta1.LPXConfig{BuildID: buildID},
 				Roles: []nvidiacomv1beta1.ComponentRoleSpec{{Name: nvidiacomv1beta1.ComponentRoleLPXConductor}, {
 					Name: nvidiacomv1beta1.ComponentRoleLPXAgent,
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{

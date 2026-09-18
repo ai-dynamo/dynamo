@@ -47,8 +47,6 @@ type ModelProjectionInput struct {
 	RuntimeBuildRef string
 	// BuildSnapshot is the normalized immutable build input.
 	BuildSnapshot NormalizedBuildSnapshot
-	// ModelSettings contains the optional per-model JSON settings.
-	ModelSettings json.RawMessage
 }
 
 // ModelProjection holds scheduler request inputs and runtime rendering state
