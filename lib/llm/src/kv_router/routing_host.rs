@@ -28,6 +28,7 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
+    discovery::RuntimeConfigWatch,
     kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
@@ -200,12 +201,13 @@ struct LoraRouting {
     filter: Arc<LoraFilter>,
     load_estimator: Arc<LoadEstimator>,
     selector: BuiltinWorkerSelector,
+    runtime_configs: Option<RuntimeConfigWatch>,
 }
 
 struct LoraSelection {
     target: u64,
     allowed_fallback: HashSet<u64>,
-    load_guard: LoraLoadGuard,
+    load_guard: Option<LoraLoadGuard>,
 }
 
 struct HostedSelection {
@@ -409,6 +411,16 @@ impl RoutingHost {
         affinity: Option<AffinityCoordinator>,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
+        Self::new_builtin_with_runtime_configs(inner, load_context, affinity, lora, None)
+    }
+
+    pub(crate) fn new_builtin_with_runtime_configs(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        affinity: Option<AffinityCoordinator>,
+        lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+        runtime_configs: Option<RuntimeConfigWatch>,
+    ) -> Result<Self, Error> {
         if affinity.is_some() && lora.is_some() {
             anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
         }
@@ -465,6 +477,7 @@ impl RoutingHost {
                     filter,
                     load_estimator,
                     selector,
+                    runtime_configs,
                 }),
             routing_context: Some(load_context),
         })

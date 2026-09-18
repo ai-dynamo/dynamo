@@ -20,6 +20,7 @@ use uuid::Uuid;
 use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::lora::runtime::RuntimeLoraSourceUri;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -58,6 +59,18 @@ pub struct RoutingHints {
     /// Used for LORA-aware routing and tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lora_name: Option<String>,
+
+    /// Canonical base model for a request-time LoRA adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_model_name: Option<String>,
+
+    /// Opaque source URI sent only to the selected worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_source_uri: Option<RuntimeLoraSourceUri>,
+
+    /// Request-time LoRA resolver protocol version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lora_resolution_version: Option<u16>,
 
     /// Cache namespace for request-scoped KV cache isolation.
     #[serde(

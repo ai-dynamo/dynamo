@@ -53,7 +53,12 @@ use super::{
     service_v2::{self, BackendErrorCheck},
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
+use crate::lora::runtime::{
+    RuntimeLoraConfig, RuntimeLoraError, RuntimeLoraSelection, resolve_runtime_lora_model,
+};
+use crate::preprocessor::{
+    PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, RUNTIME_LORA_CONTEXT_KEY, decode_base64_to_floats,
+};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
@@ -1003,6 +1008,66 @@ fn copy_context_metadata<T: Send + Sync + 'static, U: Send + Sync + 'static>(
             session_affinity.as_ref().clone(),
         );
     }
+    if let Ok(runtime_lora) = source.get::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY) {
+        target.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora.as_ref().clone());
+    }
+}
+
+fn runtime_lora_selection(
+    state: &service_v2::State,
+    requested_model: &str,
+) -> Result<Option<RuntimeLoraSelection>, ErrorResponse> {
+    let requested_canonical = state.manager().resolve_canonical_name(requested_model);
+    if state
+        .manager()
+        .get_committed_model(&requested_canonical)
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let config = RuntimeLoraConfig::from_env().map_err(|error| {
+        ErrorMessage::internal_server_error_with_details(
+            "Runtime LoRA configuration is invalid",
+            error.to_string(),
+        )
+    })?;
+    resolve_runtime_lora_model(
+        requested_model,
+        &config,
+        |name| {
+            let canonical = state.manager().resolve_canonical_name(name);
+            state.manager().get_committed_model(&canonical).is_some()
+        },
+        |name| {
+            let canonical = state.manager().resolve_canonical_name(name);
+            state
+                .manager()
+                .get_committed_model(&canonical)
+                .filter(|model| model.has_base_deployment())
+                .map(|_| canonical)
+        },
+        || state.manager().unique_committed_base_model(),
+    )
+    .map_err(|error| match error {
+        RuntimeLoraError::InvalidModelId => ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "invalid_lora_model_id".to_string(),
+        }),
+        RuntimeLoraError::BaseModelRequired => ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "runtime_lora_base_model_required".to_string(),
+        }),
+        RuntimeLoraError::BaseModelNotFound(base) => ErrorMessage::from_http_error(HttpError {
+            code: 404,
+            message: format!("model_not_found: {base}"),
+        }),
+        RuntimeLoraError::InvalidConfiguration(message) => {
+            ErrorMessage::internal_server_error_with_details(
+                "Runtime LoRA configuration is invalid",
+                message,
+            )
+        }
+    })
 }
 
 /// Warn once when the disabled NvExt policy discards a field or routing header.
@@ -1035,9 +1100,15 @@ async fn handler_completions(
         delta_common::force_include_usage(&mut request.inner.stream_options);
     }
 
+    let runtime_lora = runtime_lora_selection(&state, &request.inner.model)?;
+    let serving_model = runtime_lora
+        .as_ref()
+        .map(|selection| selection.base_model_name.as_str())
+        .unwrap_or(&request.inner.model);
+
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
-    check_model_serving_ready(&state, &request.inner.model)?;
+    check_model_serving_ready(&state, serving_model)?;
 
     if !state.nvext_enabled() {
         warn_nvext_disabled(
@@ -1056,7 +1127,7 @@ async fn handler_completions(
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
     // Canonicalize alias → primary for the metric label.
-    let canonical_model = state.manager().resolve_canonical_name(&request.inner.model);
+    let canonical_model = state.manager().resolve_canonical_name(serving_model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
@@ -1065,10 +1136,13 @@ async fn handler_completions(
         endpoint: Endpoint::Completions.to_string(),
         request_type: if streaming { "stream" } else { "unary" }.to_string(),
     };
-    let request =
+    let mut request =
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_completion_request(request))
         })?;
+    if let Some(runtime_lora) = runtime_lora {
+        request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
+    }
     let context = request.context();
 
     // create the connection handles
@@ -1145,11 +1219,22 @@ async fn completions_single(
     // canonical primary (matching vLLM/SGLang, where an alias request still
     // responds with the primary served name). Non-aliases pass through, so
     // metric_model_for still applies its unknown-model cardinality guard.
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
-    }
-    let model = request.inner.model.clone();
+    let runtime_lora = request
+        .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+        .ok()
+        .flatten();
+    let response_model = runtime_lora
+        .as_deref()
+        .map(|selection| selection.requested_model.clone());
+    let model = if let Some(selection) = runtime_lora.as_deref() {
+        selection.base_model_name.clone()
+    } else {
+        let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+        if canonical != request.inner.model {
+            request.inner.model = canonical.clone();
+        }
+        canonical
+    };
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
@@ -1191,9 +1276,14 @@ async fn completions_single(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
-
-    // capture the context to cancel the stream if the client disconnects
+    // Capture cancellation context before adapting the engine stream.
     let ctx = stream.context();
+    let stream = stream.map(move |mut response| {
+        if let (Some(model), Some(data)) = (response_model.as_ref(), response.data.as_mut()) {
+            data.inner.model = model.clone();
+        }
+        response
+    });
 
     let annotations = annotations.map_or(Vec::new(), |annotations| {
         annotations
@@ -1219,15 +1309,18 @@ async fn completions_single(
         // Same pre-commit check as chat_completions: a backend error before
         // the first item maps to its HTTP status instead of an SSE frame
         // behind an HTTP 200.
-        let stream = until_client_disconnects(
-            check_for_backend_error_info(stream, state.streaming_backend_error_check()),
-            &ctx,
-        )
-        .await
-        .inspect_err(|error_response| {
-            log_pre_commit_error(&request_id, error_response);
-            inflight_guard.mark_error(extract_error_type_from_response(error_response));
-        })?;
+        let error_check = if runtime_lora.is_some() {
+            BackendErrorCheck::UntilFirstEvent
+        } else {
+            state.streaming_backend_error_check()
+        };
+        let stream =
+            until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
+                .await
+                .inspect_err(|error_response| {
+                    log_pre_commit_error(&request_id, error_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(error_response));
+                })?;
 
         // For streaming, we'll drop the http_queue_guard on the first token
         let mut http_queue_guard = Some(http_queue_guard);
@@ -1437,11 +1530,22 @@ async fn completions_batch(
     let request_id = request.id().to_string();
     let streaming = request.inner.stream.unwrap_or(false);
     // Resolve alias → primary served name (see completions_single).
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
-    }
-    let model = request.inner.model.clone();
+    let runtime_lora = request
+        .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+        .ok()
+        .flatten();
+    let response_model = runtime_lora
+        .as_deref()
+        .map(|selection| selection.requested_model.clone());
+    let model = if let Some(selection) = runtime_lora.as_deref() {
+        selection.base_model_name.clone()
+    } else {
+        let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+        if canonical != request.inner.model {
+            request.inner.model = canonical.clone();
+        }
+        canonical
+    };
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
     // Create inflight_guard early to ensure all errors are counted
@@ -1514,8 +1618,12 @@ async fn completions_batch(
         // Remap choice indices: choice.index += prompt_idx * n
         let prompt_idx_u32 = prompt_idx as u32;
         let n_u32 = n as u32;
+        let response_model = response_model.clone();
         let remapped_stream = stream.map(move |mut response| {
             if let Some(ref mut data) = response.data {
+                if let Some(model) = response_model.as_ref() {
+                    data.inner.model = model.clone();
+                }
                 for choice in &mut data.inner.choices {
                     choice.index += prompt_idx_u32 * n_u32;
                 }
@@ -1526,7 +1634,9 @@ async fn completions_batch(
         all_streams.push(remapped_stream);
     }
 
-    let check = if streaming {
+    let check = if runtime_lora.is_some() {
+        BackendErrorCheck::UntilFirstEvent
+    } else if streaming {
         state.streaming_backend_error_check()
     } else {
         BackendErrorCheck::UntilFirstEvent
@@ -2328,8 +2438,13 @@ async fn handler_chat_completions(
     // model first so empty/missing `model` fields don't bypass the gate.
     check_ready(&state)?;
     let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
-    if !resolved_model.is_empty() {
-        check_model_serving_ready(&state, resolved_model)?;
+    let runtime_lora = runtime_lora_selection(&state, resolved_model)?;
+    let serving_model = runtime_lora
+        .as_ref()
+        .map(|selection| selection.base_model_name.as_str())
+        .unwrap_or(resolved_model);
+    if !serving_model.is_empty() {
+        check_model_serving_ready(&state, serving_model)?;
     }
 
     if !state.nvext_enabled() {
@@ -2348,9 +2463,8 @@ async fn handler_chat_completions(
     // create the context for the request
     let request_id = get_or_create_request_id(&headers);
     let streaming = request.inner.stream.unwrap_or(false);
-    let resolved_model = resolve_request_model(&request.inner.model, template.as_ref());
     // Canonicalize alias → primary for the metric label.
-    let canonical_model = state.manager().resolve_canonical_name(resolved_model);
+    let canonical_model = state.manager().resolve_canonical_name(serving_model);
     let cancellation_labels = CancellationLabels {
         model: state
             .manager()
@@ -2363,6 +2477,9 @@ async fn handler_chat_completions(
         context_from_headers_with_input_trigger(request, request_id, &headers, |request| {
             Some(classify_chat_request(request))
         })?;
+    if let Some(runtime_lora) = runtime_lora {
+        request.insert(RUNTIME_LORA_CONTEXT_KEY, runtime_lora);
+    }
     if let Some(captured) = crate::request_trace::payload::capture_http_headers(&headers) {
         request.insert(
             crate::request_trace::payload::HTTP_HEADERS_CONTEXT_KEY,
@@ -3256,14 +3373,33 @@ async fn chat_completions(
     // engine routing, metrics, and the OpenAI response.model all use the
     // canonical primary (matching vLLM/SGLang). Non-aliases pass through so
     // metric_model_for still applies its unknown-model cardinality guard.
-    let canonical = state.manager().resolve_canonical_name(&request.inner.model);
-    if canonical != request.inner.model {
-        request.inner.model = canonical;
-    }
-    let model = request.inner.model.clone();
+    let runtime_lora = request
+        .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+        .ok()
+        .flatten();
+    let response_model = runtime_lora
+        .as_deref()
+        .map(|selection| selection.requested_model.clone());
+    let model = if let Some(selection) = runtime_lora.as_deref() {
+        selection.base_model_name.clone()
+    } else {
+        let canonical = state.manager().resolve_canonical_name(&request.inner.model);
+        if canonical != request.inner.model {
+            request.inner.model = canonical.clone();
+        }
+        canonical
+    };
     let metric_model = state.manager().metric_model_for(&model).to_string();
 
-    tracing::trace!("Received chat completions request: {:?}", request.content());
+    if let Some(selection) = runtime_lora.as_deref() {
+        tracing::trace!(
+            model = %selection.base_model_name,
+            lora = %selection.adapter_key,
+            "Received runtime LoRA chat completions request"
+        );
+    } else {
+        tracing::trace!("Received chat completions request: {:?}", request.content());
+    }
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
     let mut inflight_guard = state.metrics_clone().create_inflight_guard(
@@ -3370,9 +3506,14 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
-
-    // capture the context to cancel the stream if the client disconnects
+    // Capture cancellation context before adapting the engine stream.
     let ctx = stream.context();
+    let stream = stream.map(move |mut response| {
+        if let (Some(model), Some(data)) = (response_model.as_ref(), response.data.as_mut()) {
+            data.inner.model = model.clone();
+        }
+        response
+    });
 
     // prepare any requested annotations
     let annotations = annotations.map_or(Vec::new(), |annotations| {
@@ -3405,15 +3546,18 @@ async fn chat_completions(
         // once the response is built, so it does not bound this wait:
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
-        let stream = until_client_disconnects(
-            check_for_backend_error_info(stream, state.streaming_backend_error_check()),
-            &ctx,
-        )
-        .await
-        .inspect_err(|err_response| {
-            log_pre_commit_error(&request_id, err_response);
-            inflight_guard.mark_error(extract_error_type_from_response(err_response));
-        })?;
+        let error_check = if runtime_lora.is_some() {
+            BackendErrorCheck::UntilFirstEvent
+        } else {
+            state.streaming_backend_error_check()
+        };
+        let stream =
+            until_client_disconnects(check_for_backend_error_info(stream, error_check), &ctx)
+                .await
+                .inspect_err(|err_response| {
+                    log_pre_commit_error(&request_id, err_response);
+                    inflight_guard.mark_error(extract_error_type_from_response(err_response));
+                })?;
 
         let mut http_queue_guard = Some(http_queue_guard);
         let tool_dispatch_enabled = state.streaming_tool_dispatch_enabled();

@@ -77,7 +77,10 @@ impl RequestPayloadHandle {
     /// exactly one payload record per request. `response` is `None` on client
     /// cancel / gateway timeout / aggregation failure; the record still carries
     /// the request so those cases remain inspectable.
-    pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
+    pub fn emit(self, mut response: Option<Arc<NvCreateChatCompletionResponse>>) {
+        if let Some(response) = response.as_mut() {
+            Arc::make_mut(response).inner.model = self.model.clone();
+        }
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,

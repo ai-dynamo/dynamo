@@ -10,6 +10,8 @@ use dynamo_runtime::pipeline::{BuiltinRoutePicker, RouterMode};
 
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
+use super::kv_selection::runtime_lora_workers_have_homogeneous_resolvers;
+
 /// First-party selector hosted directly by [`RoutingHost`](super::RoutingHost).
 pub(super) struct BuiltinWorkerSelector {
     mode: RouterMode,
@@ -110,11 +112,58 @@ impl RoutingHost {
         else {
             return Ok(None);
         };
-        let load_guard = LoraLoadGuard::new(Arc::clone(&lora.load_estimator), lora_name.clone());
-        let routable = self.inner.client.instance_ids_avail();
-        let candidates = lora
-            .filter
-            .filter_worker_ids_for_lora(Some(&lora_name), &routable);
+        let is_runtime_lora = request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_resolution_version)
+            .is_some();
+        let load_guard = (!is_runtime_lora)
+            .then(|| LoraLoadGuard::new(Arc::clone(&lora.load_estimator), lora_name.clone()));
+        let routing = request.routing.as_ref();
+        let allowed_worker_ids = routing.and_then(|routing| routing.allowed_worker_ids.as_ref());
+        let constraints = routing.and_then(|routing| routing.routing_constraints.as_ref());
+        let runtime_configs = lora.runtime_configs.as_ref().map(|watch| watch.borrow());
+        let routable = self
+            .inner
+            .client
+            .instance_ids_avail()
+            .into_iter()
+            .filter(|worker_id| {
+                allowed_worker_ids.is_none_or(|allowed| allowed.contains(worker_id))
+            })
+            .filter(|worker_id| {
+                if !is_runtime_lora {
+                    return true;
+                }
+                runtime_configs
+                    .as_ref()
+                    .and_then(|configs| configs.get(worker_id))
+                    .is_some_and(|config| {
+                        constraints.is_none_or(|constraints| {
+                            constraints.is_compatible_with_worker_taints(&config.taints)
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        let homogeneous_runtime_resolvers = !is_runtime_lora
+            || runtime_configs.as_ref().is_some_and(|configs| {
+                runtime_lora_workers_have_homogeneous_resolvers(&routable, configs)
+            });
+        if is_runtime_lora && (routable.is_empty() || !homogeneous_runtime_resolvers) {
+            return Err(anyhow::anyhow!(
+                DynamoError::builder()
+                    .error_type(ErrorType::Unavailable)
+                    .message("runtime_lora_capability_unavailable")
+                    .build()
+            ));
+        }
+        let candidates = if is_runtime_lora {
+            lora.filter
+                .filter_worker_ids_for_runtime_lora(&lora_name, &routable)
+        } else {
+            lora.filter
+                .filter_worker_ids_for_lora(Some(&lora_name), &routable)
+        };
         if candidates.is_empty() {
             anyhow::bail!("No workers available after LoRA filtering (lora={lora_name})");
         }
@@ -303,7 +352,7 @@ impl RoutingHost {
                 Some(selection) => (
                     Some(selection.target),
                     Some(selection.allowed_fallback),
-                    Some(selection.load_guard),
+                    selection.load_guard,
                 ),
                 None => (None, None, None),
             };

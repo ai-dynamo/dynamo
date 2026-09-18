@@ -382,6 +382,19 @@ where
             }
             retries_left = 0;
         }
+        if preprocessed_request
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.lora_resolution_version)
+            .is_some()
+        {
+            if retries_left > 0 {
+                tracing::warn!(
+                    "runtime LoRA request: migration disabled because resolver state is worker-local"
+                );
+            }
+            retries_left = 0;
+        }
         if retries_left > 0 {
             preprocessed_request.migration_state = Some(Default::default());
         }
@@ -1553,6 +1566,41 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(responses.len(), 1);
         assert!(responses[0].error.is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_lora_request_does_not_retry_on_another_worker() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenSuccess,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let mut request = create_mock_request(1);
+        request.routing = Some(RoutingHints {
+            lora_name: Some("dyn-lora-0123456789abcdef0123456789abcdef".to_string()),
+            lora_resolution_version: Some(1),
+            ..Default::default()
+        });
+        let context = Arc::new(Controller::new(context_id));
+
+        let result = RetryManager::build(
+            context,
+            BTreeMap::new(),
+            request,
+            mock_engine,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
