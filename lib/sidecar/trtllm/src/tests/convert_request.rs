@@ -194,3 +194,42 @@ fn the_derived_max_tokens_respects_the_engines_output_cap() {
         "the derived default must not exceed what the engine will generate"
     );
 }
+
+/// A `max_tokens` derived from the context window is clamped by the engine's
+/// output cap and floored at 1, so it can land under an explicit `min_tokens`.
+/// TensorRT-LLM does not cross-validate the pair, so a request carrying
+/// `min_tokens > max_tokens` is one the engine resolves however it likes --
+/// reject it here, naming both values.
+#[test]
+fn a_derived_budget_below_min_tokens_is_rejected() {
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    req.stop_conditions.min_tokens = Some(64);
+    // A 40-token window against this request's prompt leaves fewer than 64.
+    let prompt_len = req.token_ids.len() as u32;
+    let window = prompt_len + 8;
+
+    let error = build_generate_request(&req, "req", "model", limits(window), AGG)
+        .expect_err("a minimum above the remaining budget cannot be served");
+    let message = error.to_string();
+    assert!(
+        message.contains("64") && message.contains('8'),
+        "the error must name both the minimum and what is left: {message}"
+    );
+}
+
+/// The same request is served when the window leaves room for the minimum --
+/// the guard must reject the contradiction, not every request that has one.
+#[test]
+fn a_minimum_within_the_derived_budget_is_served() {
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    req.stop_conditions.min_tokens = Some(8);
+    let window = req.token_ids.len() as u32 + 64;
+
+    let proto = build_generate_request(&req, "req", "model", limits(window), AGG)
+        .expect("a minimum that fits is not a conflict");
+    let stopping = proto.stopping.expect("stopping options");
+    assert_eq!(stopping.min_tokens, Some(8));
+    assert_eq!(stopping.max_tokens, Some(64));
+}
