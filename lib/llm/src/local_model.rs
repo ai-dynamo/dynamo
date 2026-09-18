@@ -402,9 +402,13 @@ impl LocalModelBuilder {
         }
 
         // Record the commit SHA from an HF snapshot path so the frontend
-        // can resolve hf:// URIs at the same revision.
-        if let Some(repo) = super::hub::hf_repo_from_snapshot_path(&model_path) {
-            card.set_hf_commit_sha(&repo, &model_path);
+        // can resolve hf:// URIs at the same revision. Only once the SHA is on the card
+        // is it safe to rewrite `source_path` to the repo id: that rewrite is what sends
+        // the frontend to `hf://` for metadata, and without a pin it would land on the
+        // latest revision instead of the one this worker loaded.
+        if let Some(repo) = super::hub::hf_repo_from_snapshot_path(&model_path)
+            && card.set_hf_commit_sha(&repo, &model_path)
+        {
             // align source_path with hf_commit_sha's key so hf:// fallback URIs resolve correctly.
             card.set_source_path(PathBuf::from(&repo));
         }

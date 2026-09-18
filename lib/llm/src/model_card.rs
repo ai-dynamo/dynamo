@@ -772,6 +772,15 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     if repo.is_empty() || filename.is_empty() {
         anyhow::bail!("malformed hf:// uri: {uri}");
     }
+    // This uri comes off another worker's card. The filename is joined onto a snapshot
+    // directory, and the repo is both a cache key and an outbound Hub request, so neither
+    // may carry `.`/`..` or an absolute path.
+    if !crate::hub::is_hf_repo_file(filename) {
+        anyhow::bail!("invalid filename in hf:// uri: {uri}");
+    }
+    if !crate::hub::is_hf_repo_path(repo) {
+        anyhow::bail!("invalid repository in hf:// uri: {uri}");
+    }
     Ok((repo.to_string(), filename.to_string()))
 }
 
@@ -1566,12 +1575,23 @@ impl ModelDeploymentCard {
         self.source_path = Some(source_path.display().to_string());
     }
 
-    pub(crate) fn set_hf_commit_sha(&mut self, repo: &str, snapshot_path: &Path) {
-        if let Some(sha) = snapshot_path.file_name().and_then(|n| n.to_str()) {
-            self.hf_commit_sha
-                .get_or_insert_with(std::collections::HashMap::new)
-                .insert(repo.to_string(), sha.to_string());
+    /// Records the commit SHA `snapshot_path` is named after. Returns whether it was
+    /// recorded, so a caller can keep the rest of the card consistent with the pin.
+    pub(crate) fn set_hf_commit_sha(&mut self, repo: &str, snapshot_path: &Path) -> bool {
+        let Some(sha) = snapshot_path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        // A reader treats a revision that is not a commit SHA as a branch or tag and
+        // accepts whatever the hub resolves it to, so publishing anything else here
+        // would quietly reopen the worker/frontend skew this field closes.
+        if !crate::hub::is_hf_commit_sha(sha) {
+            tracing::debug!("not recording HF revision for {repo}: {sha:?} is not a commit SHA");
+            return false;
         }
+        self.hf_commit_sha
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(repo.to_string(), sha.to_string());
+        true
     }
 
     /// Allow user to override the name we register this model under.
@@ -1685,13 +1705,19 @@ impl ModelDeploymentCard {
             })
             .collect::<anyhow::Result<_>>()?;
 
-        let mut repo_files: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
+        // Ordered and deduplicated: one repo is resolved once in a stable order, and a
+        // file named by two card slots is required once rather than checked twice.
+        let mut repo_files: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         for (uri, _) in &entries {
             if uri.starts_with("hf://") {
                 let (repo, filename) = parse_hf_uri(uri)?;
                 repo_files.entry(repo).or_default().push(filename);
             }
+        }
+        for filenames in repo_files.values_mut() {
+            filenames.sort_unstable();
+            filenames.dedup();
         }
 
         let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
@@ -1712,6 +1738,12 @@ impl ModelDeploymentCard {
                     .await
                     .with_context(|| format!("hub::from_hf({repo_name})"))?
             };
+            // Whichever arm resolved it, the snapshot has to hold every file this card
+            // names, or resolution dies further down on an opaque copy error instead of
+            // naming what is missing.
+            if let Some(missing) = crate::hub::first_missing_file(&snap, Some(filenames)) {
+                anyhow::bail!("{repo_name} resolved without required file {missing:?}");
+            }
             hf_snapshots.insert(repo_name.clone(), snap);
         }
 
@@ -2586,6 +2618,34 @@ mod tests {
                 .map(String::as_str),
             Some("0000000000000000000000000000000000000000")
         );
+    }
+
+    #[test]
+    fn test_set_hf_commit_sha_ignores_a_snapshot_dir_that_is_not_a_sha() {
+        let mut card = ModelDeploymentCard::default();
+        let temp = tempfile::tempdir().unwrap();
+        // A reader would treat "main" as a branch and accept the latest commit for it,
+        // so it must never reach the card in the first place.
+        let snapshot = temp.path().join("models--Qwen--Qwen3-0.6B/snapshots/main");
+        std::fs::create_dir_all(&snapshot).unwrap();
+
+        card.set_hf_commit_sha("Qwen/Qwen3-0.6B", &snapshot);
+
+        assert!(card.hf_commit_sha.is_none());
+    }
+
+    #[test]
+    fn test_parse_hf_uri_rejects_a_filename_that_leaves_the_snapshot() {
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/..").is_err());
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/.").is_err());
+    }
+
+    #[test]
+    fn test_parse_hf_uri_rejects_a_repo_that_leaves_the_snapshot() {
+        // `rsplit_once` only isolates the last segment, so the repo needs its own check.
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/../evil/config.json").is_err());
+        assert!(super::parse_hf_uri("hf:///abs/config.json").is_err());
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/config.json").is_ok());
     }
 
     /// Qwen3.5 models have text_config.eos_token_id = 248044 (<|endoftext|>) but the

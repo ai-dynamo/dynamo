@@ -825,6 +825,16 @@ fn register_model<'p>(
                      tensor/images/videos/realtime models"
                 );
             }
+            // These types load their own weights, so nothing here resolves the repo at a
+            // revision and no commit SHA reaches the card.
+            if let Some(revision) = revision_owned.as_deref() {
+                tracing::warn!(
+                    model_name = %model_name,
+                    revision = %revision,
+                    "Ignoring revision: not supported for \
+                     tensor/images/videos/realtime models"
+                );
+            }
 
             // For base model (no lora_identifier), propagate LoRA slot capacity so
             // frontend allocator can see idle-but-LoRA-capable workers before first adapter load.
@@ -848,6 +858,17 @@ fn register_model<'p>(
         // ModelExpress load paths pass ignore_weights=true because the engine already owns
         // weight acquisition; other load paths keep the default full-fetch behavior.
         let model_path = if fs::exists(&source_path)? {
+            // The path is already on disk, so nothing resolves the revision here. The card
+            // still records the commit this directory is named after, which is the one the
+            // engine loads — say so rather than letting the two silently disagree.
+            if let Some(revision) = revision_owned.as_deref() {
+                tracing::warn!(
+                    source_path = %source_path,
+                    revision = %revision,
+                    "Ignoring revision: model path already exists on disk; the card will \
+                     record the commit that path resolves to"
+                );
+            }
             PathBuf::from(&source_path)
         } else {
             LocalModel::fetch(&source_path, revision_owned.as_deref(), ignore_weights)

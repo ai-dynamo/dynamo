@@ -85,7 +85,7 @@ async def init_omni_realtime(
             # endpoint, so it registers as Aggregated like the unary Omni worker.
             worker_type=WorkerType.Aggregated,
             needs=[],
-            revision=getattr(config.engine_args, "revision", None),
+            revision=config.engine_args.revision,
         )
 
         logger.info("Starting to serve realtime Omni worker endpoint...")

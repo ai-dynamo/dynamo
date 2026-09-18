@@ -93,7 +93,7 @@ fn get_cached_model_path_at_revision(
     // This revision reaches the join below from another worker's card over etcd, and a
     // `..` segment in it would walk out of the cache directory. The HF cache only ever
     // names a snapshot directory after a commit SHA, so anything else is a miss.
-    if huggingface::validate_hf_commit_sha(revision).is_err() {
+    if !is_hf_commit_sha(revision) {
         return None;
     }
 
@@ -217,7 +217,16 @@ pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Re
         );
     }
 
-    download_from_model_express(&model_name, None, ignore_weights).await
+    match download_from_model_express(&model_name, None, ignore_weights).await {
+        Ok(path) => {
+            tracing::info!("ModelExpress download completed successfully for model: {model_name}");
+            Ok(path)
+        }
+        Err(e) => {
+            tracing::warn!("ModelExpress download failed for model '{model_name}': {e}");
+            Err(e)
+        }
+    }
 }
 
 /// Like `from_hf`, but resolves a specific commit SHA instead of latest.
@@ -235,6 +244,14 @@ pub async fn from_hf_at_revision(
     let name = name.as_ref();
     let model_name = name.display().to_string();
 
+    // Both branches below join this revision onto a cache directory — the lookup here,
+    // and hf-hub's ref writer under the download — and it arrives from another worker's
+    // card over etcd. Reject anything that could climb out before either one runs. A
+    // branch or tag is still allowed through; only the cache lookup needs a full SHA.
+    if !is_joinable_revision(revision) {
+        anyhow::bail!("invalid revision for {model_name}: {revision:?}");
+    }
+
     if let Some(cached) = get_cached_model_path_at_revision(
         &model_name,
         revision,
@@ -245,11 +262,33 @@ pub async fn from_hf_at_revision(
         return Ok(cached);
     }
 
-    download_from_model_express(&model_name, Some(revision), ignore_weights)
+    let snapshot = download_from_model_express(&model_name, Some(revision), ignore_weights)
         .await
         .with_context(|| {
             format!("downloading {model_name} at revision {revision} via ModelExpress")
-        })
+        })?;
+
+    // The direct-download fallback inside `download_from_model_express` reports no
+    // resolved revision of its own, so when a full SHA was requested the snapshot's own
+    // directory name is the only confirmation available that the pin was honored.
+    if is_hf_commit_sha(revision) && snapshot.file_name().and_then(|n| n.to_str()) != Some(revision)
+    {
+        anyhow::bail!(
+            "{model_name} resolved to {snapshot:?}, which is not the pinned revision {revision}"
+        );
+    }
+
+    Ok(snapshot)
+}
+
+/// The first of `required_files` that is not present in `dir`, if any.
+pub(crate) fn first_missing_file<'a>(
+    dir: &Path,
+    required_files: Option<&'a [String]>,
+) -> Option<&'a String> {
+    required_files?
+        .iter()
+        .find(|filename| !dir.join(filename).exists())
 }
 
 async fn download_from_model_express(
@@ -275,22 +314,34 @@ async fn download_from_model_express(
             {
                 Ok(result) => {
                     tracing::info!("Server download succeeded for model: {model_ref}");
-                    // A server predating the pinned-revision protocol parses the request
-                    // without its revision field and answers with the default snapshot,
+                    // Compatibility with ModelExpress servers older than 0.6.0, which
+                    // predate the pinned-revision protocol: they parse the request
+                    // without its revision field and answer with the default snapshot,
                     // reporting no resolved revision. Accepting that would hand back a
                     // different commit under the name of the pinned one — the exact skew
-                    // this path exists to prevent — so anything the server does not
-                    // confirm is a miss. `get_model_path` takes no revision either, so it
-                    // cannot answer a pinned request.
-                    let pinned_served = revision.is_none_or(|revision| {
-                        result.path.is_some()
-                            && revision_honored(revision, result.resolved_revision.as_deref())
-                    });
-                    if !pinned_served {
+                    // this path exists to prevent — so a revision the server does not
+                    // confirm is a miss.
+                    // TODO: remove once 0.6.0 is the oldest ModelExpress server in the
+                    // supported window; the client crate and both runtime images are
+                    // already pinned to it, so only an operator-run external server can
+                    // still be older.
+                    if let Some(revision) = revision
+                        && !revision_honored(revision, result.resolved_revision.as_deref())
+                    {
                         tracing::warn!(
                             resolved_revision = ?result.resolved_revision,
                             "Server did not confirm the pinned revision for '{model_ref}'. \
                             Falling back to direct download."
+                        );
+                        return mx_download_direct(model_name, Some(revision), ignore_weights)
+                            .await;
+                    }
+                    // `get_model_path` takes no revision, so it cannot stand in for a
+                    // pinned request even though the server did confirm one.
+                    if revision.is_some() && result.path.is_none() {
+                        tracing::warn!(
+                            "Server confirmed the pinned revision for '{model_ref}' but reported \
+                            no local snapshot path. Falling back to direct download."
                         );
                         return mx_download_direct(model_name, revision, ignore_weights).await;
                     }
@@ -356,17 +407,46 @@ fn revision_honored(requested: &str, resolved: Option<&str>) -> bool {
     let Some(resolved) = resolved else {
         return false;
     };
-    if !is_commit_sha(requested) {
+    if !is_commit_sha_prefix(requested) {
         return true;
     }
     resolved.len() >= requested.len()
         && resolved.as_bytes()[..requested.len()].eq_ignore_ascii_case(requested.as_bytes())
 }
 
-/// Whether `revision` is shaped like a full or abbreviated commit SHA rather than a
-/// branch or tag name.
-fn is_commit_sha(revision: &str) -> bool {
+/// Whether `revision` names a commit directly — full or abbreviated — rather than a
+/// branch or tag. Looser than [`is_hf_commit_sha`] because a caller may abbreviate a
+/// SHA on the command line; use that one for anything joined into a path or published
+/// on a card.
+fn is_commit_sha_prefix(revision: &str) -> bool {
     (7..=40).contains(&revision.len()) && revision.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Whether `revision` is a full Hugging Face commit SHA. This is the only shape that
+/// names a snapshot directory, so it is the bar both for joining a revision into a
+/// cache path and for publishing one on a model deployment card.
+pub(crate) fn is_hf_commit_sha(revision: &str) -> bool {
+    huggingface::validate_hf_commit_sha(revision).is_ok()
+}
+
+/// Whether `filename` is a safe relative path within a repository snapshot. Rejects
+/// absolute paths and `.`/`..` components, which would otherwise resolve outside the
+/// snapshot directory they are joined onto.
+pub(crate) fn is_hf_repo_file(filename: &str) -> bool {
+    huggingface::validate_hf_repo_file(filename).is_ok()
+}
+
+/// Whether `repo` is a safe repository id: no absolute or `..` segments, since it is
+/// both a cache key and an outbound Hub request path.
+pub(crate) fn is_hf_repo_path(repo: &str) -> bool {
+    huggingface::validate_hf_relative_path(repo, "repository id").is_ok()
+}
+
+/// Whether `revision` is safe to join onto a cache directory. Looser than
+/// [`is_hf_commit_sha`], so a branch or tag still reaches the download, but it still
+/// rejects anything that could climb out of the cache root.
+fn is_joinable_revision(revision: &str) -> bool {
+    huggingface::validate_hf_relative_path(revision, "revision").is_ok()
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common
@@ -662,9 +742,7 @@ pub(crate) mod tests {
     #[test]
     fn test_get_cached_model_path_at_revision_finds_pinned_snapshot_with_weights() {
         // ignore_weights=false is satisfied once weight files are on disk at the
-        // pinned revision — from_hf_at_revision no longer special-cases this to an
-        // error; it now goes through ModelExpress's own pinned-revision download
-        // for full-weight fetches, same as any other cache miss.
+        // pinned revision.
         let temp = TempDir::new().unwrap();
         let model = "test-org/my-model";
         let snapshot = build_hf_cache(
@@ -755,12 +833,52 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_is_commit_sha_separates_shas_from_ref_names() {
-        assert!(is_commit_sha(SHA));
-        assert!(is_commit_sha("1a2b3c4"));
-        assert!(!is_commit_sha("1a2b3c")); // too short to be unambiguous
-        assert!(!is_commit_sha("main"));
-        assert!(!is_commit_sha("refs/pr/1"));
-        assert!(!is_commit_sha(&format!("{SHA}0"))); // longer than a SHA
+    fn test_first_missing_file_holds_a_download_to_the_required_set() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("config.json"), "{}").unwrap();
+
+        let present = ["config.json".to_string()];
+        let short = ["config.json".to_string(), "added_tokens.json".to_string()];
+
+        assert_eq!(first_missing_file(temp.path(), None), None);
+        assert_eq!(first_missing_file(temp.path(), Some(&present)), None);
+        assert_eq!(
+            first_missing_file(temp.path(), Some(&short)).map(String::as_str),
+            Some("added_tokens.json"),
+        );
+    }
+
+    #[test]
+    fn test_is_hf_commit_sha_accepts_only_a_full_sha() {
+        assert!(is_hf_commit_sha(SHA));
+        assert!(is_hf_commit_sha(&SHA.to_uppercase()));
+        assert!(
+            !is_hf_commit_sha(&SHA[..12]),
+            "abbreviated is not a snapshot"
+        );
+        assert!(!is_hf_commit_sha("main"));
+        assert!(!is_hf_commit_sha(".."));
+        assert!(!is_hf_commit_sha(""));
+    }
+
+    #[test]
+    fn test_is_hf_repo_file_rejects_paths_that_leave_the_snapshot() {
+        assert!(is_hf_repo_file("config.json"));
+        assert!(is_hf_repo_file("subdir/config.json"));
+        assert!(!is_hf_repo_file(".."));
+        assert!(!is_hf_repo_file("."));
+        assert!(!is_hf_repo_file("../escape.json"));
+        assert!(!is_hf_repo_file("/etc/passwd"));
+        assert!(!is_hf_repo_file(""));
+    }
+
+    #[test]
+    fn test_is_commit_sha_prefix_separates_shas_from_ref_names() {
+        assert!(is_commit_sha_prefix(SHA));
+        assert!(is_commit_sha_prefix("1a2b3c4"));
+        assert!(!is_commit_sha_prefix("1a2b3c")); // too short to be unambiguous
+        assert!(!is_commit_sha_prefix("main"));
+        assert!(!is_commit_sha_prefix("refs/pr/1"));
+        assert!(!is_commit_sha_prefix(&format!("{SHA}0"))); // longer than a SHA
     }
 }
