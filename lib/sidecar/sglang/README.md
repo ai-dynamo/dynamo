@@ -88,6 +88,17 @@ isolate other processes in that namespace. If overriding this to a non-loopback
 bind, restrict every publisher port (`SGLANG_KV_EVENT_PORT + dp_rank`) to authorized
 consumers using a firewall or network policy.
 
+For disaggregated multinode attention DP, use
+`launch/multinode_disagg_kv_router_sidecar.sh prefill` on each prefill node and
+`launch/multinode_disagg_kv_router_sidecar.sh decode` on each decode node.
+Each role is a separate distributed engine group: give it its own
+`DIST_INIT_ADDR` and number its nodes from zero. The defaults require four
+nodes in total, with `NNODES=2`, `TP_SIZE=2`, and `DP_SIZE=2` per role.
+Set `SGLANG_BOOTSTRAP_HOST` to the reachable prefill leader address on prefill
+node zero. All nodes must share the Dynamo namespace, discovery and event
+services; start `python3 -m dynamo.frontend --router-mode kv` separately.
+Run the script with `--help` for the four per-node commands.
+
 ## Deploy on Kubernetes (quick start)
 
 `deploy/agg.yaml` runs an aggregated deployment (a frontend plus one worker pod
