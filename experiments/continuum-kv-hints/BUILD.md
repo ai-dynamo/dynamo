@@ -8,32 +8,20 @@ patch layer that overlays the custom vLLM onto it.
 | Image | Tag |
 |---|---|
 | Dynamo base (this branch) | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm` |
-| Validated Dynamo + vLLM image | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295` |
+| Dynamo + vLLM image | `nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-<dynamo-sha>-vllm-<vllm-sha>` |
 
-- `6d7cf575cb` = pushed Dynamo revision containing the experiment stack and native-request plugin allowlist
-- `4091050295` = pushed vLLM revision containing the v0.29.0-compatible KV hint, G1 action, and session-attributed event stack
+The image tag identifies the exact Dynamo and vLLM revisions used for the build.
 
 ## Native vLLM request path
 
 The standard Dynamo vLLM runtime installs vLLM-Omni. When `VLLM_PLUGINS` is
 unset, vLLM loads every general plugin, and importing the Omni plugin globally
 patches the native `vllm.v1.request.Request`. This text-only experiment must use
-the native request path so `kv_hints` reaches the scheduler. This branch sets the
-following image-wide allowlist in `container/templates/vllm_runtime.Dockerfile`:
+the native request path so `kv_hints` reaches the scheduler. The base-image
+template and vLLM overlay Dockerfile set the following image-wide allowlist:
 
 ```bash
 VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver
-```
-
-To apply the same setting to an already-built local image without rebuilding it:
-
-```bash
-IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm-4091050295
-CONTAINER=$(docker create "$IMAGE" /bin/true)
-docker commit \
-  --change 'ENV VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver' \
-  "$CONTAINER" "$IMAGE"
-docker rm "$CONTAINER"
 ```
 
 ## Step 1 — Dynamo base image
@@ -71,19 +59,23 @@ touched. The build context is the vLLM checkout.
 
 ```bash
 cd ~/vllm
-git checkout karenc/kv-hints-g1-actions  # tip 4091050295
+git checkout karenc/kv-hints-g1-actions
 
+DYNAMO_DIR=/home/scratch.karenc_coreai/dynamo
+DYNAMO_SHA=$(git -C "$DYNAMO_DIR" rev-parse --short=10 karenc/continuum-kv-hints-poc)
+VLLM_SHA=$(git rev-parse --short=10 HEAD)
+IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-${DYNAMO_SHA}-vllm-${VLLM_SHA}
 docker build \
-  -t nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295 \
-  -f /home/scratch.karenc_coreai/dynamo/container/Dockerfile.vllm-kv-hints-patch \
+  -t "$IMAGE" \
+  -f "$DYNAMO_DIR/container/Dockerfile.vllm-kv-hints-patch" \
   .
 
-docker push nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-6d7cf575cb-vllm-4091050295
+docker push "$IMAGE"
 ```
 
 ### vLLM files patched
 
-The overlay copies these files from `karenc/kv-hints-on-v0.29.0` into the container's
+The overlay copies these files from `karenc/kv-hints-g1-actions` into the container's
 `/usr/local/lib/python3.12/dist-packages/vllm/`:
 
 | File | Change |

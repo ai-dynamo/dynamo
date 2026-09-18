@@ -1,8 +1,10 @@
 FROM nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm
 
+ENV VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver
+
 # Overlay vLLM branch karenc/kv-hints-g1-actions (cherry-picked onto v0.29.0)
 # over the base image's vLLM installation.
-# Build context must be ~/vllm checked out to karenc/kv-hints-g1-actions @ 4091050295.
+# Build context must be ~/vllm checked out to karenc/kv-hints-g1-actions @ 9b6e116be2.
 # Only the files changed by the feature branch are copied — no .so files touched.
 
 ARG VLLM_SITE=/usr/local/lib/python3.12/dist-packages/vllm
