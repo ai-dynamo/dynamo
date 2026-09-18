@@ -28,6 +28,7 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
+    discovery::RuntimeConfigWatch,
     kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
@@ -200,12 +201,13 @@ struct LoraRouting {
     filter: Arc<LoraFilter>,
     load_estimator: Arc<LoadEstimator>,
     selector: BuiltinWorkerSelector,
+    runtime_configs: Option<RuntimeConfigWatch>,
 }
 
 struct LoraSelection {
     target: u64,
     allowed_fallback: HashSet<u64>,
-    load_guard: LoraLoadGuard,
+    load_guard: Option<LoraLoadGuard>,
 }
 
 struct HostedSelection {
@@ -236,6 +238,7 @@ pub struct RoutingHost {
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    runtime_lora_filter: Option<Arc<LoraFilter>>,
     /// Retains the shared client, overload state, and cancellation subtree for this host.
     ///
     /// Compatibility construction paths that predate routing load ownership leave this unset.
@@ -343,7 +346,7 @@ impl RoutingHost {
         kv_router: Arc<KvRouter>,
         affinity: Option<AffinityCoordinator>,
     ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
+        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity, None)
     }
 
     pub(crate) fn new_with_load_context_and_coordinator(
@@ -357,6 +360,23 @@ impl RoutingHost {
             kv_router,
             Some(load_context),
             affinity,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_runtime_lora_filter_and_coordinator(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        affinity: Option<AffinityCoordinator>,
+        runtime_lora_filter: Option<Arc<LoraFilter>>,
+    ) -> Self {
+        Self::new_with_optional_load_context_and_coordinator(
+            inner,
+            kv_router,
+            Some(load_context),
+            affinity,
+            runtime_lora_filter,
         )
     }
 
@@ -365,6 +385,7 @@ impl RoutingHost {
         kv_router: Arc<KvRouter>,
         load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
+        runtime_lora_filter: Option<Arc<LoraFilter>>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -383,6 +404,7 @@ impl RoutingHost {
             affinity,
             hosted_occupancy: None,
             lora: None,
+            runtime_lora_filter,
             routing_context: load_context,
         }
     }
@@ -408,6 +430,16 @@ impl RoutingHost {
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+    ) -> Result<Self, Error> {
+        Self::new_builtin_with_runtime_configs(inner, load_context, affinity, lora, None)
+    }
+
+    pub(crate) fn new_builtin_with_runtime_configs(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        load_context: Arc<crate::kv_router::RoutingLoadContext>,
+        affinity: Option<AffinityCoordinator>,
+        lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
+        runtime_configs: Option<RuntimeConfigWatch>,
     ) -> Result<Self, Error> {
         if affinity.is_some() && lora.is_some() {
             anyhow::bail!("session affinity and LoRA filtering cannot both be enabled");
@@ -465,7 +497,9 @@ impl RoutingHost {
                     filter,
                     load_estimator,
                     selector,
+                    runtime_configs,
                 }),
+            runtime_lora_filter: None,
             routing_context: Some(load_context),
         })
     }

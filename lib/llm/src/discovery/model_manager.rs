@@ -444,6 +444,21 @@ impl ModelManager {
         self.catalog.load().models.get(model_name).cloned()
     }
 
+    /// Return the canonical name only when the published catalog has one base model.
+    /// Alias mirrors and models containing only preloaded LoRA adapters are not candidates.
+    pub(crate) fn unique_committed_canonical_base_model(&self) -> Option<String> {
+        let catalog = self.catalog.load();
+        let mut bases = catalog
+            .models
+            .iter()
+            .filter(|(name, model)| {
+                !catalog.aliases.contains_key(name.as_str()) && model.has_base_deployment()
+            })
+            .map(|(name, _)| name.clone());
+        let base = bases.next()?;
+        bases.next().is_none().then_some(base)
+    }
+
     fn get_model_internal(&self, model_name: &str) -> Option<Arc<Model>> {
         self.models
             .get(model_name)
@@ -3218,6 +3233,87 @@ mod tests {
         assert!(mm.get_model("llama").is_some());
         // A second worker set for the same primary is fine (replicas share a name).
         assert!(mm.add_worker_set("llama", "ns2", make_worker_set("ns2", "abc")));
+    }
+
+    #[test]
+    fn unique_committed_base_ignores_aliases_and_rejects_multiple_primaries() {
+        let mm = ModelManager::new();
+        let mut base_card = ModelDeploymentCard::default();
+        base_card.model_input = crate::model_type::ModelInput::Tokens;
+        assert!(mm.add_worker_set(
+            "base-a",
+            "ns1",
+            WorkerSet::new("ns1".to_string(), "abc".to_string(), base_card),
+        ));
+        assert!(mm.register_alias("base-a-alias", "base-a"));
+        assert!(mm.add_worker_set_arc(
+            "base-a-alias",
+            "ns1",
+            Arc::new(make_worker_set("ns1", "abc")),
+        ));
+        assert_eq!(
+            mm.unique_committed_canonical_base_model().as_deref(),
+            Some("base-a")
+        );
+
+        let mut adapter_card = ModelDeploymentCard::with_name_only("adapter");
+        adapter_card.lora = Some(crate::model_card::LoraInfo {
+            name: "adapter".to_string(),
+            max_gpu_lora_count: None,
+        });
+        assert!(mm.add_worker_set(
+            "adapter",
+            "adapter-ns",
+            WorkerSet::new(
+                "adapter-ns".to_string(),
+                adapter_card.mdcsum().to_string(),
+                adapter_card,
+            ),
+        ));
+        assert_eq!(
+            mm.unique_committed_canonical_base_model().as_deref(),
+            Some("base-a")
+        );
+
+        let mut second_base_card = ModelDeploymentCard::default();
+        second_base_card.model_input = crate::model_type::ModelInput::Tokens;
+        assert!(mm.add_worker_set(
+            "base-b",
+            "ns2",
+            WorkerSet::new("ns2".to_string(), "def".to_string(), second_base_card,),
+        ));
+        assert_eq!(mm.unique_committed_canonical_base_model(), None);
+    }
+
+    #[test]
+    fn runtime_lora_base_requires_frontend_preprocessing() {
+        let mm = ModelManager::new();
+        assert!(mm.add_worker_set("text-base", "text", make_worker_set("text", "abc")));
+        assert_eq!(
+            mm.unique_committed_canonical_base_model().as_deref(),
+            Some("text-base")
+        );
+        assert!(
+            !mm.get_committed_model("text-base")
+                .unwrap()
+                .has_runtime_lora_base_deployment()
+        );
+
+        let mut token_card = ModelDeploymentCard::default();
+        token_card.model_input = crate::model_type::ModelInput::Tokens;
+        assert!(mm.add_worker_set(
+            "token-base",
+            "tokens",
+            WorkerSet::new("tokens".to_string(), "def".to_string(), token_card),
+        ));
+        assert_eq!(mm.unique_committed_canonical_base_model(), None);
+
+        assert!(mm.add_worker_set(
+            "token-base",
+            "mixed-text",
+            make_worker_set("mixed-text", "ghi"),
+        ));
+        assert_eq!(mm.unique_committed_canonical_base_model(), None);
     }
 
     #[test]

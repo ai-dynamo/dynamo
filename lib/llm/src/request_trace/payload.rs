@@ -59,6 +59,7 @@ pub struct RequestPayloadHandle {
     requested_streaming: bool,
     request_id: String,
     model: String,
+    response_model_override: Option<String>,
     event_time: SystemTime,
     request: Arc<NvCreateChatCompletionRequest>,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
@@ -73,11 +74,21 @@ impl RequestPayloadHandle {
         &self.request_id
     }
 
+    fn apply_response_model_override(
+        &self,
+        response: &mut Option<Arc<NvCreateChatCompletionResponse>>,
+    ) {
+        if let (Some(response), Some(model)) = (response.as_mut(), &self.response_model_override) {
+            Arc::make_mut(response).inner.model = model.clone();
+        }
+    }
+
     /// Publish one request trace payload record. Consumes the handle to enforce
     /// exactly one payload record per request. `response` is `None` on client
     /// cancel / gateway timeout / aggregation failure; the record still carries
     /// the request so those cases remain inspectable.
-    pub fn emit(self, response: Option<Arc<NvCreateChatCompletionResponse>>) {
+    pub fn emit(self, mut response: Option<Arc<NvCreateChatCompletionResponse>>) {
+        self.apply_response_model_override(&mut response);
         super::record::emit_request_payload(
             super::RequestTracePayload {
                 request_id: self.request_id,
@@ -99,6 +110,15 @@ pub fn create_handle(
     request_id: &str,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
 ) -> Option<RequestPayloadHandle> {
+    create_handle_with_model_override(req, request_id, http_request_headers, None)
+}
+
+pub(crate) fn create_handle_with_model_override(
+    req: &NvCreateChatCompletionRequest,
+    request_id: &str,
+    http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+    model_override: Option<&str>,
+) -> Option<RequestPayloadHandle> {
     let policy = super::policy();
     // `capture_enabled()` is `policy.enabled && CAPTURE_ACTIVE`: it additionally
     // requires request trace initialization, so a stale payload handle cannot be
@@ -109,6 +129,7 @@ pub fn create_handle(
         super::config::capture_enabled(),
         policy.emit_request_payload_records(),
         http_request_headers,
+        model_override,
     )
 }
 
@@ -124,22 +145,30 @@ fn create_handle_with_config(
     enabled: bool,
     emit_request_payload: bool,
     http_request_headers: Option<Arc<BTreeMap<String, String>>>,
+    model_override: Option<&str>,
 ) -> Option<RequestPayloadHandle> {
     if !enabled || !emit_request_payload {
         return None;
     }
     let requested_streaming = req.inner.stream.unwrap_or(false);
-    let model = req.inner.model.clone();
+    let response_model_override = model_override.map(str::to_string);
+    let model = response_model_override
+        .as_deref()
+        .unwrap_or(&req.inner.model)
+        .to_string();
+    let mut request = req.clone();
+    request.inner.model = model.clone();
 
     Some(RequestPayloadHandle {
         requested_streaming,
         request_id: request_id.to_string(),
         model,
+        response_model_override,
         // Snapshot the pristine inbound request (before the preprocessor
         // overrides stream/usage) and stamp arrival time on the producing
         // thread, so the record reflects what the client sent and when.
         event_time: SystemTime::now(),
-        request: Arc::new(req.clone()),
+        request: Arc::new(request),
         http_request_headers,
     })
 }
@@ -180,7 +209,7 @@ mod tests {
     #[test]
     fn request_payload_records_emit_even_when_store_is_false() {
         let request = create_test_request("test-model", false);
-        let handle = create_handle_with_config(&request, "test-id", true, true, None);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None, None);
 
         assert!(
             handle.is_some(),
@@ -191,12 +220,51 @@ mod tests {
     #[test]
     fn request_payload_records_disabled_skips_store_true_payloads() {
         let request = create_test_request("test-model", true);
-        let handle = create_handle_with_config(&request, "test-id", true, false, None);
+        let handle = create_handle_with_config(&request, "test-id", true, false, None, None);
 
         assert!(
             handle.is_none(),
             "request_payload records disabled should skip payloads even with store=true"
         );
+    }
+
+    #[test]
+    fn request_payload_model_override_is_applied_after_capture_gate() {
+        let request = create_test_request("base|secret-source", true);
+        let handle = create_handle_with_config(&request, "test-id", true, true, None, Some("base"))
+            .expect("payload handle");
+
+        assert_eq!(handle.model, "base");
+        assert_eq!(handle.request.inner.model, "base");
+        assert_eq!(request.inner.model, "base|secret-source");
+    }
+
+    #[test]
+    fn response_model_override_is_applied_only_for_sanitized_runtime_payloads() {
+        let runtime_request = create_test_request("base|secret-source", true);
+        let runtime_handle = create_handle_with_config(
+            &runtime_request,
+            "runtime-id",
+            true,
+            true,
+            None,
+            Some("base"),
+        )
+        .expect("runtime payload handle");
+        let mut runtime_response = Some(Arc::new(create_test_response("ok")));
+        runtime_handle.apply_response_model_override(&mut runtime_response);
+        assert_eq!(runtime_response.unwrap().inner.model, "base");
+
+        let ordinary_request = create_test_request("served-alias", true);
+        let ordinary_handle =
+            create_handle_with_config(&ordinary_request, "ordinary-id", true, true, None, None)
+                .expect("ordinary payload handle");
+        let mut ordinary_response = Some(Arc::new(create_test_response("ok")));
+        Arc::make_mut(ordinary_response.as_mut().unwrap())
+            .inner
+            .model = "canonical".to_string();
+        ordinary_handle.apply_response_model_override(&mut ordinary_response);
+        assert_eq!(ordinary_response.unwrap().inner.model, "canonical");
     }
 
     #[test]
@@ -283,6 +351,7 @@ mod tests {
                 requested_streaming: streaming,
                 request_id: request_id.to_string(),
                 model: model.to_string(),
+                response_model_override: None,
                 event_time: SystemTime::now(),
                 request: Arc::new(create_test_request(model, true)),
                 http_request_headers: None,

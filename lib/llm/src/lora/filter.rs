@@ -223,6 +223,20 @@ impl LoraFilter {
         }
     }
 
+    /// Deterministically place a versioned request-time adapter on one worker.
+    ///
+    /// Callers establish runtime identity from complete routing metadata; the
+    /// adapter name alone is insufficient because a legacy alias may share the
+    /// reserved-looking prefix.
+    pub fn filter_worker_ids_for_runtime_lora(
+        &self,
+        lora_name: &str,
+        available: &[WorkerId],
+    ) -> Vec<WorkerId> {
+        let observed = self.state_tracker.snapshot();
+        self.bounded_fallback(&observed, lora_name, available)
+    }
+
     /// Filter workers for a LoRA request (HashMap variant for KV routing).
     pub fn filter_workers_for_lora(
         &self,
@@ -291,6 +305,30 @@ mod tests {
 
         let result = filter.filter_workers_for_lora(Some("unknown-lora"), &workers);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_unknown_runtime_lora_hrw_pins_one_worker() {
+        let rt = LoraRoutingTable::new();
+        let st = LoraStateTracker::new();
+        let filter = LoraFilter::new(rt, st);
+        let runtime_key = "dyn-lora-74bbe88c562d9d177d098e3ba118851a";
+
+        let first = filter.filter_worker_ids_for_runtime_lora(runtime_key, &[3, 1, 2]);
+        let reordered = filter.filter_worker_ids_for_runtime_lora(runtime_key, &[2, 3, 1]);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, reordered);
+    }
+
+    #[test]
+    fn reserved_looking_legacy_alias_preserves_unknown_lora_behavior() {
+        let filter = LoraFilter::new(LoraRoutingTable::new(), LoraStateTracker::new());
+        let alias = "dyn-lora-74bbe88c562d9d177d098e3ba118851a";
+
+        let workers = filter.filter_worker_ids_for_lora(Some(alias), &[1, 2, 3]);
+
+        assert_eq!(workers, vec![1, 2, 3]);
     }
 
     #[test]
