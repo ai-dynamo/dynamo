@@ -199,16 +199,21 @@ def cross_validate_config(
         )
 
     if dynamo_config.gms_shadow_mode:
-        parallel_sizes = (
-            engine_config.tensor_parallel_size,
-            engine_config.pipeline_parallel_size,
-            engine_config.data_parallel_size,
+        tp = engine_config.tensor_parallel_size
+        pp = engine_config.pipeline_parallel_size
+        dp = engine_config.data_parallel_size
+        nnodes = int(getattr(engine_config, "nnodes", 1) or 1)
+        backend = getattr(engine_config, "distributed_executor_backend", None)
+        single_rank = not dynamo_config.headless and tp == pp == dp == nnodes == 1
+        one_rank_per_node = (
+            nnodes > 1 and tp == nnodes and pp == dp == 1 and backend == "mp"
         )
-        if dynamo_config.headless or any(size != 1 for size in parallel_sizes):
+        if not (single_rank or one_rank_per_node):
             raise ValueError(
-                "--gms-shadow-mode currently supports exactly one local vLLM "
-                "rank; tensor, pipeline, and data parallel failover require a "
-                "coordinated rank-activation barrier"
+                "--gms-shadow-mode supports one rank or tensor parallelism with "
+                "exactly one rank per node (--tensor-parallel-size == --nnodes, "
+                "--distributed-executor-backend=mp); pipeline/data parallelism "
+                "and multiple local ranks require a coordinated activation barrier"
             )
 
     if dynamo_config.embedding_worker_processes > 1:

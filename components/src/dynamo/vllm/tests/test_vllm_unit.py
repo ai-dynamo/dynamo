@@ -375,10 +375,11 @@ def test_headless_namespace_has_required_fields(mock_vllm_cli):
 
 
 @pytest.mark.parametrize(
-    "parallel_flag",
-    ("--tensor-parallel-size", "--pipeline-parallel-size", "--data-parallel-size"),
+    "parallel_flag", ("--pipeline-parallel-size", "--data-parallel-size")
 )
-def test_cli_shadow_mode_rejects_parallel_ranks(mock_vllm_cli, parallel_flag):
+def test_cli_shadow_mode_rejects_unsupported_parallel_ranks(
+    mock_vllm_cli, parallel_flag
+):
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
@@ -389,8 +390,32 @@ def test_cli_shadow_mode_rejects_parallel_ranks(mock_vllm_cli, parallel_flag):
         "2",
     )
 
-    with pytest.raises(ValueError, match="exactly one local vLLM rank"):
+    with pytest.raises(ValueError, match="exactly one rank per node"):
         parse_args()
+
+
+@pytest.mark.parametrize("headless", (False, True))
+def test_cli_shadow_mode_accepts_one_tp_rank_per_node(mock_vllm_cli, headless):
+    args = [
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--load-format",
+        "gms",
+        "--gms-shadow-mode",
+        "--tensor-parallel-size",
+        "2",
+        "--distributed-executor-backend",
+        "mp",
+        "--nnodes",
+        "2",
+        "--node-rank",
+        "1" if headless else "0",
+    ]
+    if headless:
+        args.append("--headless")
+    mock_vllm_cli(*args)
+
+    assert parse_args().gms_shadow_mode is True
 
 
 def test_generic_shadow_alias_enables_vllm_mode(monkeypatch, mock_vllm_cli):
@@ -416,7 +441,7 @@ def test_generic_shadow_alias_uses_vllm_validation(monkeypatch, mock_vllm_cli):
         "2",
     )
 
-    with pytest.raises(ValueError, match="exactly one local vLLM rank"):
+    with pytest.raises(ValueError, match="exactly one rank per node"):
         parse_args()
 
 
