@@ -76,6 +76,8 @@ pub enum RuntimeLoraError {
     BaseModelRequired,
     #[error("runtime LoRA base model '{0}' was not found")]
     BaseModelNotFound(String),
+    #[error("runtime LoRA is unsupported for base model '{0}'")]
+    BaseModelUnsupported(String),
 }
 
 impl RuntimeLoraConfig {
@@ -117,13 +119,6 @@ pub fn adapter_key(base_model_name: &str, source_uri: &str) -> String {
     key
 }
 
-pub fn is_runtime_lora_key(name: &str) -> bool {
-    name.strip_prefix(RUNTIME_LORA_KEY_PREFIX)
-        .is_some_and(|suffix| {
-            suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-}
-
 fn contains_forbidden_character(value: &str) -> bool {
     value
         .bytes()
@@ -151,7 +146,7 @@ pub fn resolve_runtime_lora_model<K, F, B>(
 where
     K: Fn(&str) -> bool,
     F: Fn(&str) -> Option<String>,
-    B: Fn() -> Option<String>,
+    B: Fn() -> Result<String, RuntimeLoraError>,
 {
     if !config.enabled {
         return Ok(None);
@@ -175,14 +170,16 @@ where
         if base.len() > MAX_RUNTIME_BASE_MODEL_BYTES || contains_forbidden_character(base) {
             return Err(RuntimeLoraError::InvalidModelId);
         }
-        let canonical = resolve_base(base)
-            .ok_or_else(|| RuntimeLoraError::BaseModelNotFound(base.to_string()))?;
+        let canonical = match resolve_base(base) {
+            Some(canonical) => canonical,
+            None if is_known_exact(base) => {
+                return Err(RuntimeLoraError::BaseModelUnsupported(base.to_string()));
+            }
+            None => return Err(RuntimeLoraError::BaseModelNotFound(base.to_string())),
+        };
         (canonical, source)
     } else {
-        (
-            infer_base().ok_or(RuntimeLoraError::BaseModelRequired)?,
-            requested_model,
-        )
+        (infer_base()?, requested_model)
     };
 
     if canonical_base.len() > MAX_RUNTIME_BASE_MODEL_BYTES
@@ -252,10 +249,6 @@ mod tests {
             adapter_key("base", "wandb-artifact:///a|b:v1"),
             "dyn-lora-74bbe88c562d9d177d098e3ba118851a"
         );
-        assert!(is_runtime_lora_key(
-            "dyn-lora-74bbe88c562d9d177d098e3ba118851a"
-        ));
-        assert!(!is_runtime_lora_key("dyn-lora-not-a-digest"));
     }
 
     #[test]
@@ -265,7 +258,7 @@ mod tests {
             &config(),
             |name| resolve_base(name).is_some(),
             resolve_base,
-            || Some("base".to_string()),
+            || Ok("base".to_string()),
         )
         .expect("known model should be accepted");
         assert!(selection.is_none());
@@ -278,7 +271,7 @@ mod tests {
             &config(),
             |name| resolve_base(name).is_some(),
             resolve_base,
-            || None,
+            || Err(RuntimeLoraError::BaseModelRequired),
         )
         .expect("runtime model should parse")
         .expect("runtime selection expected");
@@ -308,7 +301,7 @@ mod tests {
                 &config(),
                 |name| resolve_base(name).is_some(),
                 resolve_base,
-                || None,
+                || Err(RuntimeLoraError::BaseModelRequired),
             ),
             Err(RuntimeLoraError::BaseModelRequired)
         );
@@ -318,11 +311,44 @@ mod tests {
             &config(),
             |name| resolve_base(name).is_some(),
             resolve_base,
-            || Some("base".to_string()),
+            || Ok("base".to_string()),
         )
         .expect("runtime model should parse")
         .expect("runtime selection expected");
         assert_eq!(selection.base_model_name, "base");
+    }
+
+    #[test]
+    fn known_but_ineligible_base_is_unsupported_for_combined_and_bare_forms() {
+        assert_eq!(
+            resolve_runtime_lora_model(
+                "unsupported|wandb-artifact:///team/project/adapter:v7",
+                &config(),
+                |name| name == "unsupported",
+                |_| None,
+                || Err(RuntimeLoraError::BaseModelRequired),
+            ),
+            Err(RuntimeLoraError::BaseModelUnsupported(
+                "unsupported".to_string()
+            ))
+        );
+
+        assert_eq!(
+            resolve_runtime_lora_model(
+                "wandb-artifact:///team/project/adapter:v7",
+                &config(),
+                |_| false,
+                |_| None,
+                || {
+                    Err(RuntimeLoraError::BaseModelUnsupported(
+                        "unsupported".to_string(),
+                    ))
+                },
+            ),
+            Err(RuntimeLoraError::BaseModelUnsupported(
+                "unsupported".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -344,7 +370,7 @@ mod tests {
             &config(),
             |_| false,
             resolve_base,
-            || None,
+            || Err(RuntimeLoraError::BaseModelRequired),
         )
         .unwrap()
         .unwrap();
@@ -364,7 +390,7 @@ mod tests {
                 &config(),
                 |name| resolve_base(name).is_some(),
                 resolve_base,
-                || None,
+                || Err(RuntimeLoraError::BaseModelRequired),
             ),
             Err(RuntimeLoraError::BaseModelNotFound("missing".to_string()))
         );
@@ -374,7 +400,7 @@ mod tests {
             &config(),
             |name| resolve_base(name).is_some(),
             resolve_base,
-            || None,
+            || Err(RuntimeLoraError::BaseModelRequired),
         )
         .unwrap()
         .unwrap();
@@ -386,7 +412,7 @@ mod tests {
                 &config(),
                 |name| resolve_base(name).is_some(),
                 resolve_base,
-                || None,
+                || Err(RuntimeLoraError::BaseModelRequired),
             ),
             Err(RuntimeLoraError::InvalidModelId)
         );
@@ -402,7 +428,7 @@ mod tests {
                 &disabled,
                 |name| resolve_base(name).is_some(),
                 resolve_base,
-                || Some("base".to_string()),
+                || Ok("base".to_string()),
             ),
             Ok(None)
         );
