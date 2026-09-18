@@ -13,7 +13,7 @@ use parking_lot::{Mutex, RwLock};
 use rustc_hash::FxHashSet;
 
 pub(crate) const CACHE_REUSE_HISTORY_ENABLED_ENV: &str = "DYN_ROUTER_CACHE_REUSE_HISTORY";
-pub(crate) const HISTORY_BYTES_ENV: &str = "DYN_CACHE_REUSE_HISTORY_BYTES";
+pub(crate) const HISTORY_BYTES_ENV: &str = "DYN_ROUTER_CACHE_REUSE_HISTORY_BYTES";
 pub(crate) const DEFAULT_HISTORY_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const ESTIMATED_BYTES_PER_ENTRY: usize = 32;
 const HISTORY_SHARDS: usize = 64;
@@ -46,7 +46,7 @@ impl CacheHistory {
                     tracing::warn!(
                         value,
                         effective_bytes = DEFAULT_HISTORY_BYTES,
-                        "Invalid DYN_CACHE_REUSE_HISTORY_BYTES; using default"
+                        "Invalid DYN_ROUTER_CACHE_REUSE_HISTORY_BYTES; using default"
                     );
                     DEFAULT_HISTORY_BYTES
                 }
@@ -259,6 +259,12 @@ mod tests {
     }
 
     #[test]
+    fn environment_variable_names_are_stable() {
+        assert_eq!(CACHE_REUSE_HISTORY_ENABLED_ENV, "DYN_ROUTER_CACHE_REUSE_HISTORY");
+        assert_eq!(HISTORY_BYTES_ENV, "DYN_ROUTER_CACHE_REUSE_HISTORY_BYTES");
+    }
+
+    #[test]
     fn disabled_by_default() {
         temp_env::with_var_unset(CACHE_REUSE_HISTORY_ENABLED_ENV, || assert!(!enabled()));
     }
@@ -275,7 +281,7 @@ mod tests {
         for value in ["0", "64m", " 268435456 "] {
             let (stats, output) = history_with_captured_logs(Some(value));
             assert_eq!(stats.capacity_bytes, DEFAULT_HISTORY_BYTES);
-            assert!(output.contains("Invalid DYN_CACHE_REUSE_HISTORY_BYTES; using default"));
+            assert!(output.contains("Invalid DYN_ROUTER_CACHE_REUSE_HISTORY_BYTES; using default"));
             assert!(output.contains(value), "captured log: {output}");
             assert!(output.contains(&format!("effective_bytes={DEFAULT_HISTORY_BYTES}")));
         }
