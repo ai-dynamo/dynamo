@@ -433,9 +433,9 @@ class CancellationMixin:
             try:
                 if not cancellation_task.done():
                     # A handler may be dropped before its monitor gets scheduled.
-                    # Abort an already-dispatched request synchronously, before
-                    # cancelling the stream can remove its tokenizer state. Never
-                    # send an early abort for a request still awaiting dispatch.
+                    # Abort an already-dispatched request before cancelling the
+                    # monitor, retaining the helper's topology-specific retries.
+                    # Never abort early while the request is awaiting dispatch.
                     if (
                         submitted_request_id is not None
                         and not request_id_future.done()
@@ -456,7 +456,19 @@ class CancellationMixin:
                             "api_server_dispatch_finish_time",
                             None,
                         ):
-                            self._abort_requests({submitted_request_id}, context)
+                            try:
+                                await self._abort_sglang_request(
+                                    tokenizer_manager,
+                                    submitted_request_id,
+                                    registry,
+                                    context.id(),
+                                )
+                            except Exception:
+                                logging.exception(
+                                    "Failed to abort SGLang request during stream cleanup: %s, Context: %s",
+                                    submitted_request_id,
+                                    context.id(),
+                                )
                     logging.debug(
                         "Cancelling cancellation monitor task for SGLang Request ID %s, Context: %s",
                         request_id,
