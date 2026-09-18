@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
+
 from tests.gpu_memory_service.conftest import (
     _descendant_identities,
     _live_seen_identities,
 )
+
+pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 
 def test_leak_guard_keeps_reparented_descendant_identity():
