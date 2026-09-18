@@ -119,6 +119,15 @@ def encode_image_embeddings(
         elif family is ModelFamily.QWEN_VL:
             embeddings = get_qwen_image_features(vision_encoder, image_embeds)
 
+        elif family is ModelFamily.DEEPSEEK_V41:
+            device = next(vision_encoder.parameters()).device
+            embeddings = torch.cat(
+                vision_encoder.embed_multimodal(
+                    **{key: value.to(device) for key, value in image_embeds.items()}
+                ),
+                dim=0,
+            )
+
         else:
             raise NotImplementedError(f"Model not supported: {model_name}")
 
@@ -152,7 +161,7 @@ def get_encoder_components(
         projector = getattr(vision_model, "multi_modal_projector", None)
         return vision_encoder, projector
 
-    elif family is ModelFamily.QWEN_VL:
+    elif family in (ModelFamily.QWEN_VL, ModelFamily.DEEPSEEK_V41):
         vision_encoder = vision_model
         projector = None
         return vision_encoder, projector

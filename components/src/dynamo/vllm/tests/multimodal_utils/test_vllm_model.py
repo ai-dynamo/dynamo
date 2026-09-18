@@ -52,7 +52,11 @@ class TestMultiModalUtils:
 
 
 class TestLoadVisionModel:
-    def test_vllm_encoder_settings_from_environment(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "model_name",
+        ["Qwen/Qwen3.5-9B", "nvidia/DeepSeek-V4.1-Flash-NVFP4"],
+    )
+    def test_vllm_encoder_settings_from_environment(self, monkeypatch, model_name):
         fake_visual = object()
         fake_llm = MagicMock()
         model_runner = (
@@ -68,13 +72,24 @@ class TestLoadVisionModel:
         monkeypatch.setenv("DYN_VLLM_ENCODER_KV_CACHE_MEMORY_BYTES", "4294967296")
         monkeypatch.setenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")
 
-        loaded = model_module.load_vision_model("Qwen/Qwen3.5-9B")
+        loaded = model_module.load_vision_model(model_name)
 
         kwargs = fake_llm.call_args.kwargs
         assert kwargs["gpu_memory_utilization"] == 0.125
         assert kwargs["kv_cache_memory_bytes"] == 4294967296
         assert kwargs["max_num_seqs"] == 64
-        assert loaded is fake_visual
+        assert kwargs["mm_encoder_only"] is True
+        if resolve_model_family(model_name) is ModelFamily.DEEPSEEK_V41:
+            assert kwargs["engram_config"] == {"cpu_offload": False}
+            assert loaded is model_runner.model
+        else:
+            assert "engram_config" not in kwargs
+            assert loaded is fake_visual
+
+    def test_deepseek_does_not_fall_back_to_full_transformers_model(self, monkeypatch):
+        monkeypatch.setattr(model_module, "VLLM_ENCODER", 0)
+        with pytest.raises(ValueError, match="requires VLLM_ENCODER=1"):
+            model_module.load_vision_model("nvidia/DeepSeek-V4.1-Flash-NVFP4")
 
     def test_encoder_kernel_warmup_patch_is_scoped(self, monkeypatch):
         worker_module = import_module("vllm.v1.worker.gpu_worker")
@@ -135,6 +150,11 @@ class TestResolveModelFamily:
                 id="local_store-org-less",
             ),
             pytest.param("RandomOrg/RandomModel-7B", None, id="unsupported-hf-id"),
+            pytest.param(
+                "nvidia/DeepSeek-V4.1-Flash-NVFP4",
+                ModelFamily.DEEPSEEK_V41,
+                id="hf-id-deepseek-v41",
+            ),
         ],
     )
     def test_resolve_string_inputs(self, model_name, expected):
@@ -149,6 +169,12 @@ class TestResolveModelFamilyOnDisk:
     @pytest.mark.parametrize(
         "subdir, architectures, expected",
         [
+            pytest.param(
+                "local-checkpoint",
+                ["DeepseekV41ForCausalLM"],
+                ModelFamily.DEEPSEEK_V41,
+                id="metadata-deepseek-v41",
+            ),
             pytest.param(
                 "Qwen--Qwen2-VL-2B-Instruct/v2",
                 ["Qwen2VLForConditionalGeneration"],

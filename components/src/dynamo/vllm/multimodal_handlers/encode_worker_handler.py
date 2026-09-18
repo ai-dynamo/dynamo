@@ -11,6 +11,7 @@ from typing import Any, AsyncIterator
 import torch
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
 import dynamo.nixl_connect as connect
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
@@ -53,6 +54,12 @@ SPLIT_ENCODE = int(os.getenv("DYN_SPLIT_ENCODE", 1))
 
 def _load_image_processor(engine_args: AsyncEngineArgs):
     processor_kwargs = getattr(engine_args, "mm_processor_kwargs", None) or {}
+    if resolve_model_family(engine_args.model) is ModelFamily.DEEPSEEK_V41:
+        # DeepSeek ships a native vLLM processor, not an HF preprocessor config.
+        processor = MULTIMODAL_REGISTRY.create_processor(
+            engine_args.create_model_config()
+        )
+        return processor.info.get_hf_processor(**processor_kwargs)
     processor = AutoImageProcessor.from_pretrained(
         engine_args.model,
         trust_remote_code=engine_args.trust_remote_code,
@@ -429,6 +436,11 @@ class EncodeWorkerHandler:
                         logger.debug(
                             f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
                         )
+                    elif resolve_model_family(self.model) is ModelFamily.DEEPSEEK_V41:
+                        grid = image_embeds["llm_grid"]
+                        # One newline per row, plus image start/end delimiters.
+                        sizes = (grid[:, 0] * (grid[:, 1] + 1) + 2).tolist()
+                        splitted_embeddings = embeddings.squeeze(0).split(sizes)
                     else:
                         # Validated on llava (NOTE need to double check on other models) that the
                         # embeddings already has batch dimension for images, so we can directly

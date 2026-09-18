@@ -64,6 +64,7 @@ class ModelFamily(str, Enum):
 
     QWEN_VL = "qwen-vl"
     LLAVA = "llava"
+    DEEPSEEK_V41 = "deepseek-v41"
 
 
 # Per-family registries used by `resolve_model_family`. The encoder reaches
@@ -90,6 +91,7 @@ _FAMILY_ARCHITECTURES: Dict[ModelFamily, frozenset[str]] = {
         }
     ),
     ModelFamily.LLAVA: frozenset({"LlavaForConditionalGeneration"}),
+    ModelFamily.DEEPSEEK_V41: frozenset({"DeepseekV41ForCausalLM"}),
 }
 
 # Name-stage substring patterns (lowercase). A new size / quantization /
@@ -110,6 +112,7 @@ _FAMILY_NAME_PATTERNS: Dict[ModelFamily, frozenset[str]] = {
         }
     ),
     ModelFamily.LLAVA: frozenset({"llava-1.5-7b-hf"}),
+    ModelFamily.DEEPSEEK_V41: frozenset({"deepseek-v4.1"}),
 }
 
 
@@ -187,7 +190,10 @@ def load_vision_model(
     """
     Load a vision model from a HuggingFace model ID.
     """
-    if VLLM_ENCODER and resolve_model_family(model_id) is ModelFamily.QWEN_VL:
+    family = resolve_model_family(model_id)
+    if family is ModelFamily.DEEPSEEK_V41 and not VLLM_ENCODER:
+        raise ValueError("DeepSeek V4.1 encoding requires VLLM_ENCODER=1")
+    if VLLM_ENCODER and family in (ModelFamily.QWEN_VL, ModelFamily.DEEPSEEK_V41):
         # Disable to get ViT from the same process
         update_environment_variables(
             {
@@ -197,6 +203,13 @@ def load_vision_model(
 
         # Load only the vision model via vLLM on encoder workers to avoid loading the full LLM weights, significantly reducing memory usage.
         # Uses native vLLM encoder only model loading added in https://github.com/vllm-project/vllm/pull/32605.
+        encoder_options: Dict[str, Any] = {}
+        if family is ModelFamily.DEEPSEEK_V41:
+            # The skipped language model is initialized on meta. Engram CPU
+            # offload otherwise attempts to create a CUDA stream on meta.
+            encoder_options["engram_config"] = {"cpu_offload": False}
+            encoder_options["max_num_batched_tokens"] = 256
+
         # Load only the vision model via vLLM
         with _maybe_skip_encoder_only_kernel_warmup():
             vllm_model = LLM(
@@ -214,14 +227,23 @@ def load_vision_model(
                         str(1024 * 1024 * 64),
                     )
                 ),  # Encoder-only needs only enough KV for vLLM's init lifecycle.
-                max_num_seqs=int(os.getenv("DYN_VLLM_ENCODER_MAX_NUM_SEQS", "64")),
+                max_num_seqs=int(
+                    os.getenv(
+                        "DYN_VLLM_ENCODER_MAX_NUM_SEQS",
+                        "1" if family is ModelFamily.DEEPSEEK_V41 else "64",
+                    )
+                ),
                 max_model_len=1,
                 mm_encoder_only=True,
                 enable_prefix_caching=False,
+                **encoder_options,
             )
-        return (
-            vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
+        model = (
+            vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model
         )
+        # DeepSeek embeds through the vision tower, aligner, and learned image
+        # delimiters; returning only the tower would omit two of those stages.
+        return model if family is ModelFamily.DEEPSEEK_V41 else model.visual
     return AutoModel.from_pretrained(
         model_id,
         device_map="auto",
