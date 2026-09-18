@@ -7,7 +7,7 @@ subtitle: Let workers finish in-flight requests and release resources cleanly wh
 
 When Kubernetes terminates a pod (rollout, scale-down, node drain), Dynamo workers stop accepting new requests, keep serving in-flight ones through a grace period, then release engine and connection resources before exiting. This is **on by default** — every component handles `SIGTERM`/`SIGINT` and drains automatically. The steps below tune *how long* it waits and make sure interrupted requests are recovered.
 
-Expiry of `DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` initiates cancellation of unfinished requests. The Frontend can migrate these requests to a healthy worker when migration is enabled and policy permits it; otherwise the client receives an error. Exhausted retries or an exceeded sequence-length cap can prevent recovery.
+Once shutdown proceeds past the grace period and any backend-specific draining, workers initiate cancellation of unfinished requests. The Frontend can migrate these requests to a healthy worker when migration is enabled and policy permits it; otherwise the client receives an error. Exhausted retries or an exceeded sequence-length cap can prevent recovery.
 
 The knobs are three timeouts plus enabling migration. The default flow: endpoints unregister from discovery immediately, workers serve for a short grace period, then endpoints drain (bounded by a timeout) before resources are cleaned up.
 

@@ -40,12 +40,15 @@ for sig in (signal.SIGTERM, signal.SIGINT):
 ```
 
 The `graceful_shutdown()` function:
+
 1. Logs the shutdown signal
 2. Unregisters all endpoints from discovery
 3. Waits for a configurable grace period (`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, default 5s)
-4. Calls `runtime.shutdown()` to invalidate endpoints and stop accepting new requests
-5. Waits for request handlers to finish, including with an error (based on `graceful_shutdown` per endpoint)
-6. Returns to allow cleanup to proceed
+4. Awaits the optional `drain_callback` and `pre_shutdown_callback`, in that order
+5. Sets `shutdown_event`, if provided, to initiate cancellation of unfinished requests
+6. Awaits the optional `cleanup_callback` before runtime teardown
+7. Calls `runtime.shutdown()` to initiate runtime shutdown
+8. Returns while the runtime waits for request handlers to finish, including with an error (based on `graceful_shutdown` per endpoint)
 
 The aggregate wait in `runtime.shutdown()` is bounded by
 `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which defaults to 900 seconds
