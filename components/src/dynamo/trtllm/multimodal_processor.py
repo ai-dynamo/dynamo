@@ -100,6 +100,41 @@ def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, A
     return mm_kwargs
 
 
+def _is_safetensors_url(url: str) -> bool:
+    """True when the URL path (not query) ends with ``.safetensors``."""
+    return urlparse(url).path.lower().endswith(".safetensors")
+
+
+def _urls_from_multi_modal_items(
+    items: Any,
+) -> Tuple[List[str], List[str]]:
+    """Split ``multi_modal_data`` image items into image URLs and embedding paths."""
+    image_urls: List[str] = []
+    embedding_paths: List[str] = []
+    if not isinstance(items, list):
+        return image_urls, embedding_paths
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("Url"), str):
+            url = item["Url"]
+        elif isinstance(item, str):
+            url = item
+        else:
+            continue
+        if not url:
+            continue
+        if _is_safetensors_url(url):
+            embedding_paths.append(url)
+        else:
+            image_urls.append(url)
+    return image_urls, embedding_paths
+
+
+def request_messages(request: Dict[str, Any]) -> List[Dict]:
+    extra_args = request.get("extra_args") or {}
+    messages = extra_args.get("messages") or request.get("messages") or []
+    return messages if isinstance(messages, list) else []
+
+
 class MultimodalRequestProcessor:
     """Simple processor for OpenAI format multimodal requests."""
 
@@ -327,12 +362,34 @@ class MultimodalRequestProcessor:
                         if not url:
                             continue
                         self.modality = "image"
-                        if url.endswith(".safetensors"):
+                        if _is_safetensors_url(url):
                             embedding_paths.append(url)
                         else:
                             image_urls.append(url)
 
         return "".join(text_parts), image_urls, embedding_paths
+
+    def extract_prompt_and_media_from_request(
+        self, request: Dict[str, Any]
+    ) -> Tuple[str, List[str], List[str]]:
+        """Extract text and media URLs, preferring ``multi_modal_data``.
+
+        The frontend strips inline ``data:`` payloads from
+        ``extra_args.messages`` so the request plane carries a single copy of
+        the media in ``multi_modal_data``. Chat-template structure still lives
+        in ``extra_args.messages``.
+        """
+        text, image_urls, embedding_paths = self.extract_prompt_and_media(
+            request_messages(request)
+        )
+        mm_data = request.get("multi_modal_data")
+        if isinstance(mm_data, dict):
+            mm_urls, mm_emb = _urls_from_multi_modal_items(mm_data.get("image_url"))
+            if mm_urls:
+                image_urls = mm_urls
+            if mm_emb:
+                embedding_paths = mm_emb
+        return text, image_urls, embedding_paths
 
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
@@ -446,7 +503,7 @@ class MultimodalRequestProcessor:
                         )
                         continue
 
-                    if url.endswith(".safetensors"):
+                    if _is_safetensors_url(url):
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch

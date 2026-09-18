@@ -14,6 +14,7 @@ use dynamo_parsers::tool_calling::{ToolChoice, ToolDefinition};
 use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolChoiceOption, ResponseFormat};
 use dynamo_runtime::error::{DynamoError, ErrorType};
 
+/// Tool names and parser diagnostics can contain request data, so this helper does not mark its message public.
 fn invalid_argument(message: impl Into<String>) -> DynamoError {
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
