@@ -72,6 +72,7 @@ class ImageLoader:
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
         url_policy: UrlValidationPolicy | None = None,
+        max_bytes: int | None = None,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -86,9 +87,12 @@ class ImageLoader:
                 decoded images directly from frontend memory, bypassing standard
                 network transport. Defaults to False.
             url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
+            max_bytes: Maximum remote image size in bytes. When omitted, resolve
+                DYN_MM_MAX_FILE_SIZE_MB for each request.
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
+        self._configured_max_bytes = max_bytes
         self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
         self._enable_frontend_decoding = enable_frontend_decoding
@@ -100,6 +104,11 @@ class ImageLoader:
             run_async(
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
+
+    def _max_bytes(self) -> int:
+        if self._configured_max_bytes is not None:
+            return self._configured_max_bytes
+        return max_media_bytes()
 
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
@@ -139,7 +148,7 @@ class ImageLoader:
                     image_url,
                     self._http_timeout,
                     policy=self._url_policy,
-                    max_bytes=max_media_bytes(),
+                    max_bytes=self._max_bytes(),
                 )
                 if not content:
                     raise ValueError("Empty response content from image URL")

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from dynamo.common.http import HttpStatusError
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
@@ -96,7 +97,7 @@ async def test_load_audio_rejects_empty_waveform():
 
 @pytest.mark.asyncio
 async def test_http_fetch_honors_configured_media_limit(monkeypatch):
-    monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "1")
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
     loader = AudioLoader(url_policy=_permissive_http_policy())
     waveform = np.zeros(8, dtype=np.float32)
 

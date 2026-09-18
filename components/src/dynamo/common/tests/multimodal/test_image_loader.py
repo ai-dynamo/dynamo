@@ -25,6 +25,7 @@ import pytest
 from PIL import Image
 
 from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
 
@@ -210,13 +211,29 @@ async def test_http_timeout_raises_408(loader: ImageLoader) -> None:
 async def test_http_fetch_honors_configured_media_limit(
     loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "1")
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
     mock_fetch = _mock_fetch_bytes()
 
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         await loader.load_image("https://example.com/limited.png")
 
     assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
+
+
+async def test_explicit_media_limit_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = ImageLoader(
+        max_bytes=2 * 1024 * 1024,
+        url_policy=_permissive_policy(),
+    )
+    mock_fetch = _mock_fetch_bytes()
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        await loader.load_image("https://example.com/explicit-limit.png")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 2 * 1024 * 1024
 
 
 async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:
