@@ -1580,6 +1580,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepseek_v41_complete_call_survives_missing_outer_closer() {
+        // Model the frontend hiding an EOS token that is also the outer DSML
+        // closer. A complete invocation is committed at `</｜DSML｜ invoke>`, so
+        // removing only `</｜DSML｜ calls>` must not drop the call.
+        let input = concat!(
+            "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
+            "<｜DSML｜ parameter name=\"city\" string=\"true\">Tokyo</｜DSML｜ parameter>",
+            "</｜DSML｜ invoke>"
+        );
+
+        let batch = parse_complete(
+            DEEPSEEK_V41_UNIFIED_FAMILY,
+            input,
+            &GuidedToolConstraint::None,
+            &weather_tools(),
+        )
+        .unwrap();
+        assert_eq!(batch.tool_calls.len(), 1);
+        assert_eq!(batch.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            batch.tool_calls[0].function.arguments,
+            r#"{"city":"Tokyo"}"#
+        );
+
+        let responses = apply_stream(
+            stream::iter([chunk(input, true)]),
+            Some(weather_tools()),
+            None,
+            false,
+            UnifiedParserStartingState::Response,
+            DEEPSEEK_V41_UNIFIED_FAMILY,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert!(responses.iter().all(|response| !response.is_error()));
+        assert_eq!(
+            logical_events(&responses),
+            vec![LogicalEvent::Tool {
+                index: 0,
+                name: Some("get_weather".to_string()),
+                arguments: r#"{"city":"Tokyo"}"#.to_string(),
+            }]
+        );
+        assert_eq!(
+            collect_choices(&responses).last().unwrap().finish_reason,
+            Some(FinishReason::ToolCalls)
+        );
+    }
+
+    #[tokio::test]
     async fn deepseek_v41_recovers_malformed_closed_arguments_as_text() {
         let text = concat!(
             "<｜DSML｜ calls><｜DSML｜ invoke name=\"get_weather\">",
