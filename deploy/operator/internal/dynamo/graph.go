@@ -2012,10 +2012,9 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			DynamoNamespace:                parentContext.DynamoNamespace,
 		}
 
-		// Co-located frontend discovery uses its own identity, not the engine's.
-		if parentContext.ContainerName != "" {
-			frontendContext.ContainerName = sidecarName
-		}
+		// Co-located frontend discovery uses its own identity in both worker layouts.
+		frontendContext.ContainerName = sidecarName
+
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
 		if err != nil {
