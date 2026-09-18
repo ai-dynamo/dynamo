@@ -496,7 +496,11 @@ impl
                     // `data.token_ids` is empty, and `data.finish_reason` is already correctly set.
                     // In that case, `process_token_ids` above will rewrite `finish_reason` to `None`,
                     // which we don't want to propagate to `data.finish_reason`.
-                    if finish_reason.is_some() {
+                    // A failed generation may carry EOS in its final token batch.
+                    // Local stop detection must not turn the worker's error into success.
+                    if finish_reason.is_some()
+                        && !matches!(data.finish_reason, Some(FinishReason::Error(_)))
+                    {
                         data.finish_reason = finish_reason;
                         data.stop_reason = stop_reason.or(data.stop_reason);
                     }
