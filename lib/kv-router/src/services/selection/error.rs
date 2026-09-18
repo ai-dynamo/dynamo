@@ -80,8 +80,8 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         // respond to like the overloaded family, not a gateway timeout.
         KvSchedulerError::AllEligibleWorkersOverloaded
         | KvSchedulerError::PinnedWorkerOverloaded { .. }
+        | KvSchedulerError::QueueRejected(_)
         | KvSchedulerError::DeadlineExceeded => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
         KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
         KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
     }
