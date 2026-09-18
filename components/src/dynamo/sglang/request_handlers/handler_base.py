@@ -9,6 +9,7 @@ import random
 import re
 import threading
 from abc import ABC, abstractmethod
+from array import array
 from contextlib import asynccontextmanager
 from typing import (
     Any,
@@ -977,6 +978,13 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         request_input = self.input_param_manager.get_input_param(
             request, use_tokenizer=self.use_sglang_tokenizer
         )
+        if isinstance(request_input, (bytes, bytearray, memoryview)):
+            # DYN_TOKEN_IDS_BYTES=1: the runtime sent token ids as i64-LE bytes. An
+            # array satisfies everything SGLang does with input_ids (len, slicing,
+            # array("q", ...) copy) without materializing 36k Python ints.
+            ids = array("q")
+            ids.frombytes(request_input)
+            request_input = ids
         self._validate_nvext_token_data(request, request_input)
 
         return {

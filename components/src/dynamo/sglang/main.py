@@ -19,6 +19,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.gateway import build_gateway_engine, is_gateway_child
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -68,6 +69,10 @@ async def worker(argv: list[str] | None = None):
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None
+    if snapshot_controller is None and is_gateway_child():
+        # Spawned by gateway.serve_via_gateway_children: reuse the parent's engine through
+        # a TokenizerWorker instead of launching schedulers.
+        snapshot_engine = build_gateway_engine()
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
         dynamo_args = await refresh_snapshot_restore_config(

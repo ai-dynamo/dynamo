@@ -37,7 +37,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_c
 use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 
@@ -701,6 +701,42 @@ struct PyEngineCore {
     request_metadata: Arc<StdMutex<HashMap<String, BTreeMap<String, String>>>>,
 }
 
+
+/// `DYN_TOKEN_IDS_BYTES=1`: hand Python `token_ids` as one `bytes` of little-endian
+/// i64 instead of a list of Python ints. A 36k-token prompt costs ~36k PyLong
+/// allocations plus a second pass in the backend (`array("q", input_ids)`) on the
+/// list path; the bytes path is a memcpy on both sides. Backends opt in and convert
+/// with `array("q").frombytes()`.
+fn token_ids_as_bytes() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("DYN_TOKEN_IDS_BYTES").map(|v| v == "1").unwrap_or(false))
+}
+
+fn pythonize_request<'py, T: serde::Serialize>(
+    py: Python<'py>,
+    request: &T,
+) -> PyResult<Bound<'py, PyAny>> {
+    if !token_ids_as_bytes() {
+        return Ok(pythonize(py, request)?);
+    }
+    let mut value = serde_json::to_value(request).map_err(to_pyerr)?;
+    let ids = value
+        .as_object_mut()
+        .and_then(|m| m.remove("token_ids"));
+    let py_request = pythonize(py, &value)?;
+    if let Some(serde_json::Value::Array(arr)) = ids {
+        let mut buf = Vec::with_capacity(arr.len() * 8);
+        for x in &arr {
+            buf.extend_from_slice(&x.as_i64().unwrap_or(0).to_le_bytes());
+        }
+        py_request
+            .downcast::<PyDict>()
+            .map_err(PyErr::from)?
+            .set_item("token_ids", PyBytes::new(py, &buf))?;
+    }
+    Ok(py_request)
+}
+
 impl PyEngineCore {
     fn new(engine: Arc<PyObject>, event_loop: Arc<PyObject>) -> Self {
         Self {
@@ -797,7 +833,7 @@ impl PyEngineCore {
         // turn the resulting Python async generator into a Rust stream.
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
-                let py_request = pythonize(py, &request)?;
+                let py_request = pythonize_request(py, &request)?;
                 let py_ctx = Py::new(
                     py,
                     PyContext::new(
