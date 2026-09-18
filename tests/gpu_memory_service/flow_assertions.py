@@ -84,8 +84,9 @@ def pause_engine(
     *,
     pause_label: str,
     expected_weights_hash: str | None = None,
+    preserve_kv_allocations: bool = False,
 ):
-    weights_state, _ = wait_for_active_layout(
+    weights_state, kv_state = wait_for_active_layout(
         weights_gms,
         kv_cache_gms,
         expected_weights_hash=expected_weights_hash,
@@ -94,7 +95,14 @@ def pause_engine(
     assert engine.pause()["status"] == "ok"
     logger.info("%s completed", pause_label)
 
-    wait_for_paused_layout(weights_gms, kv_cache_gms, weights_state)
+    wait_for_paused_layout(
+        weights_gms,
+        kv_cache_gms,
+        weights_state,
+        expected_kv_allocations=(
+            kv_state.allocation_count if preserve_kv_allocations else 0
+        ),
+    )
     return weights_state
 
 
@@ -134,6 +142,7 @@ def wait_for_paused_layout(
     weights_state_before_pause,
     *,
     require_no_ro_sessions: bool = False,
+    expected_kv_allocations: int = 0,
     timeout: float = 30.0,
 ):
     deadline = time.monotonic() + timeout
@@ -147,7 +156,7 @@ def wait_for_paused_layout(
             and weights_after_pause.memory_layout_hash
             == weights_state_before_pause.memory_layout_hash
             and kv_after_pause.state == ServerState.EMPTY
-            and kv_after_pause.allocation_count == 0
+            and kv_after_pause.allocation_count == expected_kv_allocations
         ):
             if not require_no_ro_sessions or weights_after_pause.ro_session_count == 0:
                 return weights_after_pause, kv_after_pause
