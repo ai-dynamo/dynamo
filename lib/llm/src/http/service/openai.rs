@@ -188,7 +188,13 @@ impl Drop for TaskLifecycleTerminal {
 }
 
 fn terminal_outcome_for_error_response(response: &ErrorResponse) -> TerminalOutcome {
-    terminal_outcome_for_error_type(extract_error_type_from_response(response))
+    match extract_error_type_from_response(response) {
+        // Preserve explicit categories such as overload, even when configured as 504.
+        ErrorType::Internal if response.0 == StatusCode::GATEWAY_TIMEOUT => {
+            TerminalOutcome::TimedOut
+        }
+        error_type => terminal_outcome_for_error_type(error_type),
+    }
 }
 
 fn terminal_outcome_for_error_type(error_type: ErrorType) -> TerminalOutcome {
@@ -791,13 +797,6 @@ impl ErrorMessage {
     /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
     pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
-        if super::metrics::request_was_timed_out(err.as_ref()) {
-            let mut response =
-                ErrorMessage::internal_server_error_with_details(alt_msg, format!("{err:#}"));
-            response.1.metric_error_type = Some(ErrorType::ResponseTimeout);
-            return response;
-        }
-
         if let Some(rejection) = find_queue_rejection_in_chain(err.as_ref()) {
             let code = overload_status_code();
             record_local_failure(ErrorClass::CapacityExhausted);
@@ -3741,7 +3740,11 @@ async fn chat_completions(
                 }
                 yield item;
             }
-            if let Some(error_type) = monitor_error_signal.error_type() {
+            if monitor_error_signal.semantic_error().is_some_and(|error| {
+                error.class().normalized() == ErrorClass::DeadlineExceeded
+            }) {
+                terminal.finish(TerminalOutcome::TimedOut);
+            } else if let Some(error_type) = monitor_error_signal.error_type() {
                 terminal.finish(terminal_outcome_for_error_type(error_type));
             } else if ctx.is_stopped() || ctx.is_killed() {
                 terminal.finish(TerminalOutcome::Cancelled);
@@ -7046,6 +7049,7 @@ mod tests {
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 
         for error_type in [
+            DynamoErrorType::DeadlineExceeded,
             DynamoErrorType::ResponseTimeout,
             DynamoErrorType::ConnectionTimeout,
             DynamoErrorType::Backend(BackendError::ResponseTimeout),
@@ -7060,9 +7064,11 @@ mod tests {
             .context("outer request error");
             let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
 
+            assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT, "{error_type:?}");
+            assert_eq!(response.1.code, StatusCode::GATEWAY_TIMEOUT.as_u16());
             assert_eq!(
                 extract_error_type_from_response(&response),
-                ErrorType::ResponseTimeout,
+                ErrorType::Internal,
                 "{error_type:?}",
             );
             assert_eq!(
@@ -7075,7 +7081,7 @@ mod tests {
 
     #[test]
     fn terminal_outcome_uses_semantic_error_type() {
-        let response = (
+        let mut response = (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorMessage {
                 message: "request rejected because the service is overloaded".to_string(),
@@ -7086,10 +7092,14 @@ mod tests {
             }),
         );
 
-        assert_eq!(
-            terminal_outcome_for_error_response(&response),
-            TerminalOutcome::Rejected
-        );
+        for status in [503, 504, 529] {
+            response.0 = StatusCode::from_u16(status).unwrap();
+            response.1.code = status;
+            assert_eq!(
+                terminal_outcome_for_error_response(&response),
+                TerminalOutcome::Rejected
+            );
+        }
     }
 
     #[test]
@@ -8708,12 +8718,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_check_for_backend_error_preserves_response_timeout() {
+    async fn test_check_for_backend_error_preserves_timeout_outcome() {
         use crate::types::openai::chat_completions::NvCreateChatCompletionStreamResponse;
         use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
         use futures::stream;
 
         for error_type in [
+            DynamoErrorType::DeadlineExceeded,
             DynamoErrorType::ResponseTimeout,
             DynamoErrorType::ConnectionTimeout,
             DynamoErrorType::Backend(BackendError::ResponseTimeout),
@@ -8741,9 +8752,11 @@ mod tests {
                 Err(response) => response,
                 Ok(_) => panic!("typed timeout must fail preflight: {error_type:?}"),
             };
+            assert_eq!(response.0, StatusCode::GATEWAY_TIMEOUT, "{error_type:?}");
+            assert_eq!(response.1.code, StatusCode::GATEWAY_TIMEOUT.as_u16());
             assert_eq!(
                 extract_error_type_from_response(&response),
-                ErrorType::ResponseTimeout,
+                ErrorType::Internal,
                 "{error_type:?}",
             );
             assert_eq!(

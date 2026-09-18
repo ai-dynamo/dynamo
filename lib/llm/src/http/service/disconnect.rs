@@ -123,7 +123,7 @@ impl StreamErrorSignal {
         self.0.terminal_event_emitted.load(Ordering::Acquire)
     }
 
-    fn semantic_error(&self) -> Option<&DynamoError> {
+    pub(super) fn semantic_error(&self) -> Option<&DynamoError> {
         self.0
             .failure
             .get()

@@ -1025,9 +1025,8 @@ impl Worker {
                 let lifecycle_role = match self.config.disaggregation_mode {
                     DisaggregationMode::Prefill => LifecycleOperationRole::Prefill,
                     DisaggregationMode::Decode => LifecycleOperationRole::Decode,
-                    DisaggregationMode::Aggregated | DisaggregationMode::Encode => {
-                        LifecycleOperationRole::Worker
-                    }
+                    DisaggregationMode::Encode => LifecycleOperationRole::Encode,
+                    DisaggregationMode::Aggregated => LifecycleOperationRole::Worker,
                 };
                 let ingress =
                     Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
