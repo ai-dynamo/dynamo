@@ -2408,7 +2408,7 @@ mod tests {
     }
 
     #[test]
-    fn huge_generated_population_reaches_only_the_admission_window() {
+    fn generated_request_failure_stops_large_population() {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -2442,6 +2442,106 @@ mod tests {
         .unwrap_err();
         assert!(format!("{error:#}").contains("bounded sentinel"));
         assert_eq!(calls.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn huge_generated_population_materializes_only_the_initial_window() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct ObserveAdmission {
+            calls: Arc<AtomicUsize>,
+            observed: Arc<AtomicUsize>,
+        }
+
+        impl super::super::ReplayScalingPolicy for ObserveAdmission {
+            fn initial_tick_ms(&mut self) -> anyhow::Result<f64> {
+                Ok(0.0)
+            }
+
+            fn on_tick(
+                &mut self,
+                snapshot: super::super::ReplayScalingSnapshot,
+            ) -> anyhow::Result<super::super::ReplayScalingDecision> {
+                // Same-timestamp arrivals settle before the scaling snapshot;
+                // no request can complete at simulated time zero.
+                assert_eq!(snapshot.now_ms, 0.0);
+                self.observed
+                    .store(self.calls.load(Ordering::SeqCst), Ordering::SeqCst);
+                anyhow::bail!("initial admission observed")
+            }
+        }
+
+        for disagg in [false, true] {
+            for max_in_flight in [1, 2, 4, 8] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let observed = Arc::new(AtomicUsize::new(usize::MAX));
+                let generated = Arc::clone(&calls);
+                let requests = super::super::GeneratedRequests::new(6_451_200, move |index| {
+                    generated.fetch_add(1, Ordering::SeqCst);
+                    // A broken eager drain must fail promptly, without making
+                    // this regression test allocate the entire population.
+                    anyhow::ensure!(index < 64, "generated beyond the admission window");
+                    Ok(DirectRequest {
+                        tokens: vec![1; 16],
+                        max_output_tokens: 3,
+                        uuid: Some(Uuid::from_u128(index as u128 + 1)),
+                        ..Default::default()
+                    })
+                });
+                let policy = Some(Box::new(ObserveAdmission {
+                    calls: Arc::clone(&calls),
+                    observed: Arc::clone(&observed),
+                })
+                    as Box<dyn super::super::ReplayScalingPolicy>);
+                let args = replay_test_args();
+                let result = if disagg {
+                    let config = OfflineDisaggReplayConfig {
+                        prefill_args: MockEngineArgs {
+                            worker_type: WorkerType::Prefill,
+                            ..args.clone()
+                        },
+                        decode_args: MockEngineArgs {
+                            worker_type: WorkerType::Decode,
+                            ..args
+                        },
+                        num_prefill_workers: 1,
+                        num_decode_workers: 1,
+                    };
+                    simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
+                        config,
+                        None,
+                        None,
+                        requests,
+                        max_in_flight,
+                        ReplayRouterMode::RoundRobin,
+                        false,
+                        SlaThresholds::default(),
+                        policy,
+                    )
+                } else {
+                    simulate_concurrency_requests_with_router_mode_and_scaling_policy(
+                        args,
+                        None,
+                        None,
+                        requests,
+                        max_in_flight,
+                        1,
+                        ReplayRouterMode::RoundRobin,
+                        false,
+                        SlaThresholds::default(),
+                        policy,
+                    )
+                };
+                assert!(
+                    format!("{:#}", result.unwrap_err()).contains("initial admission observed")
+                );
+                assert_eq!(observed.load(Ordering::SeqCst), max_in_flight);
+                assert_eq!(calls.load(Ordering::SeqCst), max_in_flight);
+            }
+        }
     }
 
     fn replay_test_args() -> MockEngineArgs {

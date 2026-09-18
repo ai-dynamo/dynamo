@@ -7,7 +7,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -494,9 +498,35 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
-def test_resource_estimate_requires_native_generated_capability(monkeypatch):
-    resources = pytest.importorskip("aisimulate.resources")
-    from dynamo import _core
+@pytest.fixture
+def resource_api(monkeypatch):
+    """Exercise the adapter contract even with a pre-resource-API wheel."""
+
+    @dataclass(frozen=True)
+    class Estimate:
+        allocation_model: str
+        request_count: int
+        input_token_bytes: int
+        lower_bound_bytes: int
+        estimated_peak_bytes: int
+
+    def estimate_workload(workload, *, stack, concurrency):
+        assert stack == "dynamo"
+        return Estimate("dynamo-eager-u32-v1", workload["request_count"], 100, 100, 200)
+
+    api = SimpleNamespace(
+        ResourceEstimate=Estimate,
+        WORKER_BASELINE_BYTES=512 * 1024**2,
+        estimate_workload=estimate_workload,
+    )
+    monkeypatch.setattr(simulation, "_resources", api)
+    return api
+
+
+def test_resource_estimate_requires_native_generated_capability(
+    monkeypatch, resource_api
+):
+    core = simulation._core
 
     factory = simulation.DynamoReplayRunnerFactory()
     workload = {
@@ -506,23 +536,40 @@ def test_resource_estimate_requires_native_generated_capability(monkeypatch):
         "concurrency": 64512,
     }
     monkeypatch.delattr(
-        _core, "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL", raising=False
+        core, "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL", raising=False
     )
     assert (
         factory.estimate_host_resources(workload).allocation_model
         == "dynamo-eager-u32-v1"
     )
     monkeypatch.setattr(
-        _core,
+        core,
         "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
         "generated-u32-v1",
         raising=False,
     )
     estimate = factory.estimate_host_resources(workload)
-    assert isinstance(estimate, resources.ResourceEstimate)
+    assert isinstance(estimate, resource_api.ResourceEstimate)
     assert estimate.allocation_model == "dynamo-generated-u32-v1"
     assert estimate.input_token_bytes == 64512 * 10240 * 4
-    assert estimate.estimated_peak_bytes > 6451200 * 4096
+    assert estimate.estimated_peak_bytes == (
+        512 * 1024**2 + 2 * 64512 * 10240 * 4 + 6451200 * (4096 + 16 * 1024)
+    )
+
+
+def test_resource_estimate_caps_prompt_storage_at_request_count(
+    monkeypatch, resource_api
+):
+    monkeypatch.setattr(
+        simulation._core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    estimate = simulation.DynamoReplayRunnerFactory().estimate_host_resources(
+        {"isl": 16, "osl": 4, "request_count": 2}, concurrency=8
+    )
+    assert estimate.input_token_bytes == 2 * 16 * 4
 
 
 @pytest.mark.parametrize(
@@ -530,20 +577,16 @@ def test_resource_estimate_requires_native_generated_capability(monkeypatch):
     [
         {"request_rate": 1.0},
         {"arrival_interval_ms": 1.0},
-        {"turns_per_session": 2},
         {"shared_prefix_ratio": 0.5},
         {"num_prefix_groups": 1},
         {"inter_turn_delay_ms": 1},
     ],
 )
 def test_resource_estimate_keeps_conservative_fallback_for_other_paths(
-    monkeypatch, extra
+    monkeypatch, resource_api, extra
 ):
-    pytest.importorskip("aisimulate.resources")
-    from dynamo import _core
-
     monkeypatch.setattr(
-        _core,
+        simulation._core,
         "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
         "generated-u32-v1",
         raising=False,
@@ -551,3 +594,56 @@ def test_resource_estimate_keeps_conservative_fallback_for_other_paths(
     workload = {"isl": 16, "osl": 4, "request_count": 128, "concurrency": 8, **extra}
     estimate = simulation.DynamoReplayRunnerFactory().estimate_host_resources(workload)
     assert estimate.allocation_model != "dynamo-generated-u32-v1"
+
+
+def test_resource_estimate_preserves_unqualified_consumer_estimate(
+    monkeypatch, resource_api
+):
+    fallback = resource_api.ResourceEstimate("runner-unqualified-v1", 128, 0, 0, 0)
+    monkeypatch.setattr(
+        resource_api, "estimate_workload", lambda *args, **kwargs: fallback
+    )
+    monkeypatch.setattr(
+        simulation._core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    workload = {"request_count": 128, "concurrency": 8, "turns_per_session": 2}
+    assert (
+        simulation.DynamoReplayRunnerFactory().estimate_host_resources(workload)
+        is fallback
+    )
+
+
+def test_resource_estimate_with_published_package_without_resources(monkeypatch):
+    # Load the real adapter with the optional module absent, even in development
+    # environments that happen to have a newer AISimulate source checkout.
+    monkeypatch.setitem(sys.modules, "aisimulate.resources", None)
+    name = "dynamo.replay._simulation_without_resources"
+    spec = importlib.util.spec_from_file_location(name, simulation.__file__)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    assert (
+        module.DynamoReplayRunnerFactory().estimate_host_resources(
+            {"request_count": 128, "concurrency": 8}
+        )
+        is None
+    )
+
+    failure = MemoryError("native replay allocation failed")
+
+    def fail_replay(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(module, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(module.DynamoReplayRunner, "_run_synthetic", fail_replay)
+    replay_spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"isl": 16, "osl": 4, "request_count": 128, "concurrency": 8},
+        goal={"target": "throughput"},
+    )
+    with pytest.raises(MemoryError) as caught:
+        module.DynamoReplayRunnerFactory().create(0).run(replay_spec)
+    assert caught.value is failure

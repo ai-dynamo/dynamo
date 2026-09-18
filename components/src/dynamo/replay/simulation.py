@@ -26,6 +26,16 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
+try:
+    import aisimulate.resources as _resources
+except ModuleNotFoundError as error:
+    # Published packages before host resource accounting have no such module.
+    # Do not hide missing dependencies inside a package that does provide it.
+    if error.name != "aisimulate.resources":
+        raise
+    _resources = None
+
+from dynamo import _core
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
@@ -59,16 +69,17 @@ class DynamoReplayRunnerFactory:
     benchmark_granularity: int = 8
 
     def estimate_host_resources(self, workload, *, concurrency=None):
-        """Qualify lazy allocation only when the loaded native binding supports it."""
-        from aisimulate.resources import (
-            WORKER_BASELINE_BYTES,
-            ResourceEstimate,
-            estimate_workload,
+        """Return an estimate, or None when the consumer has no resource API.
+
+        Older AISimulate packages do not perform host resource admission. They
+        cannot interpret an estimate, so do not advertise a qualified one.
+        """
+        if _resources is None:
+            return None
+
+        fallback = _resources.estimate_workload(
+            workload, stack="dynamo", concurrency=concurrency
         )
-
-        from dynamo import _core
-
-        fallback = estimate_workload(workload, stack="dynamo", concurrency=concurrency)
         active = concurrency or workload.get("concurrency")
         if (
             getattr(_core, "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL", None)
@@ -87,8 +98,10 @@ class DynamoReplayRunnerFactory:
         tokens = min(count, int(active)) * isl * 4
         # Keep a conservative allowance for detailed capture and other report
         # evidence. The generation capability alone does not qualify those paths.
-        peak = WORKER_BASELINE_BYTES + 2 * tokens + count * (4096 + 16 * osl)
-        return ResourceEstimate("dynamo-generated-u32-v1", count, tokens, tokens, peak)
+        peak = _resources.WORKER_BASELINE_BYTES + 2 * tokens + count * (4096 + 16 * osl)
+        return _resources.ResourceEstimate(
+            "dynamo-generated-u32-v1", count, tokens, tokens, peak
+        )
 
     def capabilities(self) -> RunnerCapabilities:
         """Advertise the backend/topology and Dynamo hook support."""
@@ -163,11 +176,9 @@ class DynamoReplayRunner:
                 common.update(self._synthetic_kwargs(spec))
                 report = self._run_synthetic(spec, common)
         except MemoryError as error:
-            try:
-                from aisimulate.resources import ResourceLimitError
-            except ImportError:
-                raise error from None
-            raise ResourceLimitError(str(error)) from error
+            if _resources is None:
+                raise
+            raise _resources.ResourceLimitError(str(error)) from error
 
         metrics, metadata = self._normalize_report(report, output_requirements)
         self._require_goodput_metric(metrics, spec)
