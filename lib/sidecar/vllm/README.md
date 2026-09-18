@@ -257,30 +257,13 @@ There is no published sidecar image yet, so build and push the image from
 sidecar executables; these manifests run `dynamo-vllm-sidecar` as the container
 command.
 
-The manifests require an operator that supports the `v1beta1` `dynamoSidecar`
-field. The engine runs in `containers[name=main]`; the restartable Dynamo sidecar
-runs in `initContainers[name=dynamo]` and receives the operator's runtime defaults.
-Engine startup and readiness use Kubernetes-native `grpc` probes on port 50051. The omitted `service` selects
-vLLM's aggregate health, which covers both `vllm.Control` and `vllm.Inference`.
-No probe executable or installer init container is required. The engine binds to
-`0.0.0.0` because kubelet probes connect to the pod IP; the colocated sidecar still
-connects to `127.0.0.1:50051`. Keep this unauthenticated engine endpoint on a trusted
-pod network and restrict access with your cluster's network controls.
-The engine image must include a `vllm-rs` build compatible with the pinned
-`vllm-proto` crate.
-
-Use a sidecar image that starts its HTTP listener before connecting runtime
-dependencies or discovering engine metadata.
-The operator injects the sidecar's startup and liveness probes on `/live` and its
-readiness probe on `/health`; no probe overrides are needed. `/live` stays
-independent of engine and runtime connectivity, while `/health` checks runtime
-initialization, required runtime connectivity, and shutdown. Engine loading does
-not hold either probe unready. The engine's separate gRPC probes keep the pod
-unready until aggregate engine health is serving. The engine startup budget is 30 minutes (`360 × 5` seconds).
-Increase this budget for larger models.
-
-Continuous engine-health reconciliation, engine restart recovery, and changes to
-engine drain/grace behavior remain deferred to the rest of DEP #14897.
+The vLLM engine runs as `main`, alongside the restartable Dynamo sidecar
+`dynamo`. The operator injects sidecar probes: `/live` for startup and liveness,
+and `/health` for runtime readiness, independent of engine loading.
+Kubernetes-native gRPC probes on port `50051` gate pod readiness on engine
+health, with a 30-minute startup budget; increase this for larger models. The
+engine listens on `0.0.0.0` for kubelet probes, while the sidecar connects over
+loopback.
 
 The Dynamo vLLM runtime image exposes `vllm-rs` through the
 [wrapper described above](#runtime-compatibility). On CPU and XPU, check that
