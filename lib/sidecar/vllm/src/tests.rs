@@ -1117,14 +1117,58 @@ fn compatibility_envelope_preserves_typed_controls() {
 }
 
 #[test]
-fn native_sampling_is_rejected_instead_of_silently_discarded() {
+fn compatibility_envelope_accepts_sampling_projected_to_proto() {
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let mut request = request();
+        if mode.is_decode() {
+            request.prefill_result = decode_request().prefill_result;
+        }
+        request.extra_args = Some(json!({
+            "vllm_tito": {
+                "sampling_params": {
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                    "top_k": 4,
+                    "min_p": 0.1,
+                    "seed": 123,
+                    "presence_penalty": 0.3,
+                    "frequency_penalty": 0.4,
+                    "repetition_penalty": 1.1,
+                    "max_tokens": 1,
+                    "min_tokens": 1,
+                    "stop_token_ids": [2],
+                    "ignore_eos": true,
+                    "logprobs": 1,
+                    "prompt_logprobs": 1,
+                    "skip_special_tokens": false
+                }
+            }
+        }));
+        let wire = build_generate_request(request, "native".to_string(), mode)
+            .expect("vllm-proto 0.3 preserves projected sampling controls");
+        assert_eq!(wire.temperature, Some(0.2));
+        let sampling = wire.sampling.expect("sampling");
+        assert_eq!(sampling.top_p, 0.9);
+        assert_eq!(sampling.top_k, 4);
+        assert_eq!(sampling.min_p, 0.1);
+        assert_eq!(sampling.seed, Some(123));
+        let decoding = wire.decoding.expect("decoding");
+        assert_eq!(decoding.presence_penalty, 0.3);
+        assert_eq!(decoding.frequency_penalty, 0.4);
+        assert_eq!(decoding.repetition_penalty, 1.1);
+        assert_eq!(wire.stopping.expect("stopping").stop_token_ids, vec![2]);
+    }
+}
+
+#[test]
+fn unprojected_native_sampling_is_rejected_instead_of_silently_discarded() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let mut request = request();
         request.extra_args = Some(json!({
-            "vllm_tito": {"sampling_params": {"temperature": 0.0}}
+            "vllm_tito": {"sampling_params": {"logit_bias": {"42": 1.0}}}
         }));
         let error = build_generate_request(request, "native".to_string(), mode)
-            .expect_err("released protocol cannot preserve native sampling semantics");
+            .expect_err("unprojected sampling controls must not be discarded");
         assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
@@ -1132,7 +1176,7 @@ fn native_sampling_is_rejected_instead_of_silently_discarded() {
         assert!(
             error
                 .to_string()
-                .contains("sampling_params.temperature is not supported")
+                .contains("sampling_params.logit_bias is not supported")
         );
     }
 }
