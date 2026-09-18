@@ -21,8 +21,8 @@ architecture.
 
 | Deployment path | Aggregated | Disaggregated |
 |---|---|---|
-| Local launcher | Validated on one GPU | Validated on one GPU; no launcher script yet |
-| Kubernetes example | Validated | No manifest yet |
+| Local launcher | Validated on one GPU | Validated on one GPU |
+| Kubernetes example | Validated | Manifest available, not yet validated on a cluster |
 
 This table covers launch topology only. The
 [TensorRT-LLM feature matrix](overview.md#feature-support-matrix) describes the
@@ -66,6 +66,16 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
+For prefill and decode on two GPUs, run the disaggregated launcher instead. It
+starts both engines with a NIXL cache transceiver, which the KV handoff needs on
+both legs:
+
+```bash
+./lib/sidecar/trtllm/launch/disagg.sh --model Qwen/Qwen3-0.6B
+```
+
+The frontend serves the same endpoint either way.
+
 ## Deploy on Kubernetes
 
 No published sidecar image is available yet. Follow the
@@ -77,4 +87,9 @@ OpenEngine gRPC. Layer the pinned OpenEngine Python bindings onto
 `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer and
 push the result: the release ships the servicer but not the bindings it and the
 manifest's health probes import. The source tree includes an
-[aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml).
+[aggregated deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/agg.yaml)
+and a
+[disaggregated one](https://github.com/ai-dynamo/dynamo/blob/main/lib/sidecar/trtllm/deploy/disagg.yaml)
+that runs prefill and decode as separate worker pods. Read the disaggregated
+manifest's header before applying it: it requests `rdma/ib` on both engines for
+the KV transfer, which you drop if your fabric does not need it.
