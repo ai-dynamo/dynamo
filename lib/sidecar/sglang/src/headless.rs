@@ -621,7 +621,8 @@ mod tests {
     #[tokio::test]
     async fn local_zmq_events_keep_global_rank_and_leader_identity_without_serving() {
         use dynamo_kv_router::protocols::{KV_EVENT_SUBJECT, RouterEvent};
-        use dynamo_runtime::discovery::{DiscoveryQuery, EventSourceQuery};
+        use dynamo_llm::discovery::KvEventSource;
+        use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, EventSourceQuery};
         use dynamo_runtime::transports::event_plane::EventSubscriber;
         use futures::SinkExt;
 
@@ -696,14 +697,14 @@ mod tests {
             endpoint.id(),
             KV_EVENT_SUBJECT,
         ));
-        assert_eq!(
-            drt.discovery()
-                .list(source_query.clone())
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        let sources = drt.discovery().list(source_query.clone()).await.unwrap();
+        assert_eq!(sources.len(), 1);
+        let DiscoveryInstance::EventSource { metadata, .. } = &sources[0] else {
+            panic!("expected a KV event source");
+        };
+        let advertised: KvEventSource = serde_json::from_value(metadata.clone()).unwrap();
+        assert_eq!(advertised.worker.dp_rank, 4);
+        assert_eq!(advertised.worker.worker_id, 42);
         drop(publishers);
         tokio::time::timeout(Duration::from_secs(5), async {
             while !drt
