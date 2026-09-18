@@ -41,6 +41,10 @@ inputs:
     description: 'Full container image reference for the framework runtime'
     required: false
     default: ''
+  frontend_image:
+    description: 'Full container image reference for the standalone frontend'
+    required: false
+    default: ''
   platform_arch:
     description: 'Platform architecture (amd64, arm64)'
     required: false
@@ -58,7 +62,7 @@ inputs:
     required: false
     default: ''
   extra_pytest_args:
-    description: 'Additional pytest arguments (e.g., --frontend-image=...)'
+    description: 'Additional pytest arguments (e.g., -m framework_only)'
     required: false
     default: ''
   cleanup_deployment:
@@ -105,6 +109,7 @@ runs:
         FRAMEWORK: ${{ inputs.framework }}
         PROFILE: ${{ inputs.profile }}
         IMAGE: ${{ inputs.image }}
+        FRONTEND_IMAGE: ${{ inputs.frontend_image }}
         DYN_TEST_OUTPUT_PATH: ${{ github.workspace }}/test-output
         TEST_NAME: ${{ inputs.test_name }}
         TEST_FILE: ${{ inputs.test_file }}
@@ -126,6 +131,9 @@ runs:
         fi
         if [ -n "${IMAGE}" ]; then
           PYTEST_ARGS+=" --image=${IMAGE}"
+        fi
+        if [ -n "${FRONTEND_IMAGE}" ]; then
+          PYTEST_ARGS+=" --frontend-image=${FRONTEND_IMAGE}"
         fi
         if [ -n "${MODEL_CACHE_PVC}" ]; then
           PYTEST_ARGS+=" --model-cache-pvc=${MODEL_CACHE_PVC}"
