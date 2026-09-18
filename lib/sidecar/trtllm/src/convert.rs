@@ -90,13 +90,13 @@ pub(crate) fn build_generate_request(
         }),
         stopping: Some(pb::StoppingOptions {
             max_tokens: Some(max_tokens),
-            // A prefill worker stops after the context phase; a minimum would
-            // force it to decode.
-            min_tokens: if mode.is_prefill() {
-                None
-            } else {
-                stop.min_tokens
-            },
+            // Forwarded on a context-only request too. The minimum only masks
+            // EOS until the sequence reaches it, so it cannot extend a context
+            // phase that `max_tokens` already caps at one token. Dropping it
+            // would let the prefill worker sample EOS on that token, finish with
+            // `Stop` instead of `PrefillReady`, and leave the frontend treating
+            // a request that never met its minimum as complete.
+            min_tokens: stop.min_tokens,
             conditions: stop_conditions(request),
             ignore_eos: stop.ignore_eos,
             // `include_stop_in_output` retains matched stop *strings*; the
