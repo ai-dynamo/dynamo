@@ -123,9 +123,8 @@ def _deep_setdefault(target: dict[str, Any], defaults: dict[str, Any]) -> None:
 
 
 def _set_ci_profiling_job_defaults(spec: dict[str, Any]) -> None:
-    """Keep DGDR profiling CI jobs bounded and eligible for one fresh Pod."""
-
     profiling_job = spec.setdefault("overrides", {}).setdefault("profilingJob", {})
+    # Retry once so an evicted Pod can reschedule away from DiskPressure.
     profiling_job.setdefault("backoffLimit", 1)
     pod_spec = profiling_job.setdefault("template", {}).setdefault("spec", {})
 
