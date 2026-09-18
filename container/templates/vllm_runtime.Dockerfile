@@ -198,6 +198,16 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         "transformers==${TRANSFORMERS_VERSION}" \
         "tokenizers==${TOKENIZERS_VERSION}"
 
+{% if device == "cuda" %}
+# Apply vLLM hotfixes to the installed package tree. Patches are applied with
+# --fuzz=5 to tolerate minor line-number drift across nightly builds.
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
+    SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    for p in /tmp/vllm_patches/*.patch; do \
+        patch --batch --forward --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p"; \
+    done
+{% endif %}
+
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
 # https://github.com/ai-dynamo/nixl/blob/v1.1.0/src/bindings/python/nixl-meta/nixl/__init__.py
