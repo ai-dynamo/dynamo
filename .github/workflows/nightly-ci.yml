@@ -526,6 +526,18 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
+  frontend-copy-to-acr:
+    name: frontend-nightly
+    needs: [compute-release-mode, frontend-build]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
+    uses: $/.github/workflows/shared-copy.yml
+    with:
+      target_tag_plain: ${{ format('{0}-nightly', needs.frontend-build.outputs.target_tag_plain) }}
+      cuda_version: '[""]'
+      override_arch: amd64
+      copy_timeout_minutes: 10
+    secrets: inherit
+
   sglang-copy-to-acr:
     name: sglang-runtime-nightly
     needs: [compute-release-mode, sglang-build]
@@ -582,13 +594,14 @@ jobs:
 
   deploy-test-vllm:
     name: vLLM Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, vllm-build, vllm-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, vllm-build, vllm-copy-to-acr, frontend-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: vllm
       profiles: '["agg", "agg_router_kv_approx"]'
       image_tag: ${{ needs.vllm-copy-to-acr.outputs.image_tag }}
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -596,13 +609,14 @@ jobs:
 
   deploy-test-sglang:
     name: sglang Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, sglang-build, sglang-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, sglang-build, sglang-copy-to-acr, frontend-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: sglang
-      profiles: '["agg", "agg_logging"]'
+      profiles: '["agg", "agg_logging", "agg_embed"]'
       image_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
@@ -610,16 +624,29 @@ jobs:
 
   deploy-test-trtllm:
     name: TensorRT-LLM Nightly Deploy Test
-    needs: [compute-release-mode, deploy-operator, trtllm-build, trtllm-copy-to-acr]
+    needs: [compute-release-mode, deploy-operator, trtllm-build, trtllm-copy-to-acr, frontend-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/shared-deploy-test.yml
     with:
       framework: trtllm
       profiles: '["agg"]'
       image_tag: ${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
       vcluster_name: ${{ needs.deploy-operator.outputs.vcluster_name }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+    secrets: inherit
+
+  cross-version-compatibility:
+    name: SGLang nightly N-2 compatibility
+    needs: [compute-release-mode, resolve-source-sha, deploy-operator, frontend-copy-to-acr, sglang-copy-to-acr, deploy-test-sglang]
+    if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' && needs.deploy-test-sglang.result == 'success' }}
+    uses: $/.github/workflows/cross-version-compatibility.yml
+    with:
+      frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
+      operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
   deploy-cleanup:

@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: n2-model-download
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 900
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: my-registry/sglang-runtime:my-tag
+          command: [python3, -c]
+          args:
+            - |
+              import json
+              from huggingface_hub import snapshot_download
+              models = {
+                  "Qwen/Qwen3-0.6B": "c1899de289a04d12100db370d81485cdf75e47ca",
+                  "Qwen/Qwen3-Embedding-0.6B": "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3",
+              }
+              for model, revision in models.items():
+                  path = snapshot_download(model, revision=revision, cache_dir='/models/hub')
+                  print(json.dumps({'model': model, 'revision': revision, 'path': path}), flush=True)
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
