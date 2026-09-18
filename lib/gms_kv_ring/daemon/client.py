@@ -492,11 +492,7 @@ class DaemonClient:
         writer_id: str,
         expected_epoch: int,
         scope: str = "",
-    ) -> tuple[
-        dict[str, list[int]],
-        dict[str, list[tuple[int, int]]] | None,
-        bool,
-    ]:
+    ) -> tuple[dict[str, list[int]], dict[str, list[tuple[int, int]]] | None, bool,]:
         resp = self._ok(
             {
                 "op": "directory_hbm_inventory",
@@ -514,9 +510,7 @@ class DaemonClient:
             None
             if raw_protected_leases is None
             else {
-                str(engine_id): [
-                    (int(lease[0]), int(lease[1])) for lease in leases
-                ]
+                str(engine_id): [(int(lease[0]), int(lease[1])) for lease in leases]
                 for engine_id, leases in raw_protected_leases.items()
             }
         )

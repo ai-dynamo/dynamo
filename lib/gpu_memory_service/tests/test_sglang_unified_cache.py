@@ -209,6 +209,37 @@ def test_directory_hashes_support_legacy_key_without_cache_salt():
     ]
 
 
+def test_reset_invalidates_directory_before_discarding_derived_state(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    content_hash = b"r" * 32
+    lease = KVLease(3, 9)
+    allocator._gms_kv_leases_by_page[3] = lease
+    allocator._gms_retained_pages.add(3)
+    directory = _Directory()
+    directory.live[content_hash] = {
+        "state": "ready",
+        "tier": "hbm",
+        "engine_id": cache._gms_engine_id,
+        "slot_ids": [3],
+        "generations": [9],
+    }
+    cache._gms_directory = directory
+    cache._gms_steady_state = True
+    cache._gms_recovery_candidates.add(content_hash)
+    cache._gms_local_pages_by_hash[content_hash] = 3
+    cache._gms_local_hashes_by_page[3] = {content_hash}
+    cache._gms_retained_order[3] = None
+
+    cache.reset()
+
+    assert content_hash not in directory.live
+    assert cache._gms_steady_state is False
+    assert cache._gms_recovery_candidates == set()
+    assert cache._gms_local_pages_by_hash == {}
+    assert cache._gms_local_hashes_by_page == {}
+    assert cache._gms_retained_order == {}
+
+
 def test_uses_native_unified_tree_without_enabling_storage_hashing(monkeypatch):
     cache, _allocator = _cache(monkeypatch)
     key = _key(1, 2, 3, 4)

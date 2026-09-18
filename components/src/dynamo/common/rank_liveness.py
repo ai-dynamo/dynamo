@@ -338,6 +338,12 @@ class RankLivenessMonitor:
             self._thread.join(timeout=0.5)
             self._thread = None
 
+    @staticmethod
+    def _poll_interval_ms(timeout_seconds: float) -> int:
+        # Keep runtime deadline tightening responsive even when the monitor was
+        # created with a much more conservative startup timeout.
+        return max(10, min(50, int(timeout_seconds * 1000 / 5)))
+
     def set_timeout_ms(self, value: int) -> None:
         """Update the loss deadline without restarting the liveness socket.
 
@@ -389,10 +395,13 @@ class RankLivenessMonitor:
 
         last_seen: dict[int, float] = {}
         started = time.monotonic()
-        poll_ms = max(10, int(self._timeout * 1000 / 5))
         try:
             while not self._stop.is_set():
                 cycle_started = time.monotonic()
+                # Recompute every cycle: set_timeout_ms() is used after model
+                # startup and must change both the deadline and observation
+                # cadence without recreating the bound ROUTER socket.
+                poll_ms = self._poll_interval_ms(self._timeout)
                 events = dict(poller.poll(poll_ms))
                 now = time.monotonic()
                 if sock in events:

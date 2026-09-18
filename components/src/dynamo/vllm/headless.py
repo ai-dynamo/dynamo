@@ -64,6 +64,12 @@ def run_dynamo_headless(config: Config) -> None:
     # Propagate worker_cls for custom load formats so headless workers use
     # the same model loader and patches as the leader node.
     if config.engine_args.load_format == "gms":
+        if config.gms_shadow_mode:
+            from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+                join_prepared_writer_cohort,
+            )
+
+            join_prepared_writer_cohort()
         _configure_gms_vllm_worker(config.engine_args)
 
         if config.gms_shadow_mode:
@@ -111,6 +117,11 @@ def _maybe_start_vllm_rank_liveness_client(config: Config) -> None:
             rank,
             reason,
         )
-        os.kill(os.getpid(), signal.SIGTERM)
+        # This launcher owns no request-plane endpoint to drain. A graceful
+        # SIGTERM makes vLLM wait through its worker shutdown grace periods,
+        # keeping the CUDA-writer cohort live long after rank 0 has died. Its
+        # worker children arm PDEATHSIG before opening shared KV, so fail-stop
+        # the launcher and let kernel process death fence the complete tree.
+        os.kill(os.getpid(), signal.SIGKILL)
 
     rl.RankLivenessClient(leader_host, node_rank, on_leader_lost=on_leader_lost).start()

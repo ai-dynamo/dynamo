@@ -474,8 +474,9 @@ def test_authoritative_failover_requires_explicit_directory_manifest(monkeypatch
 
 
 def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
-    from dynamo.common.gms_failover import _promote_content_directory_after_fence
     from gms_kv_ring.common import content_directory
+
+    from dynamo.common.gms_failover import _promote_content_directory_after_fence
 
     calls = []
 
@@ -508,8 +509,9 @@ def test_post_lock_directory_promotion_forces_fresh_epoch(monkeypatch):
 
 
 def test_post_lock_directory_promotion_preserves_legacy_block_fallback(monkeypatch):
-    from dynamo.common.gms_failover import _promote_content_directory_after_fence
     from gms_kv_ring.common import content_directory
+
+    from dynamo.common.gms_failover import _promote_content_directory_after_fence
 
     class FakeDirectory:
         def __init__(self, _socket_path, **_kwargs):
@@ -935,10 +937,12 @@ def test_release_attached_gms_failover_lock_nowait_releases_and_detaches():
     assert handler._gms_failover_lock is None
 
 
-def test_writer_cohort_keeps_cuda_quiescence_fence(monkeypatch):
+def test_writer_cohort_replaces_timed_quiescence_guess(monkeypatch):
     from dynamo.common.gms_failover import _post_lock_fence_ms
 
     monkeypatch.delenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
     monkeypatch.delenv("DYN_SGLANG_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
+    monkeypatch.delenv("DYN_VLLM_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
 
-    assert _post_lock_fence_ms("sglang") == 250
+    assert _post_lock_fence_ms("sglang") == 0
+    assert _post_lock_fence_ms("vllm") == 0
