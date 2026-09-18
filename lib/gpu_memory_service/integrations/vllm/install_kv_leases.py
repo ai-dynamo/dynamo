@@ -20,9 +20,6 @@ from gpu_memory_service.integrations.common.kv_lease_client import (
     log_lease_pressure,
     resolve_lease_device,
 )
-from gpu_memory_service.integrations.common.process_lifecycle import (
-    arm_parent_death_signal,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -221,7 +218,15 @@ def run_engine_core_with_gms_kv_leases(*args, **kwargs):
             raise RuntimeError("GMS EngineCore KV lease wrapper recursion detected")
         _original_run_engine_core = original
 
-    arm_parent_death_signal()
+    from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+        join_writer_cohort_process,
+        writer_cohort_required,
+    )
+
+    if os.environ.get("GMS_VLLM_WRITER_COHORT_PATH"):
+        join_writer_cohort_process()
+    elif writer_cohort_required():
+        raise RuntimeError("vLLM failover EngineCore started without a writer cohort")
     _install_engine_core_process_hooks()
     return original(*args, **kwargs)
 
@@ -730,7 +735,7 @@ def _borrow_hbm_blocks(self, native_keys, entries, token):
     client = self._gms_kv_lease_client
     leases = []
     installed = []
-    pinned = False
+    read_claims = []
     try:
         for entry in entries:
             if entry is None or entry.get("tier") != "hbm":
@@ -747,15 +752,21 @@ def _borrow_hbm_blocks(self, native_keys, entries, token):
             block = self.blocks[lease.block_id]
             if block.ref_cnt != 0 or block.block_hash is not None:
                 return None
-        if not client.pin_read(leases):
-            return None
-        pinned = True
+        # Keep one single-use claim per block: vLLM releases borrowed blocks
+        # independently, whereas a batch claim must be consumed atomically.
+        for lease in leases:
+            read_claim = client.pin_read([lease])
+            if read_claim is None:
+                for acquired in reversed(read_claims):
+                    client.unpin_read(acquired)
+                return None
+            read_claims.append(read_claim)
         claim = {"token": token, "remaining": set(block_ids)}
         out = []
-        for native_key, lease in zip(native_keys, leases):
+        for native_key, lease, read_claim in zip(native_keys, leases, read_claims):
             block = self.blocks[lease.block_id]
             self._insert_block_hash(native_key, block, self.hash_block_size)
-            self._gms_kv_read_pins_by_block[lease.block_id] = (lease, claim)
+            self._gms_kv_read_pins_by_block[lease.block_id] = (read_claim, claim)
             installed.append(block)
             out.append(block)
         logger.info("[GMS-KVDirectory] vLLM borrowed_hbm_blocks=%d", len(out))
@@ -764,11 +775,11 @@ def _borrow_hbm_blocks(self, native_keys, entries, token):
         for block in installed:
             self._maybe_evict_cached_block(block)
             self._gms_kv_read_pins_by_block.pop(int(block.block_id), None)
-        if pinned:
+        for read_claim in reversed(read_claims):
             try:
-                client.unpin_read(leases)
+                client.unpin_read(read_claim)
             except Exception:  # noqa: BLE001
-                logger.exception("[GMS-KVLease] failed to roll back HBM read pins")
+                logger.exception("[GMS-KVLease] failed to roll back HBM read pin")
         logger.warning("[GMS-KVLease] vLLM HBM read claim failed", exc_info=True)
         return None
 
@@ -1186,10 +1197,10 @@ def _free_blocks(self, ordered_blocks, *, admission_blocks=None):
         if read_pin is None:
             writer_free.append(block)
             continue
-        lease, claim = read_pin
+        read_claim, claim = read_pin
         if self.enable_caching and block.block_hash is not None:
             self._maybe_evict_cached_block(block)
-        client.unpin_read([lease])
+        client.unpin_read(read_claim)
         claim["remaining"].discard(int(block.block_id))
         if not claim["remaining"] and (
             directory is None or not directory.release_claim(claim["token"])

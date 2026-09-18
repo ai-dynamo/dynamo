@@ -155,3 +155,79 @@ def test_allocator_arms_parent_death_fence_before_opening_lease_client(monkeypat
         assert allocator._gms_retained_pages == set()
     finally:
         _cleanup(allocator)
+
+
+def test_paged_clear_revokes_all_derived_fast_path_state(monkeypatch):
+    monkeypatch.setattr(adapter, "torch", torch)
+    leases = {1: KVLease(1, 7)}
+    allocator = _allocator(_Client(), leases, retained=(1,))
+    allocator.free_pages = torch.tensor([1, 2, 3])
+    allocator.num_pages = 4
+    state = adapter._STATE[id(allocator)]
+    state.update(
+        exclusive_steady_state=True,
+        steady_state=True,
+        exclusive_hidden_pages={4},
+        cpu_free_pages=[2, 3],
+        cpu_staged_pages=[1],
+        cpu_release_pages=[[2]],
+        tp_reserved_pages=[2],
+        tp_reservation_aligned=True,
+        active_batch=object(),
+    )
+    observed = {}
+
+    def native_clear(self):
+        observed.update(state)
+        self.free_pages = torch.tensor([1, 2, 3, 4])
+
+    monkeypatch.setattr(adapter, "orig_paged_clear", native_clear)
+    try:
+        adapter._gms_paged_clear(allocator)
+        assert observed["exclusive_steady_state"] is False
+        assert observed["cpu_free_pages"] is None
+        assert observed["active_batch"] is None
+        assert state["steady_state"] is False
+        assert state["exclusive_hidden_pages"] == set()
+        assert state["cpu_staged_pages"] == []
+        assert state["cpu_release_pages"] == []
+        assert state["tp_reserved_pages"] == []
+        assert leases == {}
+    finally:
+        _cleanup(allocator)
+
+
+def test_paged_merge_noop_preserves_native_and_cpu_order(monkeypatch):
+    monkeypatch.setattr(adapter, "torch", torch)
+    allocator = _allocator(_Client(), {})
+    allocator.free_pages = torch.tensor([3, 1, 2])
+    allocator.staged_pages = []
+    state = adapter._STATE[id(allocator)]
+    state.update(
+        exclusive_steady_state=True,
+        cpu_free_pages=[3, 1, 2],
+        cpu_staged_pages=[],
+    )
+
+    def native_merge(self):
+        if not self.staged_pages:
+            return
+        self.free_pages, _ = torch.sort(
+            torch.cat((self.free_pages, *self.staged_pages))
+        )
+        self.staged_pages = []
+
+    monkeypatch.setattr(adapter, "orig_paged_merge_and_sort_free", native_merge)
+    try:
+        adapter._gms_paged_merge_and_sort_free(allocator)
+        assert allocator.free_pages.tolist() == [3, 1, 2]
+        assert state["cpu_free_pages"] == [3, 1, 2]
+
+        allocator.staged_pages = [torch.tensor([4, 0])]
+        state["cpu_staged_pages"] = [4, 0]
+        adapter._gms_paged_merge_and_sort_free(allocator)
+        assert allocator.free_pages.tolist() == [0, 1, 2, 3, 4]
+        assert state["cpu_free_pages"] == [0, 1, 2, 3, 4]
+        assert state["cpu_staged_pages"] == []
+    finally:
+        _cleanup(allocator)

@@ -935,10 +935,12 @@ def test_release_attached_gms_failover_lock_nowait_releases_and_detaches():
     assert handler._gms_failover_lock is None
 
 
-def test_writer_cohort_keeps_cuda_quiescence_fence(monkeypatch):
+def test_writer_cohort_replaces_timed_quiescence_guess(monkeypatch):
     from dynamo.common.gms_failover import _post_lock_fence_ms
 
     monkeypatch.delenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
     monkeypatch.delenv("DYN_SGLANG_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
+    monkeypatch.delenv("DYN_VLLM_GMS_FAILOVER_POST_LOCK_FENCE_MS", raising=False)
 
-    assert _post_lock_fence_ms("sglang") == 250
+    assert _post_lock_fence_ms("sglang") == 0
+    assert _post_lock_fence_ms("vllm") == 0

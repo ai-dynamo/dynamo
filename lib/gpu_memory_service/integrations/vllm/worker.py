@@ -29,9 +29,6 @@ from gpu_memory_service.client.torch.allocator import (
 from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.integrations.common import patch_empty_cache
-from gpu_memory_service.integrations.common.process_lifecycle import (
-    arm_parent_death_signal,
-)
 from gpu_memory_service.integrations.common.utils import (
     env_enabled_by_default,
     get_gms_lock_mode,
@@ -62,6 +59,10 @@ from gpu_memory_service.integrations.vllm.startup import (
     install_and_verify_kv_failover_hooks,
 )
 from gpu_memory_service.integrations.vllm.utils import configure_gms_worker_logging
+from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+    join_writer_cohort_process,
+    writer_cohort_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,10 +179,15 @@ class GMSWorker(Worker):
         from vllm.platforms import current_platform
 
         if shared_kv_enabled():
-            # The leader owns the failover flock, but this subprocess performs
-            # CUDA writes. Couple their lifetimes before opening shared KV so a
-            # leader-only crash cannot leave an orphaned physical writer.
-            arm_parent_death_signal()
+            # Join the kernel-visible writer cohort before opening shared KV.
+            # PDEATHSIG accelerates cleanup; the cohort flock is the proof that
+            # all CUDA-capable descendants have actually exited.
+            if os.environ.get("GMS_VLLM_WRITER_COHORT_PATH"):
+                join_writer_cohort_process()
+            elif writer_cohort_required():
+                raise RuntimeError(
+                    "vLLM failover worker started without a writer cohort"
+                )
 
         # Set CUDA device first. Do not mutate self.local_rank here; the parent
         # Worker will apply the same DP adjustment during super().init_device().

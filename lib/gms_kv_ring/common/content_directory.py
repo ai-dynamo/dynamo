@@ -153,10 +153,14 @@ class ContentDirectory:
         # give operators visibility into dropped publications.
         self._mutation_failed = 0
         self._mutation_last_error: Optional[BaseException] = None
-        # Steady-state READY publications use a dedicated ordered connection:
-        # the scheduler copies a complete frame into the Unix socket and
-        # returns, while this reader validates daemon acknowledgements. The
-        # daemon owns the queued frame even if the engine then exits.
+        self._mutation_failed_at: Optional[int] = None
+        self._mutation_pending_items = 0
+        self._max_pending_items = max(
+            1, int(os.environ.get("GMS_KV_DIRECTORY_MAX_PENDING_ITEMS", "16384"))
+        )
+        # Steady-state READY publications use a bounded ordered queue. The
+        # scheduler only copies immutable request data; one background thread
+        # owns connection setup, socket I/O, and daemon acknowledgements.
         pipeline_value = os.environ.get("GMS_KV_DIRECTORY_PIPELINED_PUBLISH", "1")
         self._pipeline_enabled = pipeline_value.lower() not in (
             "0",
@@ -172,6 +176,7 @@ class ContentDirectory:
         self._pipeline_stop = False
         self._pipeline_sequence = 0
         self._pipeline_committed = 0
+        self._pipeline_pending_items = 0
         self._pipeline_error: Optional[BaseException] = None
         if self.mode != "off" and not self.socket_path:
             logger.warning("GMS KV directory requested without daemon socket")
@@ -214,12 +219,6 @@ class ContentDirectory:
         self._mutation_thread.start()
 
     def _start_pipeline_locked(self) -> None:
-        if self._pipeline_client is None:
-            self._pipeline_client = DaemonClient(
-                self.socket_path,
-                connect_timeout=0.5,
-                op_timeout=2.0,
-            )
         if self._pipeline_thread is not None and self._pipeline_thread.is_alive():
             return
         self._pipeline_thread = threading.Thread(
@@ -230,16 +229,22 @@ class ContentDirectory:
         self._pipeline_thread.start()
 
     def _pipeline_loop(self) -> None:
+        """Own pipeline connection, sends, and acknowledgements off hot paths."""
         while True:
             with self._pipeline_condition:
                 while not self._pipeline_expected and not self._pipeline_stop:
                     self._pipeline_condition.wait()
                 if not self._pipeline_expected:
                     return
-                sequence, expected = self._pipeline_expected[0]
-                client = self._pipeline_client
-            assert client is not None
+                sequence, message, expected = self._pipeline_expected[0]
             try:
+                client = self._pipeline_client
+                if client is None:
+                    client = DaemonClient(
+                        self.socket_path, connect_timeout=0.5, op_timeout=2.0
+                    )
+                    self._pipeline_client = client
+                client.send_request(message)
                 response = client.receive_response()
                 if not response.get("ok"):
                     raise RuntimeError(
@@ -256,10 +261,18 @@ class ContentDirectory:
                         f"{accepted}/{expected} entries"
                     )
             except BaseException as exc:  # noqa: BLE001
+                client = self._pipeline_client
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._pipeline_client = None
                 with self._pipeline_condition:
                     self._pipeline_error = exc
                     self._pipeline_stop = True
                     self._pipeline_expected.clear()
+                    self._pipeline_pending_items = 0
                     self._pipeline_condition.notify_all()
                 return
             with self._pipeline_condition:
@@ -272,9 +285,11 @@ class ContentDirectory:
                     )
                     self._pipeline_stop = True
                     self._pipeline_expected.clear()
+                    self._pipeline_pending_items = 0
                     self._pipeline_condition.notify_all()
                     return
                 self._pipeline_expected.popleft()
+                self._pipeline_pending_items -= int(expected)
                 self._pipeline_committed = int(sequence)
                 self._pipeline_condition.notify_all()
 
@@ -299,25 +314,16 @@ class ContentDirectory:
                 )
             if self._pipeline_stop:
                 raise RuntimeError("GMS publication pipeline is closed")
-            self._start_pipeline_locked()
-            assert self._pipeline_client is not None
+            if self._pipeline_pending_items + len(items) > self._max_pending_items:
+                raise RuntimeError(
+                    "GMS publication pipeline capacity exceeded; refusing an "
+                    "uncommitted READY record"
+                )
             self._pipeline_sequence += 1
             sequence = int(self._pipeline_sequence)
-            self._pipeline_expected.append((sequence, len(items)))
-            try:
-                self._pipeline_client.send_request(message)
-            except BaseException as exc:
-                self._pipeline_expected.pop()
-                self._pipeline_error = exc
-                self._pipeline_stop = True
-                if self._pipeline_client is not None:
-                    try:
-                        self._pipeline_client.close()
-                    except Exception:  # noqa: BLE001
-                        pass
-                    self._pipeline_client = None
-                self._pipeline_condition.notify_all()
-                raise
+            self._pipeline_expected.append((sequence, message, len(items)))
+            self._pipeline_pending_items += len(items)
+            self._start_pipeline_locked()
             self._pipeline_condition.notify_all()
         return True
 
@@ -347,19 +353,24 @@ class ContentDirectory:
                 )
             if self._mutation_stop:
                 raise RuntimeError("GMS directory mutation worker is closed")
+            item_count = len(payload)
+            if self._mutation_pending_items + item_count > self._max_pending_items:
+                raise RuntimeError("GMS directory mutation queue capacity exceeded")
             self._mutation_sequence += 1
             sequence = int(self._mutation_sequence)
             self._mutations.append((sequence, kind, payload))
+            self._mutation_pending_items += item_count
             self._start_mutation_worker_locked()
             self._mutation_condition.notify()
             return sequence
 
     def publish_deferred(self, items: list[dict]) -> int:
-        """Enqueue an ordered publication; return once ownership is copied.
+        """Enqueue an ordered publication without performing scheduler I/O.
 
-        In steady state the complete frame is copied to the daemon connection
-        before returning; the engine may exit while the daemon commits it.
-        During startup the legacy worker queue remains the safe fallback.
+        In steady state immutable request data is copied into a bounded local
+        queue. A crash before the worker receives a daemon acknowledgement is
+        therefore a safe cache miss, never a durable READY claim. During
+        startup the acknowledged synchronous path remains the safe fallback.
         """
         if not items:
             return 0
@@ -401,6 +412,17 @@ class ContentDirectory:
                     if remaining is not None and remaining <= 0:
                         return False
                     self._mutation_condition.wait(remaining)
+            if self._mutation_error is not None:
+                raise RuntimeError("GMS directory mutation worker failed") from (
+                    self._mutation_error
+                )
+            if (
+                self._mutation_failed_at is not None
+                and self._mutation_failed_at <= target
+            ):
+                raise RuntimeError(
+                    "one or more deferred GMS directory mutations failed"
+                ) from self._mutation_last_error
         remaining = (
             None
             if timeout is None
@@ -453,6 +475,9 @@ class ContentDirectory:
                 if not self._mutations:
                     return
                 sequence, kind, payload = self._mutations.popleft()
+                self._mutation_pending_items = max(
+                    0, self._mutation_pending_items - len(payload)
+                )
                 payload = list(payload)
                 # Coalesce disjoint publications only. Turning two sequential
                 # updates of one hash/slot into an atomic batch makes the daemon
@@ -470,6 +495,9 @@ class ContentDirectory:
                     if keys is None or following_keys is None or keys & following_keys:
                         break
                     sequence, _same_kind, following = self._mutations.popleft()
+                    self._mutation_pending_items = max(
+                        0, self._mutation_pending_items - len(following)
+                    )
                     payload.extend(following)
                     keys.update(following_keys)
             try:
@@ -508,6 +536,8 @@ class ContentDirectory:
                 with self._mutation_condition:
                     self._mutation_failed += 1
                     self._mutation_last_error = exc
+                    if self._mutation_failed_at is None:
+                        self._mutation_failed_at = int(sequence)
             with self._mutation_condition:
                 self._mutation_committed = int(sequence)
                 self._mutation_condition.notify_all()

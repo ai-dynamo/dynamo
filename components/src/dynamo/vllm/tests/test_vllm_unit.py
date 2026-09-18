@@ -2437,6 +2437,10 @@ async def test_gms_preinit_lock_starts_liveness_before_engine_setup(monkeypatch)
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", fence
     )
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
+        lambda: events.append("cohort"),
+    )
 
     acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
         runtime, config
@@ -2445,6 +2449,7 @@ async def test_gms_preinit_lock_starts_liveness_before_engine_setup(monkeypatch)
     assert acquired is lock
     assert fenced is True
     assert events == [
+        "cohort",
         ("health", True),
         "acquire",
         ("fence", "engine-0-pre-init"),
@@ -2473,6 +2478,11 @@ async def test_gms_preinitialized_standby_starts_liveness_before_engine_setup(
         lambda handler, config: monitored.append((handler, config)),
     )
     config = SimpleNamespace(gms_shadow_mode=True)
+    prepared = []
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
+        lambda: prepared.append(True),
+    )
 
     acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
         SimpleNamespace(), config
@@ -2480,6 +2490,7 @@ async def test_gms_preinitialized_standby_starts_liveness_before_engine_setup(
 
     assert acquired is None
     assert fenced is False
+    assert prepared == [True]
     assert monitored == [(None, config)]
 
 

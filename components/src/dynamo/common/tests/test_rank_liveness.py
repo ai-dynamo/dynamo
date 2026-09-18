@@ -77,6 +77,36 @@ def test_monitor_timeout_can_tighten_after_startup():
     monitor.set_timeout_ms(500)
 
     assert monitor._timeout == 0.5
+    assert monitor._poll_interval_ms(monitor._timeout) == 50
+
+    monitor.set_timeout_ms(25)
+
+    assert monitor._timeout == 0.025
+    assert monitor._poll_interval_ms(monitor._timeout) == 10
+
+
+def test_running_monitor_applies_tightened_timeout_promptly():
+    endpoint = _endpoint()
+    fired = threading.Event()
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: fired.set(),
+        bind_addr=endpoint,
+        timeout_ms_override=5_000,
+        expected_ranks={1},
+        startup_grace_ms_override=5_000,
+    )
+    client = rl.RankLivenessClient("unused", 1, interval_ms=10, connect_addr=endpoint)
+
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=1.0)
+        monitor.set_timeout_ms(40)
+        client.stop()
+        assert fired.wait(0.4), "running monitor retained its startup poll interval"
+    finally:
+        client.stop()
+        monitor.stop()
 
 
 def test_expected_rank_that_never_registers_fires_startup_timeout():

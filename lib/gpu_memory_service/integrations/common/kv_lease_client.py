@@ -15,7 +15,7 @@ import struct
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
@@ -181,6 +181,13 @@ class KVLease:
 
 
 @dataclass(frozen=True)
+class KVReadClaim:
+    """Opaque, process-local proof of one successful read-pin acquisition."""
+
+    _token: object = field(default_factory=object, repr=False)
+
+
+@dataclass(frozen=True)
 class KVLeaseReservation:
     reserved_blocks: int = 0
     reserved_for_owner: str | None = None
@@ -201,9 +208,9 @@ class KVLeaseClient(Protocol):
 
     def seal(self, leases: list[KVLease]) -> None: ...
 
-    def pin_read(self, leases: list[KVLease]) -> bool: ...
+    def pin_read(self, leases: list[KVLease]) -> KVReadClaim | None: ...
 
-    def unpin_read(self, leases: list[KVLease]) -> None: ...
+    def unpin_read(self, claim: KVReadClaim) -> None: ...
 
     def adopt(self, leases: list[KVLease]) -> list[KVLease]: ...
 
@@ -245,6 +252,8 @@ class SharedMemoryKVLeaseClient:
         self._reservation_fd = _open_reservation_lock_file(self.reservation_path)
         self._reservation_cache_sig: tuple[int, int, int] | None = None
         self._reservation_cache = KVLeaseReservation()
+        self._read_claims: dict[KVReadClaim, tuple[KVLease, ...]] = {}
+        self._read_claims_lock = threading.Lock()
         self._sync_file_reservation_to_shm()
 
     @classmethod
@@ -571,24 +580,38 @@ class SharedMemoryKVLeaseClient:
                 f"GMS KV lease seal committed {sealed}/{len(leases)} blocks"
             )
 
-    def pin_read(self, leases: list[KVLease]) -> bool:
-        """Pin exact sealed generations against eviction and reuse.
-
-        The caller must retain the returned claim until all GPU work reading
-        these blocks has completed. A false result leaves no partial pins.
-        """
+    def pin_read(self, leases: list[KVLease]) -> KVReadClaim | None:
+        """Pin exact sealed generations and return a single-use claim."""
+        leases = list(leases)
+        if len({lease.block_id for lease in leases}) != len(leases):
+            raise ValueError("duplicate read-pin block IDs are not allowed")
         if not leases:
-            return True
-        return bool(
+            claim = KVReadClaim()
+            with self._read_claims_lock:
+                self._read_claims[claim] = ()
+            return claim
+        pinned = bool(
             self._rust.kv_lease_pin_read(
                 self._mmap,
                 [int(lease.block_id) for lease in leases],
                 [int(lease.generation) for lease in leases],
             )
         )
+        if not pinned:
+            return None
+        claim = KVReadClaim()
+        with self._read_claims_lock:
+            self._read_claims[claim] = tuple(leases)
+        return claim
 
-    def unpin_read(self, leases: list[KVLease]) -> None:
-        """Release exact-generation reader claims after GPU completion."""
+    def unpin_read(self, claim: KVReadClaim) -> None:
+        """Consume one claim and release exactly the pins it acquired."""
+        if not isinstance(claim, KVReadClaim):
+            raise TypeError("unpin_read requires the KVReadClaim returned by pin_read")
+        with self._read_claims_lock:
+            leases = self._read_claims.pop(claim, None)
+        if leases is None:
+            raise RuntimeError("GMS KV read claim is stale or was already released")
         if not leases:
             return
         released = int(

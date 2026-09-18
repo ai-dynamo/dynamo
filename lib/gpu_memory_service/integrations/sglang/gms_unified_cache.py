@@ -676,6 +676,44 @@ def make_gms_unified_cache_class():
             if self._gms_publication_batch_depth == 0:
                 self._gms_flush_publications()
 
+        def reset(self) -> None:
+            """Atomically retire GMS-derived cache state before native reset."""
+            # UnifiedRadixCache.__init__ dispatches to self.reset() before this
+            # subclass has installed any GMS metadata. That constructor reset
+            # is purely native and must remain so.
+            if not hasattr(self, "_gms_local_pages_by_hash"):
+                super().reset()
+                return
+            lease_map = self.token_to_kv_pool_allocator._gms_kv_leases_by_page
+            items = []
+            for content_hash, page in self._gms_local_pages_by_hash.items():
+                lease = lease_map.get(int(page))
+                if lease is not None:
+                    items.append(
+                        {
+                            "content_hash": bytes(content_hash),
+                            "engine_id": self._gms_engine_id,
+                            "slot_ids": [int(page)],
+                            "generations": [int(lease.generation)],
+                            "tier": "hbm",
+                            "sealed": False,
+                        }
+                    )
+            if items:
+                if not self._gms_directory.flush_deferred(timeout=2.0):
+                    raise RuntimeError("timed out draining SGLang HBM publications")
+                _invalidate_and_verify(self._gms_directory, items)
+            super().reset()
+            self._gms_steady_state = False
+            self._gms_recovery_candidates.clear()
+            self._gms_pending_publications.clear()
+            self._gms_publication_batch_depth = 0
+            self._gms_local_pages_by_hash.clear()
+            self._gms_local_hashes_by_page.clear()
+            self._gms_retained_order.clear()
+            self._gms_finished_insert = None
+            self._gms_finished_request_pages = None
+
         def insert(self, params):
             result = super().insert(params)
             if self._gms_capture_finished_insert:

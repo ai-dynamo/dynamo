@@ -229,9 +229,9 @@ def _resume_shadow_after_primary_failover(
         result = resume_future.result(timeout=resume_timeout_s)
         kv_with_shadow = kv_cache_gms.get_runtime_state()
         assert kv_with_shadow.state == ServerState.RW
-        assert kv_with_shadow.allocation_count == kv_with_primary.allocation_count, (
-            "failover changed the committed shared KV allocation count"
-        )
+        assert (
+            kv_with_shadow.allocation_count == kv_with_primary.allocation_count
+        ), "failover changed the committed shared KV allocation count"
         return result
 
 
@@ -387,7 +387,10 @@ def test_gms_authoritative_hbm_failover_vllm(
             == primary_output
         )
 
-        _kill_process_group(primary)
+        # Deliberately kill only the launcher. The successor must wait for
+        # orphaned EngineCore/CUDA worker cohort guards to disappear; killing
+        # the complete tree in the harness would hide that product guarantee.
+        _kill_launcher_only(primary)
         with DaemonClient(manager.kv_directory_socket) as directory:
             _entries, _epoch, writer = _wait_for_directory_writer(
                 directory, manager.kv_directory_manifest, "engine-1", timeout=30.0
