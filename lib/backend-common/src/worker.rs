@@ -38,6 +38,7 @@ use crate::engine::{
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
+use crate::token_decode::TokenPayloadAdapter;
 
 /// Default grace-period in seconds between discovery unregister and engine drain.
 /// Mirrors the Python `_DEFAULT_GRACE_PERIOD_SECS` constant.
@@ -1021,7 +1022,9 @@ impl Worker {
                     engine_adapter = engine_adapter.with_first_token_source(source);
                 }
                 let engine_adapter = Arc::new(engine_adapter);
-                let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
+                let ingress =
+                    Ingress::for_engine_with_adapter(engine_adapter.clone(), TokenPayloadAdapter);
+                let ingress = ingress.map_err(|e| {
                     err(
                         ErrorType::Backend(BackendError::Unknown),
                         format!("ingress: {e}"),
