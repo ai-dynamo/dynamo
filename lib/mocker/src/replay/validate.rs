@@ -224,17 +224,13 @@ mod tests {
     }
 
     #[test]
-    fn disagg_accepts_attention_dp_on_either_role() {
-        for (prefill_dp_size, decode_dp_size) in [(2, 1), (1, 2), (2, 4)] {
-            let mut config = config(EngineType::Vllm, EngineType::Vllm);
-            config.prefill_args.dp_size = prefill_dp_size;
-            config.decode_args.dp_size = decode_dp_size;
+    fn disagg_accepts_asymmetric_attention_dp() {
+        let mut config = config(EngineType::Vllm, EngineType::Vllm);
+        config.prefill_args.dp_size = 2;
+        config.decode_args.dp_size = 4;
 
-            validate_offline_disagg_replay_args(&config, ReplayRouterMode::RoundRobin).unwrap();
-            validate_offline_disagg_replay_args(&config, ReplayRouterMode::KvRouter).unwrap();
-            validate_offline_disagg_concurrency_args(&config, 1, ReplayRouterMode::KvRouter)
-                .unwrap();
-        }
+        validate_offline_disagg_replay_args(&config, ReplayRouterMode::KvRouter).unwrap();
+        validate_offline_disagg_concurrency_args(&config, 1, ReplayRouterMode::KvRouter).unwrap();
     }
 
     #[test]

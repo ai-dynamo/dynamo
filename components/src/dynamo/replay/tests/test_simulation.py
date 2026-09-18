@@ -404,6 +404,11 @@ def test_factory_preserves_trtllm_disagg_gate() -> None:
 
     assert capabilities.supports_backend_topology("trtllm", "agg")
     assert not capabilities.supports_backend_topology("trtllm", "disagg")
+
+
+def test_factory_advertises_disaggregated_attention_dp() -> None:
+    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
+
     assert capabilities.supports_disaggregated_attention_dp
 
 
