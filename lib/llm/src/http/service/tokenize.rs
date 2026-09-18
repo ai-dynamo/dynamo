@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{Json, Router, extract::State, extract::rejection::JsonRejection, routing::post};
+use dynamo_runtime::error::ErrorClass;
 use serde::{Deserialize, Serialize};
 
 use super::RouteDoc;
@@ -102,7 +103,10 @@ fn invalid_request(rejection: JsonRejection, expected: &str) -> ErrorResponse {
 }
 
 fn bad_request(message: String) -> ErrorResponse {
-    ErrorMessage::from_http_error(super::error::HttpError { code: 400, message })
+    ErrorMessage::from_http_error(
+        ErrorClass::InvalidRequest,
+        super::error::HttpError { code: 400, message },
+    )
 }
 
 /// Resolve the model a request targets. A body without `model` is honored only when one

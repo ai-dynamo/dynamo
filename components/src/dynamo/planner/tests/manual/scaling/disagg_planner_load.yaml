@@ -34,7 +34,7 @@ spec:
           args:
             - --config
             - '{"environment": "kubernetes", "backend": "vllm", "optimization_target": "sla", "enable_load_scaling": true, "enable_throughput_scaling": false, "pre_deployment_sweeping_mode": "none", "load_adjustment_interval_seconds": 5, "load_min_observations": 5}'
-    VllmDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -53,7 +53,7 @@ spec:
             - dynamo.vllm
             - --model
             - nvidia/Llama-3.1-8B-Instruct-FP8
-    VllmPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

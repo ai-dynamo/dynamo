@@ -43,6 +43,7 @@ from tests.utils.payload_builder import (
     guided_decoding_chat_payload_default,
     image_token_metrics_payload,
     kv_events_metrics_payload,
+    lora_chat_payload,
     metric_payload_default,
     responses_payload_default,
     responses_stream_payload_default,
@@ -50,12 +51,12 @@ from tests.utils.payload_builder import (
 )
 from tests.utils.payloads import (
     ChatPayload,
+    HttpErrorPayload,
     ImageGenerationPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
     VideoGenerationPayload,
-    lora_chat_payload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
 
@@ -272,6 +273,17 @@ sglang_configs = {
         request_payloads=[
             chat_payload_default(),
             completion_payload_default(),
+            HttpErrorPayload(
+                body={
+                    "messages": [{"role": "user", "content": "Name one color."}],
+                    "n": 2,
+                    "max_tokens": 1,
+                },
+                expected_response=["supports only n=1"],
+                expected_log=[],
+                endpoint="/v1/chat/completions",
+                timeout=10,
+            ),
             # Disagg workers expose fewer sglang:* metrics (~14 vs ~25 for aggregated)
             # because each only runs half the scheduler pipeline.
             metric_payload_default(
@@ -829,7 +841,7 @@ sglang_configs = {
         env={
             "DYN_ENCODE_GPU_MEM": "0.1",
             "DYN_WORKER_GPU_MEM": "0.4",
-            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "local",
+            "DYN_SGL_EMBEDDING_TRANSFER_MODE": "nixl-read",
             # The clips come from the image_server over plain http on localhost,
             # which the URL policy rejects by default. This model is gated out of
             # NVDEC (see _NVDEC_UNSAFE_MODEL_TYPES), and that disabled path now
@@ -866,7 +878,10 @@ sglang_configs = {
                 ],
                 repeat_count=1,
                 expected_response=MULTIMODAL_VIDEO_EXPECTED,
-                expected_log=["Embedding cache hit for VIDEO URL index 0"],
+                expected_log=[
+                    "Embedding cache hit for VIDEO URL index 0",
+                    "Initialized NIXL agent",
+                ],
                 temperature=0.0,
                 max_tokens=100,
             ),

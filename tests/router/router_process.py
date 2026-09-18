@@ -5,6 +5,7 @@ import os
 import sys
 from collections.abc import Mapping
 
+from tests.utils.http_checks import check_http_ok
 from tests.utils.managed_process import ManagedProcess
 
 
@@ -147,7 +148,7 @@ class FrontendRouterProcess(ManagedProcess):
             display_output=True,
             health_check_ports=[frontend_port],
             health_check_urls=[
-                (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
+                (f"http://localhost:{frontend_port}/v1/models", check_http_ok)
             ],
             log_dir=request.node.name,
             terminate_all_matching_process_names=False,
@@ -155,15 +156,6 @@ class FrontendRouterProcess(ManagedProcess):
         )
         self.port = frontend_port
         self.router_mode = router_mode
-
-    def _check_ready(self, response):
-        """Check if KV, random, round-robin, or direct router is ready"""
-        # NOTE: /v1/models has no health-status payload; any HTTP 200 means the
-        # router endpoint is serving and must not use check_health_ready.
-        return response.status_code == 200
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        super().__exit__(exc_type, exc_val, exc_tb)
 
 
 # Backward-compatible alias so existing callers that import KVRouterProcess

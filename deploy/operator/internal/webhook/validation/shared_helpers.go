@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -349,7 +350,7 @@ func groveForExperimental(experimental *nvidiacomv1beta1.ExperimentalSpec) *nvid
 
 func forceScalingGroupFor(experimental *nvidiacomv1beta1.ExperimentalSpec) bool {
 	grove := groveForExperimental(experimental)
-	return grove != nil && grove.ForceScalingGroup
+	return grove != nil && ptr.Deref(grove.ForceScalingGroup, false)
 }
 
 func effectiveGMSMode(mode nvidiacomv1beta1.GPUMemoryServiceMode) nvidiacomv1beta1.GPUMemoryServiceMode {

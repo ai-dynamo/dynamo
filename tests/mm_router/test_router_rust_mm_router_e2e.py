@@ -33,17 +33,19 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from io import BytesIO
 from typing import Any, Generator
 
 import pytest
 import requests
 
-from tests.conftest import EtcdServer, NatsServer
-from tests.utils.gpu_args import build_gpu_mem_args
+from tests.mm_router.utils import (
+    COMMON_PROCESS_KWARGS,
+    build_vllm_gpu_mem_args,
+    make_png_bytes,
+)
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import reserved_ports
 from tests.utils.router_logs import (
     extract_router_kv_overlap_records,
     wait_for_router_kv_overlap,
@@ -90,20 +92,6 @@ def _prepare_log_dir(request, suffix: str) -> str:
     return tempfile.mkdtemp(prefix=f"{request.node.name}_{suffix}_")
 
 
-_COMMON_PROCESS_KWARGS: dict[str, Any] = {
-    # Keep logs file-only; live tee can lag under GPU-parallel CI while tests poll files.
-    "display_output": False,
-    "terminate_all_matching_process_names": False,
-}
-
-
-def _vllm_gpu_mem_args(default_utilization: str) -> list[str]:
-    return build_gpu_mem_args("build_vllm_gpu_mem_args") or [
-        "--gpu-memory-utilization",
-        default_utilization,
-    ]
-
-
 class VLLMWorkerProcess(ManagedProcess):
     """vLLM backend that publishes KV events the router can consume."""
 
@@ -119,7 +107,7 @@ class VLLMWorkerProcess(ManagedProcess):
                 "--block-size",
                 str(BLOCK_SIZE),
                 "--enforce-eager",
-                *_vllm_gpu_mem_args("0.40"),
+                *build_vllm_gpu_mem_args("0.40"),
                 "--max-model-len",
                 "4096",
                 "--kv-events-config",
@@ -136,7 +124,7 @@ class VLLMWorkerProcess(ManagedProcess):
             timeout=900,
             straggler_commands=["-m dynamo.vllm"],
             log_dir=_prepare_log_dir(request, "vllm-worker"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
 
 
@@ -165,44 +153,26 @@ class FrontendProcess(ManagedProcess):
             timeout=240,
             straggler_commands=["-m dynamo.frontend"],
             log_dir=_prepare_log_dir(request, "router-rust-frontend"),
-            **_COMMON_PROCESS_KWARGS,
+            **COMMON_PROCESS_KWARGS,
         )
-
-
-@pytest.fixture(scope="module")
-def mm_runtime_services(request):
-    with (
-        NatsServer(request, port=0) as nats,
-        EtcdServer(request, port=0) as etcd,
-        pytest.MonkeyPatch.context() as mp,
-    ):
-        mp.setenv("NATS_SERVER", f"nats://localhost:{nats.port}")
-        mp.setenv("ETCD_ENDPOINTS", f"http://localhost:{etcd.port}")
-        yield
 
 
 @pytest.fixture(scope="module")
 def start_router_rust_mm_services(
     request, mm_runtime_services
 ) -> Generator[tuple[int, ManagedProcess], None, None]:
-    frontend_port, vllm_port, kv_event_port = allocate_ports(count=3, start_port=11000)
-    with VLLMWorkerProcess(request, system_port=vllm_port, kv_event_port=kv_event_port):
-        time.sleep(2)  # allow ZMQ publisher to bind
-        with FrontendProcess(request, frontend_port=frontend_port) as frontend_proc:
-            yield frontend_port, frontend_proc
-
-
-def _make_png_bytes(color: tuple[int, int, int], size: int = 256) -> bytes:
-    from PIL import Image
-
-    img = Image.new("RGB", (size, size), color)
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    with reserved_ports(count=3, start_port=11000) as ports:
+        frontend_port, vllm_port, kv_event_port = ports
+        with VLLMWorkerProcess(
+            request, system_port=vllm_port, kv_event_port=kv_event_port
+        ):
+            time.sleep(2)  # allow ZMQ publisher to bind
+            with FrontendProcess(request, frontend_port=frontend_port) as frontend_proc:
+                yield frontend_port, frontend_proc
 
 
 def _make_data_uri(color: tuple[int, int, int], size: int = 256) -> str:
-    b64 = base64.b64encode(_make_png_bytes(color, size)).decode("utf-8")
+    b64 = base64.b64encode(make_png_bytes(color, size)).decode("utf-8")
     return f"data:image/png;base64,{b64}"
 
 
@@ -420,23 +390,27 @@ def http_image_server() -> Generator[dict[str, str], None, None]:
     `(W, H)` header. The server lives on 127.0.0.1 with `DYN_MM_ALLOW_INTERNAL=1`
     set in the frontend env so the loopback fetch is permitted.
     """
-    (port,) = allocate_ports(count=1, start_port=18500)
-    palette = {
-        "A": (180, 30, 90),
-        "B": (30, 180, 90),
-    }
-    image_map: dict[str, bytes] = {
-        f"/image_{role}.png": _make_png_bytes(color) for role, color in palette.items()
-    }
-    server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield {role: f"http://127.0.0.1:{port}/image_{role}.png" for role in palette}
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with reserved_ports(count=1, start_port=18500) as ports:
+        port = ports[0]
+        palette = {
+            "A": (180, 30, 90),
+            "B": (30, 180, 90),
+        }
+        image_map: dict[str, bytes] = {
+            f"/image_{role}.png": make_png_bytes(color)
+            for role, color in palette.items()
+        }
+        server = HTTPServer(("127.0.0.1", port), _make_image_handler(image_map))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield {
+                role: f"http://127.0.0.1:{port}/image_{role}.png" for role in palette
+            }
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
 
 @pytest.mark.timeout(300)
