@@ -3040,6 +3040,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        self._end_rl_maintenance()
         if self._ep_capacity_executor is not None:
             # wait=False on purpose: a snapshot stuck on an unresponsive GCS must
             # not hold up worker shutdown, and the process is going away anyway.

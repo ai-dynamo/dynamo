@@ -2209,6 +2209,25 @@ class TestRLAdminRouteHardening:
         assert handler._rl_maintenance_lease == 1
 
     @pytest.mark.asyncio
+    async def test_worker_cleanup_releases_maintenance_lease_once(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._ep_capacity_executor = None
+        handler._custom_encoder = None
+        handler.temp_dirs = []
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        handler.cleanup()
+        handler.cleanup()
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "paused, options, error",
         [
