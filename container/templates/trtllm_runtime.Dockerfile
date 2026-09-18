@@ -411,13 +411,11 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # future version whose libavcodec is not, disarming the check that just fired.
 # Removing the file keeps the narrow waivers, and the tripwire, intact.
 #
-# A range rather than an exact pin, unlike DALI above: requirements.trtllm.txt
-# already installs PyNvVideoCodec>=2.2.3,<3 into /opt/dynamo/venv, and pinning the
-# system copy exactly would let the two diverge inside one image. Keep this
-# specifier identical to the one there -- including the cap, which the shell
-# guards check as a separate major-version test because `sort -V` can express a
-# floor but not an upper bound; tests/dependencies/
-# test_pynvvideocodec_floor.py asserts that, and covers the vllm and sglang
+# Pinned exactly, like DALI above: requirements.trtllm.txt installs
+# PyNvVideoCodec==2.2.3 into /opt/dynamo/venv and this stage pins the system copy
+# to the same version, so the guard below is a plain equality and the venv
+# cross-check compares the two copies to each other. tests/dependencies/
+# test_pynvvideocodec_spec.py asserts that, and covers the vllm and sglang
 # requirements files in the same pass. Two assertions follow: a filename test
 # that mirrors the codec gate's deny glob (so a reintroduced libavcodec fails
 # here, with a clear message, rather than later in the scan), and a content test
@@ -472,7 +470,7 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         exit 1; \
     fi; \
     newest=$(printf '%s\n2.2.3\n' "$before" | sort -V | tail -1); \
-    if [ "$newest" != "2.2.3" ]; then \
+    if [ "$before" = "2.2.3" ] || [ "$newest" != "2.2.3" ]; then \
         echo "ERROR: base image already carries PyNvVideoCodec $before, so this block" >&2; \
         echo "       is obsolete -- delete it and let the base version stand. Keep the" >&2; \
         echo "       libavcodec assertion below and the post-overlay one in" >&2; \
@@ -489,16 +487,12 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         exit 1; \
     fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        'PyNvVideoCodec>=2.2.3,<3'; \
+        'PyNvVideoCodec==2.2.3'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("pynvvideocodec"))'); \
     echo "PyNvVideoCodec version: $v"; \
-    [ "$(printf '%s\n2.2.3\n' "$v" | sort -V | head -1)" = "2.2.3" ] \
-        || { echo "ERROR: wanted PyNvVideoCodec >=2.2.3,<3, got $v" >&2; exit 1; }; \
-    case "$v" in 2.*) ;; *) \
-        echo "ERROR: PyNvVideoCodec $v is outside the >=2.2.3,<3 range that" >&2; \
-        echo "       requirements.trtllm.txt declares. A sort -V test can express" >&2; \
-        echo "       the floor but not the cap, so the major is checked separately." >&2; \
-        exit 1;; esac; \
+    [ "$v" = "2.2.3" ] \
+        || { echo "ERROR: wanted PyNvVideoCodec 2.2.3, got $v -- this stage and" >&2; \
+             echo "       requirements.trtllm.txt must pin the same version." >&2; exit 1; }; \
     dists=$(find /usr/local/lib/python3.12/dist-packages -maxdepth 1 \
         -name 'pynvvideocodec-*.dist-info' | wc -l); \
     [ "$dists" -eq 1 ] \
@@ -536,13 +530,10 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
                  echo "       --system-site-packages, so the interpreter would resolve the" >&2; \
                  echo "       system copy this stage just upgraded and always look correct." >&2; \
                  exit 1; }; \
-        [ "$(printf '%s\n2.2.3\n' "$vv" | sort -V | head -1)" = "2.2.3" ] \
-            || { echo "ERROR: venv PyNvVideoCodec $vv is below the 2.2.3 floor while the" >&2; \
-                 echo "       system copy is $v -- the two specifiers have drifted apart." >&2; \
-                 echo "       requirements.trtllm.txt and this stage must stay in step." >&2; exit 1; }; \
-        case "$vv" in 2.*) ;; *) \
-            echo "ERROR: venv PyNvVideoCodec $vv is outside >=2.2.3,<3 while the system" >&2; \
-            echo "       copy is $v -- the two specifiers have drifted apart." >&2; exit 1;; esac; \
+        [ "$vv" = "$v" ] \
+            || { echo "ERROR: venv PyNvVideoCodec is $vv but the system copy is $v --" >&2; \
+                 echo "       the two have drifted apart. requirements.trtllm.txt and" >&2; \
+                 echo "       this stage must pin the same version." >&2; exit 1; }; \
     else \
         echo "NOTE: no /opt/dynamo/venv in this stage yet, so the venv/system"; \
         echo "      cross-check is skipped. Expected for the dev and local-dev"; \
