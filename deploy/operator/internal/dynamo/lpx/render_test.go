@@ -16,7 +16,6 @@ import (
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -156,30 +155,9 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Project an LPU-only model with nested runtime settings")
+	t.Log("Project an LPU-only model with template-owned runtime settings")
 	snapshot := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	projection := projectRenderFixture(t, lpxv1alpha1.TargetFamilyXt8888, PipelineSingle, snapshot)
-	projection.configuredBuild.runtimeSettings["tokenizer_path"] = "tokenizer"
-	projection.configuredBuild.runtimeSettings["stop_tokens"] = []uint32{1}
-	projection.configuredBuild.runtimeSettings["swa"] = map[string]any{"chunked": true}
-	projection.configuredBuild.runtimeSettings["scheduler"] = map[string]any{"max_inflight_tasks": int64(3)}
-	retainedSetup := map[string]any{"custom": "kept"}
-	projection.configuredBuild.runtimeSettings["setup"] = retainedSetup
-
-	t.Log("Render and verify isolated model configuration state")
-	firstConfig, err := lpuModelConfig([]*ModelProjection{projection}, "/models")
-	require.NoError(t, err)
-	require.EqualValues(t, 3, firstConfig["scheduler"].(map[string]any)["max_inflight_tasks"])
-	require.NotContains(t, firstConfig["iop"], "scheduler")
-	require.NotContains(t, firstConfig["iop"], "setup")
-
-	t.Log("Mutate one rendered config and verify the next render is isolated")
-	firstConfig["setup"].(map[string]any)["mutated"] = true
-	secondConfig, err := lpuModelConfig([]*ModelProjection{projection}, "/models")
-	require.NoError(t, err)
-	require.NotContains(t, secondConfig["setup"], "mutated")
-	require.Equal(t, map[string]any{"custom": "kept"}, retainedSetup)
-	require.Equal(t, map[string]any{"chunked": true}, projection.configuredBuild.runtimeSettings["swa"])
 
 	t.Log("Construct a base PodSpec with model binding and custom placement")
 	modelAnnotationSource := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
@@ -211,8 +189,9 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	require.Equal(t, conductorPodSpec.NodeSelector, conductor.Spec.PodSpec.NodeSelector)
 	require.Equal(t, []string{"/bin/bash"}, conductor.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"-c", "custom-agent"}, conductor.Spec.PodSpec.Containers[0].Args[:2])
-	require.Equal(t, modelAnnotationSource, conductor.Spec.PodSpec.Containers[0].Env[0].ValueFrom)
-	require.Empty(t, conductor.Spec.PodSpec.Containers[0].Env[0].Value)
+	require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
+		Name: "LPU_MODEL_NAME", ValueFrom: modelAnnotationSource,
+	})
 	require.Equal(t, "agt", testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, allocationEnvVar))
 	require.Equal(t, []string{"agt"}, conductor.Spec.StartsAfter)
 
@@ -228,7 +207,7 @@ func TestRenderMaterializesAgentModelFromBasePodSpec(t *testing.T) {
 	require.Equal(t, projection.Model(), agent.Annotations[lpxv1alpha1.PodModelAnnotation])
 }
 
-func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
+func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Create distinct draft and target compiler fixtures")
@@ -244,10 +223,6 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	draft.Replicas = ptr.To(int32(2))
-	draft.LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(`{
-		"max_swa_dkvc_blocks_draft":2,
-		"setup":{"agent_connect_timeout":"30s","agent_setup_timeout":"180s"}
-	}`)}
 	target := testLPXComponent(testTargetStageName, "target-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
@@ -267,9 +242,13 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	conductorTemplate.Labels = map[string]string{"owner": "conductor"}
 	conductorTemplate.Annotations = map[string]string{"owner": "conductor"}
 	conductorTemplate.Spec.Containers[0].Image = "conductor-runtime"
-	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{{
-		Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}",
-	}}
+	conductorTemplate.Spec.Containers[0].Env = []corev1.EnvVar{
+		{Name: "NOVA_NODE_NAME_TEMPLATE", Value: "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}"},
+		{Name: "NOVA_PIPELINE_TYPE", Value: "SpecDecode"},
+		{Name: "NOVA_MAX_SWA_DKVC_BLOCKS_DRAFT", Value: "2"},
+		{Name: "NOVA_AGENT_CONNECT_TIMEOUT", Value: "30s"},
+		{Name: "NOVA_AGENT_SETUP_TIMEOUT", Value: "180s"},
+	}
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
@@ -309,20 +288,13 @@ func TestRenderSpecDecodeRoleOwnershipAndSharedSettings(t *testing.T) {
 	require.Equal(t, secondAgentBefore, &secondAgent.Spec.PodSpec)
 	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
 
-	t.Log("Project draft settings once into the shared SpecDecode configuration")
+	t.Log("Preserve runtime settings in the conductor template and share only partition data")
 	configMap, ok := extraResources[0].(*corev1.ConfigMap)
 	require.True(t, ok)
-	require.Contains(t, configMap.Data["model_config.toml"], "SpecDecode")
-	require.Contains(t, configMap.Data["model_config.toml"], "[draft")
-	require.Contains(t, configMap.Data["model_config.toml"], "[target")
-	require.NotContains(t, configMap.Data["model_config.toml"], "num_drafts")
-	require.NotContains(t, configMap.Data["model_config.toml"], "draft_to_target_port")
-	require.NotContains(t, configMap.Data["model_config.toml"], "target_to_draft_port")
-	require.NotContains(t, configMap.Data["model_config.toml"], "head_to_head_port")
-	require.Contains(t, configMap.Data["model_config.toml"], "max_swa_dkvc_blocks_draft = 2")
-	require.Equal(t, 1, strings.Count(configMap.Data["model_config.toml"], "agent_connect_timeout = '30s'"))
-	require.Equal(t, 1, strings.Count(configMap.Data["model_config.toml"], "agent_setup_timeout = '180s'"))
-	require.Equal(t, 1, strings.Count(configMap.Data["model_config.toml"], "[draft.iop]"))
+	require.NotContains(t, configMap.Data, "model_config.toml")
+	for _, env := range conductorTemplate.Spec.Containers[0].Env {
+		require.Contains(t, conductor.Spec.PodSpec.Containers[0].Env, env)
+	}
 	require.Equal(t, "draft0\ndraft1\ntarget", configMap.Data["partition_models"])
 	require.Equal(t, before, source)
 

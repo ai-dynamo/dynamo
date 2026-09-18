@@ -6,6 +6,9 @@
 package lpx
 
 import (
+	"fmt"
+	"slices"
+
 	dynamov1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -41,6 +44,36 @@ func configureNodeLocalConductorRuntime(
 	conductor.Name = dynamov1beta1.ComponentRoleLPXConductor
 	setContainerEnv(conductor, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
 	retargetMainContainerReferences(conductorPodSpec, conductor)
+}
+
+// applyConductorModelPaths binds nonempty canonical projections into the fresh conductor container.
+func applyConductorModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
+	type modelPathBinding struct {
+		name       string
+		projection *ModelProjection
+	}
+	bindings := []modelPathBinding{{"LPX_MODEL_PATH", projections[0]}}
+	if projections[0].pipeline == PipelineSpecDecode {
+		bindings[0].name = "LPX_DRAFT_MODEL_PATH"
+		bindings = append(bindings, modelPathBinding{"LPX_TARGET_MODEL_PATH", projections[len(projections)-1]})
+	}
+
+	// Resolve all paths before publishing authoritative values ahead of authored references.
+	env := make([]corev1.EnvVar, 0, len(container.Env)+len(bindings))
+	for _, binding := range bindings {
+		path, err := buildRuntimePath(lpuRuntimeBuildRef(binding.projection, modelStoragePath), modelStoragePath)
+		if err != nil {
+			return fmt.Errorf("resolve %s: %w", binding.name, err)
+		}
+		env = append(env, corev1.EnvVar{Name: binding.name, Value: path})
+	}
+	for _, variable := range container.Env {
+		if !slices.ContainsFunc(bindings, func(binding modelPathBinding) bool { return binding.name == variable.Name }) {
+			env = append(env, variable)
+		}
+	}
+	container.Env = env
+	return nil
 }
 
 // configureAgentIdentity names the main runtime and retargets its container references.

@@ -8,7 +8,6 @@ package lpx
 import (
 	"crypto/sha256"
 	"fmt"
-	"maps"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -18,7 +17,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
-	"github.com/pelletier/go-toml/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -28,11 +26,6 @@ const (
 	lpuConfigVolumeName = "config"
 	lpuConfigMountPath  = "/configs"
 )
-
-type lpuModelStorage struct {
-	volume corev1.Volume
-	mount  corev1.VolumeMount
-}
 
 // LPUConfigMapName names the immutable runtime table using its Pod-template content hash.
 // The root is the PCS identity carried by Grove's part-of Pod label.
@@ -54,17 +47,6 @@ func renderLPUConfigMap(
 			return nil, fmt.Errorf("resolve gas_dir: %w", err)
 		}
 		data["gas_dir"] = modelPath
-	} else {
-		// Conductors consume deployment overrides alongside compile-owned manifest defaults.
-		modelConfig, err := lpuModelConfig(projections, modelStoragePath)
-		if err != nil {
-			return nil, fmt.Errorf("render model_config.toml: %w", err)
-		}
-		var modelTOML strings.Builder
-		if err := toml.NewEncoder(&modelTOML).Encode(modelConfig); err != nil {
-			return nil, fmt.Errorf("render model_config.toml: %w", err)
-		}
-		data["model_config.toml"] = modelTOML.String()
 	}
 	return renderRuntimeConfigMap(namespace, materializationName+"-lpu", data)
 }
@@ -107,150 +89,26 @@ func LPUConfigMapHash(configMap *corev1.ConfigMap) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(contentHash)))
 }
 
-func lpuModelStorageBinding(spec corev1.PodSpec) (lpuModelStorage, error) {
+func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
 	mountIndex := slices.IndexFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
 		return mount.Name == commonconsts.ModelStorageVolumeName
 	})
 	if mountIndex < 0 {
-		return lpuModelStorage{}, fmt.Errorf(
+		return "", fmt.Errorf(
 			"selected LPX main container requires model storage volume mount %q",
 			commonconsts.ModelStorageVolumeName,
 		)
 	}
 	mount := container.VolumeMounts[mountIndex]
 	if strings.TrimSpace(mount.MountPath) == "" {
-		return lpuModelStorage{}, fmt.Errorf("model storage volume %q has no mount path", mount.Name)
+		return "", fmt.Errorf("model storage volume %q has no mount path", mount.Name)
 	}
 	volumeIndex := slices.IndexFunc(spec.Volumes, func(volume corev1.Volume) bool { return volume.Name == mount.Name })
 	if volumeIndex < 0 {
-		return lpuModelStorage{}, fmt.Errorf("selected LPX podTemplate has no model storage volume %q", mount.Name)
+		return "", fmt.Errorf("selected LPX podTemplate has no model storage volume %q", mount.Name)
 	}
-	return lpuModelStorage{volume: spec.Volumes[volumeIndex], mount: mount}, nil
-}
-
-func lpuModelConfig(projections []*ModelProjection, modelStoragePath string) (map[string]any, error) {
-	if projections[0].pipeline != PipelineSpecDecode {
-		config, err := nestedLPUModelConfig(projections[0], modelStoragePath)
-		if err != nil {
-			return nil, err
-		}
-		config["type"] = "Single"
-		return config, nil
-	}
-
-	// Derive the pipeline-wide speculative-decoding controls from the draft model.
-	config := make(map[string]any)
-
-	// Promote the draft's setup timeouts so Nova applies them to every model.
-	setup, err := modelObjectSetting(projections[0], "setup")
-	if err != nil {
-		return nil, err
-	}
-	delete(setup, "resolved_partitions_dir")
-	if len(setup) > 0 {
-		config["setup"] = setup
-	}
-
-	// Promote the only model-provided speculative-decoding scalar currently consumed by the runtime.
-	if value, present := projections[0].configuredBuild.runtimeSettings[v3MaxSWADKVCBlocksDraft]; present {
-		config[v3MaxSWADKVCBlocksDraft] = value
-	}
-
-	draftCount := len(projections) - 1
-	draft, err := nestedLPUModelConfig(projections[0], modelStoragePath)
-	if err != nil {
-		return nil, err
-	}
-	// Draft setup values configure the SpecDecode parent. Keep the child setup
-	// limited to the operator-owned LPU runtime bindings so Nova can inherit the
-	// parent timeouts exactly as it did with the legacy pipeline field.
-	draft["setup"] = map[string]any{
-		"resolved_partitions_dir": lpuConfigMountPath,
-	}
-	target, err := nestedLPUModelConfig(projections[draftCount], modelStoragePath)
-	if err != nil {
-		return nil, err
-	}
-	config["type"] = "SpecDecode"
-	config["draft"] = draft
-	config["target"] = target
-	return config, nil
-}
-
-func nestedLPUModelConfig(projection *ModelProjection, modelStoragePath string) (map[string]any, error) {
-	settings := maps.Clone(projection.configuredBuild.runtimeSettings)
-
-	// Lift Nova's model-level sections out of the IOP settings object.
-	scheduler, err := modelObjectSetting(projection, "scheduler")
-	if err != nil {
-		return nil, err
-	}
-	delete(settings, "scheduler")
-	setup, err := modelObjectSetting(projection, "setup")
-	if err != nil {
-		return nil, err
-	}
-	if setup == nil {
-		setup = map[string]any{}
-	}
-	delete(settings, "setup")
-
-	// Keep operator-owned LPU runtime setup bindings authoritative.
-	setup["resolved_partitions_dir"] = lpuConfigMountPath
-	delete(settings, v3MaxSWADKVCBlocksDraft)
-
-	// Lift additional programs into the Nova model object when configured.
-	var extraPrograms []any
-	if configured, present := settings["extra_programs"]; present {
-		var ok bool
-		extraPrograms, ok = configured.([]any)
-		if !ok {
-			return nil, fmt.Errorf("model %q settings.extra_programs must be an array", projection.model)
-		}
-		delete(settings, "extra_programs")
-		if projection.configuredBuild.Family == BuildFamilyXT &&
-			projection.pipeline == PipelineSingle && len(extraPrograms) > 0 {
-			return nil, fmt.Errorf("model %q settings.extra_programs is not supported for XT Single", projection.model)
-		}
-	}
-
-	build := &projection.configuredBuild
-	buildRef := build.Path
-	if projection.configuredBuild.Family == BuildFamilyHX {
-		buildRef = lpuRuntimeBuildRef(projection, modelStoragePath)
-	}
-	modelPath, err := buildRuntimePath(buildRef, modelStoragePath)
-	if err != nil {
-		return nil, fmt.Errorf("model %q model_path: %w", projection.model, err)
-	}
-	if _, overridden := settings["model_path"]; !overridden ||
-		projection.configuredBuild.Family != BuildFamilyXT || projection.pipeline != PipelineSpecDecode {
-		settings["model_path"] = modelPath
-	}
-	config := map[string]any{
-		"setup": setup,
-		"iop":   settings,
-	}
-	if scheduler != nil {
-		config["scheduler"] = scheduler
-	}
-	if extraPrograms != nil {
-		config["extra_programs"] = extraPrograms
-	}
-	return config, nil
-}
-
-func modelObjectSetting(projection *ModelProjection, name string) (map[string]any, error) {
-	configured, present := projection.configuredBuild.runtimeSettings[name]
-	if !present {
-		return nil, nil
-	}
-	object, ok := configured.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("model %q settings.%s must be an object", projection.model, name)
-	}
-	return maps.Clone(object), nil
+	return mount.MountPath, nil
 }
 
 func lpuRuntimeBuildRef(projection *ModelProjection, modelStoragePath string) string {

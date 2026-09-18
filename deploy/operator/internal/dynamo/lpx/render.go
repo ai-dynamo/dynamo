@@ -86,13 +86,11 @@ func RenderSelectedNodeLocal(
 		}
 		storageTemplate = *conductorTemplate
 	}
-	modelStorage, err := lpuModelStorageBinding(storageTemplate.Spec)
+	modelStoragePath, err := lpuModelStoragePath(storageTemplate.Spec)
 	if err != nil {
 		return nil, err
 	}
-	modelStorage.volume = *modelStorage.volume.DeepCopy()
-	modelStorage.mount = *modelStorage.mount.DeepCopy()
-	configMap, err := renderLPUConfigMap(namespace, plan.PodCliqueSetName, modelStorage.mount.MountPath, projections)
+	configMap, err := renderLPUConfigMap(namespace, plan.PodCliqueSetName, modelStoragePath, projections)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +115,10 @@ func RenderSelectedNodeLocal(
 	// Consume the independently rendered conductor without copying Agent startup or placement.
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
 	if conductorTemplateName != "" {
+		container := common.FindContainerByName(conductorTemplate.Spec.Containers, commonconsts.MainContainerName)
+		if err := applyConductorModelPaths(container, projections, modelStoragePath); err != nil {
+			return nil, err
+		}
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
 		annotations[commonconsts.AnnotationExtraResourcesHash] = configHash
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
@@ -140,12 +142,12 @@ func RenderSelectedNodeLocal(
 		stage := projection.stage
 		if index == 0 || stage != projections[index-1].stage {
 			template = input.Stages[stage]
-			storage, err := lpuModelStorageBinding(template.Spec)
+			storagePath, err := lpuModelStoragePath(template.Spec)
 			if err != nil {
 				return nil, fmt.Errorf("stage %s: %w", stage, err)
 			}
-			if storage.mount.MountPath != modelStorage.mount.MountPath {
-				return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStorage.mount.MountPath)
+			if storagePath != modelStoragePath {
+				return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
 			}
 			var conductorSpec *corev1.PodSpec
 			if stage == conductorStage && conductor != nil {
@@ -206,7 +208,7 @@ func RenderSelectedNodeLocal(
 			cyborg,
 			projections[0],
 			workloadDigest,
-			modelStorage,
+			modelStoragePath,
 			agentTemplateNames,
 			cyborgConfigMap,
 		); err != nil {

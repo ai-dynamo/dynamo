@@ -2,22 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
-  model_config.toml: |
-    type = 'SpecDecode'
-
-    [draft]
-    [draft.iop]
-    model_path = '/testdata/node-local-v2-connected'
-
-    [draft.setup]
-    resolved_partitions_dir = '/configs'
-
-    [target]
-    [target.iop]
-    model_path = '/testdata/node-local-v2-connected'
-
-    [target.setup]
-    resolved_partitions_dir = '/configs'
   nodes_per_partition: |-
     2
     2
@@ -75,7 +59,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
+  name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
   namespace: test
 ---
 metadata:
@@ -97,7 +81,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a973a2e0a92065344cab16b5b6af504f9403288bc2b332785293de5f036bc404
@@ -230,14 +214,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 4
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3061125e8a82194e7fadab40ddf2334081340728a740f3bd3d1231f72c061e1b
@@ -370,14 +354,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 4
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:55b7f43000a720e9afec381ae28b43d4a1436b5b8a2b666c4706d692411d218e
@@ -510,14 +494,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 4
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: b21dd05cabd990be4e08973107ec1fc5609ff3556d9ed4dcd445c0df9c8f8f7a
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:75b46c16650574198e849b16926c63faebce97ca1ddffdfd4c7a54e0d7b1db81
         scheduling.lpu.nvidia.com/role: conductor
@@ -549,8 +533,6 @@ spec:
             - $(POD_IP)
             - --control-server-addr
             - $(POD_IP):51045
-            - --model-config-filepath
-            - /configs/model_config.toml
             - --json-logs
             - --disable-tracing
             - --mpi-use-tcp
@@ -588,12 +570,26 @@ spec:
               value: etcd-address
             - name: LPX_ALLOCATION
               value: agt0:agt1:agt2
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v2-connected
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v2-connected
             - name: NATS_SERVER
               value: nats-address
+            - name: NOVA_DRAFT_MODEL_PATH
+              value: $(LPX_DRAFT_MODEL_PATH)
+            - name: NOVA_DRAFT_RESOLVED_PARTITIONS_DIR
+              value: /configs
             - name: NOVA_MODEL_BASE_PATHS
               value: /nfs
             - name: NOVA_NODE_NAME_TEMPLATE
               value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
+            - name: NOVA_PIPELINE_TYPE
+              value: SpecDecode
+            - name: NOVA_TARGET_MODEL_PATH
+              value: $(LPX_TARGET_MODEL_PATH)
+            - name: NOVA_TARGET_RESOLVED_PARTITIONS_DIR
+              value: /configs
             - name: OMPI_ALLOW_RUN_AS_ROOT
               value: "1"
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
@@ -677,7 +673,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b21dd05cabd990be
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 1
         roleName: cond

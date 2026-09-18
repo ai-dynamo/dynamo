@@ -143,23 +143,44 @@ func TestProjectModelV2UsesEffectivePropSyncSettings(t *testing.T) {
 }
 
 func TestProjectModelV2SingleEmbeddingPlacementFromModelSettings(t *testing.T) {
-	t.Log("Prepare a V2 build with a standalone embedding partition in its selected chain")
-	normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
-	build := normalized.build
-	build.Partitions[0].SourcePartitionID = 0
-	build.Partitions[1].SourcePartitionID = 1
-	build.StandaloneTokenEmbeddings = true
-	build.SupportsCPUEmbeddings = true
-	build.SelectedPropSyncChains = [][]int{{0, 1}}
+	for _, test := range []struct {
+		name, settings           string
+		cpuSupported, standalone bool
+		firstPartition           int64
+	}{
+		{name: "default CPU embeddings", cpuSupported: true, standalone: true, firstPartition: 1},
+		{name: "explicit CPU embeddings", settings: `{"cpu_embeddings":true}`, cpuSupported: true, standalone: true, firstPartition: 1},
+		{name: "CPU embeddings disabled", settings: `{"cpu_embeddings":false}`, cpuSupported: true, standalone: true},
+		{name: "CPU embeddings unsupported", standalone: true},
+		{name: "CPU embeddings requested but unsupported", settings: `{"cpu_embeddings":true}`, standalone: true},
+		{name: "partition zero is runnable", cpuSupported: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Prepare a selected V2 chain with explicit embedding placement capabilities")
+			normalized := normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t)))
+			build := normalized.build
+			build.Partitions[0].SourcePartitionID = 0
+			build.Partitions[1].SourcePartitionID = 1
+			build.StandaloneTokenEmbeddings = test.standalone
+			build.SupportsCPUEmbeddings = test.cpuSupported
+			build.SelectedPropSyncChains = [][]int{{0, 1}}
 
-	t.Log("Omit source partition zero when CPU embeddings are enabled")
-	offLPU := projectTestBuild(t, normalized, PipelineSingle, `{"cpu_embeddings":true}`)
-	require.Equal(t, int64(1), offLPU.RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].CompilerPartitionID)
+			t.Log("Project retained source partitions into placement and runtime metadata")
+			projection := projectTestBuild(t, normalized, PipelineSingle, test.settings)
+			spec := projection.RequestSpec(&MaterializationPlan{}, "agents")
+			require.Equal(t, test.firstPartition, spec.Partitions[0].CompilerPartitionID)
+			require.EqualValues(t, 2*(2-test.firstPartition), projection.agentReplicas)
+			require.EqualValues(t, test.firstPartition, projection.configuredBuild.Partitions[0].SourcePartitionID)
+			require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 
-	t.Log("Retain source partition zero when CPU embeddings are disabled")
-	onLPU := projectTestBuild(t, normalized, PipelineSingle, `{"cpu_embeddings":false}`)
-	require.Equal(t, 4, onLPU.agentReplicas)
-	require.Equal(t, int64(0), onLPU.RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].CompilerPartitionID)
+			t.Log("Keep scheduler output independently mutable from the projection and compiler snapshot")
+			spec.Partitions[0].CompilerPartitionID = -1
+			require.EqualValues(t, test.firstPartition, projection.partitions[0].SourcePartitionID)
+			require.EqualValues(t, test.firstPartition, projection.RequestSpec(&MaterializationPlan{}, "agents").Partitions[0].CompilerPartitionID)
+			require.Equal(t, 0, build.Partitions[0].SourcePartitionID)
+			require.Equal(t, [][]int{{0, 1}}, build.SelectedPropSyncChains)
+		})
+	}
 }
 
 func TestProjectModelV2StrictHybridPreservesPartitionZero(t *testing.T) {
@@ -345,4 +366,55 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	require.Equal(t, "0", data["partition_node_offsets"])
 	require.Equal(t, 2, projection.configuredBuild.Partitions[0].effectiveNodeCount())
 	require.Equal(t, 4, projection.configuredBuild.Partitions[0].Topology.ChipCount)
+}
+
+func TestBuildRejectsInvalidRuntimeSelectedPropSyncChain(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Define malformed or incompatible selected prop-sync chains")
+	tests := []struct {
+		name    string
+		chains  [][]int
+		wantErr string
+	}{
+		{
+			name:    "multiple chains",
+			chains:  [][]int{{0, 1}, {2, 3}},
+			wantErr: "LPU-only runtime requires exactly one selected prop-sync chain, got 2",
+		},
+		{
+			name:    "missing partition",
+			chains:  [][]int{{3, 4}},
+			wantErr: "references missing partition id 4",
+		},
+		{
+			name:    "duplicate partition",
+			chains:  [][]int{{1, 2, 1}},
+			wantErr: "contains duplicate partition id 1",
+		},
+		{
+			name:    "noncontiguous partitions",
+			chains:  [][]int{{1, 3}},
+			wantErr: "is not contiguous at partition id 3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			t.Log("Configure malformed or incompatible LPU-only selected-chain metadata")
+			configured := Build{
+				Partitions: []BuildPartition{
+					{SourcePartitionID: 0}, {SourcePartitionID: 1}, {SourcePartitionID: 2}, {SourcePartitionID: 3},
+				},
+				SelectedPropSyncChains: tt.chains,
+			}
+
+			t.Log("Reject the build without consuming its selected-chain marker")
+			err := configured.consumeRuntimeSelectedPropSyncChain()
+			require.ErrorContains(t, err, tt.wantErr)
+			require.Equal(t, tt.chains, configured.SelectedPropSyncChains)
+		})
+	}
 }

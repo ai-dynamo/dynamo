@@ -2,14 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 data:
-  model_config.toml: |
-    type = 'Single'
-
-    [iop]
-    model_path = '/nfs/node-local-v3-hx-connected'
-
-    [setup]
-    resolved_partitions_dir = '/configs'
   nodes_per_partition: "1"
   partition_ids: "1"
   partition_indices: "0"
@@ -25,7 +17,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v3-hx-lpu-only-d43c-lpu-396d1555d7634222
+  name: node-local-v3-hx-lpu-only-d43c-lpu-f8b027cf29abf6cd
   namespace: test
 ---
 metadata:
@@ -47,7 +39,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 396d1555d763422281cc6c27d516f81737c8671ab6f880ade54570435a474152
+        nvidia.com/extra-resources-hash: f8b027cf29abf6cdbab73060b6697b18f7107df8c993859d94073d6012107d12
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:1e4755073877623d76538089043ad7083626cab5bead93415d0147ba1a1023d1
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ae1c84203872d61daec4df7a2ec2e2e598454e41907d5fc9d6d0bd0887df0dc6
@@ -206,14 +198,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v3-hx-lpu-only-d43c-lpu-396d1555d7634222
+              name: node-local-v3-hx-lpu-only-d43c-lpu-f8b027cf29abf6cd
             name: config
         replicas: 1
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 396d1555d763422281cc6c27d516f81737c8671ab6f880ade54570435a474152
+        nvidia.com/extra-resources-hash: f8b027cf29abf6cdbab73060b6697b18f7107df8c993859d94073d6012107d12
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ae1c84203872d61daec4df7a2ec2e2e598454e41907d5fc9d6d0bd0887df0dc6
         scheduling.lpu.nvidia.com/role: conductor
@@ -247,8 +239,6 @@ spec:
             - $(POD_IP)
             - --control-server-addr
             - $(POD_IP):51045
-            - --model-config-filepath
-            - /configs/model_config.toml
             - --json-logs
             - --disable-tracing
             - --mpi-use-tcp
@@ -324,12 +314,18 @@ spec:
               value: etcd-address
             - name: LPX_ALLOCATION
               value: agt
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v3-hx-connected
             - name: NATS_SERVER
               value: nats-address
             - name: NOVA_MODEL_BASE_PATHS
               value: /nfs
+            - name: NOVA_MODEL_PATH
+              value: $(LPX_MODEL_PATH)
             - name: NOVA_NODE_NAME_TEMPLATE
               value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
+            - name: NOVA_RESOLVED_PARTITIONS_DIR
+              value: /configs
             - name: OMPI_ALLOW_RUN_AS_ROOT
               value: "1"
             - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
@@ -413,7 +409,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v3-hx-lpu-only-d43c-lpu-396d1555d7634222
+              name: node-local-v3-hx-lpu-only-d43c-lpu-f8b027cf29abf6cd
             name: config
         replicas: 1
         roleName: cond

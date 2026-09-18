@@ -261,9 +261,6 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			t.Log("Preserve compiled placement without repeating runtime-derived model settings")
 			for _, projection := range projections {
 				require.EqualValues(t, compiledAgentCount, projection.agentReplicas)
-				if test.family == BuildFamilyHX {
-					require.NotContains(t, projection.configuredBuild.runtimeSettings, "sequence_length")
-				}
 			}
 
 			for _, expansion := range []struct {

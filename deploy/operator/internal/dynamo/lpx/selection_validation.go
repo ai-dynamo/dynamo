@@ -16,6 +16,9 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// maxSpecDecodeNumDrafts bounds the supported speculative-decoding draft fanout.
+const maxSpecDecodeNumDrafts = 8
+
 // ValidateSelectedIntent validates the snapshot-independent selected-LPX
 // requirements beyond admission's structural checks before controller downloads
 // and selected-workload projection.

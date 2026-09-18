@@ -121,8 +121,6 @@ spec:
               - $(POD_IP)
               - --control-server-addr
               - $(POD_IP):51045
-              - --model-config-filepath
-              - /configs/model_config.toml
               - --json-logs
               - --disable-tracing
               - --mpi-use-tcp
@@ -144,6 +142,16 @@ spec:
               - --allocation
               - $(LPX_ALLOCATION)
               env:
+              - name: NOVA_PIPELINE_TYPE
+                value: 'SpecDecode'
+              - name: NOVA_DRAFT_MODEL_PATH
+                value: '$(LPX_DRAFT_MODEL_PATH)'
+              - name: NOVA_DRAFT_RESOLVED_PARTITIONS_DIR
+                value: '/configs'
+              - name: NOVA_TARGET_MODEL_PATH
+                value: '$(LPX_TARGET_MODEL_PATH)'
+              - name: NOVA_TARGET_RESOLVED_PARTITIONS_DIR
+                value: '/configs'
               - name: NOVA_MODEL_BASE_PATHS
                 value: /nfs
               - name: NOVA_NODE_NAME_TEMPLATE

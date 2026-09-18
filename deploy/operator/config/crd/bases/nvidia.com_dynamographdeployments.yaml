@@ -11530,7 +11530,7 @@ spec:
                             minLength: 1
                             type: string
                           settings:
-                            description: settings override the existing model configuration.
+                            description: settings configure model placement. Runtime options belong in role pod templates.
                             nullable: true
                             type: object
                             x-kubernetes-preserve-unknown-fields: true
@@ -21073,7 +21073,7 @@ spec:
                             minLength: 1
                             type: string
                           settings:
-                            description: settings override the existing model configuration.
+                            description: settings configure model placement. Runtime options belong in role pod templates.
                             nullable: true
                             type: object
                             x-kubernetes-preserve-unknown-fields: true

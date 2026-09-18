@@ -28,9 +28,21 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	ioFPGACount, ioFanoutFactor := build.IOFPGACount, build.IOFanoutFactor
 	propSyncEnabled := build.CompilationMode == BuildCompilationModeLPUOnly && len(build.SelectedPropSyncChains) > 0
 	connectorBuild := intent.BuildSnapshot.build
+
+	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
 	if usesResolvedRuntime {
-		if err := resolveBuildSettings(&configured, modelSettings); err != nil {
+		cpuEmbeddings := configured.SupportsCPUEmbeddings
+		if value, overridden := modelSettings["cpu_embeddings"]; overridden {
+			cpuEmbeddings = value.(bool)
+		}
+		if err := configured.consumeRuntimeSelectedPropSyncChain(); err != nil {
 			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
+		}
+
+		// Omit host-only embeddings by retaining a view of the immutable source partitions.
+		if cpuEmbeddings && configured.SupportsCPUEmbeddings && configured.StandaloneTokenEmbeddings &&
+			len(configured.Partitions) > 1 && configured.Partitions[0].SourcePartitionID == 0 {
+			configured.Partitions = configured.Partitions[1:]
 		}
 	}
 	if value, present := modelSettings["prop_sync"]; present {

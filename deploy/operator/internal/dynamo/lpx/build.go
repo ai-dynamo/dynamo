@@ -8,7 +8,6 @@ package lpx
 import (
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -36,7 +35,7 @@ const (
 // Build is the registry's source-independent view of an LPU build.
 //
 // The version 2 Cap'n Proto manifest populates this shape before deployment code
-// derives placement, replica counts, and runtime overrides.
+// derives placement and replica counts.
 type Build struct {
 	// Path is the absolute file or GCS reference of the build payload.
 	Path string
@@ -56,9 +55,6 @@ type Build struct {
 	IOFPGACount int32
 	// IOFanoutFactor is the number of clients assigned to each I/O FPGA transaction.
 	IOFanoutFactor int32
-	// runtimeSettings holds manifest overrides on a snapshot and merged
-	// authored settings shared by immutable component projections.
-	runtimeSettings map[string]any
 }
 
 // BuildPartition describes one normalized physical compiler partition.
@@ -88,19 +84,6 @@ func (p BuildPartition) effectiveNodeCount() int {
 		return p.runtimeNodeCount
 	}
 	return p.Topology.Replicas()
-}
-
-// omitStandaloneEmbeddingPartition removes host-only embedding work when the
-// build manifest explicitly identifies it as safe to run outside the LPU.
-func (b *Build) omitStandaloneEmbeddingPartition() {
-	if !b.SupportsCPUEmbeddings || !b.StandaloneTokenEmbeddings {
-		return
-	}
-
-	// Normalized XT partitions are sorted by source ID; keep the retained interval independently owned.
-	if len(b.Partitions) > 1 && b.Partitions[0].SourcePartitionID == 0 {
-		b.Partitions = slices.Clone(b.Partitions[1:])
-	}
 }
 
 func buildRuntimePath(buildPath string, modelStoragePath string) (string, error) {

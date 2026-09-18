@@ -16,7 +16,6 @@ import (
 const (
 	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
 	v3ProjectionVersion      = "v3-hx-capnp/v1"
-	v3MaxSWADKVCBlocksDraft  = "max_swa_dkvc_blocks_draft"
 	v3LPUDevice              = "lpu"
 	v3HXLogicalDeviceCount   = 16
 )
@@ -27,23 +26,17 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 	selectedPropSyncChains := runtimeBuild.SelectedPropSyncChains
 
 	ioFPGACount, ioFanoutFactor := runtimeBuild.IOFPGACount, runtimeBuild.IOFanoutFactor
-	// V3 topology and selected prop-sync chains are projected below. Do not feed
-	// them through the runtime-settings consumer: the runtime projection
-	// intentionally contains no artifact partitions.
+
+	// Keep physical artifacts in the scheduler projection; the runtime uses resolved partition metadata.
 	runtimeBuild.Partitions = nil
 	runtimeBuild.SelectedPropSyncChains = nil
-	if intent.Pipeline != PipelineLPX {
-		if err := resolveBuildSettings(&runtimeBuild, modelSettings); err != nil {
-			return nil, fmt.Errorf("resolving configured V3 runtime build: %w", err)
-		}
-	}
 	propSyncEnabled := runtimeBuild.CompilationMode == BuildCompilationModeLPUOnly && len(selectedPropSyncChains) > 0
-	if _, overridden := runtimeBuild.runtimeSettings["prop_sync"]; overridden {
-		var err error
-		propSyncEnabled, err = boolSetting(runtimeBuild.runtimeSettings, "prop_sync")
-		if err != nil {
-			return nil, fmt.Errorf("configured V3 runtime settings.%w", err)
+	if value, overridden := modelSettings["prop_sync"]; overridden {
+		enabled, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("model settings.prop_sync must be a boolean")
 		}
+		propSyncEnabled = enabled
 	}
 	if runtimeBuild.CompilationMode == BuildCompilationModeLPUOnly {
 		if len(selectedPropSyncChains) > 0 && !propSyncEnabled {

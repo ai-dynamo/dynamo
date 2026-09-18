@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"maps"
+	"slices"
 )
 
 const (
@@ -28,6 +30,8 @@ const (
 // and Pipeline is selected by the validated resolver. ModelSettings is API-validated
 // JSON: omitted, null or an object. Source inputs are not mutated; discard error results.
 func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
+	const propSyncSetting = "prop_sync"
+
 	modelSettings, modelSettingsObject := canonicalModelSettings(intent.ModelSettings)
 	intent.ModelSettings = modelSettings
 
@@ -35,8 +39,23 @@ func appendModelProjections(dst []*ModelProjection, intent ModelProjectionInput)
 	if intent.Pipeline == PipelineLPX {
 		for key := range modelSettingsObject {
 			if intent.BuildSnapshot.build.Family != BuildFamilyXT ||
-				(key != "prop_sync" && key != "prop_sync_multiple_load_sets") {
+				(key != propSyncSetting && key != "prop_sync_multiple_load_sets") {
 				return nil, fmt.Errorf("hybrid %s workloads do not support runtime settings overrides", intent.BuildSnapshot.build.Family)
+			}
+		}
+	} else {
+		// Conductor templates own runtime configuration; model settings only affect placement.
+		for _, key := range slices.Sorted(maps.Keys(modelSettingsObject)) {
+			switch key {
+			case "cpu_embeddings", propSyncSetting, "prop_sync_multiple_load_sets":
+				if _, ok := modelSettingsObject[key].(bool); !ok {
+					return nil, fmt.Errorf("model settings.%s must be a boolean", key)
+				}
+				if intent.BuildSnapshot.build.Family == BuildFamilyHX && key != propSyncSetting {
+					return nil, fmt.Errorf("model settings.%s is not used for HX placement; configure runtime options in the conductor podTemplate", key)
+				}
+			default:
+				return nil, fmt.Errorf("model settings.%s is a runtime setting; configure it in the conductor podTemplate", key)
 			}
 		}
 	}

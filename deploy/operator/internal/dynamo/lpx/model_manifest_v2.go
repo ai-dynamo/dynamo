@@ -97,13 +97,6 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 			ioFanoutFactor,
 		)
 	}
-	var settings map[string]any
-	if compilationMode == BuildCompilationModeLPUOnly {
-		settings, err = runtimeSettingsFromManifestV2(manifest, program)
-		if err != nil {
-			return nil, err
-		}
-	}
 	if !manifest.HasArtifacts() {
 		return nil, fmt.Errorf("%s is missing artifacts", gbuildManifestV2CapnpFile)
 	}
@@ -131,7 +124,6 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 		SupportsCPUEmbeddings:     program.SupportsCpuEmbeddings(),
 		IOFPGACount:               ioFPGACount,
 		IOFanoutFactor:            ioFanoutFactor,
-		runtimeSettings:           settings,
 	}
 
 	// Complete the normalized build with scheduler-facing LPU artifacts.
@@ -201,50 +193,6 @@ func selectedPropSyncChainsFromManifestV2(deployment manifestcapnpv2.DeploymentI
 		chains = append(chains, chain)
 	}
 	return chains, nil
-}
-
-func runtimeSettingsFromManifestV2(manifest manifestcapnpv2.Manifest, program manifestcapnpv2.ProgramConfig) (map[string]any, error) {
-	// Retain only settings whose omission would change the runtime's interpretation.
-	settings := map[string]any{
-		"batch_folding":             program.BatchFolding(),
-		"num_batch_split_divisions": int64(program.NumBatchSplitDivisions()),
-	}
-	var archVocabulary uint32
-	hasSWA := false
-	if manifest.HasModel() {
-		model, err := manifest.Model()
-		if err != nil {
-			return nil, fmt.Errorf("reading %s model: %w", gbuildManifestV2CapnpFile, err)
-		}
-		if model.HasArch() {
-			arch, err := model.Arch()
-			if err != nil {
-				return nil, fmt.Errorf("reading %s model.arch: %w", gbuildManifestV2CapnpFile, err)
-			}
-			archVocabulary = arch.VocabSize()
-			hasSWA = arch.HasSwa()
-		}
-
-		// Tokenizer vocabulary takes precedence over architecture padding in the deployment contract.
-		if model.HasTokenizer() {
-			tokenizer, err := model.Tokenizer()
-			if err != nil {
-				return nil, fmt.Errorf("reading %s model.tokenizer: %w", gbuildManifestV2CapnpFile, err)
-			}
-			if vocabulary := tokenizer.VocabSize(); vocabulary != 0 && vocabulary != archVocabulary {
-				settings["vocab_size"] = int64(vocabulary)
-			}
-		}
-	}
-
-	// Program-only SWA settings are not inferred when the architecture has no SWA descriptor.
-	if !hasSWA && (program.SwaChunked() || program.NumSwaDkvcBlocks() != 0) {
-		settings["swa"] = map[string]any{
-			"chunked":             program.SwaChunked(),
-			"num_swa_dkvc_blocks": int64(program.NumSwaDkvcBlocks()),
-		}
-	}
-	return settings, nil
 }
 
 func addLPUArtifactsFromManifestV2(

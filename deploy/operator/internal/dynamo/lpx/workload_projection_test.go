@@ -79,7 +79,7 @@ func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	require.NotEqual(t, firstProjection.Digest(), specDecodeProjection.Digest())
 }
 
-func TestCanonicalModelSettingsRetainRawAndNormalizeRuntimeNumbers(t *testing.T) {
+func TestCanonicalModelSettingsRetainRaw(t *testing.T) {
 	t.Log("Decode canonical model settings while retaining their exact raw bytes")
 	raw, object := canonicalModelSettings(json.RawMessage(
 		`{"exponent":1e3,"float":1.0,"integer":8192,"nested":{"array":[128001,1.5,9223372036854775808]}}`,
@@ -87,16 +87,52 @@ func TestCanonicalModelSettingsRetainRawAndNormalizeRuntimeNumbers(t *testing.T)
 	require.Equal(t, json.RawMessage(`{"exponent":1e3,"float":1.0,"integer":8192,"nested":{"array":[128001,1.5,9223372036854775808]}}`), raw)
 	require.Equal(t, json.Number("8192"), object["integer"])
 
-	t.Log("Normalize representable integers while retaining floating-point runtime values")
-	merged, err := mergeRuntimeSettingOverride(nil, object, "settings")
-	require.NoError(t, err)
-	normalized := merged.(map[string]any)
-	require.Equal(t, int64(8192), normalized["integer"])
-	require.Equal(t, []any{int64(128001), float64(1.5), float64(9223372036854775808)}, normalized["nested"].(map[string]any)["array"])
-
 	t.Log("Normalize explicit null settings to a present empty object")
 	raw, object = canonicalModelSettings(json.RawMessage("null"))
 	require.Nil(t, raw)
 	require.NotNil(t, object)
 	require.Empty(t, object)
+}
+
+func TestProjectModelSettingsPlacementBoundary(t *testing.T) {
+	t.Log("Prepare both physical families with conductor-owned runtime settings")
+	builds := []NormalizedBuildSnapshot{
+		normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV2CompilerFixture(t))),
+		normalizeTestSnapshot(t, acquireTestSnapshot(t, writeV3CompilerFixture(t))),
+	}
+	for _, build := range builds {
+		for _, pipeline := range []Pipeline{PipelineSingle, PipelineSpecDecode} {
+			for _, test := range []struct {
+				settings, wantErr string
+				xtOnly            bool
+			}{
+				{settings: `{"sequence_length":4096}`, wantErr: "model settings.sequence_length is a runtime setting; configure it in the conductor podTemplate"},
+				{settings: `{"setup":{"agent_setup_timeout":"30s"}}`, wantErr: "model settings.setup is a runtime setting"},
+				{settings: `{"z":null,"a":true}`, wantErr: "model settings.a is a runtime setting"},
+				{settings: `{"cpu_embeddings":"false"}`, wantErr: "model settings.cpu_embeddings must be a boolean"},
+				{settings: `{"prop_sync":null}`, wantErr: "model settings.prop_sync must be a boolean"},
+				{settings: `{"prop_sync_multiple_load_sets":1}`, wantErr: "model settings.prop_sync_multiple_load_sets must be a boolean"},
+				{settings: `{"cpu_embeddings":true}`, xtOnly: true},
+				{settings: `{"cpu_embeddings":false}`, xtOnly: true},
+				{settings: `{"prop_sync_multiple_load_sets":true}`, xtOnly: true},
+				{settings: `{"prop_sync_multiple_load_sets":false}`, xtOnly: true},
+				{settings: `{"prop_sync":false}`},
+			} {
+				t.Run(string(build.build.Family)+"/"+string(pipeline)+"/"+test.settings, func(t *testing.T) {
+					t.Log("Accept only placement controls consumed by the selected physical family")
+					_, err := appendModelProjections(nil, ModelProjectionInput{
+						Pipeline: pipeline, Models: []string{"default"}, BuildSnapshot: build,
+						ModelSettings: json.RawMessage(test.settings),
+					})
+					if test.xtOnly && build.build.Family == BuildFamilyHX {
+						require.ErrorContains(t, err, "is not used for HX placement; configure runtime options in the conductor podTemplate")
+					} else if test.wantErr != "" {
+						require.ErrorContains(t, err, test.wantErr)
+					} else {
+						require.NoError(t, err)
+					}
+				})
+			}
+		}
+	}
 }

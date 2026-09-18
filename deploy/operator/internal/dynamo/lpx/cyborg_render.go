@@ -21,24 +21,24 @@ func configureHybridCyborg(
 	cyborg *grovev1alpha1.PodCliqueTemplateSpec,
 	projection *ModelProjection,
 	workloadDigest string,
-	modelStorage lpuModelStorage,
+	modelStoragePath string,
 	agentTemplateNames []string,
 	cyborgConfigMap *corev1.ConfigMap,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
 	// Apply manifest-aware runtime bindings to the selected Cyborg container.
-	cyborgStorage, err := lpuModelStorageBinding(cyborg.Spec.PodSpec)
+	cyborgStoragePath, err := lpuModelStoragePath(cyborg.Spec.PodSpec)
 	if err != nil {
 		return err
 	}
-	if cyborgStorage.mount.MountPath != modelStorage.mount.MountPath {
-		return fmt.Errorf("selected Cyborg podTemplate conflicts with model storage mount %q", modelStorage.mount.MountPath)
+	if cyborgStoragePath != modelStoragePath {
+		return fmt.Errorf("selected Cyborg podTemplate conflicts with model storage mount %q", modelStoragePath)
 	}
 	if err := validateCyborgReplicas(&projection.configuredBuild, cyborg.Spec.Replicas); err != nil {
 		return err
 	}
-	if err := applyCyborgManifestPath(container, projection, modelStorage.mount.MountPath); err != nil {
+	if err := applyCyborgManifestPath(container, projection, modelStoragePath); err != nil {
 		return err
 	}
 

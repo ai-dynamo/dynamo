@@ -17,17 +17,6 @@ spec:
       replicas: 1
       lpx:
         buildId: llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
-        settings:
-          batch_size: 1
-          input_size: 1
-          num_kv_caches: 1
-          sequence_length: 8192
-          stop_tokens:
-          - 128001
-          - 128008
-          - 128009
-          tokenizer_path: llama3.1
-          vocab_size: 128256
       roles:
       - name: conductor
         podTemplate:
@@ -50,8 +39,6 @@ spec:
               - $(POD_IP)
               - --control-server-addr
               - $(POD_IP):51045
-              - --model-config-filepath
-              - /configs/model_config.toml
               - --json-logs
               - --disable-tracing
               - --mpi-use-tcp
@@ -73,6 +60,24 @@ spec:
               - --allocation
               - $(LPX_ALLOCATION)
               env:
+              - name: NOVA_BATCH_SIZE
+                value: '1'
+              - name: NOVA_INPUT_SIZE
+                value: '1'
+              - name: NOVA_MODEL_PATH
+                value: '$(LPX_MODEL_PATH)'
+              - name: NOVA_NUM_KV_CACHES
+                value: '1'
+              - name: NOVA_SEQUENCE_LENGTH
+                value: '8192'
+              - name: NOVA_STOP_TOKENS
+                value: '128001,128008,128009'
+              - name: NOVA_TOKENIZER_PATH
+                value: 'llama3.1'
+              - name: NOVA_VOCAB_SIZE
+                value: '128256'
+              - name: NOVA_RESOLVED_PARTITIONS_DIR
+                value: '/configs'
               - name: NOVA_MODEL_BASE_PATHS
                 value: /nfs
               - name: NOVA_NODE_NAME_TEMPLATE

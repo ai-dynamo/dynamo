@@ -6,7 +6,6 @@
 package lpx
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 
@@ -97,9 +96,8 @@ func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
 		pipeline:        PipelineLPX,
 		runtimeBuildRef: "model-build",
 		configuredBuild: Build{
-			Path:            "file:///snapshot-build",
-			Family:          BuildFamilyXT,
-			runtimeSettings: map[string]any{},
+			Path:   "file:///snapshot-build",
+			Family: BuildFamilyXT,
 		},
 	}
 
@@ -118,13 +116,6 @@ func TestRenderLPUConfigMapPreservesV2HybridGasDir(t *testing.T) {
 	require.Equal(t, "/models/model-build", configMap.Data["gas_dir"])
 	require.True(t, *configMap.Immutable)
 	require.Equal(t, LPUConfigMapName("test-dgd", LPUConfigMapHash(configMap)), configMap.Name)
-
-	t.Log("Ignore model settings that are not consumed by the direct runtime")
-	projection.configuredBuild.runtimeSettings["oversized"] = strings.Repeat("x", corev1.MaxSecretSize)
-	projection.configuredBuild.runtimeSettings["scheduler"] = "not-a-Nova-scheduler"
-	unchanged, err := renderLPUConfigMap("test-namespace", "test-dgd", "/models", []*ModelProjection{projection})
-	require.NoError(t, err)
-	require.Equal(t, configMap, unchanged)
 
 	t.Log("Render the preserved runtime with an invalid snapshot build reference")
 	projection.configuredBuild.Path = "relative-build"
@@ -168,77 +159,32 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 	}, data)
 }
 
-func TestV3SingleConfigUsesManifestTopologyAndArbitraryModelSettings(t *testing.T) {
+func TestConductorConfigMapContainsOnlyPartitions(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Project the V3 manifest with arbitrary deployment-time model settings")
-	snapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
-	projectionBatch, err := appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineSingle, Models: []string{"default"}, RuntimeBuildRef: "model-build", BuildSnapshot: normalizeTestSnapshot(t, snapshot),
-		ModelSettings: json.RawMessage(`{
-			"batch_size":4,
-			"custom_runtime_knob":"enabled",
-			"scheduler":{"max_inflight_tasks":3},
-			"tokenizer_path":"/nfs/models/gemma4-31b",
-			"stop_tokens":[1]
-		}`),
-	})
-	require.NoError(t, err)
-	projection := projectionBatch[0]
+	for _, family := range []string{"v2", "v3"} {
+		t.Run(family, func(t *testing.T) {
+			t.Log("Project a compiler build with a template-owned runtime configuration")
+			var path string
+			if family == "v2" {
+				path = writeV2CompilerFixture(t)
+			} else {
+				path = writeV3CompilerFixture(t)
+			}
+			projections, err := appendModelProjections(nil, ModelProjectionInput{
+				Pipeline: PipelineSingle, Models: []string{"default"},
+				BuildSnapshot: normalizeTestSnapshot(t, acquireTestSnapshot(t, path)),
+			})
+			require.NoError(t, err)
 
-	t.Log("Render the complete LPU ConfigMap")
-	configMap, err := renderLPUConfigMap(
-		"test",
-		"test-dgd",
-		"/models",
-		[]*ModelProjection{projection},
-	)
-	require.NoError(t, err)
-
-	t.Log("Verify the generated files need no manual topology or model-setting patches")
-	require.Equal(t, "part-1", configMap.Data["partition_paths"])
-	require.Equal(t, v3OpaqueTopology, configMap.Data["topologies"])
-	require.NotContains(t, configMap.Data["model_config.toml"], "sequence_length")
-	require.NotContains(t, configMap.Data, "datacenter.toml")
-	require.Contains(t, configMap.Data["model_config.toml"], "model_path = '/models/model-build'")
-	require.Contains(t, configMap.Data["model_config.toml"], "batch_size = 4")
-	require.Contains(t, configMap.Data["model_config.toml"], "custom_runtime_knob = 'enabled'")
-	require.Contains(t, configMap.Data["model_config.toml"], "max_inflight_tasks = 3")
-	require.Contains(t, configMap.Data["model_config.toml"], "tokenizer_path = '/nfs/models/gemma4-31b'")
-	require.Contains(t, configMap.Data["model_config.toml"], "stop_tokens = [1]")
-}
-
-func TestNestedLPUModelConfigPreservesExplicitOverrides(t *testing.T) {
-	t.Log("Construct a model with deployment overrides and a remapped runtime path")
-	projection := &ModelProjection{
-		model: "default", pipeline: PipelineSingle, runtimeBuildRef: "model-build",
-		configuredBuild: Build{
-			Path: "file:///snapshot-build", Family: BuildFamilyHX,
-			runtimeSettings: map[string]any{"tokenizer_path": "/custom/tokenizer", "batch_size": 4},
-		},
+			t.Log("Retain only the resolved partition files in the immutable ConfigMap")
+			configMap, err := renderLPUConfigMap("test", "test-dgd", "/models", projections)
+			require.NoError(t, err)
+			require.Equal(t, resolvedPartitionData(projections), configMap.Data)
+			require.NotContains(t, configMap.Data, "model_config.toml")
+			require.NotContains(t, configMap.Data, "datacenter.toml")
+			require.NotEmpty(t, configMap.Data["partition_paths"])
+			require.NotEmpty(t, configMap.Data["topologies"])
+		})
 	}
-
-	t.Log("Leave manifest defaults to the runtime while retaining authored overrides")
-	config, err := nestedLPUModelConfig(projection, "/models")
-	require.NoError(t, err)
-	require.Equal(t, map[string]any{
-		"model_path": "/models/model-build", "tokenizer_path": "/custom/tokenizer", "batch_size": 4,
-	}, config["iop"])
-	require.Equal(t, map[string]any{"resolved_partitions_dir": "/configs"}, config["setup"])
-	require.NotContains(t, config, "scheduler")
-}
-
-func TestV2SingleConfigRejectsExtraPrograms(t *testing.T) {
-	t.Log("Render a V2 single-model configuration with unsupported extra programs")
-	_, err := lpuModelConfig([]*ModelProjection{{
-		model:    "default",
-		pipeline: PipelineSingle,
-		configuredBuild: Build{
-			Family:          BuildFamilyXT,
-			runtimeSettings: map[string]any{"extra_programs": []any{"unsupported"}},
-		},
-	}}, "/models")
-
-	t.Log("Verify the unsupported runtime setting is rejected")
-	require.ErrorContains(t, err, "settings.extra_programs is not supported")
 }

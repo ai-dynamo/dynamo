@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 
@@ -141,5 +142,96 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				require.Equal(t, authored.VolumeMounts, container.VolumeMounts)
 			})
 		}
+	}
+}
+
+func TestConductorModelPathsPrecedeAuthoredReferences(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		family   BuildFamily
+		pipeline Pipeline
+		local    bool
+	}{
+		{name: "XT Single GCS", family: BuildFamilyXT, pipeline: PipelineSingle},
+		{name: "HX Single local", family: BuildFamilyHX, pipeline: PipelineSingle, local: true},
+		{name: "XT multiple drafts local", family: BuildFamilyXT, pipeline: PipelineSpecDecode, local: true},
+		{name: "HX multiple drafts GCS", family: BuildFamilyHX, pipeline: PipelineSpecDecode},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Resolve each model from the registry reference and the conductor's custom mount")
+			count := 1
+			names := []string{"LPX_MODEL_PATH"}
+			if test.pipeline == PipelineSpecDecode {
+				count = 3
+				names = []string{"LPX_DRAFT_MODEL_PATH", "LPX_TARGET_MODEL_PATH"}
+			}
+			projections := make([]*ModelProjection, count)
+			for index := range projections {
+				buildID := fmt.Sprintf("model-%d", index)
+				path := "gs://registry/" + buildID
+				if test.local {
+					path = "file:///operator-cache/" + buildID
+				}
+				projections[index] = &ModelProjection{
+					pipeline: test.pipeline, runtimeBuildRef: buildID,
+					configuredBuild: Build{Family: test.family, Path: path},
+				}
+			}
+			want := []corev1.EnvVar{}
+			for index, name := range names {
+				path := fmt.Sprintf("/custom/models/gcs/registry/model-%d", index*(count-1))
+				if test.local {
+					path = fmt.Sprintf("/custom/models/model-%d", index*(count-1))
+				}
+				want = append(want, corev1.EnvVar{Name: name, Value: path})
+			}
+
+			t.Log("Author dependent values before duplicate forged bindings")
+			authored := []corev1.EnvVar{
+				{Name: "A_RUNTIME_MODEL", Value: "$(" + names[0] + ")"},
+				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+			}
+			container := corev1.Container{Command: []string{"custom-runtime"}, Args: []string{"--unchanged"}, Env: slices.Clone(authored)}
+			for _, name := range names {
+				container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: "stale"}, corev1.EnvVar{Name: name, Value: "duplicate"})
+			}
+			wantContainer := container.DeepCopy()
+			wantContainer.Env = append(want, authored...)
+
+			t.Log("Publish only the first draft and final target once, before all authored references")
+			require.NoError(t, applyConductorModelPaths(&container, projections, "/custom/models"))
+			require.Equal(t, *wantContainer, container)
+
+			t.Log("Repeated rendering keeps environment order, startup and authoritative values unchanged")
+			require.NoError(t, applyConductorModelPaths(&container, projections, "/custom/models"))
+			require.Equal(t, *wantContainer, container)
+		})
+	}
+}
+
+func TestConductorModelPathsRejectInvalidReferences(t *testing.T) {
+	for _, test := range []struct {
+		pipeline Pipeline
+		name     string
+	}{
+		{pipeline: PipelineSingle, name: "LPX_MODEL_PATH"},
+		{pipeline: PipelineSpecDecode, name: "LPX_TARGET_MODEL_PATH"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Keep the target reference invalid after a valid speculative draft")
+			projections := []*ModelProjection{{pipeline: test.pipeline, configuredBuild: Build{Path: "gs://registry/model"}}}
+			if test.pipeline == PipelineSpecDecode {
+				projections = append(projections, &ModelProjection{pipeline: test.pipeline})
+			}
+			projections[len(projections)-1].configuredBuild.Path = "gs://registry/../outside"
+			container := corev1.Container{Env: []corev1.EnvVar{{Name: "KEEP", Value: "unchanged"}}}
+			before := container.DeepCopy()
+
+			t.Log("Report the failing binding without publishing a partial environment")
+			err := applyConductorModelPaths(&container, projections, "/custom/models")
+			require.ErrorContains(t, err, "resolve "+test.name)
+			require.ErrorContains(t, err, "bad path segment")
+			require.Equal(t, *before, container)
+		})
 	}
 }

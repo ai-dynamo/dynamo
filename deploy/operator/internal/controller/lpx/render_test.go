@@ -30,7 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"gotest.tools/v3/golden"
 	corev1 "k8s.io/api/core/v1"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -730,7 +729,7 @@ func testV3GraphManifestCapnp(t *testing.T, buildID string, fixture testV3GraphM
 	return data
 }
 
-func TestSingleV2ConfigContainsOnlyDeploymentOverrides(t *testing.T) {
+func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 	controllerConfig := &configv1alpha1.OperatorConfiguration{
 		Orchestrators: configv1alpha1.OrchestratorConfiguration{
 			Grove: configv1alpha1.GroveConfiguration{TerminationDelay: metav1.Duration{Duration: 15 * time.Minute}},
@@ -742,70 +741,49 @@ func TestSingleV2ConfigContainsOnlyDeploymentOverrides(t *testing.T) {
 	registry, err := lpx.NewModelRegistry(registryRoot, nil)
 	require.NoError(t, err)
 
-	type renderedConfig struct {
-		modelConfig string
-		hash        string
-	}
-	t.Log("Render omitted defaults and explicit deployment overrides")
-	configs := make([]renderedConfig, 0, 3)
-	for _, settingsJSON := range []string{"", `{"batch_size":1,"swa":{"chunked":false}}`, `{"sequence_length":65536}`} {
+	t.Log("Render runtime overrides supplied directly by the conductor template")
+	var partitionData map[string]string
+	for _, env := range []corev1.EnvVar{
+		{Name: "NOVA_BATCH_SIZE", Value: "1"},
+		{Name: "NOVA_SEQUENCE_LENGTH", Value: "65536"},
+		{Name: "A_CUSTOM_MODEL_PATH", Value: "$(LPX_MODEL_PATH)"},
+	} {
 		payload, err := os.ReadFile("../../dynamo/lpx/testdata/from_dgd_yaml/single_v2.input.yaml")
 		require.NoError(t, err)
-
 		var deployment v1beta1.DynamoGraphDeployment
 		require.NoError(t, yaml.Unmarshal(payload, &deployment))
-		require.Len(t, deployment.Spec.Components, 1)
-		require.NotNil(t, deployment.Spec.Components[0].LPX)
-		require.Len(t, deployment.Spec.Components[0].Roles, 2)
-		deployment.Spec.Components[0].LPX = &v1beta1.LPXConfig{BuildID: buildID}
-		if settingsJSON != "" {
-			deployment.Spec.Components[0].LPX.Settings = &apiextensionsv1.JSON{Raw: []byte(settingsJSON)}
-		}
+		component := &deployment.Spec.Components[0]
+		component.LPX = &v1beta1.LPXConfig{BuildID: buildID}
+		template := component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate
+		template.Spec.Containers[0].Env = []corev1.EnvVar{env}
 
 		selected, err := lpx.ResolveSelectedWorkload(t.Context(), &deployment, registry)
 		require.NoError(t, err)
 		child := newLPXRenderDeployment(t, &deployment)
-		podCliqueSet, resources, err := renderPodCliqueSet(
-			t.Context(),
-			&deployment,
-			controllerConfig,
-			&controller_common.RuntimeConfig{},
-			nil,
-			selected,
-			mustPlanSelectedLPX(t, &deployment, selected),
-			child,
-		)
+		plan := mustPlanSelectedLPX(t, &deployment, selected)
+		pcs, resources, err := renderPodCliqueSet(t.Context(), &deployment, controllerConfig,
+			&controller_common.RuntimeConfig{}, nil, selected, plan, child)
 		require.NoError(t, err)
 
+		t.Log("Keep authored environment values without changing shared partition files")
 		var hash string
-		for _, clique := range podCliqueSet.Spec.Template.Cliques {
-			if value := clique.Annotations[commonconsts.AnnotationExtraResourcesHash]; value != "" {
-				hash = value
-				break
+		for _, clique := range pcs.Spec.Template.Cliques {
+			if clique.Name == plan.ConductorTemplate {
+				require.Equal(t, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)}, clique.Spec.PodSpec.Containers[0].Env[0])
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, env)
+				hash = clique.Annotations[commonconsts.AnnotationExtraResourcesHash]
 			}
 		}
 		require.NotEmpty(t, hash)
 		configMap := getResource[*corev1.ConfigMap](t, resources, lpx.LPUConfigMapName(dynamo.PCSNameForLPX(child), hash))
-		configs = append(configs, renderedConfig{modelConfig: configMap.Data["model_config.toml"], hash: hash})
+		require.NotContains(t, configMap.Data, "model_config.toml")
+		require.NotContains(t, configMap.Data, "datacenter.toml")
+		if partitionData == nil {
+			partitionData = configMap.Data
+		} else {
+			require.Equal(t, partitionData, configMap.Data)
+		}
 	}
-
-	t.Log("Hash only emitted settings while preserving explicit deployment intent")
-	derived, explicit, overridden := configs[0], configs[1], configs[2]
-
-	buildPath := filepath.Join(registryRoot, buildID)
-	require.Equal(t, fmt.Sprintf(`type = 'Single'
-
-[iop]
-model_path = '%s'
-
-[setup]
-resolved_partitions_dir = '/configs'
-`, buildPath), derived.modelConfig)
-	require.Contains(t, explicit.modelConfig, "batch_size = 1")
-	require.Contains(t, explicit.modelConfig, "chunked = false")
-	require.NotEqual(t, derived.hash, explicit.hash)
-	require.Contains(t, overridden.modelConfig, "sequence_length = 65536")
-	require.NotEqual(t, derived.hash, overridden.hash)
 }
 
 func testGbuildManifestCapnp(t *testing.T, registryDir string) []byte {

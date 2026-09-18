@@ -40,8 +40,6 @@ spec:
               - $(POD_IP)
               - --control-server-addr
               - $(POD_IP):51045
-              - --model-config-filepath
-              - /configs/model_config.toml
               - --json-logs
               - --disable-tracing
               - --mpi-use-tcp
@@ -63,6 +61,10 @@ spec:
               - --allocation
               - $(LPX_ALLOCATION)
               env:
+              - name: NOVA_MODEL_PATH
+                value: '$(LPX_MODEL_PATH)'
+              - name: NOVA_RESOLVED_PARTITIONS_DIR
+                value: '/configs'
               - name: NOVA_MODEL_BASE_PATHS
                 value: /nfs
               - name: NOVA_NODE_NAME_TEMPLATE

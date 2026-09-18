@@ -59,9 +59,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="lpx" type="LPXConfig">
-  DGD-only configuration for a `type: lpx` component; omitted from the standalone DCD schema. Set the required `buildId` and optional build `settings`. See [LPXConfig](full-api-reference.mdx#lpxconfig) for the full field set.
-
-  Supported modes are LPU, hybrid, and LPU draft with LPU target. Every LPX graph requires exactly one explicit `conductor` role and template. A single LPX component declares both `conductor` and `agent` roles. In speculative decoding, the draft has only an `agent` role; the target declares both roles. Component names are arbitrary. All LPX components in a DGD share one LPX deployment and PodCliqueSet, separate from ordinary components.
+  DGD-only compiled-model configuration. Set `buildId`; see [LPXConfig](full-api-reference.mdx#lpxconfig) for the field definitions. LPU-only Single and SpecDecode accept only boolean placement `settings`: `prop_sync`, plus XT-only `cpu_embeddings` and `prop_sync_multiple_load_sets`. Runtime options belong in the conductor pod template.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -106,7 +104,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
     Native Pod template for this role. LPX-only; required for every declared role. Each template requires a `main` container with an explicit image. Agent and conductor templates are independent.
 
-    For LP20 and LP30, the template owns runtime commands, static arguments and environment settings, init containers, health probes, startup storage, and Pod and container security contexts. It may use the image's entrypoint or supply `command`. The operator supplies generated configuration, model and hardware bindings, and `LPX_ALLOCATION` for the LPU conductor. A Nova template consumes that value through its authored `--allocation` argument. See [Deploy with DGD](../../kubernetes/model-deployment/deploy-with-dgd.md) for role structure and runtime examples.
+    The template owns runtime startup and configuration for LP20 and LP30. See [Deploy with DGD](../../kubernetes/model-deployment/deploy-with-dgd.md) for Nova inputs and the operator's model-path, partition, and allocation bindings.
 
     <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
   </ParamField>

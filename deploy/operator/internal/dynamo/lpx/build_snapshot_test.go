@@ -59,7 +59,6 @@ func TestAcquireBuildSnapshotTracksLocalContent(t *testing.T) {
 	normalized, err := normalizeBuildSnapshot(first)
 	require.NoError(t, err)
 	build := normalized.build
-	require.NotContains(t, build.runtimeSettings, "batch_size")
 	require.EqualValues(t, 4, build.IOFPGACount)
 	require.EqualValues(t, 2, build.IOFanoutFactor)
 
