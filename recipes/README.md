@@ -90,6 +90,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
+| **[MiniMax M3 NVFP4](minimax-m3/)** | vLLM | Aggregated + Disaggregated | 8x / 24x GB200 | ✅ | TP4 per worker, 1M context, FP8 KV, EAGLE3, KV-aware routing; aggregated profile adds 400 GB CPU KV offload per replica and temporary vLLM scheduler patches |
 | **[Gemma-4-31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile |
 | **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
 | **[Nemotron-3-Nano-Omni-NVFP4](nemotron-3-nano-omni/vllm/agg/)** | vLLM | Aggregated | 1x GPU | ✅ | Multimodal text/image/video/audio serving. Requires [custom container build](nemotron-3-nano-omni/). |
