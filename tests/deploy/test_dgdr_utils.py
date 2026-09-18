@@ -196,6 +196,54 @@ def test_build_dgdr_preserves_pvc_backed_profiling_output() -> None:
     }
 
 
+def test_build_dgdr_preserves_unnamed_profiler_override() -> None:
+    dgdr = build_dgdr(
+        DGDRTestConfig(
+            namespace="test-namespace",
+            image="test",
+            mocker=False,
+            hf_token_secret="hf-secret",
+        ),
+        "test-request",
+        spec_overrides={
+            "overrides": {
+                "profilingJob": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "image": "custom-profiler",
+                                    "resources": {"requests": {"cpu": "1"}},
+                                    "env": [{"name": "CUSTOM", "value": "kept"}],
+                                    "volumeMounts": [
+                                        {"name": "scratch", "mountPath": "/scratch"}
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    containers = dgdr["spec"]["overrides"]["profilingJob"]["template"]["spec"][
+        "containers"
+    ]
+    assert not any(container.get("name") == "profiler" for container in containers)
+    profiler = next(container for container in containers if not container.get("name"))
+
+    assert profiler["image"] == "custom-profiler"
+    assert profiler["resources"]["requests"] == {
+        "cpu": "1",
+        "memory": "512Mi",
+        "ephemeral-storage": "1Gi",
+    }
+    assert profiler["env"][0] == {"name": "CUSTOM", "value": "kept"}
+    assert profiler["env"][1]["name"] == "HF_TOKEN"
+    assert profiler["volumeMounts"] == [{"name": "scratch", "mountPath": "/scratch"}]
+
+
 @pytest.mark.parametrize("content", ["not-json", '{"object": "list"}'])
 def test_parse_served_model_ids_rejects_invalid_responses(content: str) -> None:
     with pytest.raises(AssertionError, match="model-list response"):
