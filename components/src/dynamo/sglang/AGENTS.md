@@ -30,6 +30,24 @@ support the current version plus 1 version back (N and N-1). The pattern:
 component files. Do not version-check with `sglang.__version__` -- import probing is
 more reliable since SGLang's internal layout doesn't always match the version string.
 
+## Multi-process gateway (`--gateway-workers N`)
+
+`gateway.py`. One `dynamo.sglang` process fronts every DP rank of its engine: SGLang's
+`TokenizerManager` intake and the Dynamo handler's token relay run on one GIL. `--gateway-workers N` raises SGLang's `--tokenizer-worker-num` to N (that flag names the
+same process after only one of its jobs); with N > 1 SGLang puts a `MultiTokenizerRouter` in
+the engine process; it has no `generate_request`, so the leader (node rank 0) does not serve.
+Instead it publishes the launch data with SGLang's shared-memory contract
+(`write_data_for_multi_tokenizer`) and spawns N children (`--gateway-workers`, or `--tokenizer-worker-num` if only that is set),
+`python -m dynamo.sglang <same argv>` with `DYN_SGLANG_GATEWAY_PARENT_PID` set. A child
+builds a `TokenizerWorker` registered with the router (`build_gateway_engine`), wraps it
+in `GatewayEngine` (what the handlers use of an `sgl.Engine`: `tokenizer_manager`,
+`server_args`, `port_args`, `async_generate`, scheduler info) and runs the ordinary
+`init_decode`/`init_prefill` path as its own endpoint instance, so the router sees N
+instances per engine. Children get a private `metrics_ipc_name`; the parent keeps the
+real one, the engine subprocesses, and shuts the children down. Snapshot mode and
+non-leader nodes are untouched. If SGLang exposes `Engine.attach_tokenizer_worker`,
+children use it instead of the facade.
+
 ## Entry Point
 
 `__main__.py` -> `main.py:main()` -> `main.py:worker()`

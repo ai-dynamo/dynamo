@@ -15,6 +15,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
+from dynamo.sglang.gateway import gateway_worker_count, serve_via_gateway_children
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
@@ -77,6 +78,12 @@ async def init_decode(
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)
+    gateway_count = gateway_worker_count(server_args, dynamo_args)
+    if snapshot_engine is None and gateway_count > 1:
+        # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
+        # serve requests; gateway children do, this process keeps the engine alive.
+        await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+        return
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)
@@ -236,6 +243,12 @@ async def init_prefill(
         load_time = time.time() - start_time
 
     server_args = config.use_resolved_server_args(engine.server_args)
+    gateway_count = gateway_worker_count(server_args, dynamo_args)
+    if snapshot_engine is None and gateway_count > 1:
+        # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
+        # serve requests; gateway children do, this process keeps the engine alive.
+        await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+        return
 
     if server_args.enable_trace:
         set_global_trace_level(dynamo_args.sglang_trace_level)

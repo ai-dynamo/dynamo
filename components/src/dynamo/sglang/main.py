@@ -19,6 +19,7 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import parse_args
+from dynamo.sglang.gateway import build_gateway_engine, is_gateway_child
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
     init_llm_diffusion,
@@ -62,12 +63,29 @@ async def worker(argv: list[str] | None = None):
             load_format=setup_gms(config.server_args),
         )
 
+    gateway_workers = getattr(config.dynamo_args, "gateway_workers", None) or 1
+    if (
+        gateway_workers > 1
+        and config.server_args.tokenizer_worker_num < gateway_workers
+    ):
+        # SGLang only launches its MultiTokenizerRouter (the shared-memory handoff the
+        # gateway children join) when its own worker count is above 1.
+        override_server_args(
+            config.server_args,
+            "dynamo.gateway",
+            tokenizer_worker_num=gateway_workers,
+        )
+
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
     snapshot_controller = await prepare_snapshot_engine(config)
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None
+    if snapshot_controller is None and is_gateway_child():
+        # Spawned by gateway.serve_via_gateway_children: share the parent's engine
+        # through a TokenizerWorker instead of launching schedulers.
+        snapshot_engine = build_gateway_engine()
     if snapshot_controller is not None:
         snapshot_engine = snapshot_controller.engine
         dynamo_args = await refresh_snapshot_restore_config(
