@@ -160,10 +160,10 @@ pub struct WorkerConfig {
     /// `endpoint_types`. `Prefill` registers with the legacy `ModelType::Prefill`
     /// marker bit (no OpenAI surface — dual-emitted for cross-version compat)
     /// and `WorkerType::Prefill`, so the frontend's prefill router targets it
-    /// via `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
-    /// local KV indexer because decode workers do not host the indexer
-    /// endpoint. `Encode` registers as `WorkerType::Encode` with topology needs
-    /// `[[Prefill, Decode], [Aggregated]]`; it also force-disables the local KV
+    /// via `worker_type`. `Decode` keeps `endpoint_types` and honors
+    /// `enable_local_indexer` for its KV event sources. `Encode` registers as
+    /// `WorkerType::Encode` with topology needs
+    /// `[[Prefill, Decode], [Aggregated]]`; it force-disables the local KV
     /// indexer.
     pub disaggregation_mode: DisaggregationMode,
     /// Operator override. `Worker` resolves precedence: this field >
@@ -199,12 +199,10 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     /// Effective `enable_local_indexer`, accounting for disaggregation
-    /// mode. Decode and Encode workers force this off because they don't
+    /// mode. Encode workers force this off because they don't
     /// host the in-process KV indexer endpoint and must not advertise it.
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
-        self.enable_local_indexer
-            && !self.disaggregation_mode.is_decode()
-            && !self.disaggregation_mode.is_encode()
+        self.enable_local_indexer && !self.disaggregation_mode.is_encode()
     }
 }
 
@@ -2080,9 +2078,7 @@ async fn build_local_model(
         .or_else(|| Some(engine_config.model.clone()))
         .filter(|s| !s.is_empty());
 
-    // Decode workers don't host the WorkerKvQuery endpoint, so they must not
-    // advertise the local indexer regardless of the operator-supplied flag.
-    // Mirrors the vLLM worker-factory path.
+    // Use the same effective setting for publisher setup and model metadata.
     let enable_local_indexer = config.effective_enable_local_indexer();
 
     // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
@@ -2816,7 +2812,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_local_model_decode_disables_local_indexer() {
+    async fn build_local_model_decode_keeps_local_indexer() {
         let config = WorkerConfig {
             enable_local_indexer: true,
             disaggregation_mode: DisaggregationMode::Decode,
@@ -2830,9 +2826,7 @@ mod tests {
         let local_model = build_local_model(&config, &engine_config, false)
             .await
             .unwrap();
-        // Decode workers cannot host the local indexer endpoint, so the
-        // worker forces it off even when the operator-supplied flag is true.
-        assert!(!local_model.runtime_config().enable_local_indexer);
+        assert!(local_model.runtime_config().enable_local_indexer);
     }
 
     #[tokio::test]
