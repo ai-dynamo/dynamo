@@ -302,6 +302,7 @@ def prepare_trace_dataset(args, output_dir, logger):
         return requests, trace_dataset_path
 
     # Generate synthetic data based on input dataset
+    # Keep synthesis-only dependencies out of CPU helper-test collection.
     from prefix_data_generator.synthesizer import Synthesizer
 
     logger.info("Generating synthetic trace data...")

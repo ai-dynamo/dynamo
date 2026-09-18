@@ -124,13 +124,18 @@ def get_request_logs(process, request_id: str) -> List[Dict[str, Any]]:
     return find_logs_by_request_id(parse_jsonl_logs(read_log_file(process)), request_id)
 
 
-def wait_for_request_logs(
-    process, request_id: str, expected_messages: set[str], timeout: float = 10.0
+def wait_for_log_messages(
+    process,
+    expected_messages: set[str],
+    request_id: Optional[str] = None,
+    timeout: float = 10.0,
 ) -> List[Dict[str, Any]]:
-    """Wait for request-scoped structured events to reach the process log."""
+    """Wait for structured events, optionally scoped to one request."""
     deadline = time.monotonic() + timeout
     while True:
-        req_logs = get_request_logs(process, request_id)
+        req_logs = parse_jsonl_logs(read_log_file(process))
+        if request_id is not None:
+            req_logs = find_logs_by_request_id(req_logs, request_id)
         messages = {e.get("message") for e in req_logs}
         if expected_messages <= messages:
             return req_logs
@@ -209,7 +214,6 @@ JSONL_ENV_INFO = {"DYN_LOGGING_JSONL": "1", "DYN_LOG": "info"}
 
 @contextlib.contextmanager
 def _agg_services(request, ports, env, speedup_ratio=None):
-    """Start an aggregated frontend and mocker."""
     worker_kwargs = {} if speedup_ratio is None else {"speedup_ratio": speedup_ratio}
     with DynamoFrontendProcess(
         request,
@@ -336,10 +340,10 @@ def test_agg_unary_success(tracing_services) -> None:
     resp = _send_chat_completions(port, request_id=rid)
     assert resp.status_code == 200
 
-    req_logs = wait_for_request_logs(
+    req_logs = wait_for_log_messages(
         tracing_services["frontend"],
-        rid,
         {"request received", "request completed", "http response sent"},
+        request_id=rid,
     )
     received, completed, http_sent = assert_lifecycle_logs(req_logs)
 
@@ -362,8 +366,10 @@ def test_agg_unary_success(tracing_services) -> None:
 
     # Worker lifecycle — verify both x_request_id and request_id propagated
     server_rid = received[0].get("request_id")
-    wk_logs = wait_for_request_logs(
-        tracing_services["worker"], rid, {"request received", "request completed"}
+    wk_logs = wait_for_log_messages(
+        tracing_services["worker"],
+        {"request received", "request completed"},
+        request_id=rid,
     )
     wk_received = [e for e in wk_logs if e.get("message") == "request received"]
     wk_completed = [e for e in wk_logs if e.get("message") == "request completed"]
@@ -432,9 +438,26 @@ def test_agg_lifecycle_absent_at_info_level(tracing_services_info_level) -> None
 
     resp = _send_chat_completions(port, request_id=rid)
     assert resp.status_code == 200
-    fe_logs = wait_for_request_logs(
-        tracing_services_info_level["frontend"], rid, {"http response sent"}
+    fe_logs = wait_for_log_messages(
+        tracing_services_info_level["frontend"],
+        {"http response sent"},
+        request_id=rid,
     )
+
+    # Phase 3 follows endpoint drain, including the worker completion log.
+    worker = tracing_services_info_level["worker"]
+    worker.proc.terminate()
+    worker_logs = wait_for_log_messages(
+        worker, {"Phase 3: Connections to backend services will now be disconnected"}
+    )
+    assert not any(
+        e.get("message")
+        in {
+            "Graceful endpoint shutdown timed out; proceeding with runtime teardown",
+            "Timed out waiting for inflight requests to drain; proceeding with shutdown",
+        }
+        for e in worker_logs
+    ), "Worker shutdown must drain requests without timing out"
 
     for name in ("frontend", "worker"):
         req_logs = get_request_logs(tracing_services_info_level[name], rid)
