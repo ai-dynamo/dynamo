@@ -64,7 +64,7 @@ async def worker(argv: list[str] | None = None):
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
-    snapshot_controller = await prepare_snapshot_engine(config.server_args)
+    snapshot_controller = await prepare_snapshot_engine(config)
 
     dynamo_args = config.dynamo_args
     snapshot_engine = None

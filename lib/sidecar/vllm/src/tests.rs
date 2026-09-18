@@ -3170,7 +3170,7 @@ async fn pool_uses_each_configured_connection() {
     };
     let endpoint = GrpcEndpoint::parse(&server.endpoint, "--grpc-endpoint").unwrap();
     let deadline = crate::client::startup_deadline(transport.startup_deadline).unwrap();
-    let client = VllmClient::connect(&endpoint, transport, deadline)
+    let client = VllmClient::connect(&endpoint, transport, deadline, false)
         .await
         .expect("connect pool");
     assert_eq!(client.connection_count(), 2);
