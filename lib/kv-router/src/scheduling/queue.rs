@@ -4064,7 +4064,7 @@ policy_classes:
         let (queue, _slots) = make_queue_with_providers(2, 16, 256, None, Some(provider));
         let (mut request, _response) = make_request("adapter-request", 256);
         request.lora_name = Some("adapter".to_string());
-        request.overlap.effective_cached_tokens = HashMap::from([
+        request.overlap.effective_cached_tokens = FxHashMap::from_iter([
             (WorkerWithDpRank::from_worker_id(0), 224),
             (WorkerWithDpRank::from_worker_id(1), 32),
         ]);
