@@ -6579,6 +6579,7 @@ mod tests {
                     &backend_payload as &(dyn std::error::Error + 'static),
                 )),
                 sanitized: None,
+                metric_error_type: None,
             },
             true,
         );
@@ -6600,6 +6601,7 @@ mod tests {
                         .build(),
                 ),
                 sanitized: None,
+                metric_error_type: None,
             },
             true,
         );
@@ -6905,6 +6907,7 @@ mod tests {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 semantic: Some(cancelled),
                 sanitized: None,
+                metric_error_type: None,
             },
             true,
         );
@@ -6926,6 +6929,7 @@ mod tests {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 semantic: Some(cancelled),
                 sanitized: None,
+                metric_error_type: None,
             },
             true,
         );
