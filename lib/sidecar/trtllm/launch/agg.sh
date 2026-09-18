@@ -7,11 +7,14 @@
 set -e
 
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-export DYNAMO_HOME="${DYNAMO_HOME:-$(readlink -f "$SCRIPT_DIR/../../../..")}"
+# Resolved relative to this script, not via $DYNAMO_HOME: some runtime images
+# (e.g. vllm_runtime.Dockerfile) bake DYNAMO_HOME to a minimal install path
+# with no examples/ directory, which would silently override this and break
+# sourcing. Matches examples/backends/trtllm/launch/agg.sh's own approach.
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
+source "$SCRIPT_DIR/../../../../examples/common/gpu_utils.sh"   # build_trtllm_override_args_with_mem
 # shellcheck disable=SC1091 # Resolved relative to this script at runtime.
-source "$DYNAMO_HOME/examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
+source "$SCRIPT_DIR/../../../../examples/common/launch_utils.sh" # print_launch_banner, wait_any_exit
 
 MODEL="${MODEL:-Qwen/Qwen3-0.6B}"
 
@@ -86,11 +89,19 @@ if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
     TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
 fi
 
-# `--grpc` needs `smg-grpc-proto`, which TRT-LLM keeps behind its optional
-# `grpc-smg` extra. Constraint copied from that extra so we resolve what
-# upstream resolves.
-if ! "$TRTLLM_PYTHON" -c "import smg_grpc_proto" >/dev/null 2>&1; then
-    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto>=0.4.2"
+# `--grpc` needs `smg-grpc-proto`. Pinned to the exact version
+# lib/sidecar/trtllm/proto/trtllm_service.proto was vendored from (see
+# proto/README.md's checksum) -- 0.4.2 lacks the include_stop_token_in_output
+# field (added by 0.4.14) our proto and Rust code both expect, which makes
+# every request fail with "'GenerateRequest' object has no attribute
+# 'include_stop_token_in_output'". Check the resolved version, not just
+# importability: an image whose TRT-LLM install already pulled an older
+# smg-grpc-proto (e.g. via its own grpc-smg extra) would otherwise satisfy a
+# bare `import` check and skip straight past this pin. sys.exit, not assert:
+# `assert` is stripped entirely under `python -O`/`PYTHONOPTIMIZE`, which
+# would make this check fail open (exit 0) even with the package missing.
+if ! "$TRTLLM_PYTHON" -c "import importlib.metadata as m, sys; sys.exit(0 if m.version('smg-grpc-proto') == '0.4.14' else 1)" >/dev/null 2>&1; then
+    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto==0.4.14"
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
