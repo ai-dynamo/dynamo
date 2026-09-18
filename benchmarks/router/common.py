@@ -10,8 +10,6 @@ import json
 import logging
 import os
 
-from prefix_data_generator.synthesizer import Synthesizer
-
 # Default values
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 DEFAULT_URL = "http://localhost:8000"
@@ -304,6 +302,8 @@ def prepare_trace_dataset(args, output_dir, logger):
         return requests, trace_dataset_path
 
     # Generate synthetic data based on input dataset
+    from prefix_data_generator.synthesizer import Synthesizer
+
     logger.info("Generating synthetic trace data...")
     logger.info(f"  Base dataset: {args.input_dataset}")
     logger.info(f"  Num requests: {args.num_requests if args.num_requests else 'all'}")
