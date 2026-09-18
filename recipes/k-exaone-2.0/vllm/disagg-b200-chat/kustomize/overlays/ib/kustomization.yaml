@@ -11,3 +11,5 @@ sortOptions:
   order: fifo
 resources:
   - "../../base"
+components:
+  - "../../components/ib"
