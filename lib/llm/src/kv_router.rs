@@ -54,6 +54,7 @@ use futures::stream;
 pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 
+mod cache_history;
 pub(crate) mod embedded;
 pub mod encoder_router;
 pub mod indexer;
