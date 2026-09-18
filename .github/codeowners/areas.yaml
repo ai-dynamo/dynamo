@@ -370,6 +370,7 @@ areas:
   - .agents/
   - .ai/
   - .claude/
+  - .github/api-surface/
   - .github/codeowners/areas.yaml
   - .github/codeowners/external_contributors.yaml
   - AGENTS.md

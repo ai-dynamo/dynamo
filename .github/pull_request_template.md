@@ -28,3 +28,7 @@
 
 **🚫 This PR is NOT linked to an issue**:
 - [ ] Confirmed — no related issue
+
+## Public API
+
+- [ ] If this PR removes or incompatibly changes a public API, the symbol was deprecated in a prior release or a waiver is included, per the [API Stability and Deprecation Policy](docs/fern/pages/community/contributing/api-stability-policy.md).

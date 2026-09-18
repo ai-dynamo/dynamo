@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+crates:
+  dynamo-parsers:
+    repo: ai-dynamo/dynamo-parsers
+    status: external
+  fastokens:
+    repo: ai-dynamo/fastokens
+    status: external

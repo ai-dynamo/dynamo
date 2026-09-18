@@ -1287,6 +1287,8 @@ navigation:
             path: pages/community/contributing/contribution-flow.mdx
           - page: Code Quality
             path: pages/community/contributing/code-quality.md
+          - page: API Stability and Deprecation Policy
+            path: pages/community/contributing/api-stability-policy.md
           - page: DCO and Licensing
             path: pages/community/contributing/dco-and-licensing.md
           - section: Documentation

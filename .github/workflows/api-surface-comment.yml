@@ -1,0 +1,89 @@
+# api-surface-comment: post the impact report as a PR comment.
+#
+# Runs after the api-surface workflow completes. It downloads the
+# `api-surface-impact` artifact the gate job uploaded and upserts one marker
+# comment on the PR. This is a separate workflow_run job (rather than a step in
+# api-surface) because pull_request workflows from forks get a read-only token;
+# workflow_run runs on the default branch with write scope.
+
+name: api-surface-comment
+
+on:
+  # zizmor: ignore[dangerous-triggers] no checkout of the PR head: this job
+  # only downloads the api-surface-impact artifact and posts it as a comment;
+  # no untrusted code runs here.
+  workflow_run:
+    workflows: ["api-surface"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  actions: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download impact artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: api-surface-impact
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Upsert impact comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER_FILE: pr_number.txt
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # pr_number.txt is empty for push runs (no PR to comment on).
+          # The artifact contents come from a job that ran PR-head code, so
+          # treat pr_number.txt as untrusted input.
+          PR=$(cat "$PR_NUMBER_FILE")
+          if [ -z "$PR" ]; then
+            echo "push run; nothing to comment on"
+            exit 0
+          fi
+          if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
+            echo "pr_number.txt is not a number; refusing to comment"
+            exit 0
+          fi
+          # A PR-head job could write another PR's number into pr_number.txt to
+          # post into that thread. Only comment when the artifact's claimed PR
+          # is the one whose head this run actually built.
+          PR_HEAD=$(gh api "repos/${REPO}/pulls/${PR}" --jq .head.sha)
+          if [ "$PR_HEAD" != "$HEAD_SHA" ]; then
+            echo "pr_number.txt does not match the triggering run; refusing to comment"
+            exit 0
+          fi
+          if [ ! -f impact.md ]; then
+            echo "no impact report in the artifact"
+            exit 0
+          fi
+
+          # Marker keeps the comment upsert idempotent: one comment per PR,
+          # edited in place on each run instead of spamming new ones.
+          cat impact.md > body.md
+          printf '\n<!-- api-surface-impact -->\n' >> body.md
+
+          # Build the JSON payload in python so the markdown body is never
+          # string-interpolated into shell or gh arguments.
+          python - <<'PY'
+          import json
+          body = open("body.md", encoding="utf-8").read()
+          with open("payload.json", "w", encoding="utf-8") as f:
+              json.dump({"body": body}, f)
+          PY
+
+          # gh api, not the REST client action, so the marker search is a plain
+          # paginated read of issue comments.
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+            --jq '.[] | select(.body | contains("api-surface-impact")) | .id' \
+            | head -1)
+          if [ -n "$EXISTING" ]; then
+            gh api "repos/${REPO}/issues/comments/${EXISTING}" -X PATCH --input payload.json
+          else
+            gh api "repos/${REPO}/issues/${PR}/comments" -X POST --input payload.json
+          fi

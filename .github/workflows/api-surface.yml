@@ -1,0 +1,198 @@
+# api-surface: enforce the API stability and deprecation policy on every PR.
+#
+# Extracts the public API surface at the merge base and at the PR head, diffs
+# them, and fails when a `stable` symbol is removed, renamed, relocated, or
+# changed incompatibly without a prior deprecation or a reviewed waiver in
+# .github/api-surface/suppressions.yaml.
+#
+# The `api-surface` job id is a required status check: renaming the job breaks
+# branch protection. The job always uploads an `api-surface-impact` artifact
+# (impact.json + impact.md + pr_number.txt); the api-surface-comment workflow
+# turns it into the PR comment. API_SURFACE_ENFORCE flips the gate from
+# report-only ("false") to blocking ("true").
+
+name: api-surface
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  API_SURFACE_ENFORCE: "false"
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  api-surface:
+    runs-on:
+      group: Fastchecker
+    steps:
+      - name: Checkout head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: head
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyyaml pytest
+
+      - name: Unit tests
+        run: PYTHONPATH=head/.github python -m pytest head/.github/api_surface/tests -p no:cacheprovider --override-ini="addopts=" --override-ini="filterwarnings="
+
+      - name: Resolve merge base
+        id: merge-base
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git -C head fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            BASE_SHA=$(git -C head merge-base "origin/${BASE_REF}" HEAD)
+          else
+            BASE_SHA=$(git -C head rev-parse HEAD~1)
+          fi
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout base
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          path: base
+          ref: ${{ steps.merge-base.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Rust build prerequisites, mirrored from pre-merge.yml's rust-tests job.
+      - name: Install protoc
+        run: |
+          # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+          PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+          PROTOC_VER="30.2"
+          PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+          PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+          curl --retry 5 --retry-delay 2 -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+          echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+          unzip "${PROTOC_ZIP}" -d $HOME/.local
+          rm "${PROTOC_ZIP}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          protoc --version
+
+      - name: Cache cargo artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # rust-toolchain.toml in each checkout selects the toolchain; rustup show
+      # triggers the install and reports what was selected.
+      - name: Set up Rust toolchain
+        run: |
+          rustup show
+          cargo --version
+
+      - name: Generate head OpenAPI
+        working-directory: head
+        run: |
+          cargo run --locked -p dynamo-llm --bin generate-frontend-openapi
+          cp docs/frontends/openapi.json openapi.json
+
+      - name: Restore base OpenAPI
+        id: base-openapi-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: base/openapi.json
+          key: openapi-${{ steps.merge-base.outputs.base_sha }}
+
+      - name: Generate base OpenAPI
+        if: steps.base-openapi-cache.outputs.cache-hit != 'true'
+        working-directory: base
+        run: |
+          cargo run --locked -p dynamo-llm --bin generate-frontend-openapi
+          cp docs/frontends/openapi.json openapi.json
+
+      - name: Save base OpenAPI
+        if: steps.base-openapi-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25  # v5.1.0
+        with:
+          path: base/openapi.json
+          key: openapi-${{ steps.merge-base.outputs.base_sha }}
+
+      - name: Release version
+        id: release
+        run: |
+          RELEASE=$(python - <<'PY'
+          import tomllib
+          with open("head/Cargo.toml", "rb") as f:
+              print(tomllib.load(f)["workspace"]["package"]["version"])
+          PY
+          )
+          echo "release=${RELEASE}" >> "$GITHUB_OUTPUT"
+
+      # Do not fail here: the impact artifact must upload even when extraction
+      # or the diff errors out. The Gate step below owns the exit status.
+      - name: Analyze
+        id: analyze
+        env:
+          RELEASE: ${{ steps.release.outputs.release }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          PYTHONPATH=head/.github python -m api_surface analyze-pr \
+            --base-repo base --head-repo head \
+            --release "$RELEASE" --format json --output impact.json
+          analyze_exit=$?
+          set -e
+          echo "analyze_exit=${analyze_exit}" >> "$GITHUB_OUTPUT"
+          if [ -f impact.json ]; then
+            PYTHONPATH=head/.github python -m api_surface render \
+              --from-json impact.json --format md > impact.md
+          fi
+          printf '%s' "$PR_NUMBER" > pr_number.txt
+
+      - name: Upload impact artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: api-surface-impact
+          path: |
+            impact.json
+            impact.md
+            pr_number.txt
+          if-no-files-found: warn
+
+      - name: Gate
+        if: github.event_name == 'pull_request'
+        env:
+          ANALYZE_EXIT: ${{ steps.analyze.outputs.analyze_exit }}
+        run: |
+          if [ -f impact.md ]; then
+            sed -n '/## Breaking Changes/,/^## /p' impact.md
+          fi
+          FAIL=0
+          if [ "$ANALYZE_EXIT" != "0" ]; then
+            echo "::error::api-surface analysis failed (exit $ANALYZE_EXIT)"
+            FAIL=1
+          elif python -c "import json,sys; sys.exit(0 if json.load(open('impact.json')).get('breaking') else 1)"; then
+            echo "::error::breaking changes to stable public API without a deprecation or waiver"
+            FAIL=1
+          fi
+          if [ "$FAIL" = "1" ]; then
+            if [ "$API_SURFACE_ENFORCE" = "true" ]; then
+              exit 1
+            fi
+            echo "::warning::API_SURFACE_ENFORCE is false; the findings above are report-only"
+          fi

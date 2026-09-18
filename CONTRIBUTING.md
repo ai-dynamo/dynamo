@@ -25,6 +25,21 @@ For the full contribution guide — including how to get started, build from sou
 
 Or view the source: [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md)
 
+## Changing or Removing a Public API
+
+Dynamo commits to a stability promise for its public surface. Before you remove or incompatibly
+change a public API:
+
+1. Read the [API Stability and Deprecation Policy](docs/fern/pages/community/contributing/api-stability-policy.md)
+   to confirm the surface's tier.
+2. If it is `stable`, mark it deprecated in a prior pull request, name a removal target, and wait
+   at least one release.
+3. Add the `deprecation` label to the pull request that adds the marker.
+
+The `api-surface` check fails a pull request that removes or incompatibly changes a `stable`
+symbol without a prior deprecation. Exceptions go in `.github/api-surface/suppressions.yaml`
+with a reason and an expiry release, reviewed by the process codeowners.
+
 ## Quick Links
 
 - [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue)

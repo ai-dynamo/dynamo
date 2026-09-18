@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example waiver rules:
+#
+# suppressions:
+#   - id: "python:dynamo.runtime._internal.helper"   # exact symbol id
+#     reason: "Never public; leaked into the stub by mistake."
+#   - pattern: "helm:platform:components.planner.*"   # fnmatch glob on id
+#     surface: helm                                    # optional surface guard
+#     reason: "Planner chart values are alpha; churn expected."
+#     until: "1.3.0"                                   # waiver expires after 1.3.0
+suppressions: []
