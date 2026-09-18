@@ -1951,7 +1951,7 @@ class TestRLAdminRouteHardening:
             }
         )
 
-        assert resp == {"status": "ok", "version": 7}
+        assert resp == {"status": "ok", "version": 7, "version_declared": True}
         handler.engine_client.collective_rpc.assert_awaited_once_with(
             "update_weights",
             kwargs={"update_info": {"names": ["weight"]}},
@@ -2028,7 +2028,7 @@ class TestRLAdminRouteHardening:
         assert resp["version"] is None
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", [None, "policy-43"])
+    @pytest.mark.parametrize("version", [None, 7, "policy-43"])
     async def test_set_weight_version_declares_without_touching_the_engine(
         self, version
     ):
@@ -2055,7 +2055,7 @@ class TestRLAdminRouteHardening:
         assert (await handler.get_weight_version({}))["version_declared"] is False
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("version", [None, "initial"])
+    @pytest.mark.parametrize("version", [None, "initial", "unknown"])
     @pytest.mark.parametrize(
         ("route", "body"),
         [
@@ -2069,7 +2069,11 @@ class TestRLAdminRouteHardening:
 
         response = await getattr(handler, route)({**body, "weight_version": version})
 
-        assert response == {"status": "ok", "version": version}
+        assert response == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
         assert await handler.get_weight_version({}) == {
             "status": "ok",
             "version": version,
@@ -2100,7 +2104,11 @@ class TestRLAdminRouteHardening:
 
         response = await getattr(handler, route)(body)
 
-        assert response == {"status": "ok", "version": "unknown"}
+        assert response == {
+            "status": "ok",
+            "version": "unknown",
+            "version_declared": False,
+        }
         assert await handler.get_weight_version({}) == previous
 
     @pytest.mark.asyncio

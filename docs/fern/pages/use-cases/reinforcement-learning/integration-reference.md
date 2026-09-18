@@ -194,7 +194,7 @@ For each Python vLLM worker, check that `routes` from `GET /v1/rl/workers` inclu
 
 Version declarations accept any JSON value, including `null`. An explicit `{"weight_version": null}` is a declaration: `get_weight_version` then returns `"version": null` with `"version_declared": true`.
 
-A weight-update route that omits `weight_version` returns `"version": "unknown"` and leaves the previous declaration unchanged. A worker with no previous declaration remains undeclared. Pass `weight_version` on every update whose version you want the worker to report.
+A successful weight-update reply includes `version_declared` to indicate whether that update declared a version. If the request omits `weight_version`, the reply contains `"version": "unknown"` and `"version_declared": false`, and the previous declaration remains unchanged. An explicit `{"weight_version": "unknown"}` returns the same version with `"version_declared": true`. In an update reply, this flag describes the update; in `get_weight_version`, it describes the stored declaration. A worker with no previous declaration remains undeclared after an update that omits the version. Pass `weight_version` on every update whose version you want the worker to report.
 
 > [!WARNING]
 > A worker reports the last version declared to it, not the weights loaded in its GPU memory. Dynamo observes only the weight updates that traverse its own `/engine/` routes. Loading weights by another path, such as calling `collective_rpc` on the engine object directly, leaves the reported version stale unless the loader declares the new version.

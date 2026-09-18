@@ -2077,7 +2077,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
-                return {"status": "ok", "version": version}
+                return {
+                    "status": "ok",
+                    "version": version,
+                    "version_declared": "weight_version" in body,
+                }
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
@@ -2142,7 +2146,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
                 )
-                return {"status": "ok", "version": version}
+                return {
+                    "status": "ok",
+                    "version": version,
+                    "version_declared": "weight_version" in body,
+                }
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
