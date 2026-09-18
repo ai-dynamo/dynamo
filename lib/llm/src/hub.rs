@@ -268,6 +268,25 @@ async fn download_from_model_express(
             {
                 Ok(result) => {
                     tracing::info!("Server download succeeded for model: {model_ref}");
+                    // A server predating the pinned-revision protocol parses the request
+                    // without its revision field and answers with the default snapshot,
+                    // reporting no resolved revision. Accepting that would hand back a
+                    // different commit under the name of the pinned one — the exact skew
+                    // this path exists to prevent — so anything the server does not
+                    // confirm is a miss. `get_model_path` takes no revision either, so it
+                    // cannot answer a pinned request.
+                    let pinned_served = revision.is_none_or(|revision| {
+                        result.path.is_some()
+                            && revision_honored(revision, result.resolved_revision.as_deref())
+                    });
+                    if !pinned_served {
+                        tracing::warn!(
+                            resolved_revision = ?result.resolved_revision,
+                            "Server did not confirm the pinned revision for '{model_ref}'. \
+                            Falling back to direct download."
+                        );
+                        return mx_download_direct(model_name, revision, ignore_weights).await;
+                    }
                     let resolved = match result.path {
                         Some(path) => Ok(path),
                         None => {
@@ -317,6 +336,30 @@ async fn mx_download_direct(
     )
     .await
     .map(|result| result.path)
+}
+
+/// Whether the revision a ModelExpress server reports resolving confirms that it
+/// honored `requested`.
+///
+/// `None` means the server never resolved a revision at all, which is what a server
+/// older than the pinned-revision protocol reports. A branch or tag legitimately
+/// resolves to an unrelated immutable commit SHA, so only a requested SHA can be
+/// compared against the answer, and an abbreviated one is a prefix of it.
+fn revision_honored(requested: &str, resolved: Option<&str>) -> bool {
+    let Some(resolved) = resolved else {
+        return false;
+    };
+    if !is_commit_sha(requested) {
+        return true;
+    }
+    resolved.len() >= requested.len()
+        && resolved.as_bytes()[..requested.len()].eq_ignore_ascii_case(requested.as_bytes())
+}
+
+/// Whether `revision` is shaped like a full or abbreviated commit SHA rather than a
+/// branch or tag name.
+fn is_commit_sha(revision: &str) -> bool {
+    (7..=40).contains(&revision.len()) && revision.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 // TODO: remove in the future. This is a temporary workaround to find common
@@ -642,5 +685,48 @@ pub(crate) mod tests {
             },
         )
         .await;
+    }
+
+    const SHA: &str = "1a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d";
+
+    #[test]
+    fn test_revision_unconfirmed_by_the_server_is_not_honored() {
+        // A server older than the pinned-revision protocol ignores the request field
+        // and resolves nothing, so its default snapshot must not pass as the pin.
+        assert!(!revision_honored(SHA, None));
+    }
+
+    #[test]
+    fn test_revision_honored_when_the_server_resolves_the_requested_sha() {
+        assert!(revision_honored(SHA, Some(SHA)));
+        assert!(revision_honored(SHA, Some(&SHA.to_uppercase())));
+        assert!(revision_honored(&SHA[..12], Some(SHA)));
+    }
+
+    #[test]
+    fn test_revision_not_honored_when_the_server_resolves_a_different_sha() {
+        let other = "9f8e7d6c5b4a39209f8e7d6c5b4a39209f8e7d6c";
+
+        assert!(!revision_honored(SHA, Some(other)));
+        assert!(!revision_honored(SHA, Some(&SHA[..12])));
+    }
+
+    #[test]
+    fn test_branch_or_tag_accepts_the_sha_it_resolves_to() {
+        // A branch or tag has no SHA to compare against; resolving it at all is the
+        // confirmation that the server understood the request.
+        assert!(revision_honored("main", Some(SHA)));
+        assert!(revision_honored("v1.0", Some(SHA)));
+        assert!(!revision_honored("main", None));
+    }
+
+    #[test]
+    fn test_is_commit_sha_separates_shas_from_ref_names() {
+        assert!(is_commit_sha(SHA));
+        assert!(is_commit_sha("1a2b3c4"));
+        assert!(!is_commit_sha("1a2b3c")); // too short to be unambiguous
+        assert!(!is_commit_sha("main"));
+        assert!(!is_commit_sha("refs/pr/1"));
+        assert!(!is_commit_sha(&format!("{SHA}0"))); // longer than a SHA
     }
 }
