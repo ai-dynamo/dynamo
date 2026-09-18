@@ -1098,4 +1098,92 @@ mod integration_tests {
     async fn nats_same_names_are_isolated_by_namespace_and_component() {
         check_same_named_endpoint_isolation(RequestPlaneMode::Nats).await;
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nats_unregistration_waits_for_pending_or_cancelled_setup() {
+        use crate::distributed::DistributedConfig;
+        use crate::pipeline::network::egress::unified_client::Headers;
+        use std::time::Duration;
+
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = RequestPlaneMode::Nats;
+        config.nats_config = Some(nats::ClientOptions::default());
+        let drt = crate::DistributedRuntime::new(crate::Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("setup")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint(ENDPOINT);
+        let endpoint_id = endpoint.id();
+        let server = drt.request_plane_server().await.unwrap();
+
+        for cancel_caller in [false, true] {
+            // Hold setup at the registry lookup after register_endpoint has
+            // reserved the identity. No sleep or scheduler timing is needed.
+            let registry = drt.component_registry().inner.lock().await;
+            let mut registering = Box::pin(server.register_endpoint(
+                ENDPOINT.to_string(),
+                handler(false),
+                drt.connection_id(),
+                endpoint_id.namespace.clone(),
+                endpoint_id.component.clone(),
+                drt.system_health(),
+            ));
+            assert!(futures::poll!(registering.as_mut()).is_pending());
+            let mut registering = Some(registering);
+            if cancel_caller {
+                drop(registering.take());
+            }
+            let mut unregistering =
+                Box::pin(server.unregister_endpoint(&endpoint_id, drt.connection_id()));
+            assert!(
+                futures::poll!(unregistering.as_mut()).is_pending(),
+                "unregistration must wait for the owned setup task"
+            );
+            drop(registry);
+            tokio::time::timeout(Duration::from_secs(5), unregistering)
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(registering) = registering {
+                assert!(
+                    registering.await.is_err(),
+                    "cancelled setup must not report success"
+                );
+            }
+
+            // Completion releases the reservation and leaves no stale subscriber
+            // that could steal the replacement's request.
+            let received = Arc::new(tokio::sync::Notify::new());
+            let started = endpoint
+                .endpoint_builder()
+                .handler(Arc::new(TestHandler {
+                    refuse_notifier: false,
+                    received: Some(received.clone()),
+                }))
+                .start_with_registration()
+                .await
+                .unwrap();
+            let client = drt.network_manager().create_client().unwrap();
+            let ack = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.send_request(
+                    started.instance().transport.address().to_string(),
+                    Bytes::from_static(b"replacement"),
+                    Headers::new(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(ack.is_empty());
+            tokio::time::timeout(Duration::from_secs(5), received.notified())
+                .await
+                .unwrap();
+            started.shutdown().await.unwrap();
+        }
+    }
 }
