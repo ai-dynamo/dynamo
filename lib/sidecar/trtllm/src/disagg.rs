@@ -32,21 +32,25 @@ const ATTRIBUTES: &str = "prefill handoff attributes";
 
 /// The handoff's JSON shape, mirroring [`pb::KvSessionRef`] field for field.
 ///
-/// Both directions go through this one type, so the decode worker requires
-/// exactly what the prefill worker writes: a handoff that lost a field in
-/// transit fails here by name instead of decoding into a plausible-but-wrong
-/// session (a dropped `dp_rank` would otherwise read as rank 0 and pull KV from
-/// the wrong shard).
+/// Every field is required, `attributes` most of all: the server reads the
+/// session's location and rank out of it (`opaque_state`, `ctx_info_endpoint`,
+/// `ctx_dp_rank`), treats `endpoints` only as a fallback, and never reads
+/// `transfer_backend`. A handoff that lost `attributes` in transit still passes
+/// the server's own guard, which accepts an endpoint in place of an
+/// `opaque_state`, and then resumes a session with no opaque state and a rank
+/// defaulted to 0. Requiring it here turns that into a named failure.
+///
+/// Unknown fields are accepted on purpose. The required fields already reject
+/// another engine's handoff, so rejecting unknown ones would only reject a
+/// *newer* peer's -- during a rolling upgrade, every new-prefill/old-decode
+/// request, as a non-migratable 400.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Handoff {
     session_id: String,
     transfer_backend: String,
     endpoints: Vec<Endpoint>,
     dp_rank: u32,
-    /// TensorRT-LLM's own opaque state, absent only if the server sent none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    attributes: Option<Value>,
+    attributes: Value,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +77,13 @@ pub(crate) fn session_to_json(session: pb::KvSessionRef) -> Result<Value, Dynamo
             "prefill_ready carried no kv_session.session_id",
         ));
     }
+    // The decode leg cannot locate the session without these, so refuse to emit
+    // a handoff that would fail there instead of here.
+    let Some(attributes_struct) = attributes_struct else {
+        return Err(client::protocol_error(
+            "prefill_ready carried no kv_session.attributes_struct",
+        ));
+    };
 
     let handoff = Handoff {
         session_id,
@@ -86,9 +97,7 @@ pub(crate) fn session_to_json(session: pb::KvSessionRef) -> Result<Value, Dynamo
             })
             .collect(),
         dp_rank,
-        attributes: attributes_struct
-            .map(|attributes| struct_to_json(attributes, "TensorRT-LLM", ATTRIBUTES))
-            .transpose()?,
+        attributes: struct_to_json(attributes_struct, "TensorRT-LLM", ATTRIBUTES)?,
     };
     serde_json::to_value(handoff).map_err(|error| {
         client::protocol_error(format!("prefill handoff could not be encoded: {error}"))
@@ -98,7 +107,10 @@ pub(crate) fn session_to_json(session: pb::KvSessionRef) -> Result<Value, Dynamo
 /// Decodes the handoff JSON produced by [`session_to_json`] back into the
 /// `KvSessionRef` the decode request replays.
 pub(crate) fn session_from_json(value: &Value) -> Result<pb::KvSessionRef, DynamoError> {
-    let handoff: Handoff = serde_json::from_value(value.clone()).map_err(|error| {
+    // Deserialize from the borrowed tree: `from_value` would deep-clone the whole
+    // handoff, including `opaque_state` and `first_gen_log_probs`, only to drop
+    // the copy again.
+    let handoff = Handoff::deserialize(value).map_err(|error| {
         client::invalid_argument(format!(
             "decode request prefill_result.disaggregated_params is not a TensorRT-LLM handoff: \
              {error}"
@@ -122,10 +134,7 @@ pub(crate) fn session_from_json(value: &Value) -> Result<pb::KvSessionRef, Dynam
             })
             .collect(),
         dp_rank: handoff.dp_rank,
-        attributes_struct: handoff
-            .attributes
-            .map(|attributes| json_to_struct(attributes, ATTRIBUTES))
-            .transpose()?,
+        attributes_struct: Some(json_to_struct(handoff.attributes, ATTRIBUTES)?),
     })
 }
 
