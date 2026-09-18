@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use crate::indexer::KvRouterError;
-use crate::scheduling::KvSchedulerError;
+use crate::scheduling::{KvSchedulerError, SchedulerRejection};
 use crate::sequences::SequenceError;
 
 #[derive(Debug, thiserror::Error)]
@@ -68,18 +68,15 @@ impl SelectionError {
     }
 }
 
-fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
-    match error {
-        KvSchedulerError::NoEndpoints
-        | KvSchedulerError::AllEligibleWorkersFiltered
-        | KvSchedulerError::SubscriberShutdown
-        | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        KvSchedulerError::AllEligibleWorkersOverloaded
-        | KvSchedulerError::PinnedWorkerOverloaded { .. } => StatusCode::TOO_MANY_REQUESTS,
-        KvSchedulerError::QueueRejected(_) => StatusCode::SERVICE_UNAVAILABLE,
-        KvSchedulerError::PinnedWorkerNotAllowed { .. } => StatusCode::BAD_REQUEST,
-        KvSchedulerError::BookingFailed(_) => StatusCode::CONFLICT,
+pub fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
+    match error.rejection() {
+        SchedulerRejection::Overloaded | SchedulerRejection::QueueRejected => {
+            StatusCode::TOO_MANY_REQUESTS
+        }
+        SchedulerRejection::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        SchedulerRejection::BadRequest => StatusCode::BAD_REQUEST,
+        SchedulerRejection::Conflict => StatusCode::CONFLICT,
+        SchedulerRejection::Internal => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
@@ -126,6 +123,23 @@ mod tests {
         );
         assert_eq!(
             SelectionError::Scheduler(KvSchedulerError::AllEligibleWorkersOverloaded).status_code(),
+            StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+    }
+
+    /// A policy class refusing to admit is backpressure, not unavailability:
+    /// every eligible worker may be healthy while one class is at its limit.
+    #[test]
+    fn queue_rejection_is_throttling_not_unavailable() {
+        let rejection = crate::scheduling::QueueRejection {
+            policy_class: "batch".to_string(),
+            limit_kind: crate::scheduling::QueueLimitKind::Requests,
+            current: 8,
+            limit: 8,
+        };
+
+        assert_eq!(
+            SelectionError::Scheduler(KvSchedulerError::QueueRejected(rejection)).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
         );
     }

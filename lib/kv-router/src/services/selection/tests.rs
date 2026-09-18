@@ -1159,7 +1159,9 @@ policy_classes:
         Some("latency"),
     )
     .await;
-    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Throttling, not unavailability: the class refused to admit while other
+    // classes still route, so the caller should back off rather than fail over.
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = response_json(rejected).await;
     assert_eq!(body["details"]["policy_class"], "latency");
     assert_eq!(body["details"]["limit_kind"], "requests");

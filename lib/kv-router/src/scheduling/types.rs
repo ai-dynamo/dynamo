@@ -120,12 +120,65 @@ pub enum KvSchedulerError {
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
 
+/// What a scheduler refusal means to a client, independent of any one host's
+/// status vocabulary.
+///
+/// Several hosts turn the same [`KvSchedulerError`] into a client response: the
+/// standalone selection service over HTTP, and the Rust EPP over ext_proc.
+/// Each has its own status type, but the *meaning* of a refusal must not differ
+/// between them, so it is classified once, here, next to the error.
+///
+/// Deliberately coarser than [`KvSchedulerError`]: a host only needs enough
+/// resolution to pick a status class and a metric label. Being a small closed
+/// enum also keeps a new [`KvSchedulerError`] variant from breaking every host
+/// that maps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerRejection {
+    /// Downstream capacity is saturated; retryable backpressure.
+    Overloaded,
+    /// A policy class refused to admit the request rather than queue it.
+    QueueRejected,
+    /// No worker can serve the request right now.
+    Unavailable,
+    /// The request itself was not routable, such as a pin outside the allowed set.
+    BadRequest,
+    /// The request contradicted scheduler state, such as a duplicate booking.
+    Conflict,
+    /// A scheduler invariant failed.
+    Internal,
+}
+
 impl KvSchedulerError {
     pub fn is_overload(&self) -> bool {
         matches!(
             self,
             Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. }
         )
+    }
+
+    /// Classify this error for a client-facing host.
+    ///
+    /// [`SchedulerRejection::QueueRejected`] stays distinct from
+    /// [`SchedulerRejection::Overloaded`] — the workers can have capacity while
+    /// one class's queue is full, and hosts label the two differently — but it
+    /// is throttling, not unavailability, so hosts answer both the same way.
+    /// DEP #9755: "Terminal router-side rejection SHOULD use downstream
+    /// throttling semantics, such as `TooManyRequests` / HTTP 429. This
+    /// includes router queue full [...]".
+    pub fn rejection(&self) -> SchedulerRejection {
+        match self {
+            Self::AllEligibleWorkersOverloaded | Self::PinnedWorkerOverloaded { .. } => {
+                SchedulerRejection::Overloaded
+            }
+            Self::QueueRejected(_) => SchedulerRejection::QueueRejected,
+            Self::NoEndpoints
+            | Self::AllEligibleWorkersFiltered
+            | Self::SubscriberShutdown
+            | Self::InitFailed(_) => SchedulerRejection::Unavailable,
+            Self::PinnedWorkerNotAllowed { .. } => SchedulerRejection::BadRequest,
+            Self::BookingFailed(_) => SchedulerRejection::Conflict,
+            Self::WorkerSelectionPolicy(_) => SchedulerRejection::Internal,
+        }
     }
 }
 

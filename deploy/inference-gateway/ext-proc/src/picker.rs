@@ -201,8 +201,41 @@ pub enum PickError {
     /// The in-flight-request limit is saturated: the request is shed (not queued)
     /// as retryable backpressure → 503. A load-shed guardrail, since HTTP/2 stream
     /// multiplexing means the connection cap does not bound concurrent requests.
+    ///
+    /// This is the EPP's own front-door cap, distinct from
+    /// [`Self::RouterOverloaded`], which reports saturation the embedded router
+    /// observed downstream.
     #[error("endpoint picker overloaded")]
     Overloaded,
+    /// Downstream worker capacity is saturated, as reported by the embedded KV
+    /// router → 429.
+    ///
+    /// 429 rather than 503 to match the router's own mapping in
+    /// `lib/kv-router/src/services/selection/error.rs`. Note that the
+    /// integrated Frontend still answers this family with
+    /// `overload_status_code()` (529 by default), so the two hosts do not agree
+    /// yet; see the module docs on `admission`.
+    #[error("all eligible workers are overloaded")]
+    RouterOverloaded,
+    /// A router policy-class queue-depth limit refused the request → 429.
+    ///
+    /// Kept distinct from [`Self::RouterOverloaded`] even though both answer
+    /// 429: the workers may have capacity while the class's queue is full, and
+    /// the two carry different metric labels and different client messages.
+    ///
+    /// 429 rather than 503 for the reason DEP #9755 gives — the class refused
+    /// to admit, so the client should back off rather than look for another
+    /// endpoint. See the module docs on `admission`.
+    #[error("router queue is full")]
+    RouterQueueRejected,
+    /// The request contradicted existing router state, such as a duplicate
+    /// booking for the same request id → 409.
+    #[error("conflicting router state for this request")]
+    RouterConflict,
+    /// A router-internal invariant failed, such as a worker-selection policy
+    /// error → 500. Not a client error and not retryable.
+    #[error("internal routing error")]
+    RouterInternal,
 }
 
 #[cfg(test)]
