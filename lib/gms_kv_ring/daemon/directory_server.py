@@ -54,6 +54,7 @@ class DirectoryDaemon:
         self._server: Optional[asyncio.AbstractServer] = None
         self._stop_event: Optional[asyncio.Event] = None
         self._endpoint_lock_fd: Optional[int] = None
+        self._changed = asyncio.Event()
 
     def _acquire_endpoint_lock(self) -> None:
         lock_path = f"{self.listen_socket}.lock"
@@ -121,6 +122,47 @@ class DirectoryDaemon:
         except Exception as exc:  # noqa: BLE001
             return error_response(exc)
 
+    def _wake_readers(self) -> None:
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    async def _dispatch_async(self, msg: dict) -> dict:
+        # This standalone service owns only in-memory metadata. Run bounded
+        # mutations on its event-loop thread, not on contending executor
+        # threads. The full tiering daemon keeps its separate dispatch path.
+        if msg.get("op") == "directory_changes":
+            try:
+                wait_ms = min(1000, max(0, int(msg.get("wait_ms", 0))))
+                after = max(0, int(msg.get("after_revision", 0)))
+                int(msg.get("limit", 4096))  # reject malformed cursors before waiting
+            except (TypeError, ValueError):
+                return self._dispatch(msg)  # existing validation/error contract
+            if (
+                wait_ms
+                and str(msg.get("manifest_id", "")).strip()
+                and self.state._content_directory_revision <= after
+            ):
+                # No await between checking the cursor and capturing the
+                # event: a concurrent publication cannot lose its wakeup.
+                changed = self._changed
+                try:
+                    await asyncio.wait_for(changed.wait(), wait_ms / 1000)
+                except TimeoutError:
+                    pass
+            msg = dict(msg, wait_ms=0)
+        before = (
+            self.state._content_directory_revision,
+            self.state._content_directory_epoch,
+        )
+        result = self._dispatch(msg)
+        after = (
+            self.state._content_directory_revision,
+            self.state._content_directory_epoch,
+        )
+        if after != before:
+            self._wake_readers()
+        return result
+
     async def _handle(self, reader, writer) -> None:
         connection_id = uuid.uuid4().hex
         try:
@@ -130,17 +172,14 @@ class DirectoryDaemon:
                     return
                 request = dict(msg)
                 request[SERVER_CONNECTION_ID] = connection_id
-                response = await asyncio.get_running_loop().run_in_executor(
-                    None,
-                    self._dispatch,
-                    request,
-                )
+                response = await self._dispatch_async(request)
                 response["daemon_epoch"] = self.state.epoch
                 await write_frame(writer, response)
         except (ConnectionResetError, FrameProtocolError):
             return
         finally:
             release_directory_connection_claims(self.state, connection_id)
+            self._wake_readers()
             writer.close()
             try:
                 await writer.wait_closed()
