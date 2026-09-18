@@ -245,6 +245,7 @@ class EncodeWorkerHandler:
                 "Exactly one of image_url or image_decoded is allowed for the "
                 "encode worker."
             )
+        cache_key: str | None
         if has_url:
             cache_key = get_embedding_hash(group_input.image_url)
         else:

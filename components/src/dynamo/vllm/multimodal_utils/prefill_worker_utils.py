@@ -78,6 +78,7 @@ def _image_item_cache_key(
     key or bypasses the cache if no valid scope is present.
     """
     url, decoded = parse_image_item(item)
+    cache_key: str | None
     if url is not None:
         cache_key = get_embedding_hash(url)
     else:
