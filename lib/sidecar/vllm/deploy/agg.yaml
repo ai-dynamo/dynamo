@@ -10,11 +10,11 @@
 # exec probes check SERVING for both vllm.Control and vllm.Inference.
 # The setup init downloads a pinned, checksum-verified grpc_health_probe binary.
 #
-# TEMPORARY until DEP #14897: the current sidecar waits for engine metadata before
-# starting its HTTP listener. A process-only startup probe lets main start, and
-# delayed liveness allows model loading. Readiness still checks /health. Raise
-# both the engine startup budget and sidecar liveness delay for larger models.
-# These overrides validate injection and serving, not independent lifecycle recovery.
+# Requires the early HTTP/probe behavior from https://github.com/ai-dynamo/dynamo/pull/15051.
+# The operator injects startup/liveness on /live and readiness on /health.
+# Sidecar probes are independent of engine loading; engine exec probes gate pod
+# readiness. Raise only the engine startup budget for larger models.
+# Engine restart recovery remains deferred to DEP #14897.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -56,7 +56,7 @@ spec:
           - name: health-probes
             mountPath: /health-probes
         - name: dynamo
-          image: <your-registry>/dynamo-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.6.0
           command:
           - dynamo-vllm-sidecar
           args:
@@ -66,23 +66,6 @@ spec:
           - secretRef:
               name: hf-token-secret
           restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-              - /bin/sh
-              - -c
-              - kill -0 1
-            periodSeconds: 2
-            timeoutSeconds: 1
-            failureThreshold: 30
-          livenessProbe:
-            httpGet:
-              path: /live
-              port: system
-            initialDelaySeconds: 300
-            periodSeconds: 5
-            timeoutSeconds: 4
-            failureThreshold: 3
         containers:
         - name: main
           image: vllm/vllm-openai:v0.28.0
