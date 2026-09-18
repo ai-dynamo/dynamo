@@ -436,6 +436,7 @@
 /components/src/dynamo/mocker/utils/                                                                    @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/__init__.py                                                                   @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/bench_aic_concurrency.py                                                             @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/mocker/bench_ais_concurrency.py                                                             @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/mocker/bench_aic_rust_callback.py                                                           @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/convert_to_perfetto.py                                                        @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/validate_convert_to_perfetto.py                                               @ai-dynamo/dynamo-performance-codeowners
