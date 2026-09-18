@@ -773,6 +773,7 @@ def test_warn_override_collisions_names_the_source(caplog):
 @pytest.mark.core
 def test_warn_override_collisions_recurses_into_model_objects(caplog):
     """Per-key reporting for model-valued targets only where the merge is per key."""
+
     class FakeKvCacheConfig:
         def __init__(self):
             self.max_tokens = 1000
@@ -820,9 +821,7 @@ async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, capl
 
     yaml_file = tmp_path / "engine_config.yaml"
     yaml_file.write_text(
-        "max_batch_size: 999\n"
-        "kv_cache_config:\n"
-        "  max_tokens: 2592\n"
+        "max_batch_size: 999\n" "kv_cache_config:\n" "  max_tokens: 2592\n"
     )
 
     config = parse_args(
