@@ -387,7 +387,10 @@ def test_gms_authoritative_hbm_failover_vllm(
             == primary_output
         )
 
-        _kill_process_group(primary)
+        # Deliberately kill only the launcher. The successor must wait for
+        # orphaned EngineCore/CUDA worker cohort guards to disappear; killing
+        # the complete tree in the harness would hide that product guarantee.
+        _kill_launcher_only(primary)
         with DaemonClient(manager.kv_directory_socket) as directory:
             _entries, _epoch, writer = _wait_for_directory_writer(
                 directory, manager.kv_directory_manifest, "engine-1", timeout=30.0

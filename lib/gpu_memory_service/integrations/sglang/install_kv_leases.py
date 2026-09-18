@@ -1425,6 +1425,20 @@ def _gms_token_free(self, free_index):
     return result
 
 
+def _revoke_allocator_fast_path(st) -> None:
+    """Invalidate every derived allocator view before native clear mutates pages."""
+    st["exclusive_steady_state"] = False
+    st["steady_state"] = False
+    st["tp_reservation_aligned"] = False
+    st["exclusive_hidden_pages"] = set()
+    st["cpu_free_pages"] = None
+    for name in ("cpu_staged_pages", "cpu_release_pages", "tp_reserved_pages"):
+        values = st.get(name)
+        if isinstance(values, list):
+            values.clear()
+    st["active_batch"] = None
+
+
 def _gms_token_clear(self):
     st = _state(self)
     outstanding = []
@@ -1439,6 +1453,8 @@ def _gms_token_clear(self):
                 getattr(st["client"], "namespace", "?"),
                 getattr(st["client"], "owner_id", "?"),
             )
+    if st is not None:
+        _revoke_allocator_fast_path(st)
     result = orig_token_clear(self)
     if st is not None:
         client = st["client"]
@@ -1758,9 +1774,13 @@ def hint_hbm_page_release(self, pages: list[int]) -> bool:
 
 
 def _gms_paged_merge_and_sort_free(self):
+    # Native PagedTokenToKVPoolAllocator is an exact no-op with no staged
+    # pages. Preserve that ordering: sorting only the CPU mirror would make
+    # subsequent exact-page reservations disagree with the device free list.
+    had_staged_pages = bool(getattr(self, "staged_pages", ()))
     result = orig_paged_merge_and_sort_free(self)
     st = _state(self)
-    if st is not None and st.get("exclusive_steady_state", False):
+    if had_staged_pages and st is not None and st.get("exclusive_steady_state", False):
         cpu_free = st.get("cpu_free_pages")
         cpu_staged = st.get("cpu_staged_pages")
         if isinstance(cpu_free, (list, deque)) and isinstance(cpu_staged, list):
@@ -1869,6 +1889,8 @@ def _gms_paged_clear(self):
                 getattr(st["client"], "namespace", "?"),
                 getattr(st["client"], "owner_id", "?"),
             )
+    if st is not None:
+        _revoke_allocator_fast_path(st)
     result = orig_paged_clear(self)
     if st is not None:
         client = st["client"]

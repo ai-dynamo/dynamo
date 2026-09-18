@@ -1132,6 +1132,12 @@ fn kv_lease_unpin_read(
             "block_ids and generations length mismatch",
         ));
     }
+    let mut unique_ids = HashSet::with_capacity(block_ids.len());
+    if block_ids.iter().any(|block_id| !unique_ids.insert(*block_id)) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "duplicate block_ids are not allowed",
+        ));
+    }
     let ptr = buf.buf_ptr() as *mut u8;
     let buf_len = buf.len_bytes();
     unsafe {
