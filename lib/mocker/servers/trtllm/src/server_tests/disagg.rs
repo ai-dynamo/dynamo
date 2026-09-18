@@ -23,17 +23,40 @@ async fn role_validation_rejects_mismatched_disaggregation_payloads() {
         Code::FailedPrecondition
     );
 
-    let decode = TrtllmMockerService::new(
-        MockerServerConfig {
-            mode: ServerMode::Decode,
-            ..config()
-        },
-        admitting_args(),
-    )
-    .unwrap();
+    // A decode server rejects the *prefill* shape, not the plain one: see
+    // `a_decode_server_runs_a_request_that_bypassed_prefill` below.
+    let decode = decode_service();
+    let mut decode_ctx = request("dc-ctx", 4);
+    decode_ctx.extra = Some(context_only_extra());
     assert_eq!(
-        generate_error(&decode, request("dc-plain", 4)).await.code(),
+        generate_error(&decode, decode_ctx).await.code(),
         Code::FailedPrecondition
+    );
+}
+
+/// Conditional disaggregation dispatches straight to a decode worker with no
+/// handoff, expecting it to run the context phase itself. The sidecar builds
+/// exactly that request, so a decode server that required a session would
+/// reject every bypassed request rather than serving it.
+#[tokio::test]
+async fn a_decode_server_runs_a_request_that_bypassed_prefill() {
+    let decode = decode_service();
+
+    let responses = drain(&decode, request("dc-plain", 4))
+        .await
+        .expect("a decode server must serve a request that bypassed prefill");
+
+    assert!(
+        events(&responses)
+            .iter()
+            .any(|event| matches!(event, pb::generate_response::Event::Finished(_))),
+        "the bypassed request must run to a normal terminal"
+    );
+    assert!(
+        !events(&responses)
+            .iter()
+            .any(|event| matches!(event, pb::generate_response::Event::Error(_))),
+        "a bypassed request is not an error"
     );
 }
 
@@ -219,28 +242,6 @@ async fn the_first_tokens_logprob_survives_only_if_the_context_phase_computed_it
         })
     };
 
-    let missing_logprobs = |responses: &[pb::GenerateResponse]| {
-        events(responses)
-            .iter()
-            .filter_map(|event| match event {
-                pb::generate_response::Event::Token(token) => Some(token),
-                _ => None,
-            })
-            .flat_map(|token| token.tokens.iter())
-            .filter(|info| info.logprob.is_none())
-            .count()
-    };
-
-    let decode_after = |session: pb::KvSessionRef, request_id: &str| {
-        let mut decode_request = request(request_id, 4);
-        decode_request.response = logprobs();
-        decode_request.kv = Some(pb::KvOptions {
-            session: Some(session),
-            ..Default::default()
-        });
-        decode_request
-    };
-
     // Context phase asked for logprobs: the handoff carries the first one.
     let prefill = prefill_service();
     let mut context = request("pf-lp", 1);
@@ -266,4 +267,171 @@ async fn the_first_tokens_logprob_survives_only_if_the_context_phase_computed_it
         1,
         "only the replayed first token can be missing its logprob"
     );
+}
+
+fn decode_service() -> TrtllmMockerService {
+    TrtllmMockerService::new(
+        MockerServerConfig {
+            mode: ServerMode::Decode,
+            ..config()
+        },
+        admitting_args(),
+    )
+    .unwrap()
+}
+
+/// The handoff's logprob is replayed, not recomputed. Regenerating it from the
+/// token id would agree with the handoff on every honest run and hide a
+/// corrupted one, so overwrite the value in the session and require the decode
+/// leg to report exactly what it was handed.
+#[tokio::test]
+async fn the_replayed_logprob_is_the_one_the_handoff_carried() {
+    use prost_types::{ListValue, Value, value::Kind};
+
+    let prefill = prefill_service();
+    let mut context = request("pf-corrupt", 1);
+    context.extra = Some(context_only_extra());
+    context.response = Some(pb::ResponseOptions {
+        return_output_logprobs: Some(true),
+        ..Default::default()
+    });
+    let responses = drain(&prefill, context).await.unwrap();
+    let mut session = session_of(&responses);
+
+    // A value no `selected_logprob` can produce: it is negative in the same
+    // range but not a multiple of 0.1.
+    const HANDED_OFF: f64 = -0.4242;
+    let attributes = session
+        .attributes_struct
+        .as_mut()
+        .expect("the prefill handoff carries attributes");
+    attributes.fields.insert(
+        super::super::handoff::ATTR_FIRST_GEN_LOG_PROBS.to_string(),
+        Value {
+            kind: Some(Kind::ListValue(ListValue {
+                values: vec![Value {
+                    kind: Some(Kind::NumberValue(HANDED_OFF)),
+                }],
+            })),
+        },
+    );
+
+    let responses = drain(&decode_service(), decode_after(session, "dc-corrupt"))
+        .await
+        .unwrap();
+    let first = events(&responses)
+        .into_iter()
+        .find_map(|event| match event {
+            pb::generate_response::Event::Token(token) => Some(token),
+            _ => None,
+        })
+        .expect("the decode leg streams the replayed token");
+    assert_eq!(
+        first.tokens[0].logprob,
+        Some(HANDED_OFF),
+        "position 0 must report the handed-off value, not a regenerated one"
+    );
+}
+
+/// Presence is decided by output position, not by token id. The replayed token
+/// can be sampled again later in the same stream, and those occurrences are the
+/// decode engine's own work -- they must keep their logprob even when the
+/// context phase computed none for position 0.
+#[tokio::test]
+async fn a_token_repeated_after_the_replay_keeps_its_own_logprob() {
+    let prefill = prefill_service();
+    let mut context = request("pf-repeat", 1);
+    context.extra = Some(context_only_extra());
+    let responses = drain(&prefill, context).await.unwrap();
+    let session = session_of(&responses);
+
+    // No logprobs requested on the context phase, so position 0 has none.
+    let responses = drain(&decode_service(), decode_after(session, "dc-repeat"))
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_logprobs(&responses),
+        1,
+        "exactly one hole, at the replayed position"
+    );
+
+    let tokens: Vec<_> = events(&responses)
+        .into_iter()
+        .filter_map(|event| match event {
+            pb::generate_response::Event::Token(token) => Some(token),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        tokens.len() > 1,
+        "this test needs more than the replayed token"
+    );
+    for (position, token) in tokens.iter().enumerate().skip(1) {
+        assert!(
+            token.tokens[0].logprob.is_some(),
+            "position {position} is this engine's own token and must carry a logprob"
+        );
+    }
+}
+
+/// Prompt and output candidates are configured separately. Reading the output
+/// setting for the prompt stream returns nothing whenever only prompt
+/// candidates were asked for, while the server advertises support for them.
+#[tokio::test]
+async fn prompt_candidates_are_honoured_without_output_candidates() {
+    let service = service();
+    let mut req = request("prompt-cands", 2);
+    req.response = Some(pb::ResponseOptions {
+        return_prompt_logprobs: Some(true),
+        prompt_candidates: Some(pb::CandidateTokenSelection {
+            selection: Some(pb::candidate_token_selection::Selection::TopN(3)),
+        }),
+        ..Default::default()
+    });
+
+    let responses = drain(&service, req).await.unwrap();
+    let prompt = events(&responses)
+        .into_iter()
+        .find_map(|event| match event {
+            pb::generate_response::Event::Prompt(prompt) => Some(prompt),
+            _ => None,
+        })
+        .expect("prompt logprobs were requested");
+    assert!(
+        prompt
+            .tokens
+            .iter()
+            .all(|token| token.candidates.len() == 3),
+        "each prompt token must carry the three requested candidates"
+    );
+}
+
+/// How many streamed token infos carry no logprob.
+fn missing_logprobs(responses: &[pb::GenerateResponse]) -> usize {
+    events(responses)
+        .iter()
+        .filter_map(|event| match event {
+            pb::generate_response::Event::Token(token) => Some(token),
+            _ => None,
+        })
+        .flat_map(|token| token.tokens.iter())
+        .filter(|info| info.logprob.is_none())
+        .count()
+}
+
+/// A decode request that replays `session` and asks for output logprobs.
+fn decode_after(session: pb::KvSessionRef, request_id: &str) -> pb::GenerateRequest {
+    let mut decode_request = request(request_id, 4);
+    decode_request.response = Some(pb::ResponseOptions {
+        return_output_logprobs: Some(true),
+        output_candidates: Some(pb::CandidateTokenSelection {
+            selection: Some(pb::candidate_token_selection::Selection::TopN(1)),
+        }),
+        ..Default::default()
+    });
+    decode_request.kv = Some(pb::KvOptions {
+        session: Some(session),
+        ..Default::default()
+    });
+    decode_request
 }
