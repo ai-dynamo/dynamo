@@ -291,15 +291,15 @@ impl Qwen3VideoRoutingSpec {
             .map(|index| {
                 let source_index = if frame_count == 1 {
                     0
+                } else if index == frame_count - 1 {
+                    input.frame_count - 1
                 } else {
-                    index
-                        .checked_mul(input.frame_count - 1)
-                        .context("mm-routing: SGLang Qwen frame index overflow")?
-                        / (frame_count - 1)
+                    let step = (input.frame_count - 1) as f64 / (frame_count - 1) as f64;
+                    (index as f64 * step).floor() as usize
                 };
-                Ok(source_index as f64 / effective_fps)
+                source_index as f64 / effective_fps
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect();
 
         let min_pixels = contract.video_min_pixels as f64;
         let max_pixels = (contract.video_max_pixels as f64)
@@ -656,6 +656,83 @@ mod tests {
             sampled_timestamps: &prepared.sampled_timestamps,
         };
         assert_eq!(spec.video_grid(&prepared_input).unwrap(), (10, 18, 24));
+    }
+
+    #[test]
+    fn sglang_frame_sampling_matches_numpy_float_linspace() {
+        let timestamps: Vec<_> = (0..46)
+            .map(|index| index as f64 * 510.0 / 45.0 / 30.0)
+            .collect();
+        let input = VideoRoutingInput {
+            frame_count: 46,
+            width: 320,
+            height: 240,
+            source_fps: 30.0,
+            sampled_timestamps: &timestamps,
+        };
+        let mut spec = production_geometry_spec(QwenVideoResizeMode::LegacyCeil);
+        spec.sglang_preprocess = Some(SglangQwenVideoPreprocessContract {
+            image_factor: 28,
+            video_min_pixels: 128 * 28 * 28,
+            video_max_pixels: 768 * 28 * 28,
+            video_total_pixels: (128000.0 * 28.0 * 28.0 * 0.9) as usize,
+            frame_factor: 2,
+            fps: 2.0,
+            min_frames: 4,
+            max_frames: 768,
+        });
+
+        let prepared = spec.prepare_input(&input).unwrap();
+        let selected_indices: Vec<_> = prepared
+            .sampled_timestamps
+            .iter()
+            .map(|timestamp| (timestamp * prepared.source_fps).round() as usize)
+            .collect();
+
+        assert_eq!(prepared.frame_count, 34);
+        assert_eq!(
+            selected_indices,
+            [
+                0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 19, 20, 21, 23, 24, 25, 27, 28, 29,
+                31, 32, 34, 35, 36, 38, 39, 40, 42, 43, 45,
+            ]
+        );
+    }
+
+    #[test]
+    fn sglang_pre_resize_uses_ties_to_even() {
+        assert_eq!(
+            sglang_smart_resize(406, 700, 28, 100_352.0, 602_112.0).unwrap(),
+            (392, 700)
+        );
+    }
+
+    #[test]
+    fn sglang_long_video_applies_total_pixel_budget() {
+        let timestamps: Vec<_> = (0..400).map(|index| index as f64 / 2.0).collect();
+        let input = VideoRoutingInput {
+            frame_count: 400,
+            width: 1920,
+            height: 1080,
+            source_fps: 2.0,
+            sampled_timestamps: &timestamps,
+        };
+        let mut spec = production_geometry_spec(QwenVideoResizeMode::LegacyCeil);
+        spec.sglang_preprocess = Some(SglangQwenVideoPreprocessContract {
+            image_factor: 28,
+            video_min_pixels: 100_352,
+            video_max_pixels: 602_112,
+            video_total_pixels: 90_316_800,
+            frame_factor: 2,
+            fps: 2.0,
+            min_frames: 4,
+            max_frames: 768,
+        });
+
+        let prepared = spec.prepare_input(&input).unwrap();
+
+        assert_eq!(prepared.frame_count, 400);
+        assert_eq!((prepared.height, prepared.width), (504, 896));
     }
 
     #[test]

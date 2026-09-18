@@ -1121,6 +1121,17 @@ fn apply_tracked_mm_replacements(
     routing_tokens.resize(padded_len, 0);
 
     let mut block_mm_infos = vec![None; padded_len / block_size];
+    // SGLang publishes token-only KV-event hashes for runless video boundary
+    // blocks. Its worker has already replaced every image/video placeholder
+    // with the canonical media pad before hashing, so keep the canonical
+    // request-side sequence intact and attach no per-block MM metadata.
+    if replacements
+        .iter()
+        .any(|replacement| !replacement.runless_boundary_uses_mm_metadata)
+    {
+        return Ok((routing_tokens, expanded_prompt_len, block_mm_infos));
+    }
+
     for (block_index, block_start) in (0..padded_len).step_by(block_size).enumerate() {
         let block_end = block_start + block_size;
         let mm_hashes: Vec<u64> = spans
@@ -12238,6 +12249,51 @@ mod tests {
             [image_hash, video_hash]
         );
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let image_hash = 41;
+        let video_hash = 42;
+        let image_pad = pad_value_for_mm_hash(image_hash);
+        let video_pad = pad_value_for_mm_hash(video_hash);
+        let replacements = [
+            TrackedMmRoutingReplacement {
+                mm_hash: image_hash,
+                target_tokens: vec![image_token_id],
+                worker_tokens: vec![image_token_id; 14],
+                routing_tokens: vec![image_pad; 14],
+                runless_boundary_uses_mm_metadata: true,
+            },
+            TrackedMmRoutingReplacement {
+                mm_hash: video_hash,
+                target_tokens: vec![video_token_id],
+                worker_tokens: vec![7, 8, video_token_id, video_token_id],
+                routing_tokens: vec![7, 8, video_pad, video_pad],
+                runless_boundary_uses_mm_metadata: false,
+            },
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[image_token_id, video_token_id],
+            16,
+            Some(image_token_id),
+            Some(video_token_id),
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 18);
+        assert_eq!(&tokens[..14], &[image_pad; 14]);
+        assert_eq!(&tokens[14..18], &[7, 8, video_pad, video_pad]);
+        assert!(tokens[18..].iter().all(|token| *token == 0));
+        assert!(infos.iter().all(Option::is_none));
     }
 
     #[cfg(feature = "mm-routing")]

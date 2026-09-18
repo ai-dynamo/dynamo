@@ -122,6 +122,7 @@ def test_inherited_video_replacement_publishes_wrapped_target(qwen_preprocessor)
     ("model_type", "architecture"),
     [
         ("llava", "LlavaForConditionalGeneration"),
+        ("llava", "Qwen3VLForConditionalGeneration"),
         ("qwen3_vl", "Qwen3VLForCausalLM"),
     ],
 )
