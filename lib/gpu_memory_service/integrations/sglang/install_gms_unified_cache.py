@@ -108,6 +108,18 @@ def install() -> bool:
     return True
 
 
+def cache_backend_installed() -> bool:
+    """Return whether the authoritative GMS UnifiedRadixCache is registered."""
+    if not _enabled():
+        return False
+    try:
+        from sglang.srt.mem_cache.registry import get_radix_cache_factory
+
+        return get_radix_cache_factory(_BACKEND) is _factory
+    except ImportError:
+        return False
+
+
 def configure(server_args) -> bool:
     if _directory_mode() == "shadow":
         raise ValueError(
