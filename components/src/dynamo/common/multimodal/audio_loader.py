@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import numpy as np
 
 from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http.media_reference import max_media_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -128,7 +129,10 @@ class AudioLoader:
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
             content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+                normalized_url,
+                self._http_timeout,
+                policy=self._url_policy,
+                max_bytes=max_media_bytes(),
             )
             return await asyncio.to_thread(media_io.load_bytes, content)
 

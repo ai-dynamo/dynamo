@@ -206,6 +206,7 @@ NVDEC as above needs no additional change. Encode performance does not depend on
 | `DYN_DISABLE_NVDEC` | unset | Set to `1` to skip hardware decode. In a shipped image that leaves video input with no decoder at all, so it is a debugging switch rather than a fallback. Read as a boolean: `1`/`true`/`yes` disable, anything else does not. |
 | `DYN_NVDEC_GPU_ID` | `0` | GPU ordinal used for decode. |
 | `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Frames sampled uniformly from each clip. |
+| `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum size in MiB for each remote image, audio, or video download. TensorRT-LLM uses its backend-specific `--max-file-size-mb` option (`DYN_TRTLLM_MAX_FILE_SIZE_MB`) instead. |
 
 ## Sources
 

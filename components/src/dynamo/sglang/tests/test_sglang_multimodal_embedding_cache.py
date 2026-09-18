@@ -18,6 +18,7 @@ from dynamo.common.http import (
     HttpStatusError,
     HttpTimeoutError,
 )
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -555,13 +556,35 @@ async def test_disabled_nvdec_without_software_decoder_is_actionable(
 async def test_disabled_nvdec_with_software_decoder_passes_urls(
     nvdec_handler, monkeypatch
 ) -> None:
-    """NVDEC off but a software decoder exists: URLs pass through unchanged
-    (SGLang fetches and decodes them itself, as before)."""
+    """NVDEC off but a software decoder exists: non-HTTP URLs pass through
+    unchanged for SGLang to decode."""
     monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
     monkeypatch.setattr(f"{_HANDLER_MOD}._software_video_decoder_imports", lambda: True)
 
     out = await nvdec_handler._build_encode_inputs([_INLINE_VIDEO], "VIDEO")
     assert out == [_INLINE_VIDEO]
+
+
+@pytest.mark.asyncio
+async def test_disabled_nvdec_fetches_remote_video_with_configured_limit(
+    nvdec_handler, monkeypatch
+) -> None:
+    """Remote URLs must not escape Dynamo's limit through SGLang's downloader."""
+    monkeypatch.setenv("DYN_DISABLE_NVDEC", "1")
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    url = "https://example.com/clip.webm"
+    fetch = AsyncMock(return_value=b"video-bytes")
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+
+    out = await nvdec_handler._build_encode_inputs([url], "VIDEO")
+
+    assert out == [b"video-bytes"]
+    fetch.assert_awaited_once_with(
+        url,
+        30.0,
+        policy=nvdec_handler._url_policy,
+        max_bytes=1024 * 1024,
+    )
 
 
 def test_nvdec_video_enabled_gating(nvdec_handler, monkeypatch) -> None:

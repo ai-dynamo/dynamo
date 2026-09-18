@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from dynamo.common.http import HttpStatusError
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
@@ -92,6 +93,25 @@ async def test_load_audio_rejects_empty_waveform():
 
     with pytest.raises(ValueError, match="empty"):
         await loader.load_audio("https://example.com/empty.wav")
+
+
+@pytest.mark.asyncio
+async def test_http_fetch_honors_configured_media_limit(monkeypatch):
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = AudioLoader(url_policy=_permissive_http_policy())
+    waveform = np.zeros(8, dtype=np.float32)
+
+    class _MediaIO:
+        def load_bytes(self, content):
+            return waveform, 16000.0
+
+    mock_fetch = AsyncMock(return_value=b"audio")
+    monkeypatch.setattr(audio_loader_module, "fetch_bytes", mock_fetch)
+    monkeypatch.setattr(loader, "_create_vllm_audio_io", lambda: _MediaIO())
+
+    await loader._load_audio_with_vllm("https://example.com/limited.wav")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
 
 
 @pytest.mark.asyncio
