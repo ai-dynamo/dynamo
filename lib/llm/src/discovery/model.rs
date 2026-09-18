@@ -176,6 +176,13 @@ impl Model {
             .collect()
     }
 
+    /// Whether this catalog model includes a non-LoRA base deployment.
+    pub(crate) fn has_base_deployment(&self) -> bool {
+        self.worker_sets
+            .iter()
+            .any(|entry| entry.value().card().lora.is_none())
+    }
+
     /// Build an immutable membership snapshot for request-plane publication.
     ///
     /// WorkerSets themselves are shared because their engines and routing lifecycle are

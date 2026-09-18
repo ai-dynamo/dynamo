@@ -63,6 +63,7 @@ use crate::local_model::runtime_config::{
 use crate::local_model::runtime_config::{
     SGLANG_GENERATE_CAPABILITY, TOKEN_BUDGET_RUNTIME_KEY, TokenBudget,
 };
+use crate::lora::runtime::RuntimeLoraSelection;
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -1761,6 +1762,7 @@ pub struct OpenAIPreprocessor {
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+pub(crate) const RUNTIME_LORA_CONTEXT_KEY: &str = "runtime_lora.selection";
 
 /// Exclusive bound for client token ids: the larger of the model's vocab size
 /// and the tokenizer's largest id plus one, so ids that only the model or only
@@ -2962,6 +2964,7 @@ impl OpenAIPreprocessor {
                 tracker,
                 PreprocessRequestOptions::default(),
                 None,
+                None,
             )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
@@ -2982,6 +2985,7 @@ impl OpenAIPreprocessor {
         tracker: Option<&RequestTracker>,
         options: PreprocessRequestOptions,
         lora_name: Option<String>,
+        runtime_lora: Option<RuntimeLoraSelection>,
     ) -> Result<(
         PreprocessedRequest,
         HashMap<String, String>,
@@ -2990,7 +2994,7 @@ impl OpenAIPreprocessor {
     )> {
         let _stage_guard = StageGuard::new(STAGE_PREPROCESS, "");
         let preprocess_start = Instant::now();
-        let mut builder = self.builder_with_lora(request, lora_name)?;
+        let mut builder = self.builder_with_lora(request, lora_name, runtime_lora.as_ref())?;
 
         let template_start = Instant::now();
         let formatted_prompt = {
@@ -3108,7 +3112,7 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<PreprocessedRequestBuilder> {
-        self.builder_with_lora(request, None)
+        self.builder_with_lora(request, None, None)
     }
 
     fn builder_with_lora<
@@ -3123,9 +3127,14 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
         lora_name_override: Option<String>,
+        runtime_lora: Option<&RuntimeLoraSelection>,
     ) -> Result<PreprocessedRequestBuilder> {
         let mut builder = PreprocessedRequest::builder();
-        builder.model(request.model());
+        builder.model(
+            runtime_lora
+                .map(|selection| selection.base_model_name.clone())
+                .unwrap_or_else(|| request.model()),
+        );
 
         let mut stop_conditions = request.extract_stop_conditions()?;
         let eos_token_ids = self.model_info.eos_token_ids();
@@ -3216,8 +3225,14 @@ impl OpenAIPreprocessor {
         builder.output_options(output_options);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        let lora_name = self.lora_name.clone().or(lora_name_override);
+        let lora_name = runtime_lora
+            .map(|selection| selection.adapter_key.clone())
+            .or_else(|| self.lora_name.clone())
+            .or(lora_name_override);
         let cache_namespace = request_cache_salt(request).map(str::to_owned);
+        let base_model_name = runtime_lora.map(|selection| selection.base_model_name.clone());
+        let lora_source_uri = runtime_lora.map(|selection| selection.source_uri.clone());
+        let lora_resolution_version = runtime_lora.map(|selection| selection.protocol_version);
 
         // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
@@ -3225,6 +3240,16 @@ impl OpenAIPreprocessor {
             let hints = nvext.agent_hints.as_ref();
             let (priority_jump, strict_priority, priority) = routing_priorities(hints);
             builder.request_timestamp_ms(nvext.request_timestamp_ms);
+            let mut routing_constraints = nvext
+                .routing_constraints
+                .clone()
+                .map(routing_constraints_to_kv);
+            if let Some(runtime_lora) = runtime_lora {
+                routing_constraints
+                    .get_or_insert_default()
+                    .required_taints
+                    .insert(runtime_lora.capability_taint());
+            }
             let routing = RoutingHints {
                 backend_instance_id: nvext.backend_instance_id,
                 prefill_worker_id: nvext.prefill_worker_id,
@@ -3236,20 +3261,31 @@ impl OpenAIPreprocessor {
                 strict_priority,
                 priority,
                 lora_name,
+                base_model_name,
+                lora_source_uri,
+                lora_resolution_version,
                 cache_namespace: cache_namespace.clone(),
                 allowed_worker_ids: None,
-                routing_constraints: nvext
-                    .routing_constraints
-                    .clone()
-                    .map(routing_constraints_to_kv),
+                routing_constraints,
             };
             builder.routing(Some(routing));
         } else if lora_name.is_some() || cache_namespace.is_some() {
             // Ensure routing hints exist when we have LoRA or a legacy
             // top-level cache_salt, even when nvext is absent.
+            let routing_constraints = runtime_lora.map(|selection| {
+                let mut constraints = dynamo_kv_router::protocols::RoutingConstraints::default();
+                constraints
+                    .required_taints
+                    .insert(selection.capability_taint());
+                constraints
+            });
             builder.routing(Some(RoutingHints {
                 lora_name,
+                base_model_name,
+                lora_source_uri,
+                lora_resolution_version,
                 cache_namespace,
+                routing_constraints,
                 ..Default::default()
             }));
         }
@@ -7551,8 +7587,20 @@ impl
         } else {
             None
         };
+        let runtime_lora = context
+            .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+            .ok()
+            .flatten();
+        let mut sanitized_payload_request = None;
+        let payload_request = if let Some(selection) = runtime_lora.as_deref() {
+            let mut sanitized = request.clone();
+            sanitized.inner.model = selection.base_model_name.clone();
+            sanitized_payload_request.insert(sanitized)
+        } else {
+            &request
+        };
         let payload_handle = crate::request_trace::payload::create_handle(
-            &request,
+            payload_request,
             &request_id,
             payload_http_headers,
         );
@@ -7598,6 +7646,7 @@ impl
                     .ok()
                     .flatten()
                     .map(|name| name.as_ref().clone()),
+                runtime_lora.map(|selection| selection.as_ref().clone()),
             )
             .instrument(preprocessing.clone())
             .await?;
@@ -7776,6 +7825,11 @@ impl
                 .ok()
                 .flatten()
                 .map(|name| name.as_ref().clone()),
+            context
+                .get_optional::<RuntimeLoraSelection>(RUNTIME_LORA_CONTEXT_KEY)
+                .ok()
+                .flatten()
+                .as_deref(),
         )?;
 
         // Check if embeddings are provided - skip tokenization path
