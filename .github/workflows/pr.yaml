@@ -1598,6 +1598,7 @@ jobs:
       frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       operator_tag: ${{ needs.operator.outputs.operator_default_tag }}
+      release_line: '1.5'
     secrets: inherit
 
   deploy-test-dgdr:

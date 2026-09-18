@@ -17,6 +17,8 @@ MODELS = {
     ),
 }
 
+DEFAULT_RELEASE_LINE = "1.5"
+
 
 @dataclass(frozen=True)
 class VersionPair:

@@ -17,9 +17,9 @@ on:
         type: string
         required: true
       release_line:
-        description: Target release line (empty derives it from checkout)
+        description: Compatibility baseline; advance only after its release images publish
         type: string
-        default: ''
+        default: '1.5'
   workflow_call:
     inputs:
       frontend_tag:
@@ -33,7 +33,7 @@ on:
         required: true
       release_line:
         type: string
-        default: ''
+        default: '1.5'
       source_ref:
         type: string
         default: ''

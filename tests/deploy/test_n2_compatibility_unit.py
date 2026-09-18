@@ -6,7 +6,6 @@ import json
 import logging
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -23,6 +22,7 @@ from tests.deploy.dgd_utils import (
     PodStatusDetail,
 )
 from tests.deploy.n2_utils import (
+    DEFAULT_RELEASE_LINE,
     MODELS,
     compatibility_spec,
     runtime_version,
@@ -42,7 +42,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_matrix_uses_both_age_directions_without_candidate_controls():
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
-    pairs = version_matrix(releases, "1.5", "candidate-fe", "candidate-wk")
+    pairs = version_matrix(
+        releases, DEFAULT_RELEASE_LINE, "candidate-fe", "candidate-wk"
+    )
     assert [(p.frontend, p.worker) for p in pairs] == [
         (releases["1.4"]["frontend"], "candidate-wk"),
         ("candidate-fe", releases["1.4"]["worker"]),
@@ -51,17 +53,14 @@ def test_matrix_uses_both_age_directions_without_candidate_controls():
     ]
 
 
-def test_release_catalog_covers_workspace_n_minus_one_and_two():
+def test_release_catalog_covers_configured_n_minus_one_and_two():
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"][
-        "version"
-    ]
-    major, minor = map(int, version.split(".")[:2])
+    major, minor = map(int, DEFAULT_RELEASE_LINE.split("."))
     required = {f"{major}.{minor - age}" for age in (1, 2)}
 
     assert required <= releases.keys(), (
         f"release catalog is missing {sorted(required - releases.keys())} "
-        f"required by workspace version {version}"
+        f"required by release line {DEFAULT_RELEASE_LINE}"
     )
 
 

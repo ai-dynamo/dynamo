@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import os
-import tomllib
 import uuid
 from pathlib import Path
 
@@ -15,7 +14,12 @@ import pytest
 
 from tests.deploy.api_checks import check_deployment_api
 from tests.deploy.dgd_utils import ManagedDeployment
-from tests.deploy.n2_utils import MODELS, compatibility_spec, version_matrix
+from tests.deploy.n2_utils import (
+    DEFAULT_RELEASE_LINE,
+    MODELS,
+    compatibility_spec,
+    version_matrix,
+)
 from tests.utils.client import wait_for_model_availability
 from tests.utils.test_output import resolve_test_output_path
 
@@ -31,11 +35,7 @@ def version_pairs(request):
         raise pytest.UsageError("N-2 requires --frontend-image and --image")
     if not request.config.getoption("--model-cache-pvc"):
         raise pytest.UsageError("N-2 requires a prepared shared --model-cache-pvc")
-    line = os.environ.get("N2_RELEASE_LINE") or ".".join(
-        tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"][
-            "version"
-        ].split(".")[:2]
-    )
+    line = os.environ.get("N2_RELEASE_LINE") or DEFAULT_RELEASE_LINE
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
     return version_matrix(releases, line, frontend, worker)
 

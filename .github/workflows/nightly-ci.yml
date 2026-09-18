@@ -646,6 +646,7 @@ jobs:
       frontend_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       worker_tag: ${{ needs.sglang-copy-to-acr.outputs.image_tag }}
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
+      release_line: '1.5'
       source_ref: ${{ needs.resolve-source-sha.outputs.source_sha }}
     secrets: inherit
 
