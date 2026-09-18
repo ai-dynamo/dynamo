@@ -9,8 +9,9 @@
 //! role, parallelism, KV block sizing, and context length are discovered from
 //! the engine's gRPC metadata RPCs.
 //!
-//! The crate never depends on `sglang` or any engine crate — only
-//! `dynamo-backend-common`, `tonic`/`prost`, `clap`, and tokio.
+//! The crate never depends on `sglang` or any engine crate. It uses
+//! `dynamo-backend-common`, `dynamo-llm`, `dynamo-runtime`, `tonic`/`prost`,
+//! `clap`, and tokio.
 
 use std::sync::Arc;
 
