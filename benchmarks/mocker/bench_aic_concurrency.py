@@ -39,7 +39,7 @@ from dynamo._internal.aic import create_session
 MODEL = "Qwen/Qwen3-32B"
 SYSTEM = "h200_sxm"
 BACKEND = "vllm"
-BACKEND_VERSION = "0.19.0"
+BACKEND_VERSION = "current"
 
 BS, ISL = 16, 2048
 THREAD_COUNTS = (1, 2, 4, 8, 12, 16, 24)

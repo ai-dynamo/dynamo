@@ -155,18 +155,17 @@ fi
 # DYN_SYSTEM_PORT is expected to be provided by the caller. For multi-worker
 # launches, use numbered vars (for example: DYN_SYSTEM_PORT1=18081,
 # DYN_SYSTEM_PORT2=18083).
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-18081}
+DYN_SYSTEM_PORT=$(dyn_port DYN_SYSTEM_PORT 1 18081)
 # Phase 1: launch all workers in parallel.
 # Under SINGLE_GPU=true, requires the KV-bytes cap (CI sets it via the
 # requested_vllm_kv_cache_bytes marker) - otherwise vLLM's 0.9 default races.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     if (( NUM_WORKERS > 1 )); then
-        SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
-        WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
+        WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2)))
     else
         WORKER_PORT="${DYN_SYSTEM_PORT}"
     fi
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
     if (( NUM_WORKERS > 1 )); then
         GPU_ID="${ZE_AFFINITY_MASK_LIST[$((i - 1))]}"
     else
@@ -192,8 +191,7 @@ done
 # Phase 2: wait for all workers to be ready.
 for i in $(seq 1 "${NUM_WORKERS}"); do
     if (( NUM_WORKERS > 1 )); then
-        SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
-        WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
+        WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2)))
     else
         WORKER_PORT="${DYN_SYSTEM_PORT}"
     fi
@@ -201,7 +199,8 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
 done
 
 echo "=== Starting frontend (KV router, lightseek MM exact routing) ==="
-env "${COMMON_ENV[@]}" \
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    "${COMMON_ENV[@]}" \
     "DYN_LOG=${DYN_LOG_VAL}" \
 python -m dynamo.frontend \
     --http-port "${HTTP_PORT}" \
@@ -225,13 +224,12 @@ echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
     if (( NUM_WORKERS > 1 )); then
-        SYSTEM_PORT_VAR="DYN_SYSTEM_PORT${i}"
-        WORKER_PORT="${!SYSTEM_PORT_VAR:-$((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2))}"
+        WORKER_PORT=$(dyn_port DYN_SYSTEM_PORT "$i" $((VLLM_SYSTEM_PORT_BASE + ($i - 1) * 2)))
     else
         WORKER_PORT="${DYN_SYSTEM_PORT}"
     fi
     echo "Worker $i health: http://127.0.0.1:${WORKER_PORT}/health"
-    echo "Worker $i kv-events: tcp://*:$((KV_EVENTS_PORT_BASE + (i - 1)))"
+    echo "Worker $i kv-events: tcp://*:$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))"
 done
 echo
 echo "Architecture: Rust frontend + lightseek -> ${NUM_WORKERS}x vLLM workers"

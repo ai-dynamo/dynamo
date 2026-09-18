@@ -21,7 +21,7 @@ use prometheus::{
 };
 use serde::Serialize;
 use std::{
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -35,7 +35,41 @@ use crate::protocols::{
 use crate::reasoning_field::{ReasoningField, RoutedReasoning};
 use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
 
-use dynamo_runtime::error::ErrorType as DynamoErrorType;
+use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    IntCounterVec::new(
+        Opts::new(
+            format!("{}_{}", prefix, frontend_service::FAILURES_TOTAL),
+            "Total number of terminal semantic request failures",
+        ),
+        &["class", "reason"],
+    )
+    .expect("the fixed failure metric name and labels are valid")
+}
+
+/// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
+static FAILURE_METRICS_PREFIX: OnceLock<String> = OnceLock::new();
+pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
+        let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
+            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+        sanitize_frontend_prometheus_prefix(&raw)
+    });
+    new_failure_counter(Some(prefix.as_str()))
+});
+
+fn record_failure_into(counter: &IntCounterVec, error: &DynamoError) {
+    counter
+        .with_label_values(&[error.class().as_str(), error.reason().as_str()])
+        .inc();
+}
+
+pub(crate) fn record_failure(error: &DynamoError) {
+    record_failure_into(&DYNAM_FAILURES_TOTAL, error);
+}
 
 /// Check whether an error chain indicates the request was rejected.
 pub fn request_was_rejected(err: &(dyn std::error::Error + 'static)) -> bool {
@@ -63,7 +97,10 @@ pub fn request_was_unavailable(err: &(dyn std::error::Error + 'static)) -> bool 
 
 /// Check whether an error chain indicates the request was cancelled.
 pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
-    const CANCELLATION: &[DynamoErrorType] = &[DynamoErrorType::Cancelled];
+    const CANCELLATION: &[DynamoErrorType] = &[
+        DynamoErrorType::Cancelled,
+        DynamoErrorType::Backend(dynamo_runtime::error::BackendError::Cancelled),
+    ];
     const NON_CANCELLATION: &[DynamoErrorType] = &[];
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
@@ -415,9 +452,68 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
         && count <= MAX_BUCKET_COUNT
 }
 
+/// How bucket settings are looked up. Injected rather than calling `std::env::var`
+/// directly so tests can supply values without mutating the process environment:
+/// concurrent `setenv`/`getenv` is undefined behavior on Unix, and many other tests in
+/// this module construct `Metrics` and read these same variables.
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The real lookup, used everywhere outside tests.
+fn system_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+/// Read one histogram bucket setting, e.g. `DYN_METRICS_ITL_MAX`, from the environment.
+///
+/// Falls back to the deprecated doubled form (`DYN_HISTOGRAM_DYN_METRICS_ITL_MAX`),
+/// warning so operators can migrate off it.
+///
+/// Returns `default` when neither name is set. A name that *is* set but cannot be
+/// parsed also returns `default`, but warns first: silently ignoring a typo makes
+/// the whole knob look like it does not exist.
+fn bucket_env_var<T: std::str::FromStr>(
+    env: EnvLookup<'_>,
+    prefix: &str,
+    suffix: &str,
+    default: T,
+) -> T {
+    let name = format!("{prefix}_{suffix}");
+    let found = match env(&name) {
+        Some(value) => Some((name, value)),
+        None => {
+            let deprecated = format!(
+                "{}{prefix}_{suffix}",
+                env_metrics::DEPRECATED_HISTOGRAM_PREFIX
+            );
+            env(&deprecated).map(|value| {
+                tracing::warn!(
+                    deprecated = %deprecated,
+                    replacement = %name,
+                    "Deprecated histogram bucket environment variable; rename it, \
+                     support for the old name will be removed in a future release"
+                );
+                (deprecated, value)
+            })
+        }
+    };
+
+    match found {
+        None => default,
+        Some((name, value)) => value.parse::<T>().unwrap_or_else(|_| {
+            tracing::warn!(
+                env_var = %name,
+                value = %value,
+                "Could not parse histogram bucket environment variable, using default"
+            );
+            default
+        }),
+    }
+}
+
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
 fn parse_bucket_config(
+    env: EnvLookup<'_>,
     env_prefix: &str,
     default_min: f64,
     default_max: f64,
@@ -432,19 +528,9 @@ fn parse_bucket_config(
         );
         return (1.0, 10.0, 10);
     }
-    let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
-    let mut min = std::env::var(format!("{env_prefix}_MIN"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_min);
-    let mut max = std::env::var(format!("{env_prefix}_MAX"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_max);
-    let mut count = std::env::var(format!("{env_prefix}_COUNT"))
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default_count);
+    let mut min = bucket_env_var(env, env_prefix, "MIN", default_min);
+    let mut max = bucket_env_var(env, env_prefix, "MAX", default_max);
+    let mut count = bucket_env_var(env, env_prefix, "COUNT", default_count);
 
     if !validate_bucket_config(min, max, count) {
         tracing::warn!(
@@ -557,6 +643,9 @@ pub enum Endpoint {
 
     /// Classification (sequence classification / cross-encoder pooling)
     Classify,
+
+    /// Cross-encoder reranking
+    Rerank,
 
     /// Pooling (raw pooler output)
     Pooling,
@@ -734,11 +823,11 @@ impl Metrics {
     /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
     /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
     ///
-    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 256.0, 10)
+    /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 2.0, 13)
+    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 80.0, 20)
     /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
@@ -767,11 +856,26 @@ impl Metrics {
     /// Create Metrics with an explicit optional prefix. `None` uses the standard
     /// frontend prefix and does not read environment variables.
     pub fn new_with_prefix(metrics_prefix: Option<String>) -> Self {
+        Self::build(metrics_prefix, &system_env)
+    }
+
+    /// Real constructor. `env` is injected so tests can pin bucket configuration
+    /// without touching the process environment.
+    fn build(metrics_prefix: Option<String>, env: EnvLookup<'_>) -> Self {
         // TODO: Remove DYN_METRICS_PREFIX env-var override (added in PR #2432 for
         // NIM compatibility with the old "nv_llm_http_service_" prefix). No longer
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
+        if let Err(configured_prefix) = FAILURE_METRICS_PREFIX.set(prefix.clone())
+            && configured_prefix != prefix
+        {
+            tracing::warn!(
+                configured=%configured_prefix,
+                requested=%prefix,
+                "Semantic failure metrics already use a different process-wide prefix"
+            );
+        }
         if prefix != raw_prefix {
             tracing::warn!(
                 raw=%raw_prefix,
@@ -834,8 +938,13 @@ impl Metrics {
         .unwrap();
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
-        let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
+        let (req_dur_min, req_dur_max, req_dur_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_REQUEST_DURATION,
+            1.0,
+            512.0,
+            10,
+        );
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -850,8 +959,13 @@ impl Metrics {
         .unwrap();
 
         // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (isl_min, isl_max, isl_count) =
-            parse_bucket_config("DYN_METRICS_INPUT_SEQUENCE", 50.0, 128000.0, 12);
+        let (isl_min, isl_max, isl_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_INPUT_SEQUENCE,
+            50.0,
+            128000.0,
+            12,
+        );
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
 
         let input_sequence_length = HistogramVec::new(
@@ -865,8 +979,13 @@ impl Metrics {
         .unwrap();
 
         // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
-        let (osl_min, osl_max, osl_count) =
-            parse_bucket_config("DYN_METRICS_OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
+        let (osl_min, osl_max, osl_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_OUTPUT_SEQUENCE,
+            50.0,
+            32000.0,
+            10,
+        );
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
 
         let output_sequence_length = HistogramVec::new(
@@ -890,7 +1009,7 @@ impl Metrics {
 
         // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
         let (ttft_min, ttft_max, ttft_count) =
-            parse_bucket_config("DYN_METRICS_TTFT", 0.001, 480.0, 18);
+            parse_bucket_config(env, env_metrics::DYN_METRICS_TTFT, 0.001, 480.0, 18);
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
         let time_to_first_token = HistogramVec::new(
@@ -904,7 +1023,8 @@ impl Metrics {
         .unwrap();
 
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) = parse_bucket_config("DYN_METRICS_ITL", 0.001, 2.0, 13);
+        let (itl_min, itl_max, itl_count) =
+            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
@@ -921,8 +1041,13 @@ impl Metrics {
         // sub-second (60-200 token inputs on L4-class GPUs land in the 5-50ms
         // range), so 1ms..10s on a log scale gives p50/p99 resolution that
         // the 1..512s `request_duration` buckets cannot.
-        let (emb_min, emb_max, emb_count) =
-            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+        let (emb_min, emb_max, emb_count) = parse_bucket_config(
+            env,
+            env_metrics::DYN_METRICS_EMBEDDING_LATENCY,
+            0.001,
+            10.0,
+            14,
+        );
         let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
 
         let embedding_latency = HistogramVec::new(
@@ -1300,6 +1425,7 @@ impl Metrics {
         registry.register(Box::new(self.embedding_latency.clone()))?;
         registry.register(Box::new(self.images_per_request.clone()))?;
         registry.register(Box::new(self.videos_per_request.clone()))?;
+        registry.register(Box::new(DYNAM_FAILURES_TOTAL.clone()))?;
         registry.register(Box::new(self.audio_per_request.clone()))?;
         registry.register(Box::new(self.image_tokens_per_request.clone()))?;
 
@@ -1689,6 +1815,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
             Endpoint::Classify => write!(f, "classify"),
+            Endpoint::Rerank => write!(f, "rerank"),
             Endpoint::Pooling => write!(f, "pooling"),
             Endpoint::Images => write!(f, "images"),
             Endpoint::Videos => write!(f, "videos"),
@@ -1708,6 +1835,7 @@ impl Endpoint {
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
             Endpoint::Classify => "classify",
+            Endpoint::Rerank => "rerank",
             Endpoint::Pooling => "pooling",
             Endpoint::Images => "images",
             Endpoint::Videos => "videos",
@@ -2234,19 +2362,14 @@ fn annotated_to_sse_event<T: Serialize>(
 
     if let Some(ref msg) = annotated.event {
         if msg == "error" {
-            let error_message = if let Some(ref dynamo_err) = annotated.error
-                && !dynamo_err.message().is_empty()
-            {
-                dynamo_err.message().to_string()
-            } else if let Some(ref comments) = annotated.comment {
-                let joined = comments.join(" -- ");
-                if joined.trim().is_empty() {
-                    "unspecified error".to_string()
-                } else {
-                    joined
-                }
+            let error_message = if let Some(ref dynamo_err) = annotated.error {
+                format!(
+                    "semantic stream error: class={} reason={}",
+                    dynamo_err.class(),
+                    dynamo_err.reason()
+                )
             } else {
-                "unspecified error".to_string()
+                "backend stream error".to_string()
             };
             return Err(axum::Error::new(error_message));
         }
@@ -2490,6 +2613,45 @@ mod tests {
     }
 
     #[test]
+    fn model_ready_metric_omits_alias_names() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        let worker_set = Arc::new(worker_set);
+
+        // `register_alias` refuses a name that is already a live primary, so it must
+        // run before the alias name gains its own WorkerSet.
+        assert!(manager.add_worker_set_arc("test-model", "watched", worker_set.clone()));
+        assert!(manager.register_alias("test-model-alias", "test-model"));
+        assert!(manager.add_worker_set_arc("test-model-alias", "watched", worker_set));
+
+        worker_tx.send(vec![1]).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+        assert_eq!(model_ready_value(&registry, "test-model-alias"), None);
+
+        let series = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == model_ready_metric_name(None))
+            .map(|family| family.get_metric().len());
+        assert_eq!(series, Some(1));
+    }
+
+    #[test]
     fn test_round_to_sig_figs() {
         // Test rounding to 2 significant figures
         assert_eq!(round_to_sig_figs(0.0026, 2), 0.0026);
@@ -2532,6 +2694,159 @@ mod tests {
         }
     }
 
+    /// A stand-in for the process environment. Tests inject this instead of calling
+    /// `temp_env`: mutating the real environment races the many other tests in this
+    /// module that construct `Metrics` and read these same variables, which on Unix is
+    /// an unsafe `setenv`/`getenv` race, not merely an ordering hazard.
+    fn fake_env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn bucket_config_reads_the_documented_env_var_names() {
+        // These names were once read under an extra DYN_HISTOGRAM_ prefix, which
+        // silently stopped them working; they must resolve as documented.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "0.002"),
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.002, 80.0, 20));
+    }
+
+    #[test]
+    fn bucket_config_falls_back_to_the_deprecated_doubled_name() {
+        // The doubled form was the only name that worked for several releases, so it
+        // stays supported for one more rather than silently reverting to defaults.
+        let env = fake_env(&[("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "80")]);
+        let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(max, 80.0);
+    }
+
+    #[test]
+    fn bucket_config_prefers_the_new_name_over_the_deprecated_one() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MAX", "80"),
+            ("DYN_HISTOGRAM_DYN_METRICS_ITL_MAX", "30"),
+        ]);
+        let (_, max, _) = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(max, 80.0);
+    }
+
+    #[test]
+    fn bucket_config_falls_back_to_defaults_for_unset_and_unparseable_values() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "not-a-number"),
+            ("DYN_METRICS_ITL_COUNT", "12.5"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.001, 2.0, 13));
+    }
+
+    #[test]
+    fn bucket_config_rejects_a_parseable_but_invalid_combination() {
+        // min >= max parses fine but cannot produce buckets, so the whole set reverts —
+        // including a COUNT that was valid on its own.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MIN", "5"),
+            ("DYN_METRICS_ITL_MAX", "1"),
+            ("DYN_METRICS_ITL_COUNT", "20"),
+        ]);
+        let cfg = parse_bucket_config(&env, env_metrics::DYN_METRICS_ITL, 0.001, 2.0, 13);
+        assert_eq!(cfg, (0.001, 2.0, 13));
+    }
+
+    /// Upper bounds of a histogram's buckets, i.e. the `le` label values that a
+    /// dashboard's `histogram_quantile` query sees on `/metrics`.
+    fn bucket_upper_bounds(registry: &Registry, metric_name: &str) -> Vec<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)
+            .expect("histogram not registered")
+            .get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|b| b.upper_bound())
+            .collect()
+    }
+
+    #[test]
+    fn itl_ceiling_env_var_reaches_the_exported_le_labels() {
+        // Deliberately not the default (80.0, 20): a test that sets the env to the
+        // default value would pass even if the variable were ignored entirely.
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_MAX", "30"),
+            ("DYN_METRICS_ITL_COUNT", "8"),
+        ]);
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &env);
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.5);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        assert_eq!(
+            bounds.last().copied(),
+            Some(30.0),
+            "top finite bucket should follow DYN_METRICS_ITL_MAX, got {bounds:?}"
+        );
+        assert_eq!(
+            bounds.len(),
+            8,
+            "bucket count should follow DYN_METRICS_ITL_COUNT"
+        );
+    }
+
+    #[test]
+    fn itl_default_buckets_reach_80_seconds() {
+        // The ceiling was 2.0s, so any inter-token latency above it landed in `+Inf` and
+        // `histogram_quantile` pinned p99 at exactly 2.0 -- indistinguishable from a real
+        // 2s measurement. Guard the shipped default, not just the env-var override.
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &fake_env(&[]));
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.5);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        // The exact set is the contract. Note the bottom edge of 0.0018: vLLM's equivalent
+        // starts at 0.01 and cannot resolve anything faster than 10ms per token, so raising
+        // the ceiling must not cost the low-end resolution Dynamo has and vLLM does not.
+        assert_eq!(
+            bounds,
+            vec![
+                0.0, 0.0018, 0.0033, 0.0059, 0.011, 0.02, 0.035, 0.064, 0.12, 0.21, 0.38, 0.69,
+                1.2, 2.3, 4.1, 7.4, 13.0, 24.0, 44.0, 80.0
+            ],
+        );
+    }
+
     #[test]
     fn test_generate_log_buckets_edge_cases() {
         // Test empty buckets
@@ -2566,11 +2881,12 @@ mod tests {
     #[test]
     fn test_all_buckets_are_two_sig_figs() {
         let test_cases = vec![
-            (1.0, 256.0, 10),
+            (1.0, 512.0, 10),
             (50.0, 128000.0, 12),
             (50.0, 32000.0, 10),
             (0.001, 480.0, 18),
-            (0.001, 2.0, 13),
+            (0.001, 80.0, 20),
+            (0.001, 10.0, 14),
         ];
 
         for (min, max, count) in test_cases {
@@ -3976,6 +4292,64 @@ mod tests {
     }
 
     #[test]
+    fn semantic_failure_metric_honors_custom_prefix() {
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(Some("nv_llm_http_service"));
+        counter
+            .with_label_values(&["Internal", "runtime.internal"])
+            .inc();
+        registry.register(Box::new(counter)).unwrap();
+
+        assert!(
+            registry
+                .gather()
+                .iter()
+                .any(|family| family.name() == "nv_llm_http_service_failures_total")
+        );
+    }
+
+    #[test]
+    fn semantic_failure_metric_has_only_class_and_reason_labels() {
+        use dynamo_runtime::error::{DynamoError, ErrorClass, ErrorReason};
+
+        let registry = prometheus::Registry::new();
+        let counter = new_failure_counter(None);
+        registry.register(Box::new(counter.clone())).unwrap();
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .reason(ErrorReason::new("request.invalid").unwrap())
+            .build();
+
+        record_failure_into(&counter, &error);
+
+        let family = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == "dynamo_frontend_failures_total")
+            .expect("dynamo_frontend_failures_total metric");
+        let metric = family
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "reason" && label.value() == "request.invalid")
+            })
+            .expect("request.invalid sample");
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("class", "InvalidRequest"), ("reason", "request.invalid")]
+        );
+        assert_eq!(metric.get_counter().value(), 1.0);
+    }
+
+    #[test]
     fn test_multiple_requests_different_error_types() {
         let metrics = Arc::new(Metrics::new());
         let registry = prometheus::Registry::new();
@@ -4170,36 +4544,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error_event_uses_dynamo_error_message() {
+    fn test_error_event_uses_semantic_identity_without_diagnostic() {
         use dynamo_runtime::error::DynamoError;
         let result = run_event_converter(error_annotated(
             Some(DynamoError::msg("image load failed: 403 Forbidden")),
             None,
         ));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("403 Forbidden"));
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("class=Internal"));
+        assert!(message.contains("reason=runtime.unclassified"));
+        assert!(!message.contains("403 Forbidden"));
     }
 
     #[test]
-    fn test_error_event_falls_back_to_comment() {
+    fn test_error_event_does_not_expose_comment() {
         let result =
             run_event_converter(error_annotated(None, Some(vec!["connection lost".into()])));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("connection lost"));
+        let message = result.unwrap_err().to_string();
+        assert_eq!(message, "backend stream error");
+        assert!(!message.contains("connection lost"));
     }
 
     #[test]
-    fn test_error_event_unspecified_when_no_message() {
+    fn test_error_event_without_identity_is_generic() {
         let result = run_event_converter(error_annotated(None, None));
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
-    }
-
-    #[test]
-    fn test_error_event_empty_comment_falls_through() {
-        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "unspecified error");
+        assert_eq!(result.unwrap_err().to_string(), "backend stream error");
     }
 
     #[test]

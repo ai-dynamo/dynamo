@@ -182,6 +182,7 @@ core:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/experimental/**'
   - 'components/src/dynamo/gpu_memory_service/**'
   # TODO(will): Move TokenSpeed to a dedicated framework filter once CI has
   # TokenSpeed Docker images and backend-specific build/test jobs.
@@ -226,6 +227,8 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgd_override.py'
   - 'components/src/dynamo/profiler/tests/integration/test_dgd_override_go_integration.py'
   - 'components/src/dynamo/profiler/utils/dgdr_*'
+  # The operator check also owns the Go/Python snapshot environment contract test.
+  - 'components/src/dynamo/common/snapshot/**'
 
 snapshot:
   - 'deploy/checkpoint-placeholder/**'
@@ -349,6 +352,7 @@ sidecar:
   # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
+  - 'tests/serve/test_sidecar.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
