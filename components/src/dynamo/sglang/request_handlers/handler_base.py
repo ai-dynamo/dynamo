@@ -1193,7 +1193,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             request_ids: Live set of unfinished parallel-choice IDs, when available.
 
         Raises:
-            EngineShutdown: If shutdown event was triggered.
+            WorkerShutdown: If shutdown event was triggered.
         """
         cancellation_future: asyncio.Future[Any] | None = None
         shutdown_task: asyncio.Task[Any] | None = None
@@ -1240,7 +1240,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 request_ids if request_ids is not None else {sglang_request_id}, context
             )
 
-            # Check which event triggered and raise EngineShutdown if shutdown
+            # Check which event triggered and raise WorkerShutdown if shutdown
             if shutdown_task and shutdown_task in done:
                 raise WorkerShutdown("Engine was shut down during token generation")
 
@@ -1278,7 +1278,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         Automatically creates a background task to monitor for cancellation and
         shutdown events, cleaning it up when the context exits.
 
-        If shutdown event was triggered, raises EngineShutdown on exit.
+        If shutdown event was triggered, raises WorkerShutdown on exit.
 
         Args:
             request_id_future: Future that will be set with the SGLang request ID

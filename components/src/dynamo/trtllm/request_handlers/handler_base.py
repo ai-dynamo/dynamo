@@ -465,7 +465,7 @@ class HandlerBase(BaseGenerativeHandler):
         wrapper that defers abort() until the first token is received (KV
         transfer complete).
 
-        Raise EngineShutdown if shutdown event is triggered.
+        Raise WorkerShutdown if shutdown event is triggered.
         """
         cancellation_triggers: list[asyncio.Future[Any]] = []
         try:
@@ -495,7 +495,7 @@ class HandlerBase(BaseGenerativeHandler):
                 except asyncio.CancelledError:
                     pass
 
-            # Raise EngineShutdown if cancellation is due to shutdown event triggered
+            # Raise WorkerShutdown if cancellation is due to shutdown event triggered
             if shutdown_task in done:
                 raise WorkerShutdown("Engine was shut down during generation.")
 
@@ -524,7 +524,7 @@ class HandlerBase(BaseGenerativeHandler):
         In disaggregated decode mode, generation_result may be a _DeferredAbort
         wrapper that defers abort() until the first token.
 
-        Raise EngineShutdown if shutdown event is triggered.
+        Raise WorkerShutdown if shutdown event is triggered.
 
         Yields:
             asyncio.Task: The cancellation monitoring task
