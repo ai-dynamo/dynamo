@@ -187,7 +187,12 @@ pub(crate) fn build_generate_request(
         ));
     }
     let media = if let Some(features) = features {
-        build_preprocessed_media(features, prompt_token_count, routing_hashes.as_deref())?
+        build_preprocessed_media(
+            features,
+            prompt_token_count,
+            routing_hashes.as_deref(),
+            &lora_name,
+        )?
     } else {
         raw_media
     };
@@ -378,7 +383,7 @@ fn consume_vllm_tito(
     let Some(envelope) = extra.remove("vllm_tito") else {
         return Ok(None);
     };
-    let serde_json::Value::Object(envelope) = envelope else {
+    let serde_json::Value::Object(mut envelope) = envelope else {
         return Err(client::invalid_argument(
             "extra_args.vllm_tito must be a JSON object",
         ));
@@ -401,17 +406,15 @@ fn consume_vllm_tito(
             )));
         }
     }
-    envelope
-        .get("features")
-        .filter(|features| !features.is_null())
-        .map(|features| {
-            serde_json::from_value(features.clone()).map_err(|error| {
-                client::invalid_argument(format!(
-                    "extra_args.vllm_tito.features is invalid: {error}"
-                ))
-            })
-        })
-        .transpose()
+    let Some(features) = envelope.remove("features") else {
+        return Ok(None);
+    };
+    if features.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(features).map(Some).map_err(|error| {
+        client::invalid_argument(format!("extra_args.vllm_tito.features is invalid: {error}"))
+    })
 }
 
 fn consume_preprocessed_mm_routing_hashes(
@@ -684,6 +687,7 @@ fn build_preprocessed_media(
     features: VllmTitoFeatures,
     prompt_token_count: usize,
     routing_hashes: Option<&[String]>,
+    lora_name: &str,
 ) -> Result<Vec<pb::MediaItem>, DynamoError> {
     if features.mm_hashes.is_empty() {
         return Err(client::invalid_argument(
@@ -766,7 +770,12 @@ fn build_preprocessed_media(
             }
 
             let kwargs = decode_preprocessed_kwargs(encoded_kwargs, &mut decoded_bytes)?;
-            let identifier = preprocessed_mm_identifier(modality_name, &kwargs);
+            let mm_hash = preprocessed_mm_identifier(modality_name, &kwargs);
+            let identifier = if lora_name.is_empty() {
+                mm_hash.clone()
+            } else {
+                format!("{lora_name}:{mm_hash}")
+            };
             if modality == pb::Modality::Image
                 && let Some(expected) = routing_hashes.and_then(|hashes| hashes.get(index))
                 && expected != &preprocessed_mm_routing_hash(modality_name, &kwargs)
@@ -783,7 +792,7 @@ fn build_preprocessed_media(
                         identifier: identifier.clone(),
                         offset: placeholder.offset,
                         length: placeholder.length,
-                        mm_hash: Some(identifier),
+                        mm_hash: Some(mm_hash),
                         is_embed,
                     },
                 )),

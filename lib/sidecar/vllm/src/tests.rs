@@ -3662,6 +3662,49 @@ fn preprocessed_multimodal_identifier_is_bound_to_inline_content() {
 }
 
 #[test]
+fn preprocessed_multimodal_identifier_is_scoped_by_lora() {
+    let build = |lora_name: Option<&str>| {
+        let mut request =
+            request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+        request.routing.as_mut().unwrap().lora_name = lora_name.map(str::to_string);
+        build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("preprocessed features should be forwarded")
+    };
+    fn feature(request: &pb::GenerateRequest) -> &pb::PreprocessedMediaFeatures {
+        match request.media[0].source.as_ref() {
+            Some(pb::media_item::Source::Features(feature)) => feature,
+            other => panic!("expected preprocessed features, got {other:?}"),
+        }
+    }
+
+    let base = build(None);
+    let adapter_a = build(Some("adapter-a"));
+    let adapter_b = build(Some("adapter-b"));
+    let base_feature = feature(&base);
+    let adapter_a_feature = feature(&adapter_a);
+    let adapter_b_feature = feature(&adapter_b);
+
+    assert_eq!(
+        base_feature.mm_hash.as_deref(),
+        Some(base_feature.identifier.as_str())
+    );
+    assert_eq!(adapter_a_feature.mm_hash, base_feature.mm_hash);
+    assert_eq!(adapter_b_feature.mm_hash, base_feature.mm_hash);
+    assert_eq!(
+        adapter_a_feature.identifier,
+        format!("adapter-a:{}", base_feature.identifier)
+    );
+    assert_eq!(
+        adapter_b_feature.identifier,
+        format!("adapter-b:{}", base_feature.identifier)
+    );
+}
+
+#[test]
 fn preprocessed_features_reject_routing_metadata_without_payload() {
     let mut request = request();
     request
