@@ -1817,11 +1817,11 @@ mod tests {
         KvStateRecoveryReceipt, LowerTierIndexers, LowerTierQueryOptions, MatchDetails,
         query_lower_tiers_with_options,
     };
+    use dynamo_kv_router::kv_hints::KvTransferCandidateSource;
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
         LocalBlockHash, ResidencyOwner, RouterHintSourceMetadata, WorkerWithDpRank,
     };
-    use dynamo_kv_router::router_hint::RouterHintCandidateSource;
     use dynamo_runtime::{component::TransportType, protocols::EndpointId};
     use tokio_util::sync::CancellationToken;
 
@@ -1855,11 +1855,12 @@ mod tests {
         );
         (
             primary.clone(),
-            Indexer::KvIndexer {
+            Indexer::Single {
                 primary,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
                 primary_records_routing_decisions: false,
+                session_updates: None,
             },
         )
     }
@@ -2091,11 +2092,12 @@ mod tests {
             Arc::new(KvIndexerMetrics::new_unregistered()),
         );
         let lower_tiers = LowerTierIndexers::new(1, 4);
-        let indexer = Indexer::KvIndexer {
+        let indexer = Indexer::Single {
             primary,
             lower_tier: lower_tiers.clone(),
             approx: None,
             primary_records_routing_decisions: false,
+            session_updates: None,
         };
         lower_tiers
             .get_or_create(StorageTier::HostPinned)
@@ -2149,7 +2151,7 @@ mod tests {
                 &[LocalBlockHash(11), LocalBlockHash(12)],
                 &MatchDetails::default(),
                 LowerTierQueryOptions {
-                    retain_router_hint_chain: true,
+                    retain_kv_transfer_chain: true,
                 },
             )
         };
@@ -2169,10 +2171,10 @@ mod tests {
         let detached = lookup();
         let details = &detached[&StorageTier::HostPinned];
         assert!(details.hits.is_empty());
-        let candidates = details.router_hint_root_candidates.as_ref().unwrap();
+        let candidates = details.kv_transfer_candidates.as_ref().unwrap();
         assert_eq!(
             candidates.owner_prefix_blocks,
-            vec![(RouterHintCandidateSource::CacheOwner(owner_key), 2)]
+            vec![(KvTransferCandidateSource::CacheOwner(owner_key), 2)]
         );
         assert_eq!(
             candidates
@@ -2188,7 +2190,7 @@ mod tests {
         let cleared = lookup();
         assert!(
             cleared[&StorageTier::HostPinned]
-                .router_hint_root_candidates
+                .kv_transfer_candidates
                 .is_none()
         );
     }

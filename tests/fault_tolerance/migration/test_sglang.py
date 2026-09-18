@@ -16,7 +16,7 @@ import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_ports
 from tests.utils.prometheus import sum_metric_samples
@@ -446,7 +446,7 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Configure health check based on worker type
         health_check_urls = [
-            (f"http://localhost:{self.system_port}/health", self.is_ready)
+            (f"http://localhost:{self.system_port}/health", check_health_ready)
         ]
         if disagg_mode is None or disagg_mode == "decode":
             health_check_urls.append(
@@ -468,20 +468,6 @@ class DynamoWorkerProcess(ManagedProcess):
             log_dir=str(log_dir),
             display_name=worker_id,
         )
-
-    def is_ready(self, response) -> bool:
-        """Check the health of the worker process"""
-        try:
-            data = response.json()
-            if data.get("status") == "ready":
-                logger.info(f"{self.worker_id} status is ready")
-                return True
-            logger.warning(
-                f"{self.worker_id} status is not ready: {data.get('status')}"
-            )
-        except ValueError:
-            logger.warning(f"{self.worker_id} health response is not valid JSON")
-        return False
 
 
 @pytest.mark.timeout(SGLANG_MIGRATION_TEST_TIMEOUT_S)

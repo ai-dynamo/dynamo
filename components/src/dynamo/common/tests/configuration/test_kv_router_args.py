@@ -191,6 +191,42 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     assert kwargs["decode_active_request_weight"] == 64.0
 
 
+def test_session_prefix_index_is_opt_in() -> None:
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    default_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args([])
+    ).kv_router_kwargs()
+    assert default_kwargs["enable_session_prefix_index"] is False
+
+    enabled_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--enable-session-prefix-index"])
+    ).kv_router_kwargs()
+    assert enabled_kwargs["enable_session_prefix_index"] is True
+
+    disabled_kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--no-enable-session-prefix-index"])
+    ).kv_router_kwargs()
+    assert disabled_kwargs["enable_session_prefix_index"] is False
+
+
+def test_session_prefix_index_environment_flows_to_binding_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DYN_ENABLE_SESSION_PREFIX_INDEX", "true")
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+
+    kwargs = KvRouterConfigBase.from_cli_args(parser.parse_args([])).kv_router_kwargs()
+    assert kwargs["enable_session_prefix_index"] is True
+
+    overridden = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(["--no-enable-session-prefix-index"])
+    ).kv_router_kwargs()
+    assert overridden["enable_session_prefix_index"] is False
+
+
 def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
@@ -421,6 +457,30 @@ def test_frontend_reasoning_field_name_rejects_invalid_choice() -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["--reasoning-field-name", "invalid"])
+
+
+def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+
+    default_config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    quic_config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--response-plane", "quic"])
+    )
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    env_parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(env_parser)
+    env_config = FrontendConfig.from_cli_args(env_parser.parse_args([]))
+
+    assert default_config.response_plane == "tcp"
+    assert quic_config.response_plane == "quic"
+    assert env_config.response_plane == "quic"
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--response-plane", "invalid"])
 
 
 def test_conditional_disagg_config_cli_lowers_to_router_kwargs() -> None:
