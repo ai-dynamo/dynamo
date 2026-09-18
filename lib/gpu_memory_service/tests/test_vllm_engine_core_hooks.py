@@ -52,9 +52,10 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         generations = defaultdict(int)
         held = {}
         seal_batches = []
+        readers = defaultdict(int)
 
     state = LeaseState()
-    owners = iter(("primary", "shadow"))
+    owners = iter(("primary", "reader", "shadow"))
 
     class Client:
         namespace = "test"
@@ -85,6 +86,20 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         def seal(self, leases):
             state.seal_batches.append([lease.block_id for lease in leases])
 
+        def pin_read(self, leases):
+            if any(
+                state.held.get(lease.block_id, (None,))[0] != lease.generation
+                for lease in leases
+            ):
+                return False
+            for lease in leases:
+                state.readers[lease.block_id] += 1
+            return True
+
+        def unpin_read(self, leases):
+            for lease in leases:
+                state.readers[lease.block_id] -= 1
+
         def release(self, released):
             for lease in released:
                 current = state.held.get(lease.block_id)
@@ -108,7 +123,13 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
 
     class Directory:
         enabled = True
-        authoritative = True
+
+        @property
+        def authoritative(self):
+            return self.mode == "authoritative" or (
+                self.mode == "shadow" and self.read_view_is_current_writer
+            )
+
         mode = "authoritative"
         read_view_is_current_writer = True
 
@@ -150,11 +171,16 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
 
         def lookup_and_claim(self, hashes):
             return [
-                self.entries.get(value)
-                if self.entries.get(value, {}).get("state") in {"ready", "active"}
-                else None
+                (
+                    self.entries.get(value)
+                    if self.entries.get(value, {}).get("state") in {"ready", "active"}
+                    else None
+                )
                 for value in hashes
             ], "claim"
+
+        def lookup_and_read_claim(self, hashes):
+            return self.lookup_and_claim(hashes)
 
         def release_claim(self, _token):
             return True
@@ -171,12 +197,17 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
                 self.entries[value]["state"] = "ready"
             return len(hashes)
 
-        def ensure_hbm_capacity(self, required):
+        def ensure_hbm_capacity(self, required, *, eligible_slot_ids=None):
             self.ensure_calls.append(required)
+            eligible = None if eligible_slot_ids is None else set(eligible_slot_ids)
             victims = []
             freed = 0
             for content_hash, entry in list(self.entries.items()):
                 if entry.get("tier") != "hbm" or entry.get("state") != "ready":
+                    continue
+                if eligible is not None and not set(entry["slot_ids"]).issubset(
+                    eligible
+                ):
                     continue
                 victims.append(
                     {
@@ -226,6 +257,27 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         assert state.seal_batches == [[block.block_id for block in blocks]]
         assert all(directory.entries[key]["state"] == "ready" for key in content_hashes)
         assert all(block.block_id not in state.free for block in blocks)
+
+        # A standby may consume immutable READY blocks before writer promotion.
+        # It holds both the directory claim and exact ring generation until
+        # vLLM's completion-fenced free callback proves GPU reads are done.
+        directory.mode = "shadow"
+        directory.read_view_is_current_writer = False
+        reader = GMSBlockPool(8, True, 4)
+        borrowed = reader.get_cached_block(b"a" * 32, [0])
+        assert borrowed is not None
+        borrowed_block = borrowed[0]
+        assert state.held[borrowed_block.block_id][1] == "primary"
+        assert state.readers[borrowed_block.block_id] == 1
+        reader.free_block_queue.remove(borrowed_block)
+        borrowed_block.ref_cnt += 1
+        reader.free_blocks([borrowed_block])
+        assert state.readers[borrowed_block.block_id] == 0
+        assert borrowed_block.block_hash is None
+        assert borrowed_block in reader.free_block_queue.get_all_free_blocks()
+
+        directory.mode = "authoritative"
+        directory.read_view_is_current_writer = True
 
         # A stale snapshot member must not block recovery of the valid sibling.
         stale_native_key = b"stale-directory-entry" + b"\0" * 15
@@ -314,17 +366,18 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
             == 3
         )
 
-        # Directory publication failure is fail-closed for recovery but must
-        # not kill vLLM's scheduler free path or leak an invisible seal.
+        # A lost publication reply may hide a committed, adoptable record.
+        # Fail closed with the lease retained, never make that slot reusable.
         fallback = shadow.get_new_blocks(1)
         shadow.cache_full_blocks(
             SimpleNamespace(block_hashes=[b"z" * 32]), fallback, 0, 1, 4, 0
         )
         directory.fail_publish = True
-        shadow.free_blocks(fallback)
-        assert fallback[0].block_id in state.free
-        assert fallback[0].block_hash is None
-        assert shadow.free_block_queue.get_all_free_blocks()[0] is fallback[0]
+        with pytest.raises(RuntimeError, match="retaining sealed leases"):
+            shadow.free_blocks(fallback)
+        assert fallback[0].block_id not in state.free
+        assert fallback[0].block_id in shadow._gms_kv_leases_by_block
+        assert fallback[0] not in shadow.free_block_queue.get_all_free_blocks()
     finally:
         kv_cache_coordinator.BlockPool = original_block_pool_binding
         KVCacheManager.allocate_slots = original_allocate_slots
@@ -333,6 +386,57 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
         leases_mod._factory = original_factory
         leases_mod._patched = original_patched
         leases_mod._gms_block_pool_class = None
+
+
+def test_dormant_headroom_preserves_concurrent_admission(monkeypatch):
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+
+    evictions = []
+    pool = SimpleNamespace(
+        num_gpu_blocks=10_000,
+        _gms_kv_directory=SimpleNamespace(authoritative=True),
+        _gms_kv_lease_client=SimpleNamespace(free_count=lambda: 20),
+    )
+    monkeypatch.setattr(
+        leases_mod,
+        "_evict_dormant_directory_blocks",
+        lambda _pool, count: evictions.append(count) or count,
+    )
+
+    assert leases_mod._reserve_dormant_headroom(pool, 8) == 180
+    assert evictions == [180]
+    monkeypatch.setenv("GMS_VLLM_DORMANT_HEADROOM_BLOCKS", "256")
+    assert leases_mod._reserve_dormant_headroom(pool, 8) == 236
+    assert evictions == [180, 236]
+
+
+def test_completed_hbm_blocks_use_daemon_owned_publication_pipeline():
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+    from gpu_memory_service.integrations.common.kv_lease_client import KVLease
+
+    lease = KVLease(7, 11)
+    client = SimpleNamespace(seal=MagicMock())
+    directory = SimpleNamespace(
+        enabled=True,
+        publish_deferred=MagicMock(return_value=1),
+        publish=MagicMock(side_effect=AssertionError("synchronous publish used")),
+    )
+    pool = SimpleNamespace(
+        _gms_kv_directory=directory,
+        _gms_kv_lease_client=client,
+        _gms_kv_leases_by_block={7: lease},
+    )
+    block = SimpleNamespace(block_id=7, block_hash=b"native-hash")
+
+    assert leases_mod._publish_hbm_blocks(pool, [block], active=False) is True
+
+    client.seal.assert_called_once_with([lease])
+    directory.publish_deferred.assert_called_once()
+    item = directory.publish_deferred.call_args.args[0][0]
+    assert item["slot_id"] == 7
+    assert item["generation"] == 11
+    assert item["active"] is False
+    directory.publish.assert_not_called()
 
 
 def test_scheduler_completion_fence_uses_native_deferred_free(monkeypatch):
