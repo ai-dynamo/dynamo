@@ -170,10 +170,23 @@ fn max_tokens(
     // The window is input + output, so on a short prompt the remainder can
     // exceed what the engine will actually generate and it would reject the
     // request we derived.
-    Ok(match limits.max_output_tokens {
+    let derived = match limits.max_output_tokens {
         Some(cap) => remaining.min(cap),
         None => remaining,
-    })
+    };
+    // Both the cap and the `.max(1)` floor can land under an explicit minimum.
+    // Sending `min_tokens` above `max_tokens` is a request no engine can honour,
+    // and TensorRT-LLM does not cross-validate the pair, so say which two values
+    // conflict instead of letting it resolve them silently.
+    if let Some(min_tokens) = request.stop_conditions.min_tokens
+        && min_tokens > derived
+    {
+        return Err(client::invalid_argument(format!(
+            "min_tokens ({min_tokens}) exceeds the {derived} tokens left for this request; \
+             the {context_length}-token window already holds a {prompt_len}-token prompt"
+        )));
+    }
+    Ok(derived)
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
@@ -809,6 +822,24 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
         // pressure.
         pb::ErrorCode::Overloaded => client::engine_error(message),
         pb::ErrorCode::Cancelled => client::cancelled(message),
+        // A decode request reached a worker whose engine is not in that role,
+        // so every request to it fails the same way. That is a deployment
+        // mistake, and an opaque 500 gives the operator nothing to search for.
+        pb::ErrorCode::RoleMismatch => client::invalid_argument(format!(
+            "{message} (the engine rejected this request's disaggregation role: check that the \
+             sidecar's --disaggregation-mode matches how its engine was started)"
+        )),
+        // The handoff named a context worker this engine could not reach or
+        // whose session is gone. Deliberately not migratable: a retry would
+        // replay the same dead handoff and fail identically on the next worker.
+        // Recovering properly means re-running prefill, which the frontend
+        // cannot be asked for from here.
+        pb::ErrorCode::KvSessionNotFound | pb::ErrorCode::KvTransferFailed => {
+            client::engine_error(format!(
+                "{message} (the prefill handoff could not be resolved: check that both engines \
+                 were started with a cache transceiver and can reach each other)"
+            ))
+        }
         _ => client::engine_error(message),
     }
 }
