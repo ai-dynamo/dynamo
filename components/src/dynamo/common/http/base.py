@@ -47,6 +47,16 @@ class HttpConnectionError(HttpError):
     """Network-layer failure: DNS, refused, reset, half-close."""
 
 
+class HttpConfigurationError(HttpError):
+    """The deployment is configured so the fetch cannot be made safely.
+
+    An operator fault, not a verdict on the caller's URL, so it must not reach
+    the client as a 4xx. Loaders that convert unknown exceptions into
+    ``ValueError`` have to let this one through: ``py_err_to_dynamo`` maps
+    ``ValueError`` to ``InvalidArgument``, which is a client error.
+    """
+
+
 class HttpStatusError(HttpError):
     """Server responded with a non-2xx status."""
 

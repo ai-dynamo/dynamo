@@ -39,6 +39,7 @@ from dynamo.common.configuration.groups.http_args import (
 from .aiohttp_client import AiohttpClient
 from .base import (
     HttpClient,
+    HttpConfigurationError,
     HttpConnectionError,
     HttpError,
     HttpStatusError,
@@ -104,6 +105,7 @@ __all__ = [
     "AiohttpClient",
     "HttpError",
     "HttpTimeoutError",
+    "HttpConfigurationError",
     "HttpConnectionError",
     "HttpStatusError",
     "HttpConfigBase",

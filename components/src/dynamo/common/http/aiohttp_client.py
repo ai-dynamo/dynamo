@@ -22,8 +22,8 @@ from yarl import URL
 from ._ssrf_resolver import BlocklistResolver
 from .base import (
     HttpClient,
+    HttpConfigurationError,
     HttpConnectionError,
-    HttpError,
     HttpStatusError,
     HttpTimeoutError,
     collect_capped,
@@ -91,7 +91,7 @@ class AiohttpClient(HttpClient):
         return env_allows and policy.allow_private_ips
 
     @staticmethod
-    def _require_trusted_egress_proxy(url: str) -> None:
+    async def _require_trusted_egress_proxy(url: str) -> None:
         """Refuse a protected fetch that a proxy would put out of our reach.
 
         When a proxy applies, the connector dials the proxy and the proxy
@@ -108,12 +108,15 @@ class AiohttpClient(HttpClient):
         if os.getenv(DYN_MM_TRUST_EGRESS_PROXY, "").strip() == "1":
             return
         try:
-            get_env_proxy_for_url(URL(url))
+            # aiohttp runs this same helper through asyncio.to_thread because
+            # it does proxy-bypass discovery and .netrc file reads. Match that
+            # rather than repeating the blocking work on the event loop.
+            await asyncio.to_thread(get_env_proxy_for_url, URL(url))
         except LookupError:
             # No proxy for this URL, so aiohttp dials the origin and the
             # connect-time check governs it.
             return
-        raise HttpError(
+        raise HttpConfigurationError(
             f"{describe_media_source(url)} would be fetched through an egress "
             "proxy, so the connect-time address check cannot govern the "
             f"origin; set {DYN_MM_TRUST_EGRESS_PROXY}=1 to assert that the "
@@ -166,7 +169,7 @@ class AiohttpClient(HttpClient):
         # Only when the check is meant to bite. If private destinations are
         # already permitted for this fetch, the proxy gate protects nothing.
         if not allow_private:
-            self._require_trusted_egress_proxy(url)
+            await self._require_trusted_egress_proxy(url)
         session = await self._get_session(allow_private)
         client_timeout = self._effective_timeout(timeout)
         try:
@@ -208,7 +211,7 @@ class AiohttpClient(HttpClient):
         # Only when the check is meant to bite. If private destinations are
         # already permitted for this fetch, the proxy gate protects nothing.
         if not allow_private:
-            self._require_trusted_egress_proxy(url)
+            await self._require_trusted_egress_proxy(url)
         session = await self._get_session(allow_private)
         client_timeout = self._effective_timeout(timeout)
         try:

@@ -25,7 +25,7 @@ from yarl import URL
 from dynamo.common import http as mm_http
 from dynamo.common.http import AiohttpClient
 from dynamo.common.http._ssrf_resolver import BlocklistResolver
-from dynamo.common.http.base import HttpError
+from dynamo.common.http.base import HttpConfigurationError
 from dynamo.common.http.url_validator import UrlValidationPolicy
 
 pytestmark = [
@@ -210,11 +210,14 @@ async def test_build_session_installs_the_connect_time_resolver() -> None:
     process while the resolver's own unit tests stay green.
     """
     client = AiohttpClient()
-    session = client._build_session(False)
+    # Through _get_session, so client.close() owns it. _build_session does not
+    # register the session, and closing the client would leave it open.
+    session = await client._get_session(False)
     try:
         assert isinstance(session.connector._resolver, BlocklistResolver)
     finally:
         await client.close()
+    assert session.closed
 
 
 @_allows_cleanup_closed_notice
@@ -304,7 +307,7 @@ async def test_a_proxied_fetch_fails_closed_without_the_opt_in(monkeypatch) -> N
 
     client = AiohttpClient()
     try:
-        with pytest.raises(HttpError) as excinfo:
+        with pytest.raises(HttpConfigurationError) as excinfo:
             # No policy, so no URL validation runs first and the gate is the
             # only thing that can reject this.
             await client.fetch_bytes("https://example.com/x.png", 5.0)
@@ -326,7 +329,7 @@ async def test_the_gate_guards_the_revalidating_path_too(monkeypatch) -> None:
 
     client = AiohttpClient()
     try:
-        with pytest.raises(HttpError) as excinfo:
+        with pytest.raises(HttpConfigurationError) as excinfo:
             await client._fetch_body_or_redirect(
                 "https://example.com/x.png", 5.0, policy=_STRICT
             )
@@ -352,10 +355,10 @@ async def test_no_proxy_exempts_a_host_from_the_gate(monkeypatch) -> None:
 
     client = AiohttpClient()
     # Must not raise: NO_PROXY sends this host direct.
-    client._require_trusted_egress_proxy("https://example.com/x.png")
+    await client._require_trusted_egress_proxy("https://example.com/x.png")
     # A host NOT covered by NO_PROXY is still gated, which is the control.
-    with pytest.raises(HttpError):
-        client._require_trusted_egress_proxy("https://other.invalid/x.png")
+    with pytest.raises(HttpConfigurationError):
+        await client._require_trusted_egress_proxy("https://other.invalid/x.png")
     await client.close()
 
 
@@ -388,5 +391,55 @@ async def test_the_opt_in_allows_a_proxied_fetch(monkeypatch) -> None:
 
     client = AiohttpClient()
     # Returns without raising, which is the whole assertion.
-    client._require_trusted_egress_proxy("https://example.com/x.png")
+    await client._require_trusted_egress_proxy("https://example.com/x.png")
     await client.close()
+
+
+@_allows_cleanup_closed_notice
+async def test_each_policy_pool_gets_the_full_connection_limit(monkeypatch) -> None:
+    """The cap is per connect-time policy, and the help text says so.
+
+    Two pools can coexist, each with the configured limit, so a deployment
+    that enables internal access and also issues stricter per-request policies
+    can reach twice the value. Pinned here so the number and the documented
+    meaning cannot drift apart silently.
+    """
+    monkeypatch.setenv("DYN_MM_ALLOW_INTERNAL", "1")
+    client = AiohttpClient()
+    try:
+        permissive = await client._get_session(True)
+        strict = await client._get_session(False)
+        limit = client._config.max_connections
+        assert permissive is not strict
+        assert permissive.connector.limit == limit
+        assert strict.connector.limit == limit
+    finally:
+        await client.close()
+
+
+async def test_the_default_configuration_only_ever_builds_one_pool(monkeypatch) -> None:
+    """Without DYN_MM_ALLOW_INTERNAL the connect policy is always strict.
+
+    So the second pool, and the doubled cap with it, cannot appear in the
+    default deployment whatever a caller passes.
+    """
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+    client = AiohttpClient()
+    strict = UrlValidationPolicy(allow_http=True, allow_private_ips=False)
+    assert client._connect_allows_private(None) is False
+    assert client._connect_allows_private(_PERMISSIVE) is False
+    assert client._connect_allows_private(strict) is False
+    await client.close()
+
+
+async def test_the_proxy_gate_is_awaitable() -> None:
+    """The gate must not run aiohttp's proxy discovery on the event loop.
+
+    ``get_env_proxy_for_url`` does proxy-bypass discovery and ``.netrc`` file
+    reads, which is why aiohttp itself calls it through ``asyncio.to_thread``.
+    A synchronous gate repeats that blocking work inline on every protected
+    hop.
+    """
+    import inspect
+
+    assert inspect.iscoroutinefunction(AiohttpClient._require_trusted_egress_proxy)
