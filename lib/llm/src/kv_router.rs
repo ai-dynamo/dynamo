@@ -803,6 +803,10 @@ impl KvRouter {
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
+        let client_for_registration = client.clone();
+        let registration_availability_provider: metrics::RegistrationAvailabilityProvider =
+            Arc::new(move || client_for_registration.available_instance_ids());
+
         let client_for_availability = client.clone();
         let workers_for_availability = workers_with_configs.clone();
         let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
@@ -850,6 +854,7 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 available_worker_provider,
+                registration_availability_provider,
                 shared_cache: shared_cache.clone(),
                 // The availability provider refreshes LoRA eligibility at admission.
                 lora_worker_filter: None,

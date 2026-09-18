@@ -68,7 +68,7 @@ mod worker_registered;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
 use worker_registered::RouterWorkerRegistered;
-pub(crate) use worker_registered::RouterWorkerRegistration;
+pub(crate) use worker_registered::{RegistrationAvailabilityProvider, RouterWorkerRegistration};
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -562,7 +562,7 @@ impl RouterWorkerStatusMetrics {
         workers: crate::discovery::RuntimeConfigWatch,
         worker_type: &'static str,
         cancellation: tokio_util::sync::CancellationToken,
-        available_workers: Option<dynamo_kv_router::scheduling::WorkerAvailabilityProvider>,
+        available_workers: Option<RegistrationAvailabilityProvider>,
     ) -> Arc<RouterWorkerRegistration> {
         self.registered
             .watch(workers, worker_type, cancellation, available_workers)

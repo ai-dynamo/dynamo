@@ -1,8 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, Weak};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Weak},
+};
 
+use dynamo_kv_router::protocols::WorkerId;
 use dynamo_runtime::metrics::PrometheusMetric;
 use parking_lot::Mutex;
 use prometheus::{
@@ -14,16 +18,18 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ROUTER_WORKER_ID_LABEL, labels};
 use crate::discovery::RuntimeConfigWatch;
-use dynamo_kv_router::scheduling::WorkerAvailabilityProvider;
 
 const LABELS: &[&str] = &[ROUTER_WORKER_ID_LABEL, labels::DP_RANK, labels::WORKER_TYPE];
+
+pub(crate) type RegistrationAvailabilityProvider =
+    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 /// Owned by an embedded router, independently of its request/replica slot state.
 pub(crate) struct RouterWorkerRegistration {
     workers: RuntimeConfigWatch,
     worker_type: &'static str,
     cancellation: CancellationToken,
-    available_workers: Option<WorkerAvailabilityProvider>,
+    available_workers: Option<RegistrationAvailabilityProvider>,
 }
 
 /// Collect from discovery at scrape time so late bookings cannot resurrect removed workers.
@@ -50,7 +56,7 @@ impl RouterWorkerRegistered {
         workers: RuntimeConfigWatch,
         worker_type: &'static str,
         cancellation: CancellationToken,
-        available_workers: Option<WorkerAvailabilityProvider>,
+        available_workers: Option<RegistrationAvailabilityProvider>,
     ) -> Arc<RouterWorkerRegistration> {
         let source = Arc::new(RouterWorkerRegistration {
             workers,
@@ -83,8 +89,8 @@ impl Collector for RouterWorkerRegistered {
             if source.cancellation.is_cancelled() || source.workers.has_changed().is_err() {
                 return false;
             }
-            // Discovery can retain workers rejected by MCD admission or local fault
-            // inhibition. Use the same hard-availability source as selection, not overload.
+            // Registration is request-independent: apply the client's hard availability,
+            // before request-specific LoRA eligibility, and never its overload signal.
             let available = source.available_workers.as_ref().map(|provider| provider());
             for (worker_id, config) in source.workers.borrow().iter() {
                 if let Some(available) = &available
@@ -169,7 +175,8 @@ mod tests {
             (2, ModelRuntimeConfig::default()),
         ]));
         let (available_tx, available_rx) = watch::channel(None::<Arc<HashSet<u64>>>);
-        let provider: WorkerAvailabilityProvider = Arc::new(move || available_rx.borrow().clone());
+        let provider: RegistrationAvailabilityProvider =
+            Arc::new(move || available_rx.borrow().clone());
         let _owner = metric.watch(
             discovery_rx,
             "decode",

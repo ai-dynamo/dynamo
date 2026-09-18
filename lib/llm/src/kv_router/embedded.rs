@@ -34,8 +34,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::discovery::RuntimeConfigWatch;
 use crate::kv_router::metrics::{
-    ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RouterQueueMetricHandles,
-    RouterRequestMetrics, WORKER_LOAD_METRICS,
+    ActiveSequenceIngressMetrics, ROUTER_QUEUE_METRICS, RegistrationAvailabilityProvider,
+    RouterQueueMetricHandles, RouterRequestMetrics, WORKER_LOAD_METRICS,
 };
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 
@@ -50,6 +50,7 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
     pub available_worker_provider: WorkerAvailabilityProvider,
+    pub registration_availability_provider: RegistrationAvailabilityProvider,
     pub shared_cache: Option<Arc<dyn dynamo_kv_router::SharedKvCache>>,
     pub lora_worker_filter: Option<Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>>,
     /// Builds and feeds the router's index from the runtime; the partition
@@ -235,7 +236,7 @@ impl EmbeddedSelection {
                     workers_with_configs.clone(),
                     args.metric_worker_type,
                     cancellation_token.clone(),
-                    Some(args.available_worker_provider.clone()),
+                    Some(args.registration_availability_provider),
                 );
         let worker_type = args.worker_role.unwrap_or(WorkerType::Aggregated);
         let key = embedded_partition_key(args.model_name.as_deref());
