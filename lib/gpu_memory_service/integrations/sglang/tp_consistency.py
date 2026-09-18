@@ -29,18 +29,46 @@ class TPConsistency:
     def _gather(self, value):
         if not self.enabled:
             return [value]
+        import pickle
+        import struct
+
+        import torch
         import torch.distributed as dist
 
-        values = [None] * self.world_size
         try:
-            dist.all_gather_object(values, value, group=self.group)
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:  # noqa: BLE001
+            # Vote on encoding failure too; never strand peers in a collective.
+            payload = b""
+        try:
+            # Fixed frames remove all_gather_object's separate size exchange.
+            # Keep the full payload/stage checks and EVERY transaction vote.
+            frame_size = 4096
+            frame = bytearray(frame_size)
+            struct.pack_into("<I", frame, 0, len(payload))
+            if len(payload) <= frame_size - 4:
+                frame[4 : 4 + len(payload)] = payload
+            vote = torch.frombuffer(frame, dtype=torch.uint8)
+            outputs = [torch.empty_like(vote) for _ in range(self.world_size)]
+            dist.all_gather(outputs, vote, group=self.group)
+            frames = [output.numpy().tobytes() for output in outputs]
+            sizes = [struct.unpack_from("<I", item)[0] for item in frames]
+            if any(size == 0 for size in sizes):
+                raise ValueError("could not encode TP agreement frame")
+            if any(size > frame_size - 4 for size in sizes):
+                # Every rank takes this fallback when ANY payload is oversized.
+                values = [None] * self.world_size
+                dist.all_gather_object(values, value, group=self.group)
+                return values
+            return [
+                pickle.loads(item[4 : 4 + size]) for item, size in zip(frames, sizes)
+            ]
         except Exception as exc:
             # A broken collective is not a local cache miss. The caller must
             # stop the cohort instead of continuing with an unagreed prefix.
             raise GmsTPConsistencyError(
                 "SGLang GMS TP agreement channel failed"
             ) from exc
-        return values
 
     def agree(self, stage: str, value) -> None:
         values = self._gather((stage, value))
@@ -84,6 +112,15 @@ class TPConsistency:
             ) from exc
         return bool(vote.item())
 
+    def all_true(self, stage: str, value: bool) -> bool:
+        """Return true only when every rank reached the same readiness point."""
+        if not self.enabled:
+            return bool(value)
+        votes = self._gather((stage, bool(value)))
+        if any(vote[0] != stage for vote in votes):
+            raise GmsTPConsistencyError(f"SGLang GMS TP stage mismatch: {stage}")
+        return all(bool(vote[1]) for vote in votes)
+
     def _rank(self) -> int:
         if not self.enabled:
             return 0
@@ -115,6 +152,50 @@ class TPConsistency:
         for _stage, values in votes[1:]:
             common.intersection_update(values)
         return sorted(common)
+
+    def run_agreed(self, stage: str, operation):
+        """Vote local success and logical identity in one transaction.
+
+        The operation returns (local result, shared identity). Callers must
+        compensate reversible local side effects if this raises. Generation
+        tokens may remain rank-local; only the supplied identity is compared.
+        """
+        result = identity = None
+        error = None
+        try:
+            result, identity = operation()
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        votes = self._gather((stage, error is None, identity))
+        if any(vote[:2] != (stage, True) for vote in votes):
+            raise GmsTPConsistencyError(
+                f"SGLang GMS TP operation failed during {stage}"
+            ) from error
+        if any(vote[2] != votes[0][2] for vote in votes[1:]):
+            raise GmsTPConsistencyError(f"SGLang GMS TP disagreement during {stage}")
+        return result
+
+    def run_intersection(self, stage: str, operation):
+        """Read local candidates and vote success plus membership together.
+
+        No mutation is allowed in operation. A peer's read failure must still
+        reach the same collective before any rank uses the candidate set.
+        """
+        local = []
+        error = None
+        try:
+            local = list(operation())
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        votes = self._gather((stage, error is None, local))
+        if any(vote[:2] != (stage, True) for vote in votes):
+            raise GmsTPConsistencyError(
+                f"SGLang GMS TP operation failed during {stage}"
+            ) from error
+        common = set(votes[0][2])
+        for _stage, _ok, candidates in votes[1:]:
+            common.intersection_update(candidates)
+        return local, sorted(common)
 
     def _gather_digest(
         self, stage: str, ok: bool, agreement: bytes
@@ -160,9 +241,37 @@ class TPConsistency:
                 f"SGLang GMS TP transaction failed during {stage}"
             ) from error
         if any(identity != votes[0][1] for _ok, identity in votes[1:]):
+            raise GmsTPConsistencyError(f"SGLang GMS TP disagreement during {stage}")
+        return result
+
+    def run_agreed_digest(self, stage: str, operation):
+        """Run a local transaction and agree its compact identity once.
+
+        ``operation`` returns ``(local_result, agreement_bytes)``. This is the
+        fixed-size counterpart of :meth:`run_agreed` for large identities such
+        as a pressure-eviction batch. Sending the full Python object can cross
+        the fixed-frame limit and fall back to ``all_gather_object`` on the
+        scheduler thread; the digest retains fail-closed agreement without
+        serializing the whole batch across ranks.
+        """
+        if not self.enabled:
+            result, _agreement = operation()
+            return result
+        error = None
+        result = None
+        agreement = b""
+        try:
+            result, agreement = operation()
+            agreement = bytes(agreement)
+        except Exception as exc:  # noqa: BLE001
+            error = exc
+        votes = self._gather_digest(stage, error is None, agreement)
+        if any(not ok for ok, _identity in votes):
             raise GmsTPConsistencyError(
-                f"SGLang GMS TP disagreement during {stage}"
-            )
+                f"SGLang GMS TP operation failed during {stage}"
+            ) from error
+        if any(identity != votes[0][1] for _ok, identity in votes[1:]):
+            raise GmsTPConsistencyError(f"SGLang GMS TP disagreement during {stage}")
         return result
 
     def run(self, stage: str, operation):
