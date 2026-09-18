@@ -260,15 +260,7 @@ spec:
             command:
             - /opt/gpu-runtime
             env:
-            - name: CYBORG_BATCH_SIZE
-              value: "1"
-            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
-              value: "1"
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
-            - name: CYBORG_SWA_CACHE_IDS
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']

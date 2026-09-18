@@ -7,14 +7,12 @@ package lpx
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 )
 
 func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
@@ -40,13 +38,10 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 		scalingGroupReplicas: 1,
 	}
 
-	t.Log("Resolve the projected runtime path")
+	t.Log("Render the generated Agent endpoints")
 	plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 	require.NoError(t, err)
-	runtimePath, err := buildRuntimePath(projection.configuredBuild.Path, "/models")
-	require.NoError(t, err)
-	podSpec := renderTestPodSpec()
-	initial, err := workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
+	initial, err := workload.RenderCyborgConfigMap("test-namespace", plan)
 	require.NoError(t, err)
 
 	t.Log("Verify every engine replica addresses only its own Agents")
@@ -55,13 +50,13 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 			workload.scalingGroupReplicas = replicas
 			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
-			configMap, err := workload.RenderCyborgConfigMap("test-namespace", scaledPlan, podSpec)
+			configMap, err := workload.RenderCyborgConfigMap("test-namespace", scaledPlan)
 			require.NoError(t, err)
 			require.Equal(t, initial, configMap)
 			require.True(t, *configMap.Immutable)
 			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-"
 			require.Equal(t, prefix+"agt-0\n"+prefix+"agt-2", configMap.Data["lpu_servers"])
-			require.Equal(t, filepath.Join(runtimePath, "tokenizer"), configMap.Data["tokenizer_dir"])
+			require.Len(t, configMap.Data, 1)
 
 			t.Log("Resolve Cyborg server addresses to the last engine replica's actual Agent hostnames")
 			lastReplica := scaledPlan.ForReplica(replicas - 1)
@@ -71,29 +66,6 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 			}
 		})
 	}
-
-	t.Log("Render a Cap'n Proto build with a nested tokenizer path")
-	projection.configuredBuild.RuntimeTokenizerPath = "metadata/tokenizer"
-	configMap, err := workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
-
-	t.Log("Verify the nested tokenizer path is rooted in the runtime build")
-	require.NoError(t, err)
-	require.Equal(t, filepath.Join(runtimePath, "metadata/tokenizer"), configMap.Data["tokenizer_dir"])
-	require.NotEqual(t, initial.Name, configMap.Name)
-
-	t.Log("Reject oversized rendered Cyborg configuration before publication")
-	projection.configuredBuild.RuntimeTokenizerPath = strings.Repeat("x", corev1.MaxSecretSize)
-	_, err = workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
-	require.ErrorContains(t, err, "rendered LPX ConfigMap")
-	require.ErrorContains(t, err, "maximum is 1048576")
-
-	t.Log("Render a Cap'n Proto build without tokenizer metadata")
-	projection.configuredBuild.RuntimeTokenizerPath = ""
-	projection.configuredBuild.Path = "relative/build"
-	_, err = workload.RenderCyborgConfigMap("test-namespace", plan, podSpec)
-
-	t.Log("Verify missing tokenizer metadata is rejected")
-	require.EqualError(t, err, "capnp manifest build is missing model.tokenizer.path")
 }
 
 func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
@@ -134,7 +106,7 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
 			require.Equal(t, 2*test.partitions, projection.agentReplicas)
-			configMap, err := workload.RenderCyborgConfigMap("test", plan, renderTestPodSpec())
+			configMap, err := workload.RenderCyborgConfigMap("test", plan)
 			require.NoError(t, err)
 			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
 			servers := make([]string, len(test.wantOffsets))

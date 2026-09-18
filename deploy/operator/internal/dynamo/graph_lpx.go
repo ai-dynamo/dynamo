@@ -312,15 +312,11 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		role.Replicas = ptr.To(replicas)
 		role.MinAvailable = nil
-		var defaults ComponentDefaults = &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
+		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
-			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, plan, lpuTemplate.Spec)
+			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, plan)
 			if err != nil {
 				return nil, nil, err
-			}
-			defaults = &selectedCyborgComponentDefaults{
-				ComponentDefaults: defaults, workload: workload, configMapName: input.CyborgConfigMap.Name,
-				replicas: *role.Replicas, lpxPodSpec: lpuTemplate.Spec,
 			}
 		}
 		gpu := p
@@ -387,33 +383,6 @@ func (d *podTemplateRuntimeDefaults) GetBaseContainer(context ComponentContext) 
 			FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
 		},
 	})
-	return container, nil
-}
-
-// selectedCyborgComponentDefaults installs LPX-owned Cyborg bindings before
-// the user's PodTemplate is merged, preserving the normal merge strategy.
-type selectedCyborgComponentDefaults struct {
-	ComponentDefaults
-	workload      *dynamolpx.SelectedWorkload
-	configMapName string
-	replicas      int32
-	lpxPodSpec    corev1.PodSpec
-}
-
-func (d *selectedCyborgComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
-	container, err := d.ComponentDefaults.GetBaseContainer(context)
-	if err != nil {
-		return corev1.Container{}, err
-	}
-	if err := dynamolpx.ApplySelectedCyborgContainerDefaults(
-		&container,
-		d.workload,
-		d.configMapName,
-		d.replicas,
-		d.lpxPodSpec,
-	); err != nil {
-		return corev1.Container{}, err
-	}
 	return container, nil
 }
 

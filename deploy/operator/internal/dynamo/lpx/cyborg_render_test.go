@@ -72,7 +72,7 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	}
 }
 
-func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
+func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Project a split-I/O selected workload")
@@ -107,11 +107,17 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	}
 	decode.Spec.PodSpec.Containers[0].Command = []string{"/custom-cyborg", "--wrapper-option"}
 	decode.Spec.PodSpec.Containers[0].Args = []string{"argument with spaces", "literal $HOME", ""}
-	decode.Spec.PodSpec.Containers[0].Env = append(
-		decode.Spec.PodSpec.Containers[0].Env,
-		corev1.EnvVar{Name: "RDMA_PORT", Value: "12345"},
-		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
-	)
+	authoredEnv := []corev1.EnvVar{
+		{Name: "RDMA_PORT", Value: "12345"},
+		{Name: "CYBORG_BATCH_SIZE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			FieldPath: "metadata.labels['runtime-batch']",
+		}}},
+		{Name: "CYBORG_FPGA_GPI_IO_FPGA_COUNT", Value: "9"},
+		{Name: "CYBORG_SWA_CACHE_IDS", Value: "8,9"},
+		{Name: "TOKENIZER_DIR", Value: "$(GBUILD_MANIFEST_PATH)/../tokenizer"},
+		{Name: "TOTAL_REPLICAS", Value: "9"},
+	}
+	decode.Spec.PodSpec.Containers[0].Env = authoredEnv
 
 	t.Log("Use independently provisioned Cyborg model storage at the shared runtime path")
 	decode.Spec.PodSpec.Volumes[0].PersistentVolumeClaim.ClaimName = "cyborg-models"
@@ -125,19 +131,11 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	require.NoError(t, err)
 	cyborg := namedClique(t, rendered, "cond")
 
-	t.Log("Verify the rendered Cyborg runtime I/O contract")
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name: "CYBORG_FPGA_GPI_IO_FPGA_COUNT", Value: "2",
-	})
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name: "CYBORG_BATCH_SIZE", Value: "3",
-	})
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
+	t.Log("Keep runtime environment opaque while supplying its manifest before authored references")
+	manifestEnv := corev1.EnvVar{
 		Name: "GBUILD_MANIFEST_PATH", Value: "/models/model-build/manifest.v2.capnp.bin",
-	})
-	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{
-		Name: "RDMA_PORT", Value: "12345",
-	})
+	}
+	require.Equal(t, append([]corev1.EnvVar{manifestEnv}, authoredEnv...), cyborg.Spec.PodSpec.Containers[0].Env)
 	require.Equal(t, &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "cyborg-models", ReadOnly: true}, cyborg.Spec.PodSpec.Volumes[0].PersistentVolumeClaim)
 	require.Contains(t, cyborg.Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 		Name: "model-storage", MountPath: "/models", SubPath: "cyborg", ReadOnly: true,
@@ -151,10 +149,7 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	imageEntrypointCyborg.Spec.Replicas = 4
 	imageEntrypointCyborg.Spec.MinAvailable = ptr.To[int32](4)
 	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args = []string{"serve"}
-	imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env = append(
-		imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env,
-		corev1.EnvVar{Name: CyborgBatchSizeEnv, Value: "3"},
-	)
+	imageEntrypointEnv := append([]corev1.EnvVar{manifestEnv}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env...)
 
 	t.Log("Leave the image ENTRYPOINT selected when command is omitted")
 	input.Stages = map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}}
@@ -162,6 +157,7 @@ func TestRenderHybridProjectsManifestRuntimeIO(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Command)
 	require.Equal(t, []string{"serve"}, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Args)
+	require.Equal(t, imageEntrypointEnv, imageEntrypointCyborg.Spec.PodSpec.Containers[0].Env)
 
 	t.Log("Reject invalid Cyborg runtime bindings")
 

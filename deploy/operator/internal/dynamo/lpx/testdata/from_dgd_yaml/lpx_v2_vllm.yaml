@@ -20,7 +20,6 @@ data:
     lpx-${GROVE_PCSG_INDEX}-agt-14
     lpx-${GROVE_PCSG_INDEX}-agt-15
     lpx-${GROVE_PCSG_INDEX}-agt-16
-  tokenizer_dir: /testdata/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/tokenizer
 immutable: true
 metadata:
   annotations:
@@ -29,7 +28,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-decode-3aba9d08778da54a
+  name: dgd-lpx-v2-vllm-94cd-decode-54f76f5c988eb748
   namespace: inference-engine
 ---
 data:
@@ -428,7 +427,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: 3aba9d08778da54a7d7c53f0d1f5bdeb06f931a8f6390287d34c5f039dc58075
+        nvidia.com/extra-resources-hash: 54f76f5c988eb748803edb9e69ca144c7be656c2028d23217ef3135cbb8fe463
         scheduling.lpu.nvidia.com/dgd-uid: 11111111-1111-4111-8111-111111111111
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:12f2d0ae40fa84798f025eafc6bf5ecbe38cdc7adb797e3e41726b4c8c916114
         scheduling.lpu.nvidia.com/role: cyborg-worker
@@ -471,15 +470,7 @@ spec:
             - --
             - /usr/local/bin/cyborg
             env:
-            - name: CYBORG_BATCH_SIZE
-              value: "1"
-            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
-              value: "1"
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
-            - name: CYBORG_SWA_CACHE_IDS
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
@@ -537,13 +528,6 @@ spec:
               value: "19877"
             - name: SERVER_HOSTS_FILE
               value: /tmp/lpu_servers
-            - name: TOKENIZER_DIR
-              valueFrom:
-                configMapKeyRef:
-                  key: tokenizer_dir
-                  name: dgd-lpx-v2-vllm-94cd-decode-3aba9d08778da54a
-            - name: TOTAL_REPLICAS
-              value: "1"
             image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1
@@ -615,7 +599,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-decode-3aba9d08778da54a
+              name: dgd-lpx-v2-vllm-94cd-decode-54f76f5c988eb748
             name: config
         replicas: 1
         roleName: cond

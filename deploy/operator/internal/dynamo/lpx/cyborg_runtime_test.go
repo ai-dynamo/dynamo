@@ -12,16 +12,35 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-func TestConfiguredCyborgBatchSizeRejectsInvalidEnvironment(t *testing.T) {
-	t.Log("Define invalid literal and field-sourced Cyborg batch-size variables")
-	tests := []corev1.EnvVar{
-		{Name: CyborgBatchSizeEnv, Value: "0"},
-		{Name: CyborgBatchSizeEnv, Value: "invalid"},
-		{Name: CyborgBatchSizeEnv, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+func TestApplyCyborgManifestPathPrecedesAuthoredReferences(t *testing.T) {
+	t.Parallel()
+
+	t.Log("Define authored bindings that depend on the generated manifest location")
+	projection := &ModelProjection{configuredBuild: Build{Path: "file:///models/build"}}
+	authored := []corev1.EnvVar{
+		{Name: "MODEL_PATH", Value: "$(GBUILD_MANIFEST_PATH)"},
+		{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
 	}
-	for _, variable := range tests {
-		t.Logf("Reject invalid Cyborg batch-size environment %+v", variable)
-		_, err := configuredCyborgBatchSize(&corev1.Container{Env: []corev1.EnvVar{variable}}, 1)
-		require.Error(t, err)
+	want := append([]corev1.EnvVar{{Name: gbuildManifestPathEnv, Value: "/models/build/manifest.v2.capnp.bin"}}, authored...)
+	for _, test := range []struct {
+		name string
+		env  []corev1.EnvVar
+	}{
+		{name: "missing binding", env: authored},
+		{name: "stale binding after reference", env: append(append([]corev1.EnvVar(nil), authored...), corev1.EnvVar{
+			Name: gbuildManifestPathEnv, Value: "/stale/manifest",
+		})},
+		{name: "existing binding before reference", env: want},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Publish the authoritative path before references while preserving other bindings")
+			container := corev1.Container{Env: test.env}
+			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
+			require.Equal(t, want, container.Env)
+
+			t.Log("Repeat rendering without duplicating or reordering environment bindings")
+			require.NoError(t, applyCyborgManifestPath(&container, projection, "/models"))
+			require.Equal(t, want, container.Env)
+		})
 	}
 }

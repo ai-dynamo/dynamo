@@ -35,16 +35,9 @@ func configureHybridCyborg(
 	if cyborgStorage.mount.MountPath != modelStorage.mount.MountPath {
 		return fmt.Errorf("selected Cyborg podTemplate conflicts with model storage mount %q", modelStorage.mount.MountPath)
 	}
-	cyborgBatchSize, ioFPGACount, err := cyborgRuntimeIO(&projection.configuredBuild, cyborg.Spec.Replicas)
-	if err != nil {
+	if err := validateCyborgReplicas(&projection.configuredBuild, cyborg.Spec.Replicas); err != nil {
 		return err
 	}
-	cyborgBatchSize, err = configuredCyborgBatchSize(container, cyborgBatchSize)
-	if err != nil {
-		return err
-	}
-	applyCyborgRuntimeIO(container, cyborgBatchSize, ioFPGACount)
-	applyCyborgSWACacheIDs(container, cyborgBatchSize)
 	if err := applyCyborgManifestPath(container, projection, modelStorage.mount.MountPath); err != nil {
 		return err
 	}

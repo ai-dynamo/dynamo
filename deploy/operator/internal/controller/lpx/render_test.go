@@ -1043,14 +1043,14 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	lpxComponent.LPX.BuildID = "node-local-v2-cpu-embeddings"
 	lpxComponent.ModelRef = &v1beta1.ModelReference{Name: "test/model"}
 
-	t.Log("Customize the independent Cyborg batch while keeping its sidecar separate")
+	t.Log("Author the Cyborg batch while keeping its sidecar separate")
 	cyborgRole := lpxComponent.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	require.NotNil(t, cyborgRole)
 	authoredCyborgMain := &cyborgRole.PodTemplate.Spec.Containers[0]
 	require.Equal(t, commonconsts.MainContainerName, authoredCyborgMain.Name)
 	authoredCyborgMain.Env = append(
 		authoredCyborgMain.Env,
-		corev1.EnvVar{Name: lpx.CyborgBatchSizeEnv, Value: "2"},
+		corev1.EnvVar{Name: "CYBORG_BATCH_SIZE", Value: "2"},
 		corev1.EnvVar{Name: "USER_BATCH_REF", Value: "$(CYBORG_BATCH_SIZE)"},
 	)
 
@@ -1219,15 +1219,14 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, "/dev/infiniband", infinibandVolume.HostPath.Path)
 	require.Nil(t, infinibandVolume.PersistentVolumeClaim)
 
-	t.Log("Verify Cyborg receives every runtime value consumed by its startup command")
+	t.Log("Preserve authored Cyborg runtime values and their expansion order")
 	cyborgEnv := make(map[string]string, len(cyborgMain.Env))
 	for _, variable := range cyborgMain.Env {
 		cyborgEnv[variable.Name] = variable.Value
 	}
 	require.Equal(t, "19877", cyborgEnv["RDMA_PORT"])
 	require.Equal(t, "/tmp/lpu_servers", cyborgEnv["SERVER_HOSTS_FILE"])
-	require.Equal(t, "1", cyborgEnv["TOTAL_REPLICAS"])
-	require.Equal(t, "2", cyborgEnv[lpx.CyborgBatchSizeEnv])
+	require.Equal(t, "2", cyborgEnv["CYBORG_BATCH_SIZE"])
 	require.NotContains(t, cyborgEnv, "CYBORG_SWA_CACHE_IDS")
 	batchIndex := slices.IndexFunc(cyborgMain.Env, func(variable corev1.EnvVar) bool {
 		return variable.Name == "CYBORG_BATCH_SIZE"
@@ -1238,18 +1237,6 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.NotEqual(t, -1, batchIndex)
 	require.NotEqual(t, -1, userIndex)
 	require.Less(t, batchIndex, userIndex)
-	var tokenizerEnv *corev1.EnvVar
-	for index := range cyborgMain.Env {
-		if cyborgMain.Env[index].Name == "TOKENIZER_DIR" {
-			tokenizerEnv = &cyborgMain.Env[index]
-			break
-		}
-	}
-	require.NotNil(t, tokenizerEnv)
-	require.NotNil(t, tokenizerEnv.ValueFrom)
-	require.NotNil(t, tokenizerEnv.ValueFrom.ConfigMapKeyRef)
-	require.Equal(t, decodeConfigName, tokenizerEnv.ValueFrom.ConfigMapKeyRef.Name)
-	require.Equal(t, "tokenizer_dir", tokenizerEnv.ValueFrom.ConfigMapKeyRef.Key)
 
 	t.Log("Keep partition zero as the collapsed runtime root for all three physical partitions")
 	lpuConfig := getResource[*corev1.ConfigMap](t, extraResources, lpuConfigName)
@@ -1262,9 +1249,8 @@ func TestGenerateGrovePodCliqueSet_ImplicitV2HybridPreservesAgentRuntime(t *test
 	require.Equal(t, decodeConfigName, extraResources[0].GetName())
 	require.Equal(t, lpuConfigName, extraResources[1].GetName())
 	require.Equal(t, dgd.Namespace, decodeConfig.Namespace)
-	require.Len(t, decodeConfig.Data, 2)
+	require.Len(t, decodeConfig.Data, 1)
 	require.Equal(t, []string{"lpx-${GROVE_PCSG_INDEX}-agt-0"}, strings.Split(decodeConfig.Data["lpu_servers"], "\n"))
-	require.NotEmpty(t, decodeConfig.Data["tokenizer_dir"])
 	decodeHash := lpx.LPUConfigMapHash(decodeConfig)
 	require.Equal(t, decodeHash, cyborg.Annotations[commonconsts.AnnotationExtraResourcesHash])
 }
@@ -1274,6 +1260,7 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 	registry := newTestDataModelRegistry(t, t.TempDir())
 	staticEnvNames := []string{
 		"POD_IP", "POD_NAME", "POD_NAMESPACE", "POD_UID", "LPU_MODEL_NAME", "CYBORG_FPGA_GPI_REPLICA_INDEX",
+		"CYBORG_BATCH_SIZE", "CYBORG_FPGA_GPI_IO_FPGA_COUNT", "CYBORG_SWA_CACHE_IDS", "TOKENIZER_DIR", "TOTAL_REPLICAS",
 		"DYN_SYSTEM_ENABLED", "DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", "DYN_SYSTEM_PORT", "DYN_HEALTH_CHECK_ENABLED",
 		"NIXL_TELEMETRY_ENABLE", "NIXL_TELEMETRY_EXPORTER", "NIXL_TELEMETRY_PROMETHEUS_PORT", "DYN_FORWARDPASS_METRIC_PORT",
 	}
@@ -1328,11 +1315,17 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 		{name: "argument terminator", command: []string{"/opt/custom-runtime"}, args: []string{"--", "literal argument"}},
 		{name: "shell command", command: []string{"/bin/sh", "-c"}, args: []string{"exec /opt/custom-runtime --allocation $LPX_ALLOCATION"}},
 		{
+			name:          "Cyborg manifest argument remains user-owned",
+			cyborgCommand: []string{"/opt/cyborg-runtime"},
+			cyborgArgs:    []string{"--gbuild-manifest", "$(GBUILD_MANIFEST_PATH)"},
+			hybridOnly:    true,
+		},
+		{
 			name:          "explicit Cyborg shell remains user-owned",
 			command:       []string{"/opt/custom-runtime"},
 			args:          []string{"serve"},
 			cyborgCommand: []string{"/bin/sh", "-c"},
-			cyborgArgs:    []string{"exec /opt/cyborg-runtime serve"},
+			cyborgArgs:    []string{`exec /opt/cyborg-runtime --gbuild-manifest "$GBUILD_MANIFEST_PATH"`},
 			hybridOnly:    true,
 		},
 		{
@@ -1565,6 +1558,9 @@ func TestGenerateGrovePodCliqueSet_NodeLocalPreservesImageEntrypoint(t *testing.
 							require.NotContains(t, main.Env, corev1.EnvVar{Name: "LPX_ALLOCATION", Value: "forged-allocation"})
 						case lpxv1alpha1.PodRoleCyborgWorker:
 							cyborgs++
+							require.Contains(t, main.Env, corev1.EnvVar{
+								Name: "GBUILD_MANIFEST_PATH", Value: filepath.Join("/nfs", component.LPX.BuildID, "manifest.v2.capnp.bin"),
+							})
 						}
 					}
 					require.Positive(t, agents)
@@ -1613,7 +1609,13 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 		{Name: "TOKENIZER_DIR", Value: "/custom-tokenizer"},
 		{Name: "TOTAL_REPLICAS", Value: "9"},
 		{Name: "SERVER_HOSTS_FILE", Value: "/custom-servers"},
-		{Name: lpx.CyborgBatchSizeEnv, Value: "2"},
+	}
+	for _, name := range []string{"CYBORG_BATCH_SIZE", "CYBORG_FPGA_GPI_IO_FPGA_COUNT", "CYBORG_SWA_CACHE_IDS"} {
+		leader.Spec.Containers[0].Env = append(leader.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: name, ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "runtime-settings"}, Key: name,
+			}},
+		})
 	}
 	authoredConfig := corev1.Volume{
 		Name:         "config",
@@ -1646,18 +1648,14 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	}
 	require.Equal(t, []corev1.Volume{authoredConfig}, configVolumes)
 
-	t.Log("Preserve authored mounts and runtime environment over the generated Cyborg defaults")
+	t.Log("Preserve authored mounts and runtime environment without interpreting literal or valueFrom settings")
 	main := podSpec.Containers[0]
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "config", MountPath: "/custom-config", ReadOnly: true})
 	require.Contains(t, main.VolumeMounts, corev1.VolumeMount{Name: "infiniband", MountPath: "/custom-infiniband", ReadOnly: true})
 	require.False(t, slices.ContainsFunc(main.VolumeMounts, func(mount corev1.VolumeMount) bool { return mount.MountPath == "/configs" }))
-	env := make(map[string]string, len(main.Env))
-	for _, variable := range main.Env {
-		env[variable.Name] = variable.Value
+	for _, variable := range leader.Spec.Containers[0].Env {
+		require.Contains(t, main.Env, variable)
 	}
-	require.Equal(t, "/custom-tokenizer", env["TOKENIZER_DIR"])
-	require.Equal(t, "9", env["TOTAL_REPLICAS"])
-	require.Equal(t, "/custom-servers", env["SERVER_HOSTS_FILE"])
 
 	t.Log("Preserve the authored command and host-file override without adding a launcher")
 	require.Equal(t, leader.Spec.Containers[0].Command, main.Command)

@@ -48,7 +48,7 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 		return nil, err
 	}
 	if workload.BuildFamily() == BuildFamilyXT && workload.Pipeline() == PipelineLPX {
-		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(pcs.Namespace, plan, input.Stages[testRenderComponentName].Spec)
+		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(pcs.Namespace, plan)
 		if err != nil {
 			return nil, err
 		}

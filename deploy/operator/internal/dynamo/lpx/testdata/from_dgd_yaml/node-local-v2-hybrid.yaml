@@ -3,7 +3,6 @@
 
 data:
   lpu_servers: lpx-${GROVE_PCSG_INDEX}-agt-0
-  tokenizer_dir: /testdata/node-local-v2-connected-lpx/tokenizer
 immutable: true
 metadata:
   annotations:
@@ -12,7 +11,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-decode-f8838533ed7ff824
+  name: node-local-v2-hybrid-9d06-decode-734ce683f6b7ea5f
   namespace: test
 ---
 data:
@@ -243,7 +242,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: f8838533ed7ff8246dfdef9db2185d041489d1dc07addbf57f5893ae77eb5139
+        nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
         scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:15dd04d9f3ce9e1a58d776d35892e4fad5c91109b1bf86c386fb00b010273db8
         scheduling.lpu.nvidia.com/role: cyborg-worker
@@ -269,15 +268,7 @@ spec:
             - --
             - /opt/gpu-runtime
             env:
-            - name: CYBORG_BATCH_SIZE
-              value: "1"
-            - name: CYBORG_FPGA_GPI_IO_FPGA_COUNT
-              value: "1"
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.labels['grove.io/podclique-pod-index']
-            - name: CYBORG_SWA_CACHE_IDS
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['grove.io/podclique-pod-index']
@@ -333,13 +324,6 @@ spec:
               value: "19877"
             - name: SERVER_HOSTS_FILE
               value: /tmp/lpu_servers
-            - name: TOKENIZER_DIR
-              valueFrom:
-                configMapKeyRef:
-                  key: tokenizer_dir
-                  name: node-local-v2-hybrid-9d06-decode-f8838533ed7ff824
-            - name: TOTAL_REPLICAS
-              value: "1"
             image: example.invalid/gpu-runtime:test
             livenessProbe:
               failureThreshold: 1
@@ -404,7 +388,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-9d06-decode-f8838533ed7ff824
+              name: node-local-v2-hybrid-9d06-decode-734ce683f6b7ea5f
             name: config
         replicas: 1
         roleName: cond
