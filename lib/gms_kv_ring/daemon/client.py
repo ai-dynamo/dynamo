@@ -6,9 +6,13 @@
 Used by engine hooks to:
   1. attach the engine's KV pool (one-time at startup)
   2. attach the evict + restore rings (one-time at startup)
-  3. detach on engine shutdown
+  3. publish crash-recovery metadata over an ordered daemon connection
+  4. detach on engine shutdown
 
-No hot-path methods here. The rings are the hot path.
+Lease acquisition stays on the shared-memory rings. Directory publication is
+allowed on request completion, but the steady-state path waits only until the
+complete frame belongs to the daemon socket; acknowledgement is consumed by a
+background reader.
 """
 
 from __future__ import annotations
@@ -85,15 +89,23 @@ class DaemonClient:
         self.close()
 
     def _call(self, msg: dict) -> dict:
-        frame = encode_frame(msg)
         with self._call_lock:
             try:
-                self._sock.sendall(frame)
-                resp = recv_frame(self._sock)
+                self.send_request(msg)
+                resp = self.receive_response()
             except Exception:
                 self._sock.close()
                 self._sock = None
                 raise
+        return resp
+
+    def send_request(self, msg: dict) -> None:
+        """Copy one complete request frame into this connection."""
+        self._sock.sendall(encode_frame(msg))
+
+    def receive_response(self) -> dict:
+        """Receive the next response from this connection's ordered stream."""
+        resp = recv_frame(self._sock)
         # Capture the daemon epoch on every response. Older daemons
         # omit the field — leave the last-seen value unchanged in
         # that case (graceful rolling upgrade).
@@ -101,6 +113,56 @@ class DaemonClient:
         if ep is not None:
             self._daemon_epoch = int(ep)
         return resp
+
+    @staticmethod
+    def directory_publish_batch_message(
+        manifest_id: str,
+        writer_id: str,
+        items: list[dict],
+        expected_epoch: int,
+        scope: str = "",
+    ) -> dict:
+        """Normalize one directory publication without performing I/O."""
+        payload_items = []
+        for item in items:
+            slot_ids = item.get("slot_ids")
+            if slot_ids is None:
+                slot_ids = [item["slot_id"]]
+            generations = item.get("generations")
+            if generations is None:
+                generations = [item.get("generation", 0)] * len(slot_ids)
+            payload_items.append(
+                {
+                    "content_hash": item["content_hash"].hex(),
+                    **(
+                        {"local_key": bytes(item["local_key"]).hex()}
+                        if item.get("local_key") is not None
+                        else {}
+                    ),
+                    "engine_id": str(item["engine_id"]),
+                    "slot_ids": [int(slot_id) for slot_id in slot_ids],
+                    "generations": [int(generation) for generation in generations],
+                    "ranges": [
+                        {
+                            "layer": int(layer),
+                            "offset": int(offset),
+                            "size": int(size),
+                        }
+                        for layer, offset, size in item.get("ranges", [])
+                    ],
+                    "tier": str(item.get("tier", "")),
+                    "sealed": bool(item.get("sealed", True)),
+                    "active": bool(item.get("active", False)),
+                }
+            )
+        return {
+            "op": "directory_publish_batch",
+            "manifest_id": str(manifest_id),
+            "writer_id": str(writer_id),
+            "scope": str(scope),
+            "expected_epoch": int(expected_epoch),
+            "items": payload_items,
+        }
 
     def _ok(self, msg: dict) -> dict:
         resp = self._call(msg)
@@ -240,59 +302,27 @@ class DaemonClient:
         self,
         manifest_id: str,
         writer_id: str,
-        items: "list[dict]",
+        items: list[dict],
         expected_epoch: Optional[int] = None,
         scope: str = "",
     ) -> dict:
         """Publish sealed daemon-owned KV locations for the active writer."""
-        payload_items = []
-        for item in items:
-            slot_ids = item.get("slot_ids")
-            if slot_ids is None:
-                slot_ids = [item["slot_id"]]
-            generations = item.get("generations")
-            if generations is None:
-                generations = [item.get("generation", 0)] * len(slot_ids)
-            payload_items.append(
-                {
-                    "content_hash": item["content_hash"].hex(),
-                    **(
-                        {"local_key": bytes(item["local_key"]).hex()}
-                        if item.get("local_key") is not None
-                        else {}
-                    ),
-                    "engine_id": str(item["engine_id"]),
-                    "slot_ids": [int(slot_id) for slot_id in slot_ids],
-                    "generations": [int(generation) for generation in generations],
-                    "ranges": [
-                        {
-                            "layer": int(layer),
-                            "offset": int(offset),
-                            "size": int(size),
-                        }
-                        for layer, offset, size in item.get("ranges", [])
-                    ],
-                    "tier": str(item.get("tier", "")),
-                    "sealed": bool(item.get("sealed", True)),
-                    "active": bool(item.get("active", False)),
-                }
-            )
         resp = self._ok(
-            {
-                "op": "directory_publish_batch",
-                "manifest_id": str(manifest_id),
-                "writer_id": str(writer_id),
-                "scope": str(scope),
-                "expected_epoch": int(
+            self.directory_publish_batch_message(
+                manifest_id,
+                writer_id,
+                items,
+                int(
                     expected_epoch
                     if expected_epoch is not None
                     else getattr(self, "_directory_epoch", 0)
                 ),
-                "items": payload_items,
-            }
+                scope,
+            )
         )
         self._directory_epoch = int(resp.get("directory_epoch", 0))
         return {
+            "accepted": int(resp.get("accepted", resp.get("published", 0))),
             "published": int(resp.get("published", 0)),
             "removed": int(resp.get("removed", 0)),
             "rejected_stale_writer": bool(resp.get("rejected_stale_writer", False)),
@@ -327,6 +357,29 @@ class DaemonClient:
             None if token is None else str(token),
             bool(resp.get("rejected_stale_writer", False)),
             epoch,
+        )
+
+    def directory_lookup_read_claim(
+        self,
+        manifest_id: str,
+        content_hashes: list[bytes],
+    ) -> tuple[list[Optional[dict]], Optional[str]]:
+        """Claim immutable READY entries without directory-writer authority."""
+        resp = self._ok(
+            {
+                "op": "directory_lookup_claim",
+                "manifest_id": str(manifest_id),
+                "reader_only": True,
+                "hashes": [value.hex() for value in content_hashes],
+            }
+        )
+        token = resp.get("claim_token")
+        return (
+            [
+                None if entry is None else dict(entry)
+                for entry in resp.get("entries", [])
+            ],
+            None if token is None else str(token),
         )
 
     def directory_release_claim(self, claim_token: str) -> bool:
@@ -429,6 +482,21 @@ class DaemonClient:
         expected_epoch: int,
         scope: str = "",
     ) -> tuple[dict[str, list[int]], bool]:
+        protected, _leases, rejected = self.directory_hbm_lease_inventory(
+            writer_id, expected_epoch, scope=scope
+        )
+        return protected, rejected
+
+    def directory_hbm_lease_inventory(
+        self,
+        writer_id: str,
+        expected_epoch: int,
+        scope: str = "",
+    ) -> tuple[
+        dict[str, list[int]],
+        dict[str, list[tuple[int, int]]] | None,
+        bool,
+    ]:
         resp = self._ok(
             {
                 "op": "directory_hbm_inventory",
@@ -441,4 +509,19 @@ class DaemonClient:
             str(engine_id): [int(slot_id) for slot_id in slot_ids]
             for engine_id, slot_ids in (resp.get("protected") or {}).items()
         }
-        return protected, bool(resp.get("rejected_stale_writer", False))
+        raw_protected_leases = resp.get("protected_leases")
+        protected_leases = (
+            None
+            if raw_protected_leases is None
+            else {
+                str(engine_id): [
+                    (int(lease[0]), int(lease[1])) for lease in leases
+                ]
+                for engine_id, leases in raw_protected_leases.items()
+            }
+        )
+        return (
+            protected,
+            protected_leases,
+            bool(resp.get("rejected_stale_writer", False)),
+        )
