@@ -134,6 +134,35 @@ func TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues(t *testing.T) {
 	}
 }
 
+// TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame covers vLLM's FlexibleArgumentParser
+// treating "_" and "-" as interchangeable in long option names: "--tensor_parallel_size" must
+// read the same as "--tensor-parallel-size", separated or equals-form, or getFlagValue
+// silently falls back to 1 -- the same topology mismatch this PR fixes for short/equals forms.
+func TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame(t *testing.T) {
+	for name, args := range map[string][]string{
+		"separated": {"--tensor_parallel_size", "4"},
+		"equals":    {"--tensor_parallel_size=4"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			if got != 4 {
+				t.Errorf("getFlagValue(%q) = %d, want 4 -- vLLM treats \"_\" and \"-\" as "+
+					"interchangeable in long option names", args, got)
+			}
+		})
+	}
+}
+
+// TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP covers the same underscore
+// interchangeability for the boolean --enable_elastic_ep and the --data_parallel_backend
+// qualifier IsElasticEPRayLaunch reads via hasFlag/hasArg.
+func TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP(t *testing.T) {
+	container := vllmContainer("--enable_elastic_ep", "--data_parallel_backend=ray")
+	if !IsElasticEPRayLaunch(container) {
+		t.Fatal("underscore-spelled --enable_elastic_ep/--data_parallel_backend should qualify as an elastic-EP Ray launch")
+	}
+}
+
 func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
 	for name, args := range map[string][]string{
 		"long then long":  {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},

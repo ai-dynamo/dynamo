@@ -598,28 +598,39 @@ var vllmShortFlagAliases = map[string]string{
 }
 
 // vllmNormalizedFlags is the set of canonical long flags this package's readers (hasFlag,
-// hasArg, getFlagValue) actually look for. Equals-form splitting in normalizeVLLMFlags is
-// restricted to these so an unrelated option's value can never be mistaken for one of them
-// after normalization -- e.g. "--served-model-name=--enable-elastic-ep" must stay one token,
-// not become a standalone "--enable-elastic-ep" that IsElasticEPRayLaunch would match.
+// hasArg, getFlagValue) actually look for. Two things in normalizeVLLMFlags are restricted
+// to this set:
+//   - Underscore-to-dash rewriting: vLLM's FlexibleArgumentParser treats "_" and "-" as
+//     interchangeable in long option names ("--tensor_parallel_size" == "--tensor-parallel-size"),
+//     so a token is only rewritten when its dashed form is one of these -- an unrelated flag's
+//     spelling is left alone.
+//   - Equals-form splitting: an unrelated option's value can never be mistaken for one of
+//     these after normalization -- e.g. "--served-model-name=--enable-elastic-ep" must stay
+//     one token, not become a standalone "--enable-elastic-ep" that IsElasticEPRayLaunch would
+//     match.
 var vllmNormalizedFlags = map[string]bool{
 	tensorParallelSizeFlag:    true,
 	pipelineParallelSizeFlag:  true,
 	dataParallelSizeFlag:      true,
 	dataParallelSizeLocalFlag: true,
 	dataParallelBackendFlag:   true,
+	enableElasticEPFlag:       true,
 }
 
 // normalizeVLLMFlags standardizes tokenized command-line arguments into a
 // single format: "--long-flag" followed by a separate "value" token. It
-// expands short aliases (e.g., "-dp" to "--data-parallel-size") and splits
-// combined pairs (e.g., "--flag=value") for the flags this package reads.
+// expands short aliases (e.g., "-dp" to "--data-parallel-size"), rewrites
+// underscore spellings of the flags this package reads to their dashed
+// form (e.g., "--tensor_parallel_size" to "--tensor-parallel-size"), and
+// splits combined pairs (e.g., "--flag=value") for those same flags.
 func normalizeVLLMFlags(expanded []string) []string {
 	normalized := make([]string, 0, len(expanded))
 	for _, arg := range expanded {
 		flag, value, hasEquals := strings.Cut(arg, "=")
 		if canonical, ok := vllmShortFlagAliases[flag]; ok {
 			flag = canonical
+		} else if dashed := strings.ReplaceAll(flag, "_", "-"); vllmNormalizedFlags[dashed] {
+			flag = dashed
 		}
 		if hasEquals && !vllmNormalizedFlags[flag] {
 			normalized = append(normalized, arg)
