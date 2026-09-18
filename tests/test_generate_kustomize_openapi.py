@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -63,3 +66,73 @@ def test_generated_dgd_schema_merges_main_container_env_by_name():
 
     assert env["x-kubernetes-patch-strategy"] == "merge"
     assert env["x-kubernetes-patch-merge-key"] == "name"
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.parametrize(
+    "patch_env,expected_env",
+    [
+        pytest.param(
+            {"name": "UCX_TLS", "value": "rc_x"},
+            {"MODEL_NAME": "test-model", "HF_HOME": "/model-cache", "UCX_TLS": "rc_x"},
+            id="add-variable",
+        ),
+        pytest.param(
+            {"name": "HF_HOME", "value": "/cluster-cache"},
+            {"MODEL_NAME": "test-model", "HF_HOME": "/cluster-cache"},
+            id="update-variable",
+        ),
+    ],
+)
+def test_generated_beta_dgd_schema_preserves_shared_env(
+    tmp_path: Path, patch_env: dict, expected_env: dict
+):
+    executable = os.environ.get("KUSTOMIZE_BIN") or shutil.which("kustomize")
+    if executable is None:
+        pytest.skip("kustomize is required for the shared environment merge test")
+
+    generator = load_generator_module()
+    (tmp_path / "schema.json").write_text(
+        generator.generated_schema(), encoding="utf-8"
+    )
+    base = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "env-merge"},
+        "spec": {
+            "env": [
+                {"name": "MODEL_NAME", "value": "test-model"},
+                {"name": "HF_HOME", "value": "/model-cache"},
+            ]
+        },
+    }
+    patch = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "env-merge"},
+        "spec": {"env": [patch_env]},
+    }
+    kustomization = {
+        "apiVersion": "kustomize.config.k8s.io/v1beta1",
+        "kind": "Kustomization",
+        "resources": ["base.yaml"],
+        "openapi": {"path": "schema.json"},
+        "patches": [{"path": "patch.yaml"}],
+    }
+    for name, document in (
+        ("base.yaml", base),
+        ("patch.yaml", patch),
+        ("kustomization.yaml", kustomization),
+    ):
+        (tmp_path / name).write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    result = subprocess.run(
+        [executable, "build", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=True,
+    )
+    env = yaml.safe_load(result.stdout)["spec"]["env"]
+    assert {entry["name"]: entry["value"] for entry in env} == expected_env
+    assert len(env) == len(expected_env), "shared environment contains duplicate names"
