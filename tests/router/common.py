@@ -1109,6 +1109,207 @@ def _test_python_router_bindings(
     logger.info("KvRouter bindings test completed successfully")
 
 
+def _test_kv_router_worker_failure(
+    *,
+    request,
+    mocker_process_cls,
+    mocker_args: dict,
+    block_size: int,
+    model_name: str,
+    kill_signal: int,
+    request_plane: str = "nats",
+    seed_blocks: int = 4,
+    convergence_timeout: float = 60.0,
+):
+    """KV router worker-death lifecycle: discovery, inventory cleanup, recovery.
+
+    Starts two mocker processes with one worker each on one endpoint, so a
+    single worker can be killed without affecting the other. Seeds a prefix
+    onto one worker through the KV router, then kills that worker's process
+    and asserts, through stable surfaces only
+    (`client.instance_ids()` and `KvRouter.get_overlap_scores`):
+
+    1. The dead worker disappears from the endpoint's instance list.
+    2. The dead worker's cached blocks stop attracting overlap score
+       (inventory cleanup: row absent or device_blocks == 0).
+    3. The same prefix is still servable and its blocks re-appear on the
+       surviving worker (indexer repopulates from the survivor's KV events).
+
+    Args:
+        request: Pytest request fixture.
+        mocker_process_cls: MockerProcess class (passed in to avoid a
+            common.py -> mocker_process.py import cycle).
+        mocker_args: Mocker engine args; must include "block_size".
+        block_size: KV block size (must match mocker_args).
+        model_name: Model name for requests.
+        kill_signal: Signal used to kill the victim worker process
+            (signal.SIGKILL for crash, signal.SIGTERM for shutdown).
+        request_plane: Request plane ("nats" or "tcp").
+        seed_blocks: Number of full blocks in the seeded prefix.
+        convergence_timeout: Max seconds to wait for each convergence step
+            (must exceed the etcd lease TTL, 10s by default).
+    """
+    namespace = f"test-namespace-{uuid.uuid4().hex[:8]}"
+    token_ids = list(range(1000, 1000 + block_size * seed_blocks))
+
+    async def _poll(describe: str, condition, timeout: float):
+        """Poll an async condition until truthy, returning its value."""
+        deadline = time.monotonic() + timeout
+        last = None
+        while time.monotonic() < deadline:
+            last = await condition()
+            if last:
+                return last
+            await asyncio.sleep(0.5)
+        raise AssertionError(
+            f"Timed out after {timeout}s waiting for {describe} (last={last})"
+        )
+
+    async def _overlap_rows(kv_router) -> dict[tuple[int, int], int]:
+        scores = await kv_router.get_overlap_scores(token_ids, include_shared=False)
+        return {
+            (row["worker_id"], row["dp_rank"]): row["device_blocks"]
+            for row in scores["workers"]
+        }
+
+    with contextlib.ExitStack() as stack:
+        mocker_a = stack.enter_context(
+            mocker_process_cls(
+                request,
+                mocker_args=mocker_args,
+                num_mockers=1,
+                request_plane=request_plane,
+                namespace=namespace,
+                display_name="dynamo-mocker-a",
+            )
+        )
+        runtime = stack.enter_context(managed_runtime(request_plane=request_plane))
+        endpoint = runtime.endpoint(f"{namespace}.mocker.generate")
+
+        ids_a = asyncio.run(poll_for_worker_instances(endpoint, 1))
+        worker_a = ids_a[0]
+
+        mocker_b = stack.enter_context(
+            mocker_process_cls(
+                request,
+                mocker_args=mocker_args,
+                num_mockers=1,
+                request_plane=request_plane,
+                namespace=namespace,
+                display_name="dynamo-mocker-b",
+            )
+        )
+        all_ids = asyncio.run(poll_for_worker_instances(endpoint, 2))
+        (worker_b,) = set(all_ids) - {worker_a}
+        process_by_worker = {worker_a: mocker_a, worker_b: mocker_b}
+        logger.info("Workers registered: a=%s b=%s", worker_a, worker_b)
+
+        kv_router = _create_kv_router_with_timeout(
+            router_factory=lambda: KvRouter(
+                endpoint=endpoint,
+                block_size=block_size,
+                kv_router_config=KvRouterConfig(),
+            ),
+            num_workers=2,
+            engine_workers=mocker_a,
+        )
+        asyncio.run(wait_for_workers_ready(endpoint, kv_router, 2, model_name))
+
+        # Seed the prefix through the router; it lands on one worker.
+        asyncio.run(
+            send_request_via_python_kv_router(
+                kv_python_router=kv_router,
+                model_name=model_name,
+                token_ids=token_ids,
+                stop_conditions={"ignore_eos": True, "max_tokens": 8},
+            )
+        )
+
+        async def _find_owner():
+            rows = await _overlap_rows(kv_router)
+            owners = {wid for (wid, _), blocks in rows.items() if blocks >= seed_blocks}
+            return owners.pop() if len(owners) == 1 else None
+
+        victim_id = asyncio.run(
+            _poll("seeded prefix to appear on exactly one worker", _find_owner, 30.0)
+        )
+        survivor_id = worker_b if victim_id == worker_a else worker_a
+        logger.info("Prefix owner (victim): %s, survivor: %s", victim_id, survivor_id)
+
+        process_by_worker[victim_id].send_signal(kill_signal)
+
+        # 1. The dead worker must leave the endpoint's instance list
+        #    (SIGKILL relies on etcd lease expiry, so allow the full timeout).
+        #    Create the client once: every endpoint.client() call spawns a
+        #    background reconciliation task that lives until process exit.
+        async def _await_victim_deregistered():
+            client = await endpoint.client()
+
+            async def _victim_deregistered():
+                return set(client.instance_ids()) == {survivor_id}
+
+            await _poll(
+                f"instance list to converge to survivor {survivor_id}",
+                _victim_deregistered,
+                convergence_timeout,
+            )
+
+        asyncio.run(_await_victim_deregistered())
+        logger.info("Victim deregistered from instance list")
+
+        # 2. The victim's blocks must stop attracting overlap score.
+        async def _victim_inventory_cleared():
+            rows = await _overlap_rows(kv_router)
+            victim_blocks = [
+                blocks for (wid, _), blocks in rows.items() if wid == victim_id
+            ]
+            return not victim_blocks or all(b == 0 for b in victim_blocks)
+
+        asyncio.run(
+            _poll(
+                "victim's cached blocks to leave the router inventory",
+                _victim_inventory_cleared,
+                convergence_timeout,
+            )
+        )
+        logger.info("Victim inventory cleared from router")
+
+        # 3. The prefix must remain servable via the survivor and re-appear
+        #    in its inventory once the survivor's KV events are indexed.
+        worker_ids = asyncio.run(
+            send_request_via_python_kv_router(
+                kv_python_router=kv_router,
+                model_name=model_name,
+                token_ids=token_ids,
+                stop_conditions={"ignore_eos": True, "max_tokens": 8},
+                return_worker_ids=True,
+            )
+        )
+        served_by = worker_ids.get("decode_worker_id") or worker_ids.get(
+            "prefill_worker_id"
+        )
+        assert served_by == survivor_id, (
+            f"Post-failure request should be served by survivor {survivor_id}, "
+            f"got {worker_ids}"
+        )
+
+        async def _survivor_owns_prefix():
+            rows = await _overlap_rows(kv_router)
+            return any(
+                wid == survivor_id and blocks >= seed_blocks
+                for (wid, _), blocks in rows.items()
+            )
+
+        asyncio.run(
+            _poll(
+                f"seeded prefix to re-appear on survivor {survivor_id}",
+                _survivor_owns_prefix,
+                30.0,
+            )
+        )
+        logger.info("Prefix re-cached on survivor; worker failure lifecycle complete")
+
+
 def _test_router_query_instance_id(
     engine_workers,
     block_size: int,
