@@ -56,6 +56,7 @@ class TokenspeedLLMEngine(LLMEngine):
         self.engine = None
         self._model_max_len: int | None = None
         self._active_rids_by_context: dict[str, list[str]] = {}
+        self._cancelled_contexts: set[str] = set()
 
     @classmethod
     async def from_args(
@@ -133,6 +134,10 @@ class TokenspeedLLMEngine(LLMEngine):
         if not kv_events_enabled(config):
             return
         if not getattr(self.server_args, "enable_prefix_caching", True):
+            # Native publisher construction is independent of prefix caching.
+            config["enable_kv_cache_events"] = False
+            config["publisher"] = "null"
+            self.server_args.kv_events_config = json.dumps(config)
             logger.warning(
                 "TokenSpeed KV events were requested but enable_prefix_caching=False "
                 "(--disable-prefix-caching); no KV events will be published"
@@ -195,6 +200,11 @@ class TokenspeedLLMEngine(LLMEngine):
                     "token_ids": [],
                     "disaggregated_params": request.get("bootstrap_info") or bootstrap,
                 }
+            # Native abort_request ignores unknown RIDs. An abort while the
+            # handoff was yielded must therefore prevent native submission.
+            if request_id is not None and request_id in self._cancelled_contexts:
+                yield {"token_ids": [], "finish_reason": "cancelled"}
+                return
             async for out in self.engine.tokenizer_manager.generate_request(obj):
                 delta_out, emitted_completion_tokens = _completion_delta_output(
                     out, emitted_completion_tokens
@@ -203,12 +213,15 @@ class TokenspeedLLMEngine(LLMEngine):
         finally:
             if request_id is not None:
                 self._active_rids_by_context.pop(request_id, None)
+                self._cancelled_contexts.discard(request_id)
 
     async def abort(self, context: Context) -> None:
         request_id = context.id()
         if self.engine is None or request_id is None:
             return
 
+        if request_id in self._active_rids_by_context:
+            self._cancelled_contexts.add(request_id)
         rids = self._active_rids_by_context.get(request_id, [request_id])
         for rid in rids:
             self.engine.tokenizer_manager.abort_request(rid)
@@ -392,7 +405,14 @@ def _finish_reason_type(finish_reason: Any) -> str:
         reason = str(finish_reason.get("type") or "unknown")
         if reason == "abort":
             message = finish_reason.get("message") or "Unknown backend error"
-            raise RuntimeError(f"TokenSpeed generation aborted: {message}")
+            # ABORT_CODE.UnknownError (522) also represents client cancellation.
+            # Only TransferFailed (521), NumericalError (523), or an explicit
+            # transfer failure are errors. Current PD hooks use 522 with text.
+            transfer_failed = "transfer" in message.lower() and (
+                "failed" in message.lower() or "timed out" in message.lower()
+            )
+            if finish_reason.get("err_type") in (521, 523) or transfer_failed:
+                raise RuntimeError(f"TokenSpeed generation aborted: {message}")
         return reason
     return str(finish_reason)
 

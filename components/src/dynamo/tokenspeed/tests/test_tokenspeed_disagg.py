@@ -26,7 +26,7 @@ def server_args(**overrides):
         disaggregation_mode="null",
         disaggregation_transfer_backend="mooncake",
         disaggregation_bootstrap_port=9000,
-        host="0.0.0.0",
+        host="127.0.0.1",
         mapping=SimpleNamespace(attn=SimpleNamespace(dp_size=1)),
         prefix_granularity=64,
         max_model_len=4096,
@@ -40,6 +40,7 @@ def server_args(**overrides):
 
 @pytest.fixture
 def native_engine(monkeypatch):
+    monkeypatch.delenv(BOOTSTRAP_HOST_ENV, raising=False)
     native = Mock()
     native.scheduler_info = {
         "max_model_len": 8192,
@@ -284,11 +285,21 @@ async def test_kv_source_matches_native_bind_and_topic(
     ],
 )
 async def test_disabled_kv_events_have_no_source(native_engine, overrides, caplog):
+    native, constructor = native_engine
+    native_configs = []
+
+    def construct(*, server_args):
+        native_configs.append(json.loads(server_args.kv_events_config or "{}"))
+        return native
+
+    constructor.side_effect = construct
     engine = TokenspeedLLMEngine(server_args(**overrides))
     try:
         await engine.start(worker_id=1)
         assert await engine.kv_event_sources() == []
         if overrides.get("enable_prefix_caching") is False:
+            assert native_configs[0]["enable_kv_cache_events"] is False
+            assert native_configs[0]["publisher"] == "null"
             assert "enable_prefix_caching=False" in caplog.text
             assert "KV events" in caplog.text
         else:
@@ -351,18 +362,32 @@ async def test_non_boolean_event_flag_rejected_before_start(native_engine, enabl
     await engine.cleanup()
 
 
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0", "::", "::1", "localhost"])
 @pytest.mark.parametrize("address", ["127.0.1.1", "0.0.0.0"])
-async def test_wildcard_prefill_rejects_local_only_advertisement(
-    monkeypatch, native_engine, address
+async def test_prefill_rejects_local_only_derived_advertisement(
+    monkeypatch, native_engine, host, address
 ):
     monkeypatch.delenv(BOOTSTRAP_HOST_ENV, raising=False)
     monkeypatch.setattr(disagg.socket, "gethostbyname", lambda _: address)
     _, constructor = native_engine
-    engine = TokenspeedLLMEngine(server_args(disaggregation_mode="prefill"))
+    engine = TokenspeedLLMEngine(server_args(disaggregation_mode="prefill", host=host))
     with pytest.raises(ValueError, match=BOOTSTRAP_HOST_ENV):
         await engine.start(worker_id=1)
     constructor.assert_not_called()
     await engine.cleanup()
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0", "::", "::1", "localhost"])
+async def test_prefill_derives_non_loopback_advertisement(
+    monkeypatch, native_engine, host
+):
+    monkeypatch.setattr(disagg.socket, "gethostbyname", lambda _: "192.0.2.10")
+    engine = TokenspeedLLMEngine(server_args(disaggregation_mode="prefill", host=host))
+    try:
+        config = await engine.start(worker_id=1)
+        assert config.llm.bootstrap_host == "192.0.2.10"
+    finally:
+        await engine.cleanup()
 
 
 async def test_explicit_loopback_prefill_allowed_for_single_host(
@@ -429,5 +454,104 @@ async def test_prefill_creates_handoff_when_router_has_no_bootstrap_endpoint(
                 await stream.aclose()
         assert rooms.call_count == 2
         rooms.assert_called_with(63)
+    finally:
+        await engine.cleanup()
+
+
+@pytest.mark.parametrize("router_bootstrap", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_prefill_cancellation_after_handoff_prevents_submission(
+    native_engine, router_bootstrap, cancel
+):
+    """An abort before native admission survives resuming the handoff stream."""
+    native, _ = native_engine
+    submitted = []
+
+    async def generate(obj):
+        submitted.append(obj.rid)
+        yield {"output_ids": [20], "meta_info": {"finish_reason": {"type": "length"}}}
+
+    native.tokenizer_manager.generate_request = generate
+    engine = TokenspeedLLMEngine(
+        server_args(disaggregation_mode="prefill", host="prefill.example")
+    )
+    registration = await engine.start(worker_id=1)
+    request = {"token_ids": [10, 11]}
+    if router_bootstrap:
+        request["bootstrap_info"] = {
+            "bootstrap_host": registration.llm.bootstrap_host,
+            "bootstrap_port": registration.llm.bootstrap_port,
+            "bootstrap_room": 1,
+        }
+    context = SimpleNamespace(id=lambda: "handoff-cancel")
+    stream = engine.generate(request, context)
+    try:
+        first = await anext(stream)
+        assert first["disaggregated_params"]
+        assert submitted == []
+        if cancel:
+            await engine.abort(context)
+            await engine.abort(context)
+        chunks = [chunk async for chunk in stream]
+        assert submitted == ([] if cancel else ["handoff-cancel"])
+        assert chunks[-1]["finish_reason"] == ("cancelled" if cancel else "length")
+        assert engine._active_rids_by_context == {}
+        # Reusing the context must not inherit cancellation from the old stream.
+        chunks = [chunk async for chunk in engine.generate(request, context)]
+        assert chunks[-1]["finish_reason"] == "length"
+        assert submitted[-1] == "handoff-cancel"
+    finally:
+        await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_cancelled_native_stream_preserves_cancelled_finish(native_engine):
+    native, _ = native_engine
+    aborted = set()
+    native.tokenizer_manager.abort_request.side_effect = aborted.add
+
+    async def generate(obj):
+        yield {"output_ids": [20]}
+        assert obj.rid in aborted
+        yield {
+            "output_ids": [],
+            "meta_info": {
+                "finish_reason": {
+                    "type": "abort",
+                    "message": "AbortReq from client",
+                    "err_type": 522,
+                }
+            },
+        }
+
+    native.tokenizer_manager.generate_request = generate
+    engine = TokenspeedLLMEngine(server_args())
+    await engine.start(worker_id=1)
+    context = SimpleNamespace(id=lambda: "stream-cancel")
+    stream = engine.generate({"token_ids": [10]}, context)
+    try:
+        assert (await anext(stream))["token_ids"] == [20]
+        await engine.abort(context)
+        chunks = [chunk async for chunk in stream]
+        assert chunks[-1]["finish_reason"] == "cancelled"
+        assert engine._active_rids_by_context == {}
+    finally:
+        await stream.aclose()
+        await engine.cleanup()
+
+
+async def test_kv_replay_rejected_before_native_start(native_engine, tmp_path):
+    _, constructor = native_engine
+    engine = TokenspeedLLMEngine(
+        server_args(kv_events_config=json.dumps({
+            "enable_kv_cache_events": True,
+            "endpoint": f"ipc://{tmp_path}/events",
+            "replay_endpoint": f"ipc://{tmp_path}/replay",
+        }))
+    )
+    try:
+        with pytest.raises(ValueError, match="replay_endpoint"):
+            await engine.start(worker_id=1)
+        constructor.assert_not_called()
     finally:
         await engine.cleanup()

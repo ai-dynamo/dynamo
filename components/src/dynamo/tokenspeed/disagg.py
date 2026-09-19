@@ -69,16 +69,37 @@ def validate_disagg_compatibility(mode: DisaggregationMode, server_args: Any) ->
 
 
 def runtime_disaggregated_endpoint(server_args: Any) -> tuple[str, int]:
+    """Advertise a peer-reachable host; the environment opts into single-host use."""
     port = getattr(server_args, "disaggregation_bootstrap_port", None)
     if port is None or not 0 < int(port) < 65536:
         raise ValueError("TokenSpeed prefill requires a valid bootstrap port")
-    host = os.environ.get(BOOTSTRAP_HOST_ENV) or getattr(server_args, "host", None)
-    if not host or host in ("0.0.0.0", "::", "[::]"):
-        host = socket.gethostbyname(socket.gethostname())
+    explicit_host = os.environ.get(BOOTSTRAP_HOST_ENV)
+    host = explicit_host or getattr(server_args, "host", None)
+    try:
+        address = ipaddress.ip_address(host.strip("[]")) if host else None
+    except ValueError:
+        address = None  # Hostnames are valid advertised addresses too.
+    if (
+        not host
+        or (address is not None and address.is_unspecified)
+        or (
+            not explicit_host
+            and ((address is not None and address.is_loopback) or host == "localhost")
+        )
+    ):
+        # ServerArgs.host defaults to loopback. Mooncake's bootstrap server
+        # binds all interfaces, so derive the advertisement independently.
+        try:
+            host = socket.gethostbyname(socket.gethostname())
+        except socket.gaierror as exc:
+            raise ValueError(
+                f"Cannot determine TokenSpeed bootstrap host; set {BOOTSTRAP_HOST_ENV} "
+                "to an address reachable by decode workers"
+            ) from exc
         address = ipaddress.ip_address(host)
         if address.is_loopback or address.is_unspecified:
             raise ValueError(
-                "TokenSpeed wildcard host resolves to a local-only address; "
+                "TokenSpeed bootstrap host resolves to a local-only address; "
                 f"set {BOOTSTRAP_HOST_ENV} to an address reachable by decode workers"
             )
     return str(host), int(port)

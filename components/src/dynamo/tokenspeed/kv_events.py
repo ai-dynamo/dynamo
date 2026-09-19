@@ -28,6 +28,11 @@ def kv_events_enabled(config: dict[str, Any]) -> bool:
 
 
 def kv_event_source(config: dict[str, Any]) -> ZmqSource:
+    if config.get("replay_endpoint") is not None:
+        raise ValueError(
+            "Dynamo TokenSpeed KV events do not support replay_endpoint; "
+            "remove it from --kv-events-config"
+        )
     if (config.get("publisher") or "zmq") != "zmq":
         raise ValueError("Dynamo TokenSpeed KV events require the zmq publisher")
     endpoint = config["endpoint"]
