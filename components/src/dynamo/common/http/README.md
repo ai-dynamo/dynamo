@@ -11,9 +11,32 @@ uses aiohttp.
 `AiohttpClient` is the single supported backend. Its connector queues
 pending connections in `O(1)`, so latency stays close to the offered
 rate when one request fans out to many URLs (e.g. 100 image fetches),
-and it exposes a `TCPConnector(resolver=...)` DNS hook that can pin
-validated DNS answers for a connect-time SSRF backstop (the default
-client here uses the stock resolver; the pinning lands as a follow-up). See the
+and it exposes a `TCPConnector(resolver=...)` DNS hook that pins the
+validated DNS answers as a connect-time SSRF backstop against DNS
+rebinding — the default client wires a `BlocklistResolver` (see
+`_ssrf_resolver.py`). The connector may return private addresses only when the
+`DYN_MM_ALLOW_INTERNAL` deployment baseline **and** the request policy both
+allow it, so neither side alone can weaken the other. The client keeps one
+session per outcome and closes each resolver itself, because aiohttp closes
+only a resolver it created.
+
+> [!IMPORTANT]
+> The backstop governs **direct** connections only. When a proxy applies
+> (`HTTP_PROXY` / `HTTPS_PROXY` — the session runs `trust_env=True`), the
+> connector dials the proxy and the *proxy* resolves the origin, out of this
+> resolver's sight, so the check cannot govern the destination.
+>
+> A policy-protected fetch that a proxy would carry therefore **fails closed**.
+> Set `DYN_MM_TRUST_EGRESS_PROXY=1` to assert that the proxy enforces
+> destination policy itself, and the fetch proceeds. The gate asks aiohttp
+> which proxy applies to that specific URL, so `NO_PROXY` is honored and a
+> fetch that goes direct is never refused. It does not apply when
+> `DYN_MM_ALLOW_INTERNAL=1`, which already permits private destinations.
+>
+> Note aiohttp never calls a resolver for an IP literal, so literal blocked
+> addresses are `validate_url`'s job rather than the backstop's.
+
+See the
 [NeMo Gym aiohttp vs httpx note](https://docs.nvidia.com/nemo/gym/latest/infrastructure/engineering-notes/aiohttp-vs-httpx.html)
 for the fan-out latency comparison.
 
