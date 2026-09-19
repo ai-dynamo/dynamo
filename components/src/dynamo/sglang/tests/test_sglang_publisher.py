@@ -861,11 +861,36 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
             pass
 
 
+def _publisher_with_sockets(sock, fanout, owner, stop_after_publish):
+    """A DynamoSglangPublisher with only what run() touches, no engine or runtime."""
+    pub = publisher_mod.DynamoSglangPublisher.__new__(
+        publisher_mod.DynamoSglangPublisher
+    )
+    pub._sock, pub._fanout = sock, fanout
+    pub._publishes_engine_gauges = owner
+    pub._running = True
+    pub.dp_rank = 0
+    pub.server_args = SimpleNamespace(page_size=1)
+    published = []
+
+    def publish(dp_rank, kv_used_blocks):
+        published.append((dp_rank, kv_used_blocks))
+        if stop_after_publish:
+            pub._running = False
+
+    pub.metrics_publisher = SimpleNamespace(publish=publish)
+    pub.component_gauges = Mock()
+    return pub, published
+
+
 @pytest.mark.asyncio
-async def test_metrics_fanout_reaches_sibling_gateways(tmp_path):
+async def test_metrics_fanout_reaches_sibling_gateways(tmp_path, monkeypatch):
     import zmq
     import zmq.asyncio
 
+    monkeypatch.setattr(
+        publisher_mod, "kv_metrics_block_values", lambda metrics, page_size: (7, 100)
+    )
     metrics_ep = f"ipc://{tmp_path}/metrics"
     fanout_ep = f"ipc://{tmp_path}/fanout"
     ctx = zmq.asyncio.Context()
@@ -883,17 +908,27 @@ async def test_metrics_fanout_reaches_sibling_gateways(tmp_path):
         assert sibling_fanout is None
         await asyncio.sleep(0.3)  # PUB/SUB slow joiner
 
+        owner, owner_published = _publisher_with_sockets(
+            owner_sock, fanout, owner=True, stop_after_publish=True
+        )
+        sibling, sibling_published = _publisher_with_sockets(
+            sibling_sock, None, owner=False, stop_after_publish=True
+        )
+
         scheduler = ctx.socket(zmq.PUSH)
         sockets.append(scheduler)
         scheduler.connect(metrics_ep)
-        payload = {"data_parallel_rank": 3, "gpu_cache_usage_perc": 0.5}
-        await asyncio.wait_for(scheduler.send_pyobj(payload), 5)
+        kv_metrics = SimpleNamespace(data_parallel_rank=3, gpu_cache_usage_perc=0.5)
+        await asyncio.wait_for(scheduler.send_pyobj(kv_metrics), 5)
 
-        received = await asyncio.wait_for(owner_sock.recv_pyobj(), 5)
-        assert received == payload
-        await asyncio.wait_for(fanout.send_pyobj(received), 5)
-        relayed = await asyncio.wait_for(sibling_sock.recv_pyobj(), 5)
-        assert relayed == payload
+        # The owner's run() consumes the scheduler message and relays it; the
+        # sibling's run() must see it through the fan-out with no other source.
+        await asyncio.wait_for(asyncio.gather(owner.run(), sibling.run()), 10)
+
+        assert owner_published == [(3, 7)]
+        assert sibling_published == [(3, 7)]
+        owner.component_gauges.set_total_blocks.assert_called_once_with("3", 100)
+        sibling.component_gauges.set_total_blocks.assert_not_called()
 
         with pytest.raises(ValueError, match="fan-out"):
             publisher_mod._open_metrics_sockets(ctx, metrics_ep, None, owner=False)
