@@ -46,8 +46,8 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    random_uuid,
     read_jinja_chat_template,
+    request_id_from_context,
     resolve_chat_template,
     worker_warmup,
 )
@@ -576,7 +576,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Single-process path: preprocess, dispatch, stream post-process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         try:
             if self.debug_perf:
@@ -653,7 +653,7 @@ class SglangProcessor:
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Pool path: preprocess in worker, stream in main process."""
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         # --- Phase 1: Preprocess (semaphore held) ---
         assert self._worker_semaphore is not None
@@ -805,7 +805,7 @@ class SglangProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choice:
                     dynamo_out: dict[str, Any] = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": [choice],
                         "created": created_ts,
                         "model": request["model"],

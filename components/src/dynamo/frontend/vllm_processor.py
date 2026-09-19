@@ -51,7 +51,7 @@ from .utils import (
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
-    random_uuid,
+    request_id_from_context,
     resolve_chat_template,
 )
 
@@ -636,7 +636,7 @@ class VllmProcessor:
     async def _generator_inner(
         self, request: dict[str, Any], context: Any | None = None
     ) -> AsyncGenerator[dict[str, Any], None]:
-        request_id = random_uuid()
+        request_id = request_id_from_context(context)
 
         logprobs = request.get("logprobs")
         top_logprobs = request.get("top_logprobs")
@@ -1082,7 +1082,7 @@ class VllmProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": choices,
                         "created": int(time.time()),
                         "model": request["model"],
