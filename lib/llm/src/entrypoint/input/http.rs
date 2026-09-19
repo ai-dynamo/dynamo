@@ -223,6 +223,12 @@ async fn run_with_selection_policy(
                 model.namespace(),
                 model.namespace_prefix(),
             );
+            tracing::info!(
+                scope = ?namespace_filter,
+                namespace = model.namespace().unwrap_or("<unset>"),
+                namespace_prefix = model.namespace_prefix().unwrap_or("<unset>"),
+                "Model discovery scope resolved"
+            );
             let local_model_path =
                 (!model.path().as_os_str().is_empty()).then(|| model.path().to_path_buf());
             let generate_engine_capabilities = http_service.generate_engine_capabilities();

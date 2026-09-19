@@ -682,13 +682,16 @@ impl ModelWatcher {
                 None
             };
 
-            // Add chat engine only if the model supports chat
+            // Add chat engine only if the model supports chat.
+            // Routing resolves lazily; an eager `?` shadows the actionable tokenizer error.
             if card.model_type.supports_chat() {
-                let routing = preprocessed_routing.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("chat pipeline requires preprocessed routing")
-                })?;
+                let chat_routing = || {
+                    preprocessed_routing.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!("chat pipeline requires preprocessed routing")
+                    })
+                };
                 let chat_engine = if let Some(ref factory) = self.chat_engine_factory {
-                    let routed_engine = routing
+                    let routed_engine = chat_routing()?
                         .build_preprocessed_pipeline(
                             card,
                             self.migration_limit,
@@ -706,7 +709,7 @@ impl ModelWatcher {
                     let preprocessor =
                         worker_set_chat_preprocessor(card, tk.clone(), &cancellation)?;
                     Some(
-                        routing
+                        chat_routing()?
                             .build_pipeline::<
                                 NvCreateChatCompletionRequest,
                                 NvCreateChatCompletionStreamResponse,
@@ -2016,6 +2019,116 @@ mod tests {
         assert_eq!(manager.get_model_cards().len(), 2);
         drop(events);
         task.await.unwrap();
+        runtime.shutdown();
+    }
+
+    const GLOBAL_ROUTER_NAMESPACE: &str = "tc-4-10-ctrl";
+    const GLOBAL_ROUTER_MODEL: &str = "global-router-model";
+
+    const SNAPSHOT_WITHOUT_TOKENIZER: &str = "mock-no-tokenizer-json";
+
+    /// The GlobalRouter forwards already-tokenized requests, so both of its
+    /// cards take the `Tokens` branch of `prepare_worker_set`.
+    fn global_router_card(snapshot: &str) -> ModelDeploymentCard {
+        let model_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/sample-models")
+            .join(snapshot);
+        let mut card = ModelDeploymentCard::load_from_disk(model_path, None).unwrap();
+        card.set_name(GLOBAL_ROUTER_MODEL);
+        card.model_input = ModelInput::Tokens;
+        card
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn global_router_card_shapes()
+    -> [(&'static str, ModelType, WorkerType, Vec<Vec<WorkerType>>); 2] {
+        [
+            (
+                "prefill_generate",
+                ModelType::Prefill,
+                WorkerType::Prefill,
+                vec![vec![WorkerType::Decode]],
+            ),
+            (
+                "decode_generate",
+                ModelType::Chat | ModelType::Completions,
+                WorkerType::Decode,
+                vec![vec![WorkerType::Prefill]],
+            ),
+        ]
+    }
+
+    /// A decode card whose snapshot carries no loadable tokenizer must be
+    /// rejected with the message that names the missing artifact, not with the
+    /// internal routing precondition that happens to fail first.
+    #[tokio::test]
+    async fn global_router_decode_card_without_tokenizer_names_the_missing_tokenizer() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let watcher = Arc::new(ModelWatcher::new(
+            drt,
+            Arc::new(ModelManager::new()),
+            RouterConfig::default(),
+            0,
+            None,
+            None,
+            None,
+            Arc::new(Metrics::new_with_prefix(Some(
+                "watcher_global_router_test".to_string(),
+            ))),
+        ));
+
+        let mcid = ModelCardInstanceId {
+            namespace: GLOBAL_ROUTER_NAMESPACE.to_string(),
+            component: "workers".to_string(),
+            endpoint: "decode_generate".to_string(),
+            instance_id: 1,
+            model_suffix: None,
+        };
+        let (_, model_type, worker_type, needs) = global_router_card_shapes()[1].clone();
+        let mut card = global_router_card(SNAPSHOT_WITHOUT_TOKENIZER);
+        card.model_type = model_type;
+        card.worker_type = Some(worker_type);
+        card.needs = needs;
+        assert!(!card.has_tokenizer());
+
+        let endpoint_id = model_card_endpoint_id(&mcid);
+        let key = GroupKey {
+            model_name: card.name().to_string(),
+            worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+        };
+        let desired = DesiredInstance {
+            key: mcid.to_path(),
+            mcid,
+            endpoint_id,
+            mdc_checksum: card.mdcsum().to_string(),
+            projection_fingerprint: lora_projection_fingerprint(&card).unwrap(),
+            video_contract: qwen_video_contract_digest(&card),
+            card,
+            group_key: key.clone(),
+        };
+        let spec = GroupSpec {
+            key,
+            mdc_checksum: desired.mdc_checksum.clone(),
+            fingerprint: desired.mdc_checksum.clone(),
+            generation: 1,
+            representative: desired,
+            video_contract: None,
+        };
+        let (_admission_tx, admission_rx) = tokio::sync::watch::channel(vec![1]);
+
+        let error = watcher
+            .prepare_worker_set(&spec, admission_rx, CancellationToken::new())
+            .await
+            .err()
+            .map(|error| format!("{error:#}"))
+            .expect("a decode card with no loadable tokenizer must be rejected");
+        assert!(
+            error.contains("no supported Rust tokenizer"),
+            "the rejection must name the missing tokenizer, got: {error}"
+        );
         runtime.shutdown();
     }
 

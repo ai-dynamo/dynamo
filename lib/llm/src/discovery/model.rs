@@ -98,10 +98,53 @@ struct NamespaceReadinessEval {
     ambiguous: std::collections::HashSet<crate::worker_type::WorkerType>,
 }
 
+/// See [`Model::claim_engine_error_report`].
+const ENGINE_ERROR_REPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How many namespaces [`format_namespace_summary`] names before it reports the
+/// rest as a count. A globally scoped model sees every deployment's worker
+/// generations, so the summary needs a bound that does not grow with discovery.
+const ENGINE_ERROR_NAMESPACE_SAMPLE: usize = 8;
+
+/// `namespaces` is a sorted map, so the bounded sample names the same
+/// namespaces on every report rather than an arbitrary subset.
+fn format_namespace_summary(readiness: &ModelReadiness) -> String {
+    let mut summary = readiness
+        .namespaces
+        .iter()
+        .take(ENGINE_ERROR_NAMESPACE_SAMPLE)
+        .map(|(namespace, detail)| {
+            format!(
+                "{namespace}: ready={}{}",
+                detail.ready,
+                detail
+                    .reason
+                    .as_ref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if let Some(omitted) = readiness
+        .namespaces
+        .len()
+        .checked_sub(ENGINE_ERROR_NAMESPACE_SAMPLE)
+        .filter(|omitted| *omitted > 0)
+    {
+        summary.push_str(&format!("; +{omitted} more"));
+    }
+    summary
+}
+
 /// A named model backed by one or more WorkerSets.
 pub struct Model {
     name: String,
     worker_sets: DashMap<String, Arc<WorkerSet>>,
+    /// Shared with every [`Model::snapshot`] of this model: requests run against
+    /// committed snapshots, so a throttle held per-snapshot would restart on each
+    /// catalog publication.
+    last_engine_error_report: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
 }
 
 impl Model {
@@ -109,6 +152,7 @@ impl Model {
         Self {
             name,
             worker_sets: DashMap::new(),
+            last_engine_error_report: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -182,7 +226,11 @@ impl Model {
     /// long-lived. The membership map is copied so later discovery mutations cannot leak
     /// through an older published catalog.
     pub(crate) fn snapshot(&self) -> Self {
-        let snapshot = Self::new(self.name.clone());
+        let snapshot = Self {
+            name: self.name.clone(),
+            worker_sets: DashMap::new(),
+            last_engine_error_report: Arc::clone(&self.last_engine_error_report),
+        };
         for entry in &self.worker_sets {
             snapshot
                 .worker_sets
@@ -723,12 +771,56 @@ impl Model {
     /// Return the appropriate error when no servable WorkerSet was found.
     /// If the engine exists but no WorkerSet can serve (zero workers, prefill not activated,
     /// etc.), return ModelUnavailable (maps to 503). Otherwise ModelNotFound (maps to 404).
+    ///
+    /// Both answers are otherwise silent: the caller sees a bare 404 or 503 and
+    /// the reasons `namespace_readiness` already computed are never emitted.
+    /// On the HTTP path the readiness gate (`check_model_serving_ready`) has
+    /// already answered 503 for a committed model whose namespaces are all
+    /// incomplete, so reaching `ModelNotFound` here means the model is ready
+    /// but no WorkerSet carries an engine of the requested kind.
     fn engine_error(&self, engine_exists: bool) -> ModelManagerError {
+        if self.claim_engine_error_report() {
+            let readiness = self.namespace_readiness();
+            let namespaces = format_namespace_summary(&readiness);
+            if engine_exists {
+                tracing::warn!(
+                    model_name = %self.name,
+                    worker_sets = self.worker_set_count(),
+                    namespaces = %namespaces,
+                    "No WorkerSet can serve this request"
+                );
+            } else {
+                tracing::warn!(
+                    model_name = %self.name,
+                    worker_sets = self.worker_set_count(),
+                    namespaces = %namespaces,
+                    "No WorkerSet of this model carries the requested engine; \
+                     check earlier model-materialization warnings for the WorkerSet that failed to build"
+                );
+            }
+        }
         if engine_exists {
             ModelManagerError::ModelUnavailable(self.name.clone())
         } else {
             ModelManagerError::ModelNotFound(self.name.clone())
         }
+    }
+
+    /// Whether this failure may be reported, at most once per
+    /// [`ENGINE_ERROR_REPORT_INTERVAL`] for this model.
+    ///
+    /// `engine_error` is on the request path, so a client retrying a model that
+    /// is stuck would otherwise pay one readiness scan and one warning line per
+    /// request. A repeating interval rather than a one-shot flag, because a
+    /// model that breaks again after recovering has to be able to say so.
+    fn claim_engine_error_report(&self) -> bool {
+        let now = std::time::Instant::now();
+        let mut last = self.last_engine_error_report.lock().unwrap();
+        if last.is_some_and(|last| now.duration_since(last) < ENGINE_ERROR_REPORT_INTERVAL) {
+            return false;
+        }
+        *last = Some(now);
+        true
     }
 
     // -- Internal selection --
@@ -910,6 +1002,52 @@ mod tests {
         assert_eq!(model.name(), "llama");
         assert!(model.is_empty());
         assert_eq!(model.worker_set_count(), 0);
+    }
+
+    #[test]
+    fn engine_error_report_stays_throttled_across_snapshots() {
+        let model = Model::new("llama".to_string());
+        assert!(model.claim_engine_error_report());
+
+        let snapshot = model.snapshot();
+        assert!(!snapshot.claim_engine_error_report());
+        assert!(!snapshot.snapshot().claim_engine_error_report());
+        assert!(!model.claim_engine_error_report());
+    }
+
+    #[test]
+    fn namespace_summary_is_bounded_and_counts_the_rest() {
+        let readiness = |count: usize| ModelReadiness {
+            model: "llama".to_string(),
+            ready: false,
+            reason: None,
+            namespaces: (0..count)
+                .map(|i| {
+                    (
+                        format!("ns{i:03}"),
+                        NamespaceReadiness {
+                            ready: false,
+                            reason: None,
+                            worker_types: Default::default(),
+                            present: Vec::new(),
+                            missing_worker_types: Vec::new(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+
+        let small = format_namespace_summary(&readiness(3));
+        assert_eq!(small.matches("ready=").count(), 3);
+        assert!(!small.contains("more"));
+
+        let large = format_namespace_summary(&readiness(500));
+        assert_eq!(
+            large.matches("ready=").count(),
+            ENGINE_ERROR_NAMESPACE_SAMPLE
+        );
+        assert!(large.starts_with("ns000: "));
+        assert!(large.ends_with("; +492 more"));
     }
 
     #[test]
