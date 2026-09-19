@@ -313,11 +313,8 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         # the other worker's publisher for tcp://*:20380.
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
-        # Both disagg workers run with --kv-transfer-config, so both open a
-        # NIXL handshake listener. vLLM's default VLLM_NIXL_SIDE_CHANNEL_PORT
-        # (5600) is host-wide and unknown to the port allocator, so leaving
-        # either worker on a fixed value lets any concurrent user of that port
-        # kill engine-core init with ``Address already in use``.
+        # Both disagg workers open a NIXL handshake listener; vLLM's default
+        # side-channel port (5600) is host-wide, so a fixed value can collide.
         if is_prefill is not None:
             self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
             allocated_ports.append(self.nixl_side_channel_port)
