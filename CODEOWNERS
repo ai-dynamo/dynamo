@@ -419,6 +419,7 @@
 /recipes/qwen3-32b-fp8/                                                                                 @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/loadgen/                                                                                @ai-dynamo/dynamo-performance-codeowners
 /recipes/CONTRIBUTING.md                                                                                @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/recent_cache/                                                                               @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/pyproject.toml                                                                              @ai-dynamo/dynamo-performance-codeowners
 /examples/backends/mocker/                                                                              @ai-dynamo/dynamo-performance-codeowners
 /lib/mocker/src/scheduler/                                                                              @ai-dynamo/dynamo-performance-codeowners
@@ -431,6 +432,7 @@
 /recipes/nemotron-3-super-fp8/                                                                          @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/sin_load_generator/                                                                         @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/prefix_data_generator/                                                                      @ai-dynamo/dynamo-performance-codeowners
+/benchmarks/replay_recent_cache.py                                                                      @ai-dynamo/dynamo-performance-codeowners
 /benchmarks/request_trace/README.md                                                                     @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/mocker/tests/                                                                    @ai-dynamo/dynamo-performance-codeowners
 /components/src/dynamo/mocker/utils/                                                                    @ai-dynamo/dynamo-performance-codeowners
