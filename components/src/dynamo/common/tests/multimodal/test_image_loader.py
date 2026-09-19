@@ -245,7 +245,6 @@ async def test_cache_hit_skips_fetch(loader: ImageLoader) -> None:
 
 
 def _png_bytes_of(color: tuple[int, int, int]) -> bytes:
-    """Create a minimal valid PNG of a single solid color."""
     buf = BytesIO()
     Image.new("RGB", (2, 2), color).save(buf, format="PNG")
     return buf.getvalue()
@@ -277,8 +276,6 @@ async def test_case_differing_paths_do_not_share_cache_entry(
 async def test_case_differing_queries_do_not_share_cache_entry(
     loader: ImageLoader,
 ) -> None:
-    """Query strings are case-sensitive for the same reason paths are."""
-
     async def _fetch(url: str, *args, **kwargs) -> bytes:
         color = (255, 0, 0) if "v=A" in url else (0, 0, 255)
         return _png_bytes_of(color)
@@ -293,10 +290,26 @@ async def test_case_differing_queries_do_not_share_cache_entry(
     assert second.getpixel((0, 0)) == (0, 0, 255)
 
 
+async def test_case_differing_userinfo_do_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "User:Token@" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://User:Token@example.com/img.png")
+        second = await loader.load_image("https://user:token@example.com/img.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
 async def test_scheme_and_host_case_still_share_cache_entry(
     loader: ImageLoader,
 ) -> None:
-    """Scheme and host are case-insensitive, so those spellings stay deduplicated."""
     mock_fetch = _mock_fetch_bytes()
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         first = await loader.load_image("https://EXAMPLE.com/img.png")
