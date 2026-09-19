@@ -419,7 +419,17 @@ Every result and skipped-point entry in the artifact carries a `kv_seed_regime` 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST" type="string">
-  Comma- or whitespace-separated allowlist of HTTP header names captured on `request_payload` rows. Values are not redacted.
+  Comma- or whitespace-separated, case-insensitive allowlist of HTTP header names captured on
+  `request_payload` rows. Unset or empty captures none. Captured values follow
+  `DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST`.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST" type="string">
+  Comma- or whitespace-separated, case-insensitive header names whose captured values are replaced
+  with `<redacted>`. Defaults to `authorization`, `proxy-authorization`, `cookie`, `set-cookie`,
+  `x-api-key`, `api-key`, `x-auth-token`, and `x-access-token`. Setting this replaces the defaults;
+  an empty value disables redaction. This list does not enable capture. Values are not scanned
+  for credentials; include any custom credential header names in this list.
 </ParamField>
 
 See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.
