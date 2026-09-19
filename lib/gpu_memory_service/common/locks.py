@@ -13,6 +13,8 @@ class RequestedLockType(str, Enum):
     # a client expresses adopt-vs-replace: asking for RW means "wipe it, I'll allocate
     # my own", asking for RW_DATA means "I only intend to write bytes into what's there".
     RW_DATA_OR_RW = "rw_data_or_rw"
+    # Persistent writer mode for crash-surviving KV allocations.
+    RW_PERSISTENT = "rw_persistent"
 
 
 class GrantedLockType(str, Enum):
@@ -22,3 +24,4 @@ class GrantedLockType(str, Enum):
     # allocations, may not change their shape (no allocate/free/metadata mutation).
     # Granted in place of RW while the layout is committed.
     RW_DATA = "rw_data"
+    RW_PERSISTENT = "rw_persistent"
