@@ -439,6 +439,7 @@ def update_engine_config_with_dynamo(
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "max_batch_size": dynamo_config.benchmark_max_batch_size,
             "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
         explicit_points = dynamo_config._benchmark_points

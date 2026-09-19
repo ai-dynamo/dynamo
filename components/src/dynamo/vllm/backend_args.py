@@ -536,6 +536,21 @@ class DynamoVllmArgGroup(ArgGroup):
                 "A bounded cleanup grace still fails closed if no result is written."
             ),
         )
+        add_argument(
+            g,
+            flag_name="--benchmark-max-batch-size",
+            env_var="DYN_BENCHMARK_MAX_BATCH_SIZE",
+            default=None,
+            arg_type=int,
+            help=(
+                "Cap the decode benchmark batch-size axis without changing the "
+                "engine's own limits. Points above the cap are never generated "
+                "(not measured, not skipped). Decoupled from --max-num-seqs: keep "
+                "the engine at its deployment concurrency while sweeping only the "
+                "batch range the performance model needs; setting --max-num-seqs "
+                "to at least twice this cap keeps every swept rung warmable."
+            ),
+        )
 
 
 # @dataclass()
@@ -587,6 +602,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
+    benchmark_max_batch_size: Optional[int] = None
     prefill_max_new_token_samples: int = 64
     prefill_max_kv_read_token_samples: int = 16
     decode_max_kv_read_token_samples: int = 128
