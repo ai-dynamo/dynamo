@@ -563,7 +563,7 @@ fn reject_client_handoff(request: &Map<String, Value>) -> Result<(), SidecarErro
 /// define, before any prefill work is dispatched.
 fn reject_unsupported_variants(request: &Map<String, Value>) -> Result<(), SidecarError> {
     match request.get("n") {
-        None => Ok(()),
+        None | Some(Value::Null) => Ok(()),
         Some(Value::Number(number)) if number.as_i64() == Some(1) => Ok(()),
         Some(_) => Err(SidecarError::adapter(
             axum::http::StatusCode::BAD_REQUEST,
