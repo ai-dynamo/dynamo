@@ -56,6 +56,17 @@ env:
   PLATFORM: linux/amd64
   SOURCE_REF: ${{ inputs.source_ref || github.sha }}
 
+# Scope the token for every job that does not set its own `permissions`.
+# `actions: read` is needed as well as `contents: read`: most of the unscoped
+# jobs here call reusable workflows, and a caller's block is the ceiling for
+# the workflow it calls -- shared-build-image.yml and shared-build-sidecar.yml
+# both declare `actions: read` internally, which a `contents: read` ceiling
+# would strip. Jobs that set their own block are unaffected; a job-level
+# `permissions` replaces this one outright.
+permissions:
+  actions: read
+  contents: read
+
 jobs:
 
   # ============================================================================
