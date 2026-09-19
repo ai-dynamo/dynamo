@@ -100,10 +100,6 @@ if [[ "$FASTH3_VARIANT" == vsa-* ]]; then
         exit 1
     fi
     python -c 'import fastvideo_kernel'
-    # The published fastvideo-kernel wheel provides the portable Triton VSA
-    # route used by B300/SM103. The native SM100a extension is source-built
-    # and must be opted into explicitly on compatible B200/SM100 systems.
-    export FASTVIDEO_VSA_SM100A="${DYN_H3_FASTVIDEO_VSA_SM100A:-0}"
     FASTH3_ARGS+=(--fastvideo-vsa-topk "$FASTVIDEO_VSA_TOPK")
 else
     ATTENTION_BACKEND="${ATTENTION_BACKEND:-TRTLLM_ATTN}"

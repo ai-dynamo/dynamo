@@ -14,7 +14,6 @@ FASTH3_REVISION="${DYN_H3_FASTH3_REVISION:-bcf40ca6f457ed66f8badf13514943e390205
 FASTH3_SHA256="${DYN_H3_FASTH3_SHA256:-}"
 ATTENTION_BACKEND="${DYN_H3_ATTENTION_BACKEND:-}"
 FASTVIDEO_VSA_TOPK="${DYN_H3_FASTVIDEO_VSA_TOPK:-64}"
-FASTVIDEO_VSA_SM100A="${DYN_H3_FASTVIDEO_VSA_SM100A:-0}"
 QUAL_DIR="${DYN_H3_QUAL_DIR:-/tmp/dynamo_minimax_h3_qualification}"
 OUTPUT_DIR="$QUAL_DIR/outputs"
 CASE_NAME="cat-playing-canon-in-d-grand-piano"
@@ -211,7 +210,7 @@ fi
 
 sha256sum "$VIDEO_FILE" > "$SHA_FILE"
 export DYNAMO_REVISION IMAGE_REF MODEL MODEL_REVISION FASTH3_LORA_PATH FASTH3_VARIANT
-export FASTH3_REVISION FASTH3_SHA256 ATTENTION_BACKEND FASTVIDEO_VSA_TOPK FASTVIDEO_VSA_SM100A
+export FASTH3_REVISION FASTH3_SHA256 ATTENTION_BACKEND FASTVIDEO_VSA_TOPK
 python3 - "$METADATA_FILE" "$HARDWARE_FILE" "$REQUEST_FILE" "$TIMING_FILE" <<'PY'
 import importlib.metadata
 import json
@@ -262,9 +261,6 @@ if os.environ["FASTH3_LORA_PATH"]:
     if os.environ["FASTH3_VARIANT"].startswith("vsa-"):
         metadata["fasth3"]["fastvideo_vsa_topk"] = int(
             os.environ["FASTVIDEO_VSA_TOPK"]
-        )
-        metadata["fasth3"]["fastvideo_vsa_sm100a"] = (
-            os.environ["FASTVIDEO_VSA_SM100A"] == "1"
         )
 with open(sys.argv[1], "w", encoding="utf-8") as output:
     json.dump(metadata, output, indent=2)
