@@ -41,7 +41,7 @@ use crate::{
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument,
+        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -583,6 +583,30 @@ impl RoutingHost {
         }
     }
 
+    /// A request that carries a parent session id binds under the parent's group; every other
+    /// request keys on its own session. The parent keeps its own binding, so a group is placed on
+    /// its own rather than inheriting whichever worker the parent already holds. An explicit
+    /// per-request target stays on the request's own session so it cannot be rejected against, or
+    /// rebind, the group.
+    fn affinity_binding_id(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+    ) -> Result<Option<Arc<SessionAffinityId>>, Error> {
+        if explicit.is_none()
+            && let Some(parent_session_id) = request
+                .content()
+                .agent_context
+                .as_ref()
+                .and_then(|context| context.parent_session_id.as_deref())
+        {
+            return Ok(Some(Arc::new(SessionAffinityId::new(
+                subagent_group_affinity_id(parent_session_id),
+            ))));
+        }
+        affinity_id(request)
+    }
+
     /// Commit a held session to the dispatched worker; a request without a
     /// session passes its stream through.
     fn bind_affinity(
@@ -705,10 +729,10 @@ impl RoutingHost {
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
-        let Some(session_id) = affinity_id(request)? else {
+        let explicit = explicit_target(request.content(), phase)?;
+        let Some(session_id) = self.affinity_binding_id(request, explicit)? else {
             return Ok((select(None).await?, None));
         };
-        let explicit = explicit_target(request.content(), phase)?;
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));

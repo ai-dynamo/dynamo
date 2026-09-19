@@ -15,7 +15,7 @@ use super::SessionAffinityMode::{Hard, Soft};
 use super::{
     AffinityCoordinator, AffinityTarget, Hold, LlmResponse, affinity_id,
     coordinator::{ReplicaApplyOutcome, tracked_stream},
-    explicit_target, to_table,
+    explicit_target, subagent_group_affinity_id, to_table,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -27,6 +27,7 @@ use crate::{
     },
     types::Annotated,
 };
+use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
 
 fn session_id() -> SessionAffinityId {
     SessionAffinityId::new("session-1")
@@ -874,4 +875,65 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
         replica.query_target(&session_id(), None).unwrap(),
         Some(replicated_target)
     );
+}
+
+#[test]
+fn a_subagent_group_id_is_namespaced_and_fixed_size() {
+    let a = subagent_group_affinity_id("parent-1");
+    let b = subagent_group_affinity_id("parent-1");
+    let c = subagent_group_affinity_id("parent-2");
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert!(
+        a.starts_with("\u{1}sg:"),
+        "the key must be un-claimable via a header value"
+    );
+    let long = subagent_group_affinity_id(&"p".repeat(10_000));
+    assert_eq!(long.len(), a.len());
+    assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
+}
+
+fn group_id() -> SessionAffinityId {
+    SessionAffinityId::new(subagent_group_affinity_id("parent-1"))
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subagent_that_never_dispatches_leaves_the_group_unbound() {
+    let coordinator = coordinator();
+    let first = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert!(
+        matches!(first, Hold::Initialize(_)),
+        "the first subagent must initialize the group"
+    );
+    drop(first);
+    assert_eq!(coordinator.query_target(&group_id(), None).unwrap(), None);
+    assert!(matches!(
+        coordinator.acquire(&group_id(), None).await.unwrap(),
+        Hold::Initialize(_)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_hard_group_pins_siblings_and_refuses_to_move() {
+    let coordinator = coordinator();
+    let first = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert!(matches!(first, Hold::Initialize(_)));
+    let mut stream = coordinator
+        .commit_to_stream(first, target(7, Some(0)), response_stream(1))
+        .unwrap();
+    while stream.next().await.is_some() {}
+    let sibling = coordinator.acquire(&group_id(), None).await.unwrap();
+    assert_eq!(sibling.target(), Some(to_table(target(7, Some(0)))));
+    // A dispatch that disagrees with a hard pin is refused, and the pin is reset so the next
+    // sibling re-selects cleanly; the group is never quietly moved to the mismatched worker.
+    assert!(
+        coordinator
+            .commit_to_stream(sibling, target(9, Some(1)), response_stream(1))
+            .is_err()
+    );
+    assert_eq!(coordinator.query_target(&group_id(), None).unwrap(), None);
+    assert!(matches!(
+        coordinator.acquire(&group_id(), None).await.unwrap(),
+        Hold::Initialize(_)
+    ));
 }
