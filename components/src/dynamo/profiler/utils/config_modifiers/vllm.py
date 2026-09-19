@@ -19,7 +19,6 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_worker_component_from_config,
     remove_valued_arguments,
-    set_argument_value,
     set_unique_argument_value,
     setup_worker_component_resources,
     update_image,
@@ -437,7 +436,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
 
         # Remove --tp alias if present, use --tensor-parallel-size as canonical form
         args = remove_valued_arguments(args, "--tp")
-        args = set_argument_value(args, "--tensor-parallel-size", str(tp_size))
+        args = set_unique_argument_value(args, "--tensor-parallel-size", str(tp_size))
 
         get_main_container(worker_service).args = args
 
@@ -473,9 +472,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
 
         # Remove aliases, use canonical forms
         args = remove_valued_arguments(args, "--tp")
-        args = set_argument_value(args, "--tensor-parallel-size", str(tep_size))
+        args = set_unique_argument_value(args, "--tensor-parallel-size", str(tep_size))
         args = remove_valued_arguments(args, "--dp")
-        args = set_argument_value(args, "--data-parallel-size", "1")
+        args = set_unique_argument_value(args, "--data-parallel-size", "1")
 
         # Remove hybrid load balancing flags - not compatible with DP=1
         args = remove_valued_arguments(args, "--data-parallel-size-local")
@@ -519,15 +518,15 @@ class VllmV1ConfigModifier(BaseConfigModifier):
 
         # Remove aliases, use canonical forms
         args = remove_valued_arguments(args, "--tp")
-        args = set_argument_value(args, "--tensor-parallel-size", "1")
+        args = set_unique_argument_value(args, "--tensor-parallel-size", "1")
         args = remove_valued_arguments(args, "--dp")
-        args = set_argument_value(args, "--data-parallel-size", str(dep_size))
+        args = set_unique_argument_value(args, "--data-parallel-size", str(dep_size))
 
         # Handle hybrid load balancing for multinode DEP
         # If dep_size > num_gpus_per_node, we need multinode and can use hybrid-lb
         if dep_size > num_gpus_per_node and "--data-parallel-hybrid-lb" in args:
             # Set local DP size to GPUs per node for hybrid load balancing
-            args = set_argument_value(
+            args = set_unique_argument_value(
                 args, "--data-parallel-size-local", str(num_gpus_per_node)
             )
         else:
@@ -659,8 +658,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             max_num_tokens // dp_size if dp_size > 1 else max_num_tokens
         )
 
-        args = set_argument_value(args, "--max-num-seqs", str(max_batch_size))
-        args = set_argument_value(
+        args = set_unique_argument_value(args, "--max-num-seqs", str(max_batch_size))
+        args = set_unique_argument_value(
             args, "--max-num-batched-tokens", str(per_gpu_max_tokens)
         )
 
