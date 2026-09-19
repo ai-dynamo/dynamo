@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, List, Mapping, Optional
+from typing import Any, AsyncGenerator, AsyncIterator, Dict, Mapping, Optional
 
 import numpy as np
 import sglang as sgl
@@ -41,6 +41,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     VIDEO_URL_KEY,
     build_disagg_mm_kwargs,
     extract_media_urls,
+    extract_mm_hashes,
     raise_if_unextracted_multimodal,
 )
 
@@ -304,32 +305,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         probe = filter_supported_async_generate_kwargs(engine, {"mm_hashes": None})
         return "mm_hashes" in probe
-
-    @staticmethod
-    def _extract_mm_hashes(request: Dict[str, Any]) -> Optional[List[str]]:
-        """Pull the per-image hashes the Rust frontend forwards via extra_args.
-
-        Returns ``None`` when the field is absent or malformed; SGLang then
-        recomputes the hash internally via ``hash_feature()``.
-        """
-        extra_args = request.get("extra_args")
-        if not isinstance(extra_args, dict):
-            return None
-        mm_hashes = extra_args.get("mm_hashes")
-        if not mm_hashes:
-            return None
-        if not isinstance(mm_hashes, list):
-            return None
-        # Fail closed if a non-string slipped into the list — downstream
-        # SGLang treats mm_hashes as List[str] and a bad element would
-        # crash the worker mid-request. Routing falls back to text-prefix.
-        if not all(isinstance(h, str) for h in mm_hashes):
-            logging.warning(
-                "extra_args.mm_hashes contained non-str entries; "
-                "ignoring routing-side hashes and letting SGLang recompute"
-            )
-            return None
-        return mm_hashes
 
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
@@ -623,7 +598,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
             mm_hashes_kwargs: Dict[str, Any] = {}
             if self._mm_hashes_supported:
-                forwarded = self._extract_mm_hashes(request)
+                forwarded = extract_mm_hashes(request)
                 if forwarded is not None:
                     mm_hashes_kwargs["mm_hashes"] = forwarded
 

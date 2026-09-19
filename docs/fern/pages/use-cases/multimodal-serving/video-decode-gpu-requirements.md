@@ -4,17 +4,19 @@
 title: Video Decode GPU Requirements
 ---
 
-Dynamo decodes H.264 and H.265 (HEVC) video input on the GPU using NVDEC, NVIDIA's
-dedicated hardware video decoder, through
-[PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/).
+Dynamo provides two video-input decode paths in its CUDA runtime images:
 
-Other formats — VP8, VP9 and AV1 — have **no video-input decoder** in the shipped images.
-The in-tree VP8/VP9 FFmpeg serves the video *output* (generation) path; it is not wired to
-video input, and the Rust `media-ffmpeg` decoder is not built into these images. Video
-input decodes through Python carriers (OpenCV, PyAV, decord) that the images deliberately
-omit — the vLLM images do ship OpenCV, but built without any video backend, for still-image
-work only — so a VP8/VP9/AV1 clip fails with an unsupported-codec error unless a carrier
-that decodes video is installed alongside.
+- H.264 and H.265 (HEVC) decode on the GPU using NVDEC, NVIDIA's dedicated
+  hardware video decoder, through
+  [PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/).
+- VP8 and VP9 decode on the CPU through Dynamo's codec-limited, in-tree FFmpeg
+  when frontend decoding is enabled on vLLM or SGLang.
+
+The in-tree FFmpeg does not include H.264, H.265, or AV1 decoders. Without
+frontend decoding, video input remains owned by the backend and requires its
+Python decode carrier (OpenCV, PyAV, or decord). The images deliberately omit
+those wider software-decode carriers by default; vLLM does ship OpenCV, but it
+is built without a video backend for still-image work only.
 
 This page covers which GPUs provide NVDEC, what the container must expose, and how
 Dynamo behaves when hardware decode is unavailable.
@@ -129,20 +131,20 @@ between the two.
 ## Behavior when NVDEC is unavailable
 
 Hardware decode is additive and never blocks a request on its own: routing falls through
-to the software decode path where one exists.
+to a software decode path where one exists. VP8 and VP9 frontend decoding on CUDA vLLM
+and SGLang does not depend on NVDEC.
 
 > [!IMPORTANT]
-> In the shipped images there is no software decode path for video input, for any format.
-> The Python carriers that decode video input (OpenCV, PyAV, decord) are deliberately not
-> installed — the vLLM images ship OpenCV built without a video backend, which resizes
-> still images and opens no video — and the in-tree VP8/VP9 FFmpeg serves the video
-> *output* path rather than input. So if NVDEC is unavailable, H.264 and H.265 fail with an unsupported-codec error
-> — and VP8, VP9 and AV1 fail the same way whether NVDEC is available or not, since NVDEC
-> does not decode them either.
+> The shipped images do not include a software H.264, H.265, or AV1 decoder.
+> Therefore, if NVDEC is unavailable, H.264 and H.265 fail with an
+> unsupported-codec error unless the backend's wider Python decode carrier is
+> installed. AV1 also requires an additional carrier because Dynamo does not
+> route it through NVDEC and the in-tree FFmpeg excludes it.
 >
 > Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
-> For the other formats, install a decode carrier alongside, or transcode the input to
-> H.264/H.265 before sending it.
+> For VP8 and VP9, use frontend decoding on a CUDA vLLM or SGLang runtime. For
+> other software-decoded cases, install a decode carrier alongside or transcode
+> the input before sending it.
 
 ### Installing a software decoder
 
