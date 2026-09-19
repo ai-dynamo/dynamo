@@ -543,11 +543,15 @@ async def test_cancelled_native_stream_preserves_cancelled_finish(native_engine)
 async def test_kv_replay_rejected_before_native_start(native_engine, tmp_path):
     _, constructor = native_engine
     engine = TokenspeedLLMEngine(
-        server_args(kv_events_config=json.dumps({
-            "enable_kv_cache_events": True,
-            "endpoint": f"ipc://{tmp_path}/events",
-            "replay_endpoint": f"ipc://{tmp_path}/replay",
-        }))
+        server_args(
+            kv_events_config=json.dumps(
+                {
+                    "enable_kv_cache_events": True,
+                    "endpoint": f"ipc://{tmp_path}/events",
+                    "replay_endpoint": f"ipc://{tmp_path}/replay",
+                }
+            )
+        )
     )
     try:
         with pytest.raises(ValueError, match="replay_endpoint"):
