@@ -1,38 +1,115 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Embedding cache ON vs OFF on a single vllm_serve workflow.
-#
-# Usage:
-#   python -m benchmarks.multimodal.sweep --config benchmarks/multimodal/sweep/experiments/embedding_cache/cache_on_off.yaml
+# Qwen3.5-122B three-arm embedding-cache comparison on 2xH100.
+# Repeated image payloads carry stable UUIDs and are stripped after their first
+# use in each session. The mm processor cache is deliberately identical across
+# arms; only the post-encoder embedding-cache connector changes.
 
-model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
-concurrencies: [16, 32, 64, 128, 256]
-osl: 150
-request_count: 1000
-warmup_count: 5
+model: Qwen/Qwen3.5-122B-A10B-FP8
+concurrencies: [30]
+osl: 1024
+conversation_num: 30
+warmup_count: 2
 port: 8000
-timeout: 900
-output_dir: benchmarks/multimodal/sweep/results/vllm_serve
+timeout: 2400
+output_dir: /dynamo-tmp/logs/09-14/qwen35-122b-vllm-ec-uuid/default
+skip_plots: true
+restart_server_every_benchmark: true
+uuid_and_strip: true
 
 env:
-  ENABLE_ENCODER_CACHE: "0"
+  DYN_DISABLE_NSYS: "1"
+  DYN_HTTP_BODY_LIMIT_MB: "200"
+  VLLM_USE_V2_MODEL_RUNNER: "1"
 
 input_files:
-  - benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_base64.jsonl
-  - benchmarks/multimodal/jsonl/1000req_2img_200pool_400word_base64.jsonl
-  - benchmarks/multimodal/jsonl/1000req_4img_200pool_400word_base64.jsonl
-  - benchmarks/multimodal/jsonl/1000req_2img_200pool_400word_http.jsonl
-  - benchmarks/multimodal/jsonl/1000req_4img_200pool_400word_http.jsonl
-  - benchmarks/multimodal/jsonl/1000req_1img_800pool_400word_http.jsonl
-  - benchmarks/multimodal/jsonl/1000req_2img_1600pool_400word_http.jsonl
-  - benchmarks/multimodal/jsonl/1000req_4img_3200pool_400word_http.jsonl
+  - /dynamo-tmp/data/30u_8t_5w_8000word_base64_uuid_seed42.jsonl
 
 configs:
-  - label: cache-off
+  - label: vllm-serve
     workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
-    extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "0"]
+    extra_args:
+      - --tensor-parallel-size
+      - "2"
+      - --quantization
+      - fp8
+      - --enable-expert-parallel
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "32768"
+      - --max-num-seqs
+      - "50"
+      - --mm-encoder-tp-mode
+      - data
+      - --mm-processor-cache-gb
+      - "30"
+      - --limit-mm-per-prompt
+      - '{"image":5}'
+      - --no-enable-prefix-caching
+      - --no-enable-log-requests
 
-  - label: cache-on
+  - label: vllm-serve-native-ec
     workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
-    extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "10"]
+    extra_args:
+      - --tensor-parallel-size
+      - "2"
+      - --quantization
+      - fp8
+      - --enable-expert-parallel
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "32768"
+      - --max-num-seqs
+      - "50"
+      - --mm-encoder-tp-mode
+      - data
+      - --mm-processor-cache-gb
+      - "30"
+      - --limit-mm-per-prompt
+      - '{"image":5}'
+      - --no-enable-prefix-caching
+      - --no-enable-log-requests
+      - --ec-transfer-config
+      - '{"ec_connector":"ECCPUConnector","ec_role":"ec_both","ec_connector_extra_config":{"ec_cpu_bytes":4294967296}}'
+
+  - label: vllm-serve-dynamo-ec
+    workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+    extra_args:
+      - --tensor-parallel-size
+      - "2"
+      - --quantization
+      - fp8
+      - --enable-expert-parallel
+      - --gpu-memory-utilization
+      - "0.90"
+      - --max-model-len
+      - "32768"
+      - --max-num-batched-tokens
+      - "32768"
+      - --max-num-seqs
+      - "50"
+      - --mm-encoder-tp-mode
+      - data
+      - --mm-processor-cache-gb
+      - "30"
+      - --limit-mm-per-prompt
+      - '{"image":5}'
+      - --no-enable-prefix-caching
+      - --no-enable-log-requests
+      - --multimodal-embedding-cache-capacity-gb
+      - "4"
+
+# Historical cache-on/off matrix retained for reference. Keep it commented so
+# the canonical file continues to describe one runnable experiment.
+# model: Qwen/Qwen3-VL-30B-A3B-Instruct-FP8
+# concurrencies: [16, 32, 64, 128, 256]
+# configs:
+#   - label: cache-off
+#   - label: cache-on

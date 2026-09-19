@@ -57,6 +57,13 @@ case "$CONFIG" in
     BENCH_FRONTEND="qwen36-vllm-serve"
     BENCH_RUN_LABEL="vllm-serve"
     ;;
+  vllm-serve-native-ec)
+    DEPLOY_KIND="deployment"
+    DEPLOY_NAME="qwen36-vllm-serve-native-ec"
+    BENCH_POD="qwen36-vllm-serve-native-ec-bench"
+    BENCH_FRONTEND="qwen36-vllm-serve-native-ec"
+    BENCH_RUN_LABEL="vllm-serve-native-ec"
+    ;;
   dynamo-fd)
     DEPLOY_KIND="dgd"
     DEPLOY_NAME="qwen36-dynamo-fd"
@@ -73,11 +80,11 @@ case "$CONFIG" in
     ;;
   "")
     echo "ERROR: --config <name> required" >&2
-    echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
+    echo "Available: vllm-serve vllm-serve-native-ec dynamo-fd dynamo-fd-ec" >&2
     exit 2 ;;
   *)
     echo "ERROR: unknown config: $CONFIG" >&2
-    echo "Available: vllm-serve dynamo-fd dynamo-fd-ec" >&2
+    echo "Available: vllm-serve vllm-serve-native-ec dynamo-fd dynamo-fd-ec" >&2
     exit 2 ;;
 esac
 export BENCH_POD BENCH_FRONTEND BENCH_RUN_LABEL
@@ -143,7 +150,7 @@ dataset() {
     fi
     $K delete job qwen36-generate-datasets
   fi
-  $K apply -f "$HERE/data-gen-job.yaml"
+  APPLY_TPL "$HERE/data-gen-job.yaml"
   $K wait --for=condition=Complete job/qwen36-generate-datasets --timeout=1800s
   $K logs job/qwen36-generate-datasets | tail -20
 }

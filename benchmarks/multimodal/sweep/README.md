@@ -125,3 +125,11 @@ Given the config above with two input files and two configs (`cache-off`,
 | Embedding cache (TRT-LLM E+PD) | `experiments/embedding_cache/trtllm_e_pd.yaml` | Disaggregated TRT-LLM E+PD |
 | Embedding cache (SGLang E+PD) | `experiments/embedding_cache/sglang_e_pd.yaml` | Disaggregated SGLang video understanding |
 | Aggregated / colocated EPD | `experiments/epd/README.md` | vLLM and SGLang |
+
+# UUID-aware image transport
+
+Set `uuid_and_strip: true` in the sweep YAML when each JSONL row includes an
+`image_uuids` list parallel to `images`. The runner selects AIPerf's chat
+endpoint and adds `--uuid-and-strip`; the default remains `false` for existing
+experiments. This lets vLLM receive image content once per session and reuse
+the stable UUID on subsequent requests.

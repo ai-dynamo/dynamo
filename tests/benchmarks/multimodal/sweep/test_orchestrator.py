@@ -21,6 +21,7 @@ def _make_config(
     num_input_files: int = 2,
     request_rates: List[int] | None = None,
     restart_server_every_benchmark: bool = True,
+    uuid_and_strip: bool = False,
 ) -> SweepConfig:
     """Create a SweepConfig with dummy workflow scripts and input files."""
     if request_rates is None:
@@ -61,6 +62,7 @@ def _make_config(
         output_dir=str(tmp_path / "results"),
         skip_plots=True,
         restart_server_every_benchmark=restart_server_every_benchmark,
+        uuid_and_strip=uuid_and_strip,
     )
 
 
@@ -188,3 +190,24 @@ def test_skip_all_results_no_server_start(
 
     assert mock_aiperf.call_count == 0
     assert mock_server.start.call_count == 0
+
+
+@patch("benchmarks.multimodal.sweep.orchestrator.run_aiperf_single")
+@patch("benchmarks.multimodal.sweep.orchestrator.ServerManager")
+def test_uuid_and_strip_propagates_to_aiperf(
+    mock_server_cls: MagicMock,
+    mock_aiperf: MagicMock,
+    tmp_path: Path,
+) -> None:
+    config = _make_config(
+        tmp_path,
+        num_configs=1,
+        num_input_files=1,
+        request_rates=[4],
+        uuid_and_strip=True,
+    )
+    mock_server_cls.return_value.is_running = False
+
+    run_sweep(config, repo_root=tmp_path)
+
+    assert mock_aiperf.call_args.kwargs["uuid_and_strip"] is True
