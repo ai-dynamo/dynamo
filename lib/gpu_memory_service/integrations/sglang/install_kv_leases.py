@@ -190,6 +190,10 @@ def rollback_adopted_hbm_pages(allocator, leases: list[KVLease]) -> None:
             cpu_free.extend(ordered)
         else:
             cpu_free.extendleft(reversed(pages))
+        active = st.get("active_free_pages")
+        if isinstance(active, set):
+            active.update(pages)
+        st["active_prefix_valid"] = False
 
 
 # Resolved by `install()` from the running SGLang build. Module globals rather
@@ -204,6 +208,7 @@ _native_paged_allocator_class = None
 orig_token_init = None
 orig_token_alloc = None
 orig_token_free = None
+orig_token_merge_and_sort_free = None
 orig_token_clear = None
 orig_paged_init = None
 orig_paged_alloc = None
@@ -367,6 +372,10 @@ def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
     allocator.free_pages = torch.cat((allocator.free_pages, page_tensor))
     cpu_free.extend(pages)
     _record_leases(st, successors)
+    active = st.get("active_free_pages")
+    if isinstance(active, set):
+        active.update(pages)
+    st["active_prefix_valid"] = False
     hidden.difference_update(pages)
     retained.difference_update(pages)
     candidates = getattr(allocator, "_gms_recovery_candidates", None)
@@ -799,6 +808,29 @@ def enter_exclusive_steady_state(self) -> int:
     self.free_pages = torch.tensor(
         local, dtype=self.free_pages.dtype, device=self.free_pages.device
     )
+    # Never activate the entire free pool by default: at least three quarters
+    # of current allocator headroom remains explicitly IDLE and immediately
+    # recoverable. The configured ceiling still bounds refill batch size.
+    active_count = min(
+        len(local),
+        _steady_active_window_pages(),
+        max(1, len(local) // 4),
+    )
+    st["active_window_pages"] = active_count
+    active_pages = set(local[:active_count])
+    idle_leases = [lease_map[page] for page in local[active_count:]]
+
+    def park_initial_idle():
+        st["client"].park_idle(idle_leases)
+        pages = [int(lease.block_id) for lease in idle_leases]
+        return pages, pages
+
+    if idle_leases:
+        parked = cohort.run_agreed("steady:park-idle", park_initial_idle)
+        if parked != local[active_count:]:
+            raise RuntimeError("SGLang TP idle-page publication diverged")
+    st["active_free_pages"] = active_pages
+    st["active_prefix_valid"] = True
     # Every page left in native free_pages is already leased by this writer.
     # SGLang's GPU list remains authoritative. Mirror only page IDs on the CPU
     # so completion can publish exact identities without synchronizing CUDA.
@@ -1069,6 +1101,160 @@ def _tp_reservation_window_pages() -> int:
         return 4096
 
 
+def _steady_active_window_pages() -> int:
+    raw = os.environ.get("GMS_SGLANG_ACTIVE_LEASE_WINDOW_PAGES", "4096")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Ignoring invalid GMS_SGLANG_ACTIVE_LEASE_WINDOW_PAGES=%r", raw)
+        return 4096
+
+
+def _transition_idle_pages(
+    self, pages: list[int], *, activate: bool, operation: str
+) -> None:
+    """Apply one TP-agreed IDLE transition to exact free-page leases."""
+    if not pages:
+        return
+    st = _state(self)
+    if st is None:
+        raise RuntimeError("SGLang lease state is unavailable")
+    lease_map = st.get("leases_by_page")
+    if not isinstance(lease_map, dict):
+        raise RuntimeError("SGLang lease map is unavailable")
+    leases = [lease_map[page] for page in pages]
+    cohort = getattr(self, "_gms_tp_consistency", None)
+
+    def transition():
+        method = st["client"].activate_idle if activate else st["client"].park_idle
+        method(leases)
+        return pages, pages
+
+    if cohort is not None and cohort.enabled:
+        agreed = cohort.run_agreed(
+            f"{operation}:{'activate' if activate else 'park'}", transition
+        )
+    else:
+        agreed, _identity = transition()
+    if agreed != pages:
+        raise RuntimeError("SGLang TP active-window transition diverged")
+
+
+def _set_steady_active_prefix(self, required_pages: int, operation: str) -> None:
+    """Make exactly the required/window-sized native-free prefix writable.
+
+    Pages outside the prefix are published IDLE. Re-evaluating the whole free
+    prefix after batched frees prevents active pages from accumulating behind
+    IDLE pages and silently eroding crash-safe headroom.
+    """
+    st = _state(self)
+    if st is None:
+        return
+    cpu_free = st.get("cpu_free_pages")
+    active = st.get("active_free_pages")
+    if not isinstance(cpu_free, deque) or not isinstance(active, set):
+        raise RuntimeError("SGLang active lease window is unavailable")
+    free_order = [int(page) for page in cpu_free]
+    if not active.issubset(set(free_order)):
+        raise RuntimeError("SGLang active free-page view contains allocated pages")
+    window = max(1, int(st.get("active_window_pages", _steady_active_window_pages())))
+    target = min(len(free_order), max(int(required_pages), window))
+    desired_order = free_order[:target]
+    desired = set(desired_order)
+
+    # Park first. If activation subsequently fails, allocation remains blocked
+    # and the pool has more safe headroom rather than an over-wide active set.
+    excess = [page for page in free_order if page in active and page not in desired]
+    _transition_idle_pages(self, excess, activate=False, operation=f"{operation}:bound")
+    active.difference_update(excess)
+
+    inactive = [page for page in desired_order if page not in active]
+    _transition_idle_pages(
+        self, inactive, activate=True, operation=f"{operation}:prefix"
+    )
+    active.update(inactive)
+    st["active_prefix_valid"] = True
+
+
+def _ensure_steady_active_window(self, required_pages: int, operation: str) -> None:
+    """Activate a bounded free-page prefix before SGLang may write it.
+
+    Free pages outside this window remain IDLE and are immediately recoverable
+    after a crash. Refill is batched, so the native allocation hot path pays no
+    shared-state operation until it crosses a window boundary.
+    """
+    st = _state(self)
+    if st is None or required_pages <= 0:
+        return
+    active = st.get("active_free_pages")
+    if (
+        st.get("active_prefix_valid", False)
+        and isinstance(active, set)
+        and int(required_pages) <= len(active)
+    ):
+        return
+    _set_steady_active_prefix(self, required_pages, operation)
+
+
+def _trim_steady_active_window(self, operation: str) -> None:
+    """Restore the configured bound only when an oversized/invalid view exists."""
+    st = _state(self)
+    if st is None:
+        return
+    active = st.get("active_free_pages")
+    if not isinstance(active, set):
+        raise RuntimeError("SGLang active lease window is unavailable")
+    window = max(1, int(st.get("active_window_pages", _steady_active_window_pages())))
+    if st.get("active_prefix_valid", False) and len(active) <= window:
+        return
+    _set_steady_active_prefix(self, 0, operation)
+
+
+def _consume_steady_pages(st: dict[str, object], count: int) -> list[int]:
+    cpu_free = st.get("cpu_free_pages")
+    active = st.get("active_free_pages")
+    if not isinstance(cpu_free, deque) or not isinstance(active, set):
+        raise RuntimeError("SGLang CPU free-page mirror diverged")
+    selected = [int(cpu_free.popleft()) for _ in range(count)]
+    if not set(selected).issubset(active):
+        raise RuntimeError("SGLang allocated an IDLE page without activation")
+    active.difference_update(selected)
+    return selected
+
+
+def _publish_steady_native_free(
+    self, pages: list[int], operation: str, *, placement: str
+) -> None:
+    """Add newly native-free pages, then restore the bounded active prefix."""
+    st = _state(self)
+    if st is None:
+        return
+    lease_map = st.get("leases_by_page")
+    active = st.get("active_free_pages")
+    if not isinstance(lease_map, dict) or not isinstance(active, set):
+        raise RuntimeError("SGLang active lease window is unavailable")
+    unique = list(dict.fromkeys(int(page) for page in pages if int(page) > 0))
+    missing = [page for page in unique if page not in lease_map]
+    if missing:
+        raise RuntimeError(
+            "SGLang cannot publish unleased free pages: "
+            f"first_missing={missing[0]} count={len(missing)}"
+        )
+    # Staged pages are not in native free_pages yet. Publish them IDLE now and
+    # activate the sorted prefix only if a later allocation merges them.
+    if placement == "staged":
+        _transition_idle_pages(
+            self, unique, activate=False, operation=f"{operation}:staged"
+        )
+        return
+    # These pages remained LEASED while allocated. Native release is their GPU
+    # completion boundary, so they join the free active set before rebalancing.
+    active.update(unique)
+    if placement != "prepend":
+        st["active_prefix_valid"] = False
+    _trim_steady_active_window(self, operation)
+
+
 def _consume_tp_reservation(self, count: int) -> list[KVLease] | None:
     """Take the next agreed pages without another cross-rank collective."""
     st = _state(self)
@@ -1312,10 +1498,6 @@ def _release_pages(self, *page_ids) -> None:
             active_leases=len(lease_map),
         )
     if st.get("steady_state", False):
-        # Recycle already-owned idle pages without a release/acquire round
-        # trip. They remain LEASED, so promotion can still reclaim them after
-        # a crash. SEALED retained pages stay excluded until ordered directory
-        # retirement makes them writable again.
         queue = st.get("tp_reserved_pages")
         if isinstance(queue, list):
             queue.extend(
@@ -1338,6 +1520,30 @@ def _release_indices(self, free_index) -> None:
     _release_pages(self, pages)
 
 
+def _released_page_list(self, free_index) -> list[int]:
+    pages = (
+        free_index
+        if int(self.page_size) == 1
+        else torch.unique(free_index // int(self.page_size))
+    )
+    return [int(page) for page in pages.detach().cpu().tolist() if int(page) > 0]
+
+
+def _merge_cpu_staged_pages(st) -> None:
+    cpu_free = st.get("cpu_free_pages")
+    cpu_staged = st.get("cpu_staged_pages")
+    if (
+        isinstance(cpu_free, (list, deque))
+        and isinstance(cpu_staged, list)
+        and cpu_staged
+    ):
+        merged = sorted((*cpu_free, *cpu_staged))
+        cpu_free.clear()
+        cpu_free.extend(merged)
+        cpu_staged.clear()
+        st["active_prefix_valid"] = False
+
+
 def _initialize_allocator(self) -> None:
     arm_parent_death_signal()
     total_pages = int(self.size // self.page_size)
@@ -1358,6 +1564,9 @@ def _initialize_allocator(self) -> None:
         # mirror lets request-aware allocation record physical page ownership
         # without synchronizing SGLang's GPU allocator tensor back to Python.
         "cpu_free_pages": None,
+        "active_free_pages": set(),
+        "active_prefix_valid": False,
+        "active_window_pages": 0,
         "cpu_staged_pages": [],
         # Finished-request frees can be derived from the request's CPU page
         # record.  Cache adapters append those page IDs here; the allocator
@@ -1391,6 +1600,16 @@ def _gms_token_alloc(self, need_size: int):
     st = _state(self)
     if st is None or int(need_size) == 0:
         return orig_token_alloc(self, need_size)
+    if st.get("exclusive_steady_state", False):
+        count = int(need_size)
+        if self.need_sort and count > len(self.free_pages):
+            self.merge_and_sort_free()
+        _ensure_steady_active_window(self, count, "token_alloc")
+        result = orig_token_alloc(self, need_size)
+        if result is not None:
+            _consume_steady_pages(st, count)
+        _trim_steady_active_window(self, "token_alloc:post")
+        return result
     if self.need_sort and int(need_size) > len(self.free_pages):
         self.merge_and_sort_free()
         st["tp_reservation_aligned"] = False
@@ -1433,7 +1652,32 @@ def _gms_token_free(self, free_index):
     if st is not None:
         st["tp_reservation_aligned"] = False
     if self.free_group is None:
+        pages = _released_page_list(self, free_index)
         _release_indices(self, free_index)
+        if st is not None and st.get("exclusive_steady_state", False):
+            cpu_free = st.get("cpu_free_pages")
+            cpu_staged = st.get("cpu_staged_pages")
+            if not isinstance(cpu_free, deque) or not isinstance(cpu_staged, list):
+                raise RuntimeError("SGLang CPU free-page mirror diverged")
+            if self.need_sort:
+                cpu_staged.extend(pages)
+            else:
+                cpu_free.extend(pages)
+            _publish_steady_native_free(
+                self,
+                pages,
+                "token_free",
+                placement="staged" if self.need_sort else "append",
+            )
+    return result
+
+
+def _gms_token_merge_and_sort_free(self):
+    had_staged_pages = bool(len(self.release_pages))
+    result = orig_token_merge_and_sort_free(self)
+    st = _state(self)
+    if had_staged_pages and st is not None and st.get("exclusive_steady_state", False):
+        _merge_cpu_staged_pages(st)
     return result
 
 
@@ -1445,6 +1689,11 @@ def _revoke_allocator_fast_path(st) -> None:
     st["exclusive_hidden_pages"] = set()
     st["standby_headroom_pages"] = set()
     st["cpu_free_pages"] = None
+    st["active_window_pages"] = 0
+    active = st.get("active_free_pages")
+    if isinstance(active, set):
+        active.clear()
+    st["active_prefix_valid"] = False
     for name in ("cpu_staged_pages", "cpu_release_pages", "tp_reserved_pages"):
         values = st.get(name)
         if isinstance(values, list):
@@ -1494,13 +1743,11 @@ def _gms_paged_alloc(self, need_size: int):
         num_pages = int(need_size) // int(self.page_size)
         if num_pages > len(self.free_pages):
             self.merge_and_sort_free()
+        _ensure_steady_active_window(self, num_pages, "paged_alloc")
         result = orig_paged_alloc(self, need_size)
         if result is not None and num_pages:
-            cpu_free = st.get("cpu_free_pages")
-            if not isinstance(cpu_free, deque) or len(cpu_free) < num_pages:
-                raise RuntimeError("SGLang CPU free-page mirror diverged")
-            for _ in range(num_pages):
-                cpu_free.popleft()
+            _consume_steady_pages(st, num_pages)
+        _trim_steady_active_window(self, "paged_alloc:post")
         return result
     num_pages = int(need_size) // int(self.page_size)
     if num_pages == 0:
@@ -1563,6 +1810,14 @@ def _gms_paged_alloc_extend(
         premerge_pages = extend_num_tokens // int(self.page_size) + len(prefix_lens) + 1
         if self.need_sort and premerge_pages > len(self.free_pages):
             self.merge_and_sort_free()
+        # This upper bound is intentionally derived without a device read or
+        # an optional SGLang helper. Activating a few extra IDLE pages is safe;
+        # exposing even one unactivated page to the Triton allocator is not.
+        required_pages = min(
+            len(self.free_pages),
+            int(num_new_pages) if num_new_pages is not None else premerge_pages,
+        )
+        _ensure_steady_active_window(self, required_pages, "paged_alloc_extend")
         free_before = len(self.free_pages)
         result = orig_paged_alloc_extend(
             self,
@@ -1576,13 +1831,11 @@ def _gms_paged_alloc_extend(
         )
         num_new_pages = free_before - len(self.free_pages)
         if result is not None and num_new_pages:
-            cpu_free = st.get("cpu_free_pages")
-            if not isinstance(cpu_free, deque) or len(cpu_free) < num_new_pages:
-                raise RuntimeError("SGLang CPU free-page mirror diverged")
-            selected = [cpu_free.popleft() for _ in range(num_new_pages)]
+            selected = _consume_steady_pages(st, num_new_pages)
             _record_extend_pages(
                 st, selected, prefix_lens_cpu, seq_lens_cpu, int(self.page_size)
             )
+        _trim_steady_active_window(self, "paged_alloc_extend:post")
         return result
     premerge_pages = extend_num_tokens // int(self.page_size) + len(prefix_lens) + 1
     if self.need_sort and premerge_pages > len(self.free_pages):
@@ -1651,15 +1904,17 @@ def _gms_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc):
     if st.get("exclusive_steady_state", False):
         if len(seq_lens) > len(self.free_pages):
             self.merge_and_sort_free()
+        # At most one new page per decoded sequence. Use that safe upper bound
+        # so the steady path does not depend on an optional Python helper.
+        required_pages = min(len(self.free_pages), len(seq_lens))
+        _ensure_steady_active_window(self, required_pages, "paged_alloc_decode")
         free_before = len(self.free_pages)
         result = orig_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc)
         num_new_pages = free_before - len(self.free_pages)
         if result is not None and num_new_pages:
-            cpu_free = st.get("cpu_free_pages")
-            if not isinstance(cpu_free, deque) or len(cpu_free) < num_new_pages:
-                raise RuntimeError("SGLang CPU free-page mirror diverged")
-            selected = [cpu_free.popleft() for _ in range(num_new_pages)]
+            selected = _consume_steady_pages(st, num_new_pages)
             _record_decode_pages(st, selected, seq_lens_cpu, int(self.page_size))
+        _trim_steady_active_window(self, "paged_alloc_decode:post")
         return result
     if self.need_sort and len(seq_lens) > len(self.free_pages):
         self.merge_and_sort_free()
@@ -1745,6 +2000,12 @@ def _gms_paged_release_page_ids(self, *page_ids):
                     cpu_free.extendleft(reversed(pages))
                 else:
                     cpu_free[:0] = pages
+        _publish_steady_native_free(
+            self,
+            pages,
+            "paged_free",
+            placement="staged" if self.need_sort else "prepend",
+        )
         return result
     result = orig_paged_release_page_ids(self, *page_ids)
     if (
@@ -1794,13 +2055,7 @@ def _gms_paged_merge_and_sort_free(self):
     result = orig_paged_merge_and_sort_free(self)
     st = _state(self)
     if had_staged_pages and st is not None and st.get("exclusive_steady_state", False):
-        cpu_free = st.get("cpu_free_pages")
-        cpu_staged = st.get("cpu_staged_pages")
-        if isinstance(cpu_free, (list, deque)) and isinstance(cpu_staged, list):
-            merged = sorted((*cpu_free, *cpu_staged))
-            cpu_free.clear()
-            cpu_free.extend(merged)
-            cpu_staged.clear()
+        _merge_cpu_staged_pages(st)
     return result
 
 
@@ -1948,6 +2203,7 @@ def _build_allocator_classes(token_class, paged_class):
         __init__ = _gms_token_init
         alloc = _gms_token_alloc
         free = _gms_token_free
+        merge_and_sort_free = _gms_token_merge_and_sort_free
         clear = _gms_token_clear
 
     class GMSPagedTokenToKVPoolAllocator(paged_class):
@@ -1970,7 +2226,8 @@ def install(factory: Callable[[object, int], KVLeaseClient] | None = None) -> bo
     global _patched, _factory, torch, get_num_new_pages
     global _gms_token_allocator_class, _gms_paged_allocator_class
     global _native_token_allocator_class, _native_paged_allocator_class
-    global orig_token_init, orig_token_alloc, orig_token_free, orig_token_clear
+    global orig_token_init, orig_token_alloc, orig_token_free
+    global orig_token_merge_and_sort_free, orig_token_clear
     global orig_paged_init, orig_paged_alloc, orig_paged_alloc_extend
     global orig_paged_alloc_decode, orig_paged_release_page_ids
     global orig_paged_merge_and_sort_free, orig_paged_clear
@@ -1999,6 +2256,7 @@ def install(factory: Callable[[object, int], KVLeaseClient] | None = None) -> bo
     orig_token_init = Token.__init__
     orig_token_alloc = Token.alloc
     orig_token_free = Token.free
+    orig_token_merge_and_sort_free = Token.merge_and_sort_free
     orig_token_clear = Token.clear
     orig_paged_init = Paged.__init__
     orig_paged_alloc = Paged.alloc

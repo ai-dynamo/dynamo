@@ -234,25 +234,63 @@ def test_exclusive_adoption_rollback_restores_cpu_free_page_order(monkeypatch):
     assert list(state["cpu_free_pages"]) == [2, 3, 4]
 
 
-def test_steady_state_free_recycles_owned_lease_without_ring_release(monkeypatch):
+def test_steady_state_free_refills_active_window_without_ring_transition(monkeypatch):
     released = []
+    parked = []
     allocator = SimpleNamespace()
     lease = KVLease(2, 7)
     state = {
-        "client": SimpleNamespace(release=lambda leases: released.extend(leases)),
+        "client": SimpleNamespace(
+            release=lambda leases: released.extend(leases),
+            park_idle=lambda leases: parked.extend(leases),
+        ),
         "leases_by_page": {2: lease},
         "retained_pages": set(),
         "tp_reserved_pages": [3],
         "tp_reservation_aligned": True,
         "steady_state": True,
+        "exclusive_steady_state": True,
+        "cpu_free_pages": deque([2]),
+        "active_free_pages": set(),
+        "active_window_pages": 1,
     }
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
 
     hooks._release_pages(allocator, torch.tensor([2]))
+    hooks._publish_steady_native_free(allocator, [2], "test", placement="prepend")
 
     assert released == []
+    assert parked == []
+    assert state["active_free_pages"] == {2}
     assert state["leases_by_page"] == {2: lease}
     assert state["tp_reserved_pages"] == [3, 2]
+
+
+def test_steady_state_free_parks_only_active_window_surplus(monkeypatch):
+    parked = []
+    allocator = SimpleNamespace()
+    leases = {2: KVLease(2, 7), 3: KVLease(3, 8)}
+    state = {
+        "client": SimpleNamespace(
+            release=lambda _leases: None,
+            park_idle=lambda batch: parked.extend(batch),
+        ),
+        "leases_by_page": leases,
+        "retained_pages": set(),
+        "tp_reserved_pages": [],
+        "steady_state": True,
+        "exclusive_steady_state": True,
+        "cpu_free_pages": deque([2, 3]),
+        "active_free_pages": {2},
+        "active_window_pages": 1,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    hooks._release_pages(allocator, torch.tensor([3]))
+    hooks._publish_steady_native_free(allocator, [3], "test", placement="prepend")
+
+    assert parked == [leases[3]]
+    assert state["active_free_pages"] == {2}
 
 
 def test_recovery_mode_free_still_releases_lease(monkeypatch):
@@ -293,7 +331,9 @@ def test_exclusive_steady_state_exposes_only_owned_writable_pages(monkeypatch):
         _gms_tp_consistency=TPConsistency(),
     )
     state = {
-        "client": SimpleNamespace(acquire=acquire, release=lambda leases: None),
+        "client": SimpleNamespace(
+            acquire=acquire, release=lambda leases: None, park_idle=lambda leases: None
+        ),
         "leases_by_page": {1: KVLease(1, 3), 2: KVLease(2, 4)},
         "retained_pages": {2},
         "tp_reserved_pages": [1],
@@ -312,6 +352,128 @@ def test_exclusive_steady_state_exposes_only_owned_writable_pages(monkeypatch):
     assert state["steady_state"] is True
     assert state["exclusive_steady_state"] is True
     assert list(state["cpu_free_pages"]) == [1, 3]
+
+
+def test_exclusive_steady_state_parks_tail_and_refills_bounded_window(monkeypatch):
+    monkeypatch.setenv("GMS_SGLANG_ACTIVE_LEASE_WINDOW_PAGES", "1")
+    leases = {
+        1: KVLease(1, 3),
+        2: KVLease(2, 4),
+        3: KVLease(3, 5),
+    }
+    parked = []
+    activated = []
+    client = SimpleNamespace(
+        acquire=lambda *_args, **_kwargs: [],
+        release=lambda _leases: None,
+        park_idle=lambda batch: parked.extend(batch),
+        activate_idle=lambda batch: activated.extend(batch),
+    )
+    allocator = SimpleNamespace(
+        free_pages=torch.tensor([1, 2, 3]),
+        need_sort=False,
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": client,
+        "leases_by_page": dict(leases),
+        "retained_pages": set(),
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+        "steady_state": False,
+        "exclusive_steady_state": False,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(hooks, "torch", torch)
+
+    assert hooks.enter_exclusive_steady_state(allocator) == 3
+    assert state["active_free_pages"] == {1}
+    assert parked == [leases[2], leases[3]]
+
+    hooks._ensure_steady_active_window(allocator, 2, "test")
+    assert activated == [leases[2]]
+    assert state["active_free_pages"] == {1, 2}
+    assert hooks._consume_steady_pages(state, 2) == [1, 2]
+    assert state["active_free_pages"] == set()
+
+
+def test_active_prefix_rebalances_fragmented_free_pages(monkeypatch):
+    leases = {page: KVLease(page, page + 10) for page in (1, 2, 3, 4)}
+    parked = []
+    activated = []
+    allocator = SimpleNamespace(_gms_tp_consistency=TPConsistency())
+    state = {
+        "client": SimpleNamespace(
+            park_idle=lambda batch: parked.extend(batch),
+            activate_idle=lambda batch: activated.extend(batch),
+        ),
+        "leases_by_page": leases,
+        "cpu_free_pages": deque([1, 2, 3, 4]),
+        "active_free_pages": {2, 3, 4},
+        "active_window_pages": 2,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    hooks._set_steady_active_prefix(allocator, 0, "test")
+
+    assert parked == [leases[3], leases[4]]
+    assert activated == [leases[1]]
+    assert state["active_free_pages"] == {1, 2}
+
+
+def test_token_free_updates_cpu_mirror_and_parks_tail(monkeypatch):
+    leases = {1: KVLease(1, 11), 2: KVLease(2, 12)}
+    parked = []
+    allocator = SimpleNamespace(
+        page_size=1,
+        need_sort=False,
+        free_group=None,
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(
+            park_idle=lambda batch: parked.extend(batch),
+            activate_idle=lambda _batch: None,
+        ),
+        "leases_by_page": leases,
+        "retained_pages": set(),
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+        "steady_state": True,
+        "exclusive_steady_state": True,
+        "cpu_free_pages": deque([1]),
+        "cpu_staged_pages": [],
+        "active_free_pages": {1},
+        "active_window_pages": 1,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(hooks, "orig_token_free", lambda _self, _pages: "freed")
+    monkeypatch.setattr(hooks, "torch", torch)
+
+    assert hooks._gms_token_free(allocator, torch.tensor([2])) == "freed"
+    assert list(state["cpu_free_pages"]) == [1, 2]
+    assert state["active_free_pages"] == {1}
+    assert parked == [leases[2]]
+
+
+def test_token_sorted_free_mirror_merges_with_native_release_pages(monkeypatch):
+    allocator = SimpleNamespace(release_pages=torch.tensor([3]))
+    state = {
+        "exclusive_steady_state": True,
+        "cpu_free_pages": deque([1, 4]),
+        "cpu_staged_pages": [3, 2],
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+
+    def merge(_self):
+        allocator.release_pages = torch.tensor([])
+        return "merged"
+
+    monkeypatch.setattr(hooks, "orig_token_merge_and_sort_free", merge)
+
+    assert hooks._gms_token_merge_and_sort_free(allocator) == "merged"
+    assert list(state["cpu_free_pages"]) == [1, 2, 3, 4]
+    assert state["cpu_staged_pages"] == []
 
 
 def test_exclusive_steady_state_preserves_one_page_for_standby(monkeypatch):
@@ -334,7 +496,9 @@ def test_exclusive_steady_state_preserves_one_page_for_standby(monkeypatch):
         _gms_standby_headroom_pages=1,
     )
     state = {
-        "client": SimpleNamespace(acquire=acquire, release=lambda leases: None),
+        "client": SimpleNamespace(
+            acquire=acquire, release=lambda leases: None, park_idle=lambda leases: None
+        ),
         "leases_by_page": {1: KVLease(1, 3), 2: KVLease(2, 4)},
         "retained_pages": {2},
         "tp_reserved_pages": [],
@@ -362,6 +526,7 @@ def test_exclusive_extend_records_pages_without_device_read(monkeypatch):
     state = {
         "exclusive_steady_state": True,
         "cpu_free_pages": deque([3, 4]),
+        "active_free_pages": {3, 4},
         "active_batch": SimpleNamespace(reqs=[req]),
     }
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
@@ -396,6 +561,7 @@ def test_exclusive_decode_records_pages_without_device_read(monkeypatch):
     state = {
         "exclusive_steady_state": True,
         "cpu_free_pages": deque([3, 4]),
+        "active_free_pages": {3, 4},
         "active_batch": SimpleNamespace(reqs=[req]),
     }
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
@@ -533,7 +699,7 @@ def test_pressure_stops_retrying_single_unretirable_recovery_page(monkeypatch):
 
 
 def test_exclusive_release_demotes_before_native_free(monkeypatch):
-    allocator = SimpleNamespace()
+    allocator = SimpleNamespace(need_sort=False)
     state = {"exclusive_steady_state": True}
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
     events = []
@@ -541,6 +707,9 @@ def test_exclusive_release_demotes_before_native_free(monkeypatch):
         hooks,
         "_demote_exact_retained_pages",
         lambda self, pages: events.append(("demote", pages)),
+    )
+    monkeypatch.setattr(
+        hooks, "_publish_steady_native_free", lambda *_args, **_kwargs: None
     )
     monkeypatch.setattr(
         hooks,
@@ -578,6 +747,9 @@ def test_exclusive_release_uses_matching_cpu_page_hint(monkeypatch):
         lambda self, pages: events.append(("demote", pages)),
     )
     monkeypatch.setattr(
+        hooks, "_publish_steady_native_free", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
         hooks,
         "_forget_local_page_mappings",
         lambda self, pages: events.append(("forget", pages)),
@@ -603,6 +775,9 @@ def test_exclusive_release_rejects_wrong_sized_cpu_page_hint(monkeypatch):
     }
     monkeypatch.setitem(hooks._STATE, id(allocator), state)
     monkeypatch.setattr(hooks, "_demote_exact_retained_pages", lambda *_args: None)
+    monkeypatch.setattr(
+        hooks, "_publish_steady_native_free", lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(hooks, "_forget_local_page_mappings", lambda *_args: None)
     monkeypatch.setattr(
         hooks,
