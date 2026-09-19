@@ -282,6 +282,7 @@ class GPUQuiescenceManager:
                 result = await self._quiesce_locked(
                     backend=client.backend,
                     predecessor_cohort=client.cohort,
+                    terminate_host=True,
                 )
         finally:
             if result is None or not result.quiesced:
@@ -308,23 +309,6 @@ class GPUQuiescenceManager:
             )
             return
 
-        # MPS CUDA_SUCCESS is the authorization to finish host teardown. Guard
-        # every signal with the birth identity so PID reuse cannot kill a new
-        # process after a slow control operation.
-        for registered in clients:
-            observed = process_start_time(registered.pid)
-            if observed is None:
-                continue
-            if observed != registered.process_start_time:
-                logger.error(
-                    "Refusing post-quiescence SIGKILL of reused pid=%d",
-                    registered.pid,
-                )
-                continue
-            try:
-                os.kill(registered.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         logger.info(
             "GPU crash interlock completed backend=%s cohort=%s clients=%d "
             "elapsed_ms=%.2f",
@@ -500,7 +484,11 @@ class GPUQuiescenceManager:
             )
 
     async def _quiesce_locked(
-        self, *, backend: str, predecessor_cohort: str
+        self,
+        *,
+        backend: str,
+        predecessor_cohort: str,
+        terminate_host: bool = False,
     ) -> QuiescenceResult:
         """Quiesce one exact cohort while ``self._lock`` is held."""
         key = (backend, predecessor_cohort)
@@ -547,6 +535,7 @@ class GPUQuiescenceManager:
                 client.pid,
                 client.process_start_time,
             )
+            stopped_before_termination = process_state(client.pid) in {"T", "t"}
             if client_key not in self._terminated_clients:
                 rc, detail = await self._control(
                     backend, "terminate_client", server_pid, str(client.pid)
@@ -568,6 +557,26 @@ class GPUQuiescenceManager:
                 # a second terminate_client would return INVALID_CONTEXT even
                 # though the first command already supplied authoritative proof.
                 self._terminated_clients.add(client_key)
+            # CUDA_SUCCESS authorizes host teardown. A crash-interlocked client
+            # cannot disappear from MPS inventory while its signal handler is
+            # stopped/paused outside CUDA, so kill the exact birth-checked PID
+            # before waiting for inventory retirement. This is not a fallback:
+            # an unsuccessful terminate_client never reaches this branch.
+            if terminate_host or stopped_before_termination:
+                observed = process_start_time(client.pid)
+                if observed == client.process_start_time:
+                    try:
+                        os.kill(client.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                elif observed is not None:
+                    return QuiescenceResult(
+                        False,
+                        "gms-mps",
+                        len(clients),
+                        f"PID {client.pid} was reused after MPS termination",
+                        (time.monotonic() - started) * 1000.0,
+                    )
             absent, inventory = await self._wait_client_absent(
                 backend, server_pid, client.pid
             )

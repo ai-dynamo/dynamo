@@ -339,11 +339,14 @@ async def test_crash_interlock_quiesces_then_kills_registered_cohort(monkeypatch
     pid = os.getpid()
     start = quiescence.process_start_time(pid)
     assert start is not None
+    killed = []
 
     async def control(_backend, *command):
-        return (0, "") if command[0] == "get_client_list" else (0, "0")
+        if command[0] == "get_client_list":
+            assert killed[-1] == (pid, signal.SIGKILL)
+            return 0, ""
+        return 0, "0"
 
-    killed = []
     monkeypatch.setattr(manager, "_control", control)
     monkeypatch.setattr(quiescence, "process_state", lambda _pid: "T")
     monkeypatch.setattr(

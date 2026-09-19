@@ -37,9 +37,9 @@ the common setting.
          |-------------------------->| terminate_client(server,pid) |
          |                           |----------------------------->|
          |                           |<---------- CUDA result 0 -----|
-         |                           | verify PID absent from list   |
-         |                           |----------------------------->|
          |<------------------ SIGKILL|                              |
+         X                           | verify PID absent from list   |
+                                     |----------------------------->|
          X                           | cache exact-cohort proof      |
                                      | successor may reclaim HBM     |
 
@@ -50,8 +50,11 @@ group-stopped. GMS therefore waits until `/proc` proves the exact birth-checked
 PID is stopped, resumes it solely for the MPS termination protocol, and does not
 authorize the successor during that interval. If MPS fails, GMS birth-checks
 and stops the client again. GMS accepts only CUDA result 0 from
-terminate_client and then verifies that the PID disappeared from the MPS client
-inventory. A missing client, command exit status 0 with CUDA result 201,
+terminate_client. That result authorizes a birth-checked SIGKILL of a stopped
+crash client; GMS then verifies that the PID disappeared from the MPS client
+inventory before recording proof. This ordering is required because a client
+paused in its native signal handler cannot service the final teardown needed
+to retire its MPS inventory entry. A missing client, command exit status 0 with CUDA result 201,
 traffic cessation, CPU-process death, and time alone are not proof.
 
 One rank's notification fences its exact registered cohort. For tensor
@@ -63,8 +66,8 @@ whole-cohort proof.
 ## Deployment requirements
 
 - GMS and its engine workers must share a PID namespace. GMS validates
-  /proc/<pid>/stat at registration and again before signaling, which also
-  prevents PID-reuse mistakes.
+  /proc/<pid>/stat at registration and again before signaling, which sharply
+  reduces PID-reuse risk.
 - All CUDA clients and the control process must use the same MPS pipe directory
   and compatible UID. The MPS daemon must start before any CUDA context.
 - Exactly one MPS server must be discoverable, or its PID must be configured.
@@ -104,6 +107,10 @@ Additional gotchas:
 - Forking after CUDA/interlock initialization is unsupported. A fork child
   refuses to report using its parent's registration and exits instead.
 - The alternate signal stack is intentionally process-lifetime memory.
+- The current host-signal path validates `/proc/<pid>/stat` immediately before
+  `kill(2)`, but those two operations are not atomic. An extremely narrow PID
+  exit/reuse race remains. A capability-grade implementation should retain a
+  pidfd per registered client and signal through `pidfd_send_signal(2)`.
 - If pipe delivery itself fails, the process still stops. This is fail-closed
   for KV correctness but requires an operator to kill/restart the process.
 - GMS briefly resumes a stopped client because current MPS needs it runnable to
