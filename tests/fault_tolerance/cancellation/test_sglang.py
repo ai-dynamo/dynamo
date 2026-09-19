@@ -359,17 +359,24 @@ def test_request_cancellation_sglang_decode_cancel(
                     frontend.frontend_port, "chat_completion_stream"
                 )
 
+                # Every poll below waits on a log line produced by another process and
+                # relayed through that process's stderr to the file being read, so each
+                # one needs a budget sized for the slowest runner, not the helper's
+                # 500 ms default.
+
                 # Poll for "New Request ID" pattern in decode worker (Dynamo context ID)
                 request_id, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern="New Request ID: ",
                     match_type="contains",
+                    max_wait_ms=10000,
                 )
 
                 # Verify same request ID reached prefill worker
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"New Request ID: {request_id}",
+                    max_wait_ms=10000,
                 )
 
                 # Read one response first to trigger SGLang ID logging in decode worker
@@ -381,23 +388,29 @@ def test_request_cancellation_sglang_decode_cancel(
                     pattern="New SGLang Request ID: ",
                     log_offset=decode_log_offset,
                     match_type="contains",
+                    max_wait_ms=10000,
                 )
 
                 # Now we know SGLang has the request in decode worker, cancel it
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" in decode worker
+                # Poll for "Aborted Request ID" in decode worker. This budget covers the
+                # whole cancellation chain: the client closes the socket, the frontend
+                # notices and issues a Kill, the Kill crosses the request plane, and the
+                # decode worker's cancellation monitor wakes up and logs.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
                     log_offset=decode_log_offset,
+                    max_wait_ms=5000,
                 )
 
                 # Verify frontend log has kill message
                 _, frontend_log_offset = poll_for_pattern(
                     process=frontend,
                     pattern="issued control message control_msg=Kill",
+                    max_wait_ms=5000,
                 )
 
                 logger.info(
