@@ -371,6 +371,11 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 		*out = new(string)
 		**out = **in
 	}
+	if in.DynamoSidecar != nil {
+		in, out := &in.DynamoSidecar, &out.DynamoSidecar
+		*out = new(string)
+		**out = **in
+	}
 	if in.CompilationCache != nil {
 		in, out := &in.CompilationCache, &out.CompilationCache
 		*out = new(CompilationCacheConfig)

@@ -19963,6 +19963,16 @@ spec:
                   required:
                     - pvcName
                   type: object
+                dynamoSidecar:
+                  description: |-
+                    dynamoSidecar names the restartable init container running the Dynamo
+                    runtime for a worker, prefill, or decode component. The operator injects
+                    Dynamo defaults into this container; the regular container named main
+                    runs the engine with user-provided commands, ports, and probes.
+                    The named init container must have restartPolicy: Always. Multinode,
+                    enabled checkpoint, GPU memory service, and failover are not supported.
+                    This field is preserved through v1alpha1 conversion annotations.
+                  type: string
                 eppConfig:
                   description: |-
                     eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
@@ -36790,11 +36800,11 @@ spec:
                   x-kubernetes-list-type: map
                 runtimeVersionOverride:
                   description: |-
-                    RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
-                    main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
-                    no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
-                    parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-                    example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+                    RuntimeVersionOverride declares the Dynamo runtime compatibility version in the runtime
+                    image: main by default, or the init container selected by dynamoSidecar. DGD admission requires
+                    it when that image has no parseable semantic-version tag; controller-generated DCDs may omit it.
+                    Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
+                    MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
                     version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string

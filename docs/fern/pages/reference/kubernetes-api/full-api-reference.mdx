@@ -2628,7 +2628,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in the runtime image: main by default, or the init container selected by dynamoSidecar. DGD admission requires it when that image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2694,6 +2694,11 @@ frontendSidecar optionally designates a container in `podTemplate.spec.container
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="dynamoSidecar" type="string">
+dynamoSidecar names the restartable init container running the Dynamo runtime for a worker, prefill, or decode component. The operator injects Dynamo defaults into this container; the regular container named main runs the engine with user-provided commands, ports, and probes. The named init container must have restartPolicy: Always. Multinode, enabled checkpoint, GPU memory service, and failover are not supported. This field is preserved through v1alpha1 conversion annotations.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="compilationCache" type="CompilationCacheConfig">
 compilationCache configures a PVC-backed compilation cache. The operator handles backend-specific mount paths and environment variables, so users do not need to hand-wire them into `podTemplate`. Extracted from v1alpha1's `volumeMount.useAsCompilationCache` flag.
 See [CompilationCacheConfig](#compilationcacheconfig).
@@ -2737,7 +2742,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime compatibility version in the runtime image: main by default, or the init container selected by dynamoSidecar. DGD admission requires it when that image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2799,6 +2804,11 @@ See [EPPConfig](#v1beta1-eppconfig).
 
 <ParamField path="frontendSidecar" type="string">
 frontendSidecar optionally designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match the `name` of a container in that list; the operator merges its frontend-sidecar defaults (auto-generated Dynamo env vars, ports, health probes) into that container the same way it merges into `"main"`. The full container definition (image, args, envFrom, env) lives in `podTemplate` -- this eliminates the redundant `image`, `args`, `envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`. The validation webhook rejects values that do not match any container name in `podTemplate.spec.containers`.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="dynamoSidecar" type="string">
+dynamoSidecar names the restartable init container running the Dynamo runtime for a worker, prefill, or decode component. The operator injects Dynamo defaults into this container; the regular container named main runs the engine with user-provided commands, ports, and probes. The named init container must have restartPolicy: Always. Multinode, enabled checkpoint, GPU memory service, and failover are not supported. This field is preserved through v1alpha1 conversion annotations.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 

@@ -8,6 +8,7 @@ package dynamo
 import (
 	"testing"
 
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	"github.com/stretchr/testify/require"
 )
@@ -43,7 +44,8 @@ func TestWorkerDefaultsCanaryHealthCheckVersionGate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("render the worker defaults for the resolved runtime version")
 			container, err := NewWorkerDefaults().GetBaseContainer(ComponentContext{
-				RuntimeVersion: tt.runtimeVersion,
+				RuntimeContainerName: commonconsts.MainContainerName,
+				RuntimeVersion:       tt.runtimeVersion,
 			})
 			require.NoError(t, err)
 
@@ -90,7 +92,8 @@ func TestWorkerDefaultsLivenessFailureThresholdVersionGate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("render the worker defaults for the resolved runtime version")
 			container, err := NewWorkerDefaults().GetBaseContainer(ComponentContext{
-				RuntimeVersion: tt.runtimeVersion,
+				RuntimeContainerName: commonconsts.MainContainerName,
+				RuntimeVersion:       tt.runtimeVersion,
 			})
 			require.NoError(t, err)
 
