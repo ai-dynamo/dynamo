@@ -393,8 +393,8 @@ def test_request_cancellation_sglang_decode_cancel(
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" in decode worker. The budget covers the
-                # whole chain: socket close, frontend Kill, request plane, monitor wake-up.
+                # The budget covers the whole cancellation chain: socket close,
+                # frontend Kill, request plane, monitor wake-up.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
