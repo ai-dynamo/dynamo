@@ -109,25 +109,5 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
 }
 
 #[cfg(test)]
-mod tests {
-    use dynamo_backend_common::{BackendError, ErrorType};
-
-    use super::status_to_dynamo;
-
-    #[test]
-    fn maps_transport_statuses_to_backend_errors() {
-        for (code, expected) in [
-            (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
-            (tonic::Code::Unavailable, BackendError::CannotConnect),
-            (tonic::Code::Cancelled, BackendError::Cancelled),
-            (
-                tonic::Code::DeadlineExceeded,
-                BackendError::ConnectionTimeout,
-            ),
-            (tonic::Code::Internal, BackendError::Unknown),
-        ] {
-            let error = status_to_dynamo("Test", tonic::Status::new(code, "failure"));
-            assert_eq!(error.error_type(), ErrorType::Backend(expected));
-        }
-    }
-}
+#[path = "../../testkit/tests/unit/errors/common.rs"]
+mod unit_common;

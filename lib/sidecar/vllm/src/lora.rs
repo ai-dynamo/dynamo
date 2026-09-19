@@ -384,3 +384,7 @@ pub(crate) async fn unpublish_lora_model(
     })?;
     Ok(true)
 }
+
+#[cfg(test)]
+#[path = "../../testkit/tests/unit/requests/lora.rs"]
+mod unit_lora;
