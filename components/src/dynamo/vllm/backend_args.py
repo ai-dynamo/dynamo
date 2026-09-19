@@ -480,6 +480,18 @@ class DynamoVllmArgGroup(ArgGroup):
                 "vLLM GPU worker. These are synthetic states, not real context history."
             ),
         )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--benchmark-hybrid-live-state",
+            env_var="DYN_BENCHMARK_HYBRID_LIVE_STATE",
+            default=False,
+            help=(
+                "Hybrid (KDA/Mamba) models: let the real-KV decode warm-up run with recurrent-state groups "
+                "forked from the parked chain's live state block instead of skipping the warm-up. Attention KV "
+                "is the chain's real prefix; the recurrent state is a valid but deeper-context state (shallow "
+                "points read a few percent fast). Mutually exclusive with --benchmark-randomize-kda-state."
+            ),
+        )
         add_argument(
             g,
             flag_name="--benchmark-warmup-iterations",
@@ -571,6 +583,7 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_mode: Optional[BenchmarkMode] = None
     benchmark_points_file: Optional[str] = None
     benchmark_randomize_kda_state: bool = False
+    benchmark_hybrid_live_state: bool = False
     benchmark_warmup_iterations: int = 5
     benchmark_output_path: str = "/tmp/benchmark_results.json"
     benchmark_timeout: int = 900
@@ -693,6 +706,10 @@ class DynamoVllmConfig(ConfigBase):
             setattr(self, replacement_name, mapped_value)
 
     def _validate_benchmark_sampling(self) -> None:
+        if self.benchmark_hybrid_live_state and self.benchmark_randomize_kda_state:
+            raise ValueError(
+                "--benchmark-hybrid-live-state and --benchmark-randomize-kda-state are mutually exclusive"
+            )
         if self.benchmark_randomize_kda_state and self.benchmark_mode not in (
             "decode",
             "agg",

@@ -5285,11 +5285,12 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
 @pytest.mark.core
 @pytest.mark.parametrize("ctx", [2, 1000])
 def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monkeypatch):
-    # Four one-block chains fit, but their two private tail blocks per
-    # request raise the warmup bound to twelve. Reaching depth 8 (or starting
-    # below it) must not mark the short point as covered by real KV.
+    # Four one-block chains fit, but the private tail block each shadow takes
+    # at these contexts (exact per-rung reserve, one block per group here)
+    # raises the warmup bound to eight. Reaching depth 8 (or starting below
+    # it) must not mark the short point as covered by real KV.
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
-    stub = _kvwarm_planner_stub(usable_blocks=11)
+    stub = _kvwarm_planner_stub(usable_blocks=7)
     short = BenchmarkPoint(point_type="decode", batch_size=4, total_kv_read_tokens=8)
     deepest = replace(short, total_kv_read_tokens=4 * ctx)
     stub._bench_grid = deque([deepest, short] if ctx > 2 else [short])
@@ -5304,8 +5305,8 @@ def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monke
         {
             "batch": 4,
             "depth": min(ctx + 4, 8),
-            "required_blocks": 12,
-            "usable_blocks": 11,
+            "required_blocks": 8,
+            "usable_blocks": 7,
         }
     ]
     stub._bench_active_req_ids = set()
