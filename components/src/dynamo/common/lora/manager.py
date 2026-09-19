@@ -154,3 +154,16 @@ def get_lora_manager() -> Optional[LoRAManager]:
     if not _lora_enabled():
         return None
     return _lora_manager.get_or_init(_init_lora_manager)
+
+
+def lora_runtime_enabled(engine_lora_enabled: bool) -> bool:
+    """Return whether this worker can actually serve LoRA adapters.
+
+    Both halves must be checked together, and every caller must use this one
+    predicate. The engine flag alone registers lifecycle endpoints and
+    advertises adapter capacity on a worker whose resolution path cannot
+    resolve anything, so an adapter-named request falls through to the base
+    weights and returns a plausible wrong answer with no error. A worker must
+    advertise adapter support only when it can honour it.
+    """
+    return bool(engine_lora_enabled) and get_lora_manager() is not None
