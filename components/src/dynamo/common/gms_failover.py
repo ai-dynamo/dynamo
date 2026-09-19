@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FAILOVER_LOCK_PATH = "/shared/failover.lock"
 DEFAULT_FAILOVER_TAGS = ("kv_cache", "weights")
 KEEP_SHADOW_READY_ENV = "DYN_GMS_FAILOVER_KEEP_SHADOW_READY"
+_gpu_quiescence_tasks: set[asyncio.Task[None]] = set()
 
 
 def _promotion_warmup_enabled(backend_name: str | None = None) -> bool:
@@ -231,18 +232,6 @@ def _failover_reclaim_foreign_leases_enabled() -> bool:
     return _truthy_env("DYN_GMS_FAILOVER_RECLAIM_FOREIGN_LEASES", default=True)
 
 
-def _failover_reclaim_max_blocks_per_file() -> int:
-    value = os.environ.get("DYN_GMS_FAILOVER_RECLAIM_MAX_BLOCKS_PER_FILE", "0")
-    try:
-        return max(0, int(value))
-    except ValueError:
-        logger.warning(
-            "Ignoring invalid DYN_GMS_FAILOVER_RECLAIM_MAX_BLOCKS_PER_FILE=%r",
-            value,
-        )
-        return 0
-
-
 def _normalize_lease_engine_name(backend_name: str) -> str:
     normalized = backend_name.lower().replace("-", "_")
     if normalized in {"trt", "trt_llm", "tensorrt_llm"}:
@@ -340,18 +329,20 @@ def _promote_content_directory_after_fence(
     return protected_blocks, protected_leases
 
 
-def _reclaim_foreign_kv_leases_after_fence(
+def _recover_foreign_kv_leases_after_fence(
     backend_name: str,
     role: str,
+    *,
+    gpu_quiesced: bool,
+    recovery_owner_id: str | None = None,
     protected_blocks: "set[int] | None" = None,
     protected_leases: "set[tuple[int, int]] | None" = None,
 ) -> None:
-    """Best-effort orphan lease reclaim after this process owns failover.
+    """Classify predecessor pages and reclaim only with GPU proof.
 
-    The failover lock/epoch is the safety boundary. Before that point the
-    previous primary may still write KV. After this process acquired the lock,
-    foreign owners in the rank-local lease namespace are fenced leftovers from
-    the previous primary and can be reclaimed to provide immediate HBM headroom.
+    CPU writer fencing makes state immutable but does not prove queued CUDA work
+    has drained. IDLE pages provide immediate safe headroom; ambiguous pages are
+    quarantined. Only a capability-gated proof permits quarantine reclamation.
 
     ``protected_leases`` are directory-advertised READY HBM slot generations.
     Only records whose rank-local generation still matches are preserved for
@@ -364,7 +355,7 @@ def _reclaim_foreign_kv_leases_after_fence(
         from gpu_memory_service.integrations.common.kv_lease_client import (
             default_kv_lease_namespace_suffix,
             kv_leases_enabled,
-            reclaim_foreign_kv_leases_in_shm_dir,
+            recover_foreign_kv_leases_in_shm_dir,
             resolve_lease_device,
         )
 
@@ -373,35 +364,111 @@ def _reclaim_foreign_kv_leases_after_fence(
             return
         device = resolve_lease_device(f"GMS_{engine.upper()}_KV_LEASE_DEVICE")
         started = time.monotonic()
-        result = reclaim_foreign_kv_leases_in_shm_dir(
+        result = recover_foreign_kv_leases_in_shm_dir(
             engine,
             device,
-            max_blocks_per_file=_failover_reclaim_max_blocks_per_file(),
+            owner_id=recovery_owner_id,
             protected_blocks=protected_blocks,
             protected_leases=protected_leases,
             namespace_suffix=default_kv_lease_namespace_suffix(engine),
+            gpu_quiesced=gpu_quiesced,
         )
         elapsed_ms = (time.monotonic() - started) * 1000.0
-        if result.files or result.reclaimed_blocks or result.errors:
+        if result.errors:
+            raise RuntimeError(
+                f"GMS KV recovery classification failed in {result.errors} file(s)"
+            )
+        if (
+            result.files
+            or result.released_idle_blocks
+            or result.quarantined_blocks
+            or result.reclaimed_blocks
+        ):
             logger.info(
-                "[GMS failover] %s %s post-fence KV lease reclaim files=%d "
-                "reclaimed_blocks=%d errors=%d elapsed_ms=%.2f",
+                "[GMS failover] %s %s KV recovery files=%d idle_released=%d "
+                "quarantined=%d reclaimed=%d gpu_quiesced=%s elapsed_ms=%.2f",
                 backend_name,
                 role,
                 result.files,
+                result.released_idle_blocks,
+                result.quarantined_blocks,
                 result.reclaimed_blocks,
-                result.errors,
+                gpu_quiesced,
                 elapsed_ms,
             )
     except Exception:
-        # A reclaim failure strands the ex-primary's leases and permanently
-        # leaks HBM; surface it at WARNING so an operator can see it.
-        logger.warning(
-            "[GMS failover] %s %s post-fence KV lease reclaim failed",
+        logger.exception(
+            "[GMS failover] %s %s KV lease recovery failed closed",
             backend_name,
             role,
-            exc_info=True,
         )
+        raise
+
+
+async def _finish_gpu_quiescence_recovery(
+    *,
+    backend_name: str,
+    role: str,
+    predecessor_cohort: str | None,
+    recovery_owner_id: str,
+) -> None:
+    """Complete phase two without delaying safe phase-one serving."""
+    from gpu_memory_service.integrations.common.gpu_quiescence import (
+        prove_predecessor_gpu_quiescence,
+    )
+
+    proof = await prove_predecessor_gpu_quiescence(
+        backend_name=backend_name,
+        predecessor_cohort=predecessor_cohort,
+    )
+    if not proof.quiesced:
+        logger.warning(
+            "[GMS failover] %s %s GPU proof rejected; quarantine retained "
+            "provider=%s elapsed_ms=%.2f detail=%s",
+            backend_name,
+            role,
+            proof.provider,
+            proof.elapsed_ms,
+            proof.detail,
+        )
+        return
+    logger.info(
+        "[GMS failover] %s %s GPU quiescence proven provider=%s "
+        "elapsed_ms=%.2f detail=%s",
+        backend_name,
+        role,
+        proof.provider,
+        proof.elapsed_ms,
+        proof.detail,
+    )
+    await asyncio.to_thread(
+        _recover_foreign_kv_leases_after_fence,
+        backend_name,
+        role,
+        gpu_quiesced=True,
+        recovery_owner_id=recovery_owner_id,
+    )
+
+
+def _phase_two_finished(task: asyncio.Task[None]) -> None:
+    _gpu_quiescence_tasks.discard(task)
+    if task.cancelled():
+        logger.warning("[GMS failover] GPU quiescence recovery was cancelled")
+        return
+    error = task.exception()
+    if error is not None:
+        # Phase one is already safe: retain quarantine and keep serving from
+        # IDLE/free plus exact SEALED capacity instead of failing the engine.
+        logger.error(
+            "[GMS failover] GPU quiescence recovery failed; quarantine retained",
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+
+def _schedule_gpu_quiescence_recovery(**kwargs) -> None:
+    task = asyncio.create_task(_finish_gpu_quiescence_recovery(**kwargs))
+    _gpu_quiescence_tasks.add(task)
+    task.add_done_callback(_phase_two_finished)
 
 
 async def run_gms_failover_post_lock_fence(
@@ -409,7 +476,7 @@ async def run_gms_failover_post_lock_fence(
     backend_name: str,
     role: str,
 ) -> None:
-    """Fence and reclaim shared-KV lease state after active ownership changes.
+    """Fence and classify shared-KV lease state after active ownership changes.
 
     When a content directory is configured, this first promotes the directory
     writer (fencing the crashed one) and collects its HBM-resident slots so the
@@ -417,18 +484,19 @@ async def run_gms_failover_post_lock_fence(
     failover to a full recompute.
     """
 
+    predecessor = None
     if backend_name == "sglang":
         from gpu_memory_service.integrations.sglang.writer_lifecycle import (
             fence_predecessor_writers,
         )
 
-        await fence_predecessor_writers()
+        predecessor = await fence_predecessor_writers()
     elif backend_name == "vllm":
         from gpu_memory_service.integrations.vllm.writer_lifecycle import (
             fence_predecessor_writers,
         )
 
-        await fence_predecessor_writers()
+        predecessor = await fence_predecessor_writers()
 
     fence_ms = _post_lock_fence_ms(backend_name)
     if fence_ms > 0:
@@ -486,12 +554,36 @@ async def run_gms_failover_post_lock_fence(
                 break
         if cancelled is not None:
             raise cancelled
-    _reclaim_foreign_kv_leases_after_fence(
+    from gpu_memory_service.integrations.common.kv_lease_client import (
+        current_kv_lease_owner_id,
+        resolve_lease_device,
+    )
+
+    lease_engine = _normalize_lease_engine_name(backend_name)
+    lease_device = resolve_lease_device(f"GMS_{lease_engine.upper()}_KV_LEASE_DEVICE")
+    recovery_owner_id = current_kv_lease_owner_id(lease_engine, lease_device)
+    _recover_foreign_kv_leases_after_fence(
         backend_name,
         role,
+        gpu_quiesced=False,
+        recovery_owner_id=recovery_owner_id,
         protected_blocks=protected_blocks,
         protected_leases=protected_leases,
     )
+    from gpu_memory_service.integrations.common.gpu_quiescence import (
+        gpu_quiescence_provider_configured,
+    )
+
+    if gpu_quiescence_provider_configured(backend_name):
+        # Serving can resume from phase-one IDLE/free capacity and exact SEALED
+        # KV immediately. The optional platform proof unlocks ambiguous pages
+        # later without putting its latency on the user-visible takeover path.
+        _schedule_gpu_quiescence_recovery(
+            backend_name=backend_name,
+            role=role,
+            predecessor_cohort=(None if predecessor is None else str(predecessor)),
+            recovery_owner_id=recovery_owner_id,
+        )
 
 
 def _controller_from(owner: Any) -> Any:
