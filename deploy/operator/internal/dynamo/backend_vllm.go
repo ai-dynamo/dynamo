@@ -61,7 +61,9 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 
 		// Apply multinode-specific argument modifications
-		updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations)
+		if err := updateVLLMMultinodeArgs(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes, annotations); err != nil {
+			return err
+		}
 
 		if shouldUseMpBackend(annotations) {
 			container.Env = append(container.Env, corev1.EnvVar{
@@ -310,8 +312,11 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
-func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) error {
 	args := parseVLLMLaunchArgs(getExpandedArgs(container))
+	if err := args.ValidateParallelismSizes(); err != nil {
+		return fmt.Errorf("invalid vLLM launch flags: %w", err)
+	}
 	needsDistributed := needsTensorParallelMultinodeLaunch(args, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
@@ -336,6 +341,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
 	}
+	return nil
 }
 
 // getExpandedArgs will expand the containers args in the case where
@@ -679,17 +685,32 @@ type vllmLaunchArgs struct {
 }
 
 // WorldSize is the number of ranks one engine occupies: tensor-parallel size
-// times pipeline-parallel size.
+// times pipeline-parallel size. Callers must call ValidateParallelismSizes
+// first -- WorldSize assumes positive inputs and does not itself guard
+// against the zero/negative case.
 func (a vllmLaunchArgs) WorldSize() int64 {
-	worldSize := a.TensorParallelSize * a.PipelineParallelSize
-	if worldSize <= 0 {
-		// A non-positive world size means a malformed launch flag (e.g.
-		// "--tensor-parallel-size 0" or a negative value) -- treat it as vLLM's
-		// default of 1 rather than letting it silently skip the multinode
-		// decision downstream or divide by zero in injectDataParallelLaunchFlags.
-		return 1
+	return a.TensorParallelSize * a.PipelineParallelSize
+}
+
+// ValidateParallelismSizes rejects non-positive tensor/pipeline/data-parallel
+// sizes. vLLM's own CLI would refuse these too; silently treating them as
+// vLLM's default of 1 would either divide by zero in
+// injectDataParallelLaunchFlags or make needsTensorParallelMultinodeLaunch /
+// needsDataParallelMultinodeLaunch silently skip multinode coordination the
+// manifest actually needs, letting the malformed flag reach vLLM unmodified
+// with no operator-side error. Absent flags are not an error here --
+// getFlagValue already returns vLLM's default of 1 for those.
+func (a vllmLaunchArgs) ValidateParallelismSizes() error {
+	if a.TensorParallelSize <= 0 {
+		return fmt.Errorf("%s must be positive, got %d", tensorParallelSizeFlag, a.TensorParallelSize)
 	}
-	return worldSize
+	if a.PipelineParallelSize <= 0 {
+		return fmt.Errorf("%s must be positive, got %d", pipelineParallelSizeFlag, a.PipelineParallelSize)
+	}
+	if a.HasDataParallelSize && a.DataParallelSize <= 0 {
+		return fmt.Errorf("%s must be positive, got %d", dataParallelSizeFlag, a.DataParallelSize)
+	}
+	return nil
 }
 
 // parseVLLMLaunchArgs parses an already-expanded, normalized command line

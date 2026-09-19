@@ -490,6 +490,27 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	}
 }
 
+// TestVLLMBackend_UpdateContainer_RejectsNonPositiveParallelismSizes proves the
+// error from vllmLaunchArgs.ValidateParallelismSizes actually reaches and halts
+// UpdateContainer for a multinode deployment, rather than only being reachable
+// in a unit test of the validation method itself: a malformed
+// "--tensor-parallel-size 0" (or negative) must stop container construction
+// with a clear error instead of silently reaching vLLM unmodified.
+func TestVLLMBackend_UpdateContainer_RejectsNonPositiveParallelismSizes(t *testing.T) {
+	backend := &VLLMBackend{}
+	container := &corev1.Container{
+		Command: []string{"python3"},
+		Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "0"},
+	}
+	err := backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(8))
+	if err == nil {
+		t.Fatal("UpdateContainer() = nil error, want an error for --tensor-parallel-size 0")
+	}
+	if !strings.Contains(err.Error(), tensorParallelSizeFlag) {
+		t.Errorf("UpdateContainer() error = %q, want it to name the offending flag %q", err, tensorParallelSizeFlag)
+	}
+}
+
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	backend := &VLLMBackend{}
 

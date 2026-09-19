@@ -164,24 +164,48 @@ func TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP(t *testing.T) {
 	}
 }
 
-// TestWorldSize_NonPositiveFallsBackToOne guards against a malformed
-// "--tensor-parallel-size 0" or a negative parallelism value producing a
-// non-positive world size: nothing in getFlagValue rejects zero or negative
-// integers, and a non-positive WorldSize would either divide by zero in
-// injectDataParallelLaunchFlags or silently make the multinode gating
-// functions decide no coordination is needed at all.
-func TestWorldSize_NonPositiveFallsBackToOne(t *testing.T) {
-	for name, args := range map[string][]string{
+// TestValidateParallelismSizes_RejectsNonPositive guards against a malformed
+// "--tensor-parallel-size 0" or a negative parallelism value: nothing in
+// getFlagValue rejects zero or negative integers, and letting one through
+// would either divide by zero in injectDataParallelLaunchFlags or silently
+// make the multinode gating functions decide no coordination is needed at
+// all, letting the malformed flag reach vLLM unmodified with no
+// operator-side error.
+func TestValidateParallelismSizes_RejectsNonPositive(t *testing.T) {
+	for name, rawArgs := range map[string][]string{
 		"zero tensor-parallel-size":     {tensorParallelSizeFlag, "0"},
 		"negative tensor-parallel-size": {tensorParallelSizeFlag, "-1"},
 		"negative pipeline-parallel-size combined": {
 			tensorParallelSizeFlag, "2", pipelineParallelSizeFlag, "-1",
 		},
+		"zero data-parallel-size":     {dataParallelSizeFlag, "0"},
+		"negative data-parallel-size": {dataParallelSizeFlag, "-1"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(args...))).WorldSize()
-			if got != 1 {
-				t.Errorf("WorldSize() = %d, want 1 (fallback for non-positive input) for %q", got, args)
+			args := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(rawArgs...)))
+			if err := args.ValidateParallelismSizes(); err == nil {
+				t.Errorf("ValidateParallelismSizes() = nil, want an error for %q", rawArgs)
+			}
+		})
+	}
+}
+
+// TestValidateParallelismSizes_AcceptsAbsentOrPositive confirms an absent
+// flag (getFlagValue's default of 1) and explicit positive values are not
+// errors -- only an explicit non-positive value is rejected.
+func TestValidateParallelismSizes_AcceptsAbsentOrPositive(t *testing.T) {
+	for name, rawArgs := range map[string][]string{
+		"nothing set":              {},
+		"positive tensor-parallel": {tensorParallelSizeFlag, "4"},
+		"positive data-parallel":   {dataParallelSizeFlag, "8"},
+		"all three set and positive": {
+			tensorParallelSizeFlag, "2", pipelineParallelSizeFlag, "2", dataParallelSizeFlag, "4",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(rawArgs...)))
+			if err := args.ValidateParallelismSizes(); err != nil {
+				t.Errorf("ValidateParallelismSizes() = %v, want nil for %q", err, rawArgs)
 			}
 		})
 	}
