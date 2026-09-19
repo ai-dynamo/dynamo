@@ -264,7 +264,7 @@ def test_dyn_port_accepts_high_non_system_port() -> None:
 
 _EXAMPLES_DIR = Path(__file__).parents[2] / "examples"
 _WAIT_ANY_EXIT = re.compile(r"^[ \t]*wait_any_exit[ \t]*$", re.MULTILINE)
-_HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1")
+_HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)(\w+)\2")
 # `python -m dynamo.vllm`, `python3 -m dynamo.frontend`, `python -m "$WORKER_MODULE"`.
 _SERVICE = re.compile(
     r"(?<![\w./-])python3?\s+(?:-\S+\s+)*-m\s+(?:dynamo\.\S*|\$\{?\w+\}?)"
@@ -301,11 +301,12 @@ def _split_commands(script: str) -> list[_Command]:
     commands: list[_Command] = []
     parts: list[str] = []
     mask: list[str] = []
-    heredocs: list[str] = []
+    heredocs: list[tuple[str, bool]] = []  # (delimiter, "<<-" drops leading tabs)
     prev = ""  # last character added, for comment detection
     prev_code = ""  # last non-blank character added, for redirection detection
     line = 1
     start = 1
+    group = 0  # index in commands of the first member of the open AND-OR list
     index = 0
     size = len(script)
 
@@ -321,7 +322,7 @@ def _split_commands(script: str) -> list[_Command]:
             prev_code = trimmed[-1]
 
     def flush(terminator: str) -> None:
-        nonlocal prev, prev_code, start
+        nonlocal prev, prev_code, start, group
         text = "".join(parts)
         lead = len(text) - len(text.lstrip())
         stripped = text.strip()
@@ -334,6 +335,12 @@ def _split_commands(script: str) -> list[_Command]:
                     terminator,
                 )
             )
+        if terminator not in ("&&", "||"):
+            # Bash runs a whole AND-OR list in the background, so the terminator
+            # that closes the list applies to every member, not just the last.
+            for position in range(group, len(commands)):
+                commands[position] = commands[position]._replace(terminator=terminator)
+            group = len(commands)
         parts.clear()
         mask.clear()
         prev = ""
@@ -364,7 +371,7 @@ def _split_commands(script: str) -> list[_Command]:
         if script.startswith("<<", index) and not script.startswith("<<<", index):
             match = _HEREDOC.match(script, index)
             if match is not None:
-                heredocs.append(match.group(2))
+                heredocs.append((match.group(3), match.group(1) == "-"))
                 index = match.end()
                 continue
         if char == "\n":
@@ -372,11 +379,15 @@ def _split_commands(script: str) -> list[_Command]:
             line += 1
             index += 1
             while heredocs:
-                delimiter = heredocs.pop(0)
+                delimiter, drop_tabs = heredocs.pop(0)
                 while index < size:
                     end = script.find("\n", index)
                     end = size if end < 0 else end
-                    done = script[index:end].strip() == delimiter
+                    body = script[index:end]
+                    # Bash ends the body on an exact delimiter line, and `<<-`
+                    # removes leading tabs only. A looser test ends the heredoc
+                    # early and reads the rest of the body as commands.
+                    done = (body.lstrip("\t") if drop_tabs else body) == delimiter
                     index = end + 1
                     line += 1
                     if done:
@@ -447,6 +458,43 @@ def test_foreground_service_detector_reads_bash_separators() -> None:
         for line, _, is_background in _service_launches(backgrounded)
         if not is_background
     ] == []
+
+
+_AND_OR_SAMPLE = """\
+#!/bin/bash
+python -m dynamo.frontend && echo ready &
+python -m dynamo.vllm --model "$MODEL" || exit 1
+wait_any_exit
+"""
+
+_HEREDOC_SAMPLE = """\
+#!/bin/bash
+cat > config.yaml <<EOF
+model: $MODEL
+  EOF
+python -m dynamo.vllm --model "$MODEL"
+EOF
+cat > notes.txt <<-END
+\tpython -m dynamo.planner
+\tEND
+python -m dynamo.frontend &
+wait_any_exit
+"""
+
+
+def test_and_or_list_inherits_its_trailing_ampersand() -> None:
+    """Bash backgrounds a whole `&&`/`||` list, so every member of it is one job."""
+    assert _service_launches(_AND_OR_SAMPLE) == [
+        (2, "python -m dynamo.frontend", True),
+        (3, "python -m dynamo.vllm", False),
+    ]
+
+
+def test_heredoc_body_ends_only_at_the_bash_delimiter() -> None:
+    """An indented `EOF` is body text; only `<<-END` ignores the leading tabs."""
+    assert _service_launches(_HEREDOC_SAMPLE) == [
+        (10, "python -m dynamo.frontend", True),
+    ]
 
 
 def test_launch_scripts_background_the_services_wait_any_exit_watches() -> None:
