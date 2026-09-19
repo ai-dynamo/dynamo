@@ -8,7 +8,7 @@ import struct
 
 import pytest
 from gpu_memory_service.server import gpu_quiescence as quiescence
-from gpu_memory_service.server.gpu_quiescence import GPUQuiescenceManager
+from gpu_memory_service.server.gpu_quiescence import GPUClient, GPUQuiescenceManager
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.none]
 
@@ -345,6 +345,7 @@ async def test_crash_interlock_quiesces_then_kills_registered_cohort(monkeypatch
 
     killed = []
     monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: "T")
     monkeypatch.setattr(
         quiescence.os, "kill", lambda target, sig: killed.append((target, sig))
     )
@@ -361,7 +362,7 @@ async def test_crash_interlock_quiesces_then_kills_registered_cohort(monkeypatch
     await asyncio.wait_for(task, timeout=1)
     os.close(write_fd)
 
-    assert killed == [(pid, signal.SIGKILL)]
+    assert killed == [(pid, signal.SIGCONT), (pid, signal.SIGKILL)]
     assert ("vllm", "old") in manager._proofs
 
 
@@ -379,6 +380,7 @@ async def test_crash_interlock_leaves_process_stopped_without_mps_proof(monkeypa
 
     killed = []
     monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: "T")
     monkeypatch.setattr(
         quiescence.os, "kill", lambda target, sig: killed.append((target, sig))
     )
@@ -395,5 +397,51 @@ async def test_crash_interlock_leaves_process_stopped_without_mps_proof(monkeypa
     await asyncio.wait_for(task, timeout=1)
     os.close(write_fd)
 
-    assert killed == []
+    assert killed == [(pid, signal.SIGCONT), (pid, signal.SIGSTOP)]
     assert ("sglang", "old") not in manager._proofs
+
+
+@pytest.mark.asyncio
+async def test_crash_interlock_restops_resumed_members_if_later_resume_fails(
+    monkeypatch,
+):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    pid = os.getpid()
+    start = quiescence.process_start_time(pid)
+    assert start is not None
+    missing_pid = pid + 1_000_000
+    starts = {pid: start, missing_pid: "missing-start"}
+    signals = []
+
+    def kill(target, sig):
+        signals.append((target, sig))
+        if target == missing_pid and sig == signal.SIGCONT:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(
+        quiescence, "process_start_time", lambda target: starts.get(target)
+    )
+    monkeypatch.setattr(quiescence, "process_state", lambda _pid: "T")
+    monkeypatch.setattr(quiescence.os, "kill", kill)
+    write_fd = manager.register(
+        backend="vllm",
+        cohort="old",
+        pid=pid,
+        process_start_time_value=start,
+        rank=0,
+        crash_interlock=True,
+    )
+    missing = GPUClient("vllm", "old", missing_pid, "missing-start", 1)
+    manager._clients[("vllm", "old", missing_pid)] = missing
+    task = manager._crash_tasks[("vllm", "old", pid)]
+    os.write(write_fd, struct.pack("=IIii", 0x47534D43, 1, signal.SIGABRT, pid))
+    await asyncio.wait_for(task, timeout=1)
+    os.close(write_fd)
+
+    assert signals == [
+        (pid, signal.SIGCONT),
+        (missing_pid, signal.SIGCONT),
+        (pid, signal.SIGSTOP),
+    ]
+    assert ("vllm", "old") not in manager._proofs

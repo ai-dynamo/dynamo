@@ -33,6 +33,14 @@ def process_start_time(pid: int) -> str | None:
         return None
 
 
+def process_state(pid: int) -> str | None:
+    """Return the single-letter Linux process state for ``pid``."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, PermissionError, IndexError, OSError):
+        return None
+
+
 @dataclass(frozen=True)
 class GPUClient:
     backend: str
@@ -188,6 +196,7 @@ class GPUQuiescenceManager:
             os.close(read_fd)
 
         signal_number: int | None = None
+        native_record = bool(data)
         source = "pipe-eof"
         if data:
             if len(data) != _CRASH_RECORD.size:
@@ -228,11 +237,66 @@ class GPUQuiescenceManager:
             client.pid,
             source,
         )
-        async with self._lock:
-            result = await self._quiesce_locked(
-                backend=client.backend,
-                predecessor_cohort=client.cohort,
-            )
+        resumed: list[GPUClient] = []
+        result: QuiescenceResult | None = None
+        try:
+            if native_record:
+                # terminate_client may require its client runnable to complete
+                # the MPS RPC. First prove the native handler stopped every
+                # registered member, then resume it only while MPS owns the
+                # termination. The finally block re-stops every member already
+                # resumed if a later member disappears or any proof step fails.
+                for registered in clients:
+                    if not await self._wait_native_stop(registered):
+                        logger.critical(
+                            "GPU crash interlock failed closed backend=%s "
+                            "cohort=%s pid=%d detail=native client did not stop",
+                            client.backend,
+                            client.cohort,
+                            registered.pid,
+                        )
+                        return
+                for registered in clients:
+                    if (
+                        process_start_time(registered.pid)
+                        != registered.process_start_time
+                    ):
+                        logger.critical(
+                            "GPU crash interlock failed closed: pid=%d exited "
+                            "before MPS termination",
+                            registered.pid,
+                        )
+                        return
+                    try:
+                        os.kill(registered.pid, signal.SIGCONT)
+                    except ProcessLookupError:
+                        logger.critical(
+                            "GPU crash interlock failed closed: pid=%d exited "
+                            "before MPS termination",
+                            registered.pid,
+                        )
+                        return
+                    resumed.append(registered)
+
+            async with self._lock:
+                result = await self._quiesce_locked(
+                    backend=client.backend,
+                    predecessor_cohort=client.cohort,
+                )
+        finally:
+            if result is None or not result.quiesced:
+                # Preserve fail-closed semantics even when the MPS subprocess
+                # raises or returns a non-success CUDA result.
+                for registered in resumed:
+                    if (
+                        process_start_time(registered.pid)
+                        != registered.process_start_time
+                    ):
+                        continue
+                    try:
+                        os.kill(registered.pid, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        pass
         if not result.quiesced:
             logger.critical(
                 "GPU crash interlock failed closed backend=%s cohort=%s pid=%d "
@@ -269,6 +333,17 @@ class GPUQuiescenceManager:
             result.client_count,
             result.elapsed_ms,
         )
+
+    async def _wait_native_stop(self, client: GPUClient) -> bool:
+        deadline = time.monotonic() + self._timeout(client.backend)
+        while True:
+            if process_start_time(client.pid) != client.process_start_time:
+                return False
+            if process_state(client.pid) in {"T", "t"}:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(min(0.001, max(0.0, deadline - time.monotonic())))
 
     @staticmethod
     def configured(backend: str) -> bool:

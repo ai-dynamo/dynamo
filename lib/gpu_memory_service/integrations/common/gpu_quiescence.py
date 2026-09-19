@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import logging
 import os
 import shlex
@@ -130,7 +129,7 @@ def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -
     try:
         import signal
 
-        from gpu_memory_service import gms_rust_ring
+        import gms_rust_ring  # type: ignore[import-not-found]
 
         signals = [
             getattr(signal, name)
@@ -140,12 +139,10 @@ def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -
                 "SIGBUS",
                 "SIGILL",
                 "SIGFPE",
-                "SIGTERM",
             )
             if hasattr(signal, name)
         ]
         gms_rust_ring.install_gpu_crash_interlock(notification_fd, signals)
-        atexit.register(gms_rust_ring.trigger_gpu_crash_interlock, 0)
         logger.info("Armed native GMS GPU crash interlock for %s", backend_name)
     except Exception:
         os.close(notification_fd)

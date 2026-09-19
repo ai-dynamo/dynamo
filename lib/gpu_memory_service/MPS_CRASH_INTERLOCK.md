@@ -32,6 +32,8 @@ the common setting.
          | catchable fatal signal    |                              |
          | pipe.write(fixed record)  |                              |
          | SIGSTOP self              |                              |
+         |                           | verify exact PID is stopped  |
+         |<------------------ SIGCONT|                              |
          |-------------------------->| terminate_client(server,pid) |
          |                           |----------------------------->|
          |                           |<---------- CUDA result 0 -----|
@@ -42,10 +44,15 @@ the common setting.
                                      | successor may reclaim HBM     |
 
 The handler does not call Python, CUDA, malloc, logging, locks, or RPC. It uses
-one fixed-size write smaller than PIPE_BUF, SIGSTOP, and pause. GMS accepts only
-CUDA result 0 from terminate_client and then verifies that the PID disappeared
-from the MPS client inventory. A missing client, command exit status 0 with CUDA
-result 201, traffic cessation, CPU-process death, and time alone are not proof.
+one fixed-size write smaller than PIPE_BUF, SIGSTOP, and pause. Live testing
+shows that MPS can return `CUDA_ERROR_MPS_RPC_FAILURE` while the whole client is
+group-stopped. GMS therefore waits until `/proc` proves the exact birth-checked
+PID is stopped, resumes it solely for the MPS termination protocol, and does not
+authorize the successor during that interval. If MPS fails, GMS birth-checks
+and stops the client again. GMS accepts only CUDA result 0 from
+terminate_client and then verifies that the PID disappeared from the MPS client
+inventory. A missing client, command exit status 0 with CUDA result 201,
+traffic cessation, CPU-process death, and time alone are not proof.
 
 One rank's notification fences its exact registered cohort. For tensor
 parallelism, every CUDA rank must be registered with the GMS/MPS authority for
@@ -73,8 +80,9 @@ whole-cohort proof.
 | Failure | Intercepted? | Warm shared-HBM recovery |
 |---|---:|---|
 | SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE | Yes, after arm | Yes only after strict MPS proof |
-| SIGTERM / normal Python exit | Yes | Same strict proof |
-| Python exception that exits normally | Via atexit | Same strict proof |
+| SIGTERM | No; reserved for graceful engine/orchestrator shutdown | Existing graceful or cold path |
+| Normal Python exit or caught exception | No signal handler; pipe EOF only | Usually fail closed/cold |
+| Uncaught Python exception | Runtime-dependent; often normal teardown | Fail closed unless it becomes a handled fatal signal with strict proof |
 | SIGKILL | No handler | Warm only if the pipe-EOF attempt still obtains strict MPS proof; otherwise fail closed/cold |
 | cgroup or kernel OOM kill | Usually no (SIGKILL) | Fail closed/cold |
 | Host or GMS crash | No | Fail closed/cold |
@@ -89,11 +97,19 @@ Additional gotchas:
   every client sharing that server.
 - Other libraries may replace these signal handlers after installation. There
   is no portable ownership protocol for fatal-signal handlers.
+- SIGTERM is deliberately not intercepted. Treating an orchestrator's normal
+  termination as a fatal CUDA crash can stop an otherwise healthy worker and
+  hang graceful shutdown. Qualification injects SIGABRT for the catchable
+  crash path and tests SIGKILL separately for fail-closed behavior.
 - Forking after CUDA/interlock initialization is unsupported. A fork child
   refuses to report using its parent's registration and exits instead.
 - The alternate signal stack is intentionally process-lifetime memory.
 - If pipe delivery itself fails, the process still stops. This is fail-closed
   for KV correctness but requires an operator to kill/restart the process.
+- GMS briefly resumes a stopped client because current MPS needs it runnable to
+  complete `terminate_client`. The shadow remains fenced throughout. This can
+  drain already-submitted CUDA work and adds crash-path latency, but it adds no
+  serving-hot-path synchronization.
 - The interlock cannot preserve in-flight request execution. It protects
   committed/sealed shared KV; the router still replays the interrupted request.
 - MPS teardown is a crash-path operation. It adds registration and handler
@@ -116,4 +132,5 @@ Exercise both modes in qualification:
 
 Use a supervisor to detect and kill a process left in the stopped state after a
 failed proof, then restart the engine through the cold path. Do not send SIGCONT
-to such a process: its interrupted CUDA/runtime state is not safe to resume.
+to such a process yourself: only GMS performs the birth-checked, fenced resume
+immediately around `terminate_client` and re-stops it if proof fails.
