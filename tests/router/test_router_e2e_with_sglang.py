@@ -21,7 +21,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     allocate_port,
@@ -124,9 +124,22 @@ class SGLangProcess(ManagedEngineProcessMixin):
         # it never binds this port -- the env var only flips the feature on. One
         # shared value across workers is therefore sufficient (no collision).
         self._fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        # torch.distributed rendezvous port, one per worker. Left unset, SGLang
+        # picks it with get_free_port(), which binds to port 0, reads the number
+        # and closes the socket before init_process_group binds it for real; the
+        # non-DP path does not re-check availability. A worker that loses that
+        # window blocks in rendezvous for torch's ~30 min default (dist_timeout
+        # is None) without allocating VRAM or exiting. Same race and same remedy
+        # as the note in examples/backends/sglang/launch/disagg_same_gpu.sh.
+        self._nccl_ports = [
+            allocate_port(DynamoPortRange.NCCL.value) for _ in range(num_workers)
+        ]
         request.addfinalizer(
             lambda: deallocate_ports(
-                self._system_ports + self._kv_event_ports + [self._fpm_port]
+                self._system_ports
+                + self._kv_event_ports
+                + self._nccl_ports
+                + [self._fpm_port]
             )
         )
 
@@ -227,6 +240,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
+            # Unique rendezvous port per worker; see the _nccl_ports note above.
+            nccl_port = self._nccl_ports[worker_idx]
+            command.extend(["--nccl-port", str(nccl_port)])
+
             # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
             system_port = self._system_ports[worker_idx]
@@ -254,7 +271,16 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 timeout=120,  # Allow time for model loading
                 display_output=True,
                 health_check_ports=[],
-                health_check_urls=[],
+                # Gate each worker on its own readiness endpoint. Without a
+                # check here the mixin's per-worker health step is a no-op, so a
+                # worker that dies or hangs is only noticed when the frontend
+                # instance poll gives up, with no attribution. /health reports
+                # ready off the health-check payload dynamo.sglang registers on
+                # generate; DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, which older
+                # tests set for this, is deprecated and warns at startup.
+                health_check_urls=[
+                    (f"http://localhost:{system_port}/health", check_health_ready)
+                ],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
             )
@@ -262,13 +288,15 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if data_parallel_size is not None:
                 logger.info(
                     f"Created {data_parallel_size} DP ranks per worker on GPU(s) {gpu_device} "
-                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}, "
+                    f"nccl_port={nccl_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
             else:
                 logger.info(
                     f"Created SGLang worker {worker_idx} on GPU {gpu_device} "
-                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}) "
+                    f"({mem_budget}, system_port={system_port}, kv_port={kv_events_port}, "
+                    f"nccl_port={nccl_port}) "
                     f"with endpoint: {self.endpoint}"
                 )
 
