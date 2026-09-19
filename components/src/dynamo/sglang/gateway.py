@@ -76,8 +76,9 @@ def owns_engine_metrics() -> bool:
 def effective_gateway_workers(server_args, dynamo_args) -> int:
     """Gateway count implied by ``--gateway-workers`` and ``--tokenizer-worker-num``.
 
-    The engine runs exactly one SGLang tokenizer worker per gateway process, so two
-    explicit, different values are an error rather than a silent choice."""
+    The engine runs one SGLang tokenizer worker per gateway process. A tokenizer
+    count above 1 that differs from ``--gateway-workers`` is an error rather than a
+    silent choice; the default of 1 lets ``--gateway-workers N`` stand alone."""
     requested = getattr(dynamo_args, "gateway_workers", None)
     tokenizer_workers = getattr(server_args, "tokenizer_worker_num", 1) or 1
     if requested is None:
@@ -86,13 +87,12 @@ def effective_gateway_workers(server_args, dynamo_args) -> int:
         raise ValueError(
             f"--gateway-workers {requested} conflicts with --tokenizer-worker-num "
             f"{tokenizer_workers}: each gateway process is one SGLang tokenizer "
-            "worker, so set only one of the two flags or give them the same value"
+            "worker, so drop --tokenizer-worker-num or give both the same value"
         )
     return requested
 
 
 def gateway_worker_count(server_args, dynamo_args) -> int:
-    """Children this process must spawn; 1 on non-leader nodes and inside children."""
     if (getattr(server_args, "node_rank", 0) or 0) != 0 or is_gateway_child():
         return 1
     return effective_gateway_workers(server_args, dynamo_args)
@@ -125,12 +125,29 @@ def validate_gateway_mode(server_args, dynamo_args, count: int) -> None:
             f"({SNAPSHOT_CONTROL_DIR_ENV} is set): snapshot warmup needs a single "
             "tokenizer manager"
         )
+    routes = getattr(dynamo_args, "engine_routes", None)
+    if routes and getattr(sgl.Engine, "attach_tokenizer_worker", None) is None:
+        from dynamo.sglang.engine_routes import parse_engine_route_descriptors
+
+        engine_targets = [
+            d.path
+            for d in parse_engine_route_descriptors(routes)
+            if d.target == "engine"
+        ]
+        if engine_targets:
+            raise ValueError(
+                "gateway mode with engine-target --engine-routes "
+                f"({', '.join(engine_targets)}) needs an SGLang with "
+                "Engine.attach_tokenizer_worker; on this SGLang the gateway children "
+                "only expose the tokenizer manager"
+            )
 
 
 def reserve_system_port_for_children() -> None:
-    """Leader side, before the runtime starts. The leader serves no requests, so it
-    gives ``DYN_SYSTEM_PORT`` to the children: child 0 takes the configured port,
-    child i takes port + i, and the leader runs without a system status server."""
+    """Leader side, before the runtime starts. The leader serves no requests, so the
+    configured ``DYN_SYSTEM_PORT`` goes to child 0; the leader runs without a system
+    status server and the other children bind a random port (0), because any fixed
+    offset can collide with another worker group's configured port."""
     raw = os.environ.get(ENV_SYSTEM_PORT)
     try:
         port = int(raw) if raw is not None else -1
@@ -150,7 +167,7 @@ def child_environment(index: int) -> dict[str, str]:
     }
     base = env.pop(ENV_SYSTEM_PORT_BASE, None)
     if base is not None:
-        env[ENV_SYSTEM_PORT] = str(int(base) + index)
+        env[ENV_SYSTEM_PORT] = base if index == 0 else "0"
     return env
 
 
@@ -209,8 +226,6 @@ def _reap(proc: subprocess.Popen, timeout: float = 60) -> None:
 async def serve_via_gateway_children(
     engine, count: int, shutdown_event: asyncio.Event
 ) -> None:
-    """Parent side: publish the engine's launch data, spawn ``count`` children and
-    keep the engine alive until shutdown or until a child dies."""
     from sglang.srt.managers.multi_tokenizer_mixin import write_data_for_multi_tokenizer
 
     shm = getattr(engine, "_multi_tokenizer_shm", None)

@@ -81,6 +81,19 @@ def test_validate_rejects_unsupported_modes(not_a_child, monkeypatch):
         gateway.validate_gateway_mode(_server_args(4), _dyn(), 4)
 
 
+def test_validate_engine_routes_need_attach_api(monkeypatch):
+    monkeypatch.delenv("DYN_SNAPSHOT_CONTROL_DIR", raising=False)
+    monkeypatch.setattr(
+        gateway.sgl.Engine, "attach_tokenizer_worker", None, raising=False
+    )
+    routes = ["flush_cache", "abort=abort_request:tm"]
+    gateway.validate_gateway_mode(_server_args(4), _dyn(engine_routes=routes[1:]), 4)
+    with pytest.raises(ValueError, match="attach_tokenizer_worker"):
+        gateway.validate_gateway_mode(_server_args(4), _dyn(engine_routes=routes), 4)
+    monkeypatch.setattr(gateway.sgl.Engine, "attach_tokenizer_worker", lambda pid: None)
+    gateway.validate_gateway_mode(_server_args(4), _dyn(engine_routes=routes), 4)
+
+
 def test_child_index_decides_metrics_ownership_and_fanout(monkeypatch):
     monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
     monkeypatch.delenv(gateway.ENV_CHILD_INDEX, raising=False)
@@ -102,7 +115,7 @@ def test_system_port_is_handed_to_children(not_a_child, monkeypatch):
     assert os.environ[gateway.ENV_SYSTEM_PORT] == "-1"
     env0, env2 = gateway.child_environment(0), gateway.child_environment(2)
     assert env0[gateway.ENV_SYSTEM_PORT] == "8081"
-    assert env2[gateway.ENV_SYSTEM_PORT] == "8083"
+    assert env2[gateway.ENV_SYSTEM_PORT] == "0"
     assert gateway.ENV_SYSTEM_PORT_BASE not in env2
     assert env2[gateway.ENV_CHILD_INDEX] == "2"
     assert env2[gateway.ENV_PARENT_PID] == str(os.getpid())
@@ -119,7 +132,7 @@ def test_system_port_untouched_when_disabled(not_a_child, monkeypatch, value):
         monkeypatch.setenv(gateway.ENV_SYSTEM_PORT, value)
     gateway.reserve_system_port_for_children()
     assert os.environ.get(gateway.ENV_SYSTEM_PORT) == value
-    assert gateway.ENV_SYSTEM_PORT not in gateway.child_environment(1) or value
+    assert gateway.child_environment(1).get(gateway.ENV_SYSTEM_PORT) == value
     assert gateway.ENV_SYSTEM_PORT_BASE not in os.environ
 
 
@@ -145,7 +158,7 @@ def test_gateway_engine_facade_generates_through_tokenizer_manager():
 
     assert asyncio.run(run()) == [{"text": "ok"}]
     assert seen["obj"].input_ids == [1, 2, 3]
-    facade.shutdown()  # no-op: the parent owns the engine
+    facade.shutdown()
 
 
 class FakeProc:

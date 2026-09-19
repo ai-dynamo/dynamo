@@ -1993,17 +1993,14 @@ impl Client {
         }
         let endpoint = self.endpoint.clone();
         crate::future_into_py(py, async move {
-            let last_matches = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
-            let wait_state = last_matches.clone();
-            let error_key = key.clone();
-            let error_value = value.clone();
-            let wait = async move {
-                let mut rx = llm_rs::discovery::runtime_config_watch(
-                    &endpoint,
-                    endpoint.drt().primary_token(),
-                )
-                .await
-                .map_err(to_pyerr)?;
+            // Scope the discovery watcher to this lookup so every exit path stops it.
+            let lifecycle = endpoint.drt().primary_token().child_token();
+            let _guard = lifecycle.clone().drop_guard();
+            let mut last_matches: Vec<u64> = Vec::new();
+            let wait = async {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint, lifecycle.clone())
+                    .await
+                    .map_err(to_pyerr)?;
 
                 loop {
                     let mut matches: Vec<u64> = rx
@@ -2020,13 +2017,10 @@ impl Client {
                         .collect();
                     matches.sort_unstable();
 
-                    if let Ok(mut last) = wait_state.lock() {
-                        *last = matches.clone();
-                    }
-
                     if matches.len() >= min_count {
                         return Ok(matches);
                     }
+                    last_matches = matches;
 
                     rx.changed().await.map_err(to_pyerr)?;
                 }
@@ -2039,16 +2033,14 @@ impl Client {
                     ));
                 }
                 let timeout = std::time::Duration::from_secs_f64(timeout_s);
-                tokio::time::timeout(timeout, wait).await.map_err(|_| {
-                    let matches = last_matches
-                        .lock()
-                        .map(|matches| matches.clone())
-                        .unwrap_or_default();
-                    PyTimeoutError::new_err(format!(
-                        "Timed out waiting for {min_count} endpoint instances with runtime_data[{error_key:?}] == {error_value:?}; last_match_count={}, matching_ids={matches:?}",
-                        matches.len(),
-                    ))
-                })?
+                let result = tokio::time::timeout(timeout, wait).await;
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(PyTimeoutError::new_err(format!(
+                        "Timed out waiting for {min_count} endpoint instances with runtime_data[{key:?}] == {value:?}; last_match_count={}, matching_ids={last_matches:?}",
+                        last_matches.len(),
+                    ))),
+                }
             } else {
                 wait.await
             }
