@@ -235,7 +235,6 @@ class SGLangProcess(ManagedEngineProcessMixin):
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
 
-            # Unique rendezvous port per worker; see the _nccl_ports note above.
             nccl_port = self._nccl_ports[worker_idx]
             command.extend(["--nccl-port", str(nccl_port)])
 
