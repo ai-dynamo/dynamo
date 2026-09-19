@@ -155,6 +155,35 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     return status
 
 
+def _benchmark_engine_identity(data: dict) -> Optional[dict]:
+    """The part of a rank artifact's ``engine`` block that every DP rank of a
+    run must agree on.
+
+    ``parallel.data_parallel_rank`` legitimately differs per rank, and
+    ``resolved`` / ``resolution`` are written after this merge by the
+    launcher's worker probe.
+    """
+    engine = data.get("engine")
+    if not isinstance(engine, dict):
+        return None
+    identity = copy.deepcopy(engine)
+    identity.pop("resolved", None)
+    identity.pop("resolution", None)
+    parallel = identity.get("parallel")
+    if isinstance(parallel, dict):
+        parallel.pop("data_parallel_rank", None)
+    return identity
+
+
+def _engine_degraded(engine_block: Any) -> bool:
+    """True when a rank's ``engine`` block cannot be trusted for an identity
+    comparison: no block at all, or the capture itself failed partway
+    through (``_bench_capture_engine`` still emits whatever sub-blocks it
+    built before the exception, alongside ``capture_error``).
+    """
+    return not isinstance(engine_block, dict) or "capture_error" in engine_block
+
+
 def _merge_benchmark_rank_results(
     rank_data: list[tuple[int, Path, dict]],
     merged_path: Path,
@@ -174,6 +203,34 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("Self-benchmark rank results are missing run_id")
     if not isinstance(grid_digest, str) or not grid_digest:
         raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+    # A rank is "degraded" when its engine capture failed or is missing while
+    # at least one other rank has one: it cannot be trusted for an identity
+    # comparison, so it is excluded below and carried into the merged
+    # document's engine.capture_errors instead. A run where NO rank ever
+    # captured an engine block (e.g. a pre-Task-1 artifact) is not degraded
+    # -- it simply carries no engine provenance, so the merge stays
+    # byte-for-byte backward compatible (no engine key, no warning).
+    any_engine_present = any(isinstance(d.get("engine"), dict) for _, _, d in rank_data)
+    engine_capture_errors: dict[str, str] = {}
+    reference_engine: Optional[dict] = None
+    reference_engine_block: Optional[dict] = None
+    reference_engine_rank: Optional[int] = None
+    if any_engine_present:
+        for rank, _, data in rank_data:
+            engine_block = data.get("engine")
+            if _engine_degraded(engine_block):
+                engine_capture_errors[str(rank)] = (
+                    str(engine_block["capture_error"])
+                    if isinstance(engine_block, dict)
+                    else "missing engine block"
+                )
+            elif reference_engine is None:
+                # The first rank whose capture succeeded is the identity
+                # reference; a rank that comes first in rank_data but was
+                # itself degraded is not eligible to be the reference.
+                reference_engine = _benchmark_engine_identity(data)
+                reference_engine_block = engine_block
+                reference_engine_rank = rank
 
     reference_status = _validate_benchmark_rank_payload(reference, reference_path)
 
@@ -313,6 +370,20 @@ def _merge_benchmark_rank_results(
                 f"Self-benchmark grid mismatch at {path}: "
                 f"expected={grid_digest} actual={data.get('grid_digest')}"
             )
+        if reference_engine is not None and not _engine_degraded(data.get("engine")):
+            data_engine_identity = _benchmark_engine_identity(data) or {}
+            if data_engine_identity != reference_engine:
+                mismatched_field = sorted(
+                    key
+                    for key in set(data_engine_identity) | set(reference_engine)
+                    if data_engine_identity.get(key) != reference_engine.get(key)
+                )[0]
+                raise RuntimeError(
+                    f"Self-benchmark engine provenance mismatch at {path}: "
+                    f"field={mismatched_field} "
+                    f"reference_rank={reference_engine_rank}: the ranks of "
+                    "one run must share an engine configuration"
+                )
         recorded_rank = data.get("dp", {}).get("rank")
         if recorded_rank != dp_rank:
             raise RuntimeError(
@@ -434,6 +505,33 @@ def _merge_benchmark_rank_results(
             flattened_results.append(entry)
 
     merged = copy.deepcopy(reference)
+    if any_engine_present:
+        if (
+            _engine_degraded(reference.get("engine"))
+            and reference_engine_block is not None
+        ):
+            # The reference rank's own capture failed or was absent, but
+            # another rank's did not: reseed the merged block from that rank
+            # instead of losing the provenance the run did capture.
+            merged["engine"] = copy.deepcopy(reference_engine_block)
+        merged_engine = merged.get("engine")
+        if isinstance(merged_engine, dict) and isinstance(
+            merged_engine.get("parallel"), dict
+        ):
+            # The merged document describes every rank, so a single rank's
+            # own DP rank would be a lie here.
+            merged_engine["parallel"]["data_parallel_rank"] = None
+        if engine_capture_errors:
+            logger.warning(
+                "Self-benchmark engine provenance capture failed or was "
+                "absent on rank(s) %s; the merged artifact's engine "
+                "provenance is unverified across ranks",
+                ", ".join(sorted(engine_capture_errors, key=int)),
+            )
+            if not isinstance(merged_engine, dict):
+                merged_engine = {}
+                merged["engine"] = merged_engine
+            merged_engine["capture_errors"] = engine_capture_errors
     merged["artifact_type"] = "merged"
     merged["dp"] = {
         "ranks": global_ranks,

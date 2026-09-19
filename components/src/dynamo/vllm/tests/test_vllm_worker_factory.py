@@ -18,6 +18,7 @@ from dynamo.vllm.worker_factory import (
     SnapshotEngineSetupResult,
     WorkerFactory,
     _await_benchmark_then_restore_workers,
+    _benchmark_engine_identity,
     _DecodeWorkerLifecycle,
     _merge_benchmark_rank_results,
     _stop_worker_gc_policy,
@@ -1898,3 +1899,323 @@ async def test_random_state_stop_failure_still_restores_gc(monkeypatch):
             {"randomize_kda_state": True}, Mock(), client
         )
     stop_gc.assert_awaited_once_with(client)
+
+
+# --------------------------------------------------------------------------
+# Engine provenance (AIC-1950)
+# --------------------------------------------------------------------------
+
+
+def _engine_block(dp_rank: int, backend: str | None = None) -> dict:
+    """Minimal engine block shaped like the one the scheduler writes."""
+    return {
+        "attention": {
+            "backend_requested": backend,
+            "backend_resolved": None,
+            "resolution": "pending_worker_probe",
+        },
+        "parallel": {"data_parallel_rank": dp_rank, "tensor_parallel_size": 4},
+        "versions": {"vllm": "0.28.0"},
+        "resolved": None,
+        "resolution": "pending_worker_probe",
+    }
+
+
+def _engine_rank_payload(dp_rank: int, engine: dict | None) -> dict:
+    """A two-rank-group rank artifact whose only variable is ``engine``."""
+    point = {"benchmark_id": 1, "point_type": "prefill"}
+    rank_results = [
+        {"dp_rank": 0, "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}]},
+        {"dp_rank": 1, "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}]},
+    ]
+    payload: dict = {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "valid": True,
+        "run_id": "run-1",
+        "grid_digest": "grid-1",
+        "timing": {
+            "started_at": "2026-09-19T12:00:00Z",
+            "completed_at": "2026-09-19T12:00:10Z",
+            "benchmark_elapsed_seconds": 10.0,
+            "measured_iteration_seconds": 0.02,
+        },
+        "dp": {"rank": dp_rank, "size": 2},
+        "coverage": {
+            "expected_points": 1,
+            "completed_points": 1,
+            "skipped_points": 0,
+        },
+        "results": [
+            {
+                "point": point,
+                "fpms": [
+                    {
+                        "counter_id": 1,
+                        "dp_rank": dp_rank,
+                        "wall_time": 0.01 * (dp_rank + 1),
+                    }
+                ],
+            }
+        ],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": [0, 1],
+                "complete": True,
+                "wall_time": 0.02,
+                "rank_results": rank_results,
+            }
+        ],
+        "skipped_points": [],
+    }
+    if engine is not None:
+        payload["engine"] = engine
+    return payload
+
+
+def _engine_rank_payload_group(dp_rank: int, engine: dict | None, size: int) -> dict:
+    """An N-rank-group rank artifact whose only variable is ``engine``.
+
+    ``_engine_rank_payload``'s fixed 2-rank group cannot exercise a third,
+    unrelated degraded rank alongside two ranks that genuinely disagree.
+    """
+    point = {"benchmark_id": 1, "point_type": "prefill"}
+    rank_results = [
+        {"dp_rank": r, "fpms": [{"counter_id": 1, "dp_rank": r, "wall_time": 0.01}]}
+        for r in range(size)
+    ]
+    payload: dict = {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "valid": True,
+        "run_id": "run-1",
+        "grid_digest": "grid-1",
+        "timing": {
+            "started_at": "2026-09-19T12:00:00Z",
+            "completed_at": "2026-09-19T12:00:10Z",
+            "benchmark_elapsed_seconds": 10.0,
+            "measured_iteration_seconds": 0.01,
+        },
+        "dp": {"rank": dp_rank, "size": size},
+        "coverage": {
+            "expected_points": 1,
+            "completed_points": 1,
+            "skipped_points": 0,
+        },
+        "results": [
+            {
+                "point": point,
+                "fpms": [
+                    {
+                        "counter_id": 1,
+                        "dp_rank": dp_rank,
+                        "wall_time": 0.01 * (dp_rank + 1),
+                    }
+                ],
+            }
+        ],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": list(range(size)),
+                "complete": True,
+                "wall_time": 0.01,
+                "rank_results": rank_results,
+            }
+        ],
+        "skipped_points": [],
+    }
+    if engine is not None:
+        payload["engine"] = engine
+    return payload
+
+
+def test_benchmark_engine_identity_strips_rank_and_probe_fields():
+    identity = _benchmark_engine_identity({"engine": _engine_block(3, "FLASH_ATTN")})
+
+    assert identity == {
+        "attention": {
+            "backend_requested": "FLASH_ATTN",
+            "backend_resolved": None,
+            "resolution": "pending_worker_probe",
+        },
+        "parallel": {"tensor_parallel_size": 4},
+        "versions": {"vllm": "0.28.0"},
+    }
+    assert _benchmark_engine_identity({}) is None
+
+
+def test_merge_copies_engine_provenance_and_clears_the_rank(tmp_path):
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, _engine_block(1))),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["parallel"]["tensor_parallel_size"] == 4
+    # Per-rank in a document that describes every rank would be a lie.
+    assert merged["engine"]["parallel"]["data_parallel_rank"] is None
+    assert merged["engine"]["versions"] == {"vllm": "0.28.0"}
+    assert "capture_errors" not in merged["engine"]
+
+
+def test_merge_rejects_engine_provenance_mismatch(tmp_path):
+    with pytest.raises(RuntimeError, match="engine provenance mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (
+                    0,
+                    tmp_path / "rank0.json",
+                    _engine_rank_payload(0, _engine_block(0, "FLASH_ATTN")),
+                ),
+                (
+                    1,
+                    tmp_path / "rank1.json",
+                    _engine_rank_payload(1, _engine_block(1, "FLASHINFER")),
+                ),
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_carries_engine_capture_error_without_raising(tmp_path, caplog):
+    """A rank whose engine capture raised (``_bench_capture_engine`` fails
+    soft into ``capture_error``, AIC-1950 Task 1) must not fail the whole
+    merge: its FPM numbers are still trustworthy even though its engine
+    provenance is not. The failure is carried into the merged document
+    instead of being compared for identity."""
+    caplog.set_level(logging.WARNING)
+    # A real capture failure yields a partially filled block -- whatever
+    # sub-blocks _bench_capture_engine built before the exception -- plus
+    # capture_error, not just the marker in isolation.
+    partial_capture = {
+        "attention": {
+            "backend_requested": "FLASHINFER",
+            "backend_resolved": None,
+            "resolution": "pending_worker_probe",
+        },
+        "capture_error": "hf_config missing",
+    }
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, partial_capture)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["capture_errors"] == {"1": "hf_config missing"}
+    # The reference rank (0) captured fine; its fields still come through.
+    assert merged["engine"]["parallel"]["tensor_parallel_size"] == 4
+    assert "engine provenance" in caplog.text
+
+
+def test_merge_carries_engine_provenance_missing_on_one_rank_only(tmp_path, caplog):
+    """A rank with no ``engine`` block at all (e.g. an older worker image)
+    is handled the same way as a capture failure: recorded, not raised."""
+    caplog.set_level(logging.WARNING)
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, None)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["capture_errors"] == {"1": "missing engine block"}
+    assert "engine provenance" in caplog.text
+
+
+def test_merge_ignores_probe_filled_engine_fields(tmp_path):
+    """resolved/resolution are written after the merge by the worker probe;
+    a rank that already carries one must not fail the merge."""
+    probed = _engine_block(1)
+    probed["resolved"] = {"attention_backends": {"layer.0": "FLASHINFER_MLA"}}
+    probed["resolution"] = "worker_probe"
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, _engine_block(0))),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, probed)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["resolved"] is None
+
+
+def test_merge_still_rejects_mismatch_with_one_degraded_rank_present(tmp_path):
+    """One degraded rank must not switch the identity check off for the
+    ranks that did capture: two clean ranks on different attention backends
+    must still raise even though a third rank's capture failed."""
+    with pytest.raises(RuntimeError, match="engine provenance mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (
+                    0,
+                    tmp_path / "rank0.json",
+                    _engine_rank_payload_group(0, _engine_block(0, "FLASH_ATTN"), 3),
+                ),
+                (
+                    1,
+                    tmp_path / "rank1.json",
+                    _engine_rank_payload_group(1, _engine_block(1, "FLASHINFER"), 3),
+                ),
+                (
+                    2,
+                    tmp_path / "rank2.json",
+                    _engine_rank_payload_group(2, {"capture_error": "boom"}, 3),
+                ),
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_reseeds_engine_from_first_clean_rank_when_reference_degraded(
+    tmp_path, caplog
+):
+    """When the merge's reference rank (``rank_data[0]``) is itself
+    degraded, the provenance another rank did capture must not be lost: the
+    merged engine block is reseeded from the first rank whose capture
+    succeeded, not just left as the degraded reference's own (missing or
+    partial) block."""
+    caplog.set_level(logging.WARNING)
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, None)),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, _engine_block(1))),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert merged["engine"]["parallel"]["tensor_parallel_size"] == 4
+    assert merged["engine"]["parallel"]["data_parallel_rank"] is None
+    assert merged["engine"]["versions"] == {"vllm": "0.28.0"}
+    assert merged["engine"]["capture_errors"] == {"0": "missing engine block"}
+    assert "engine provenance" in caplog.text
+
+
+def test_merge_without_engine_provenance_is_unchanged(tmp_path, caplog):
+    """No rank capturing an ``engine`` block at all (e.g. a pre-Task-1
+    artifact) is not a degraded run: the merge stays byte-for-byte backward
+    compatible, with no ``engine`` key and no warning."""
+    caplog.set_level(logging.WARNING)
+
+    merged = _merge_benchmark_rank_results(
+        [
+            (0, tmp_path / "rank0.json", _engine_rank_payload(0, None)),
+            (1, tmp_path / "rank1.json", _engine_rank_payload(1, None)),
+        ],
+        tmp_path / "merged.json",
+    )
+
+    assert "engine" not in merged
+    assert "engine provenance" not in caplog.text
