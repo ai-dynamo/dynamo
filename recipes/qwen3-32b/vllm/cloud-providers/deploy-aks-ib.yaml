@@ -84,7 +84,7 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           securityContext:
             capabilities:
               add:
@@ -128,7 +128,7 @@ spec:
         value: /model-cache
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0
           securityContext:
             runAsUser: 0
           volumeMounts:
@@ -213,7 +213,7 @@ spec:
             value: /model-cache
           - name: VLLM_LOGGING_LEVEL
             value: INFO
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           securityContext:
             capabilities:
               add:
