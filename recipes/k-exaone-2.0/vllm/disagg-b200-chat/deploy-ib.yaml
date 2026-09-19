@@ -6,9 +6,26 @@
 #   scripts/kustomize-matrix.py unfold recipes/k-exaone-2.0/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 #   scripts/kustomize-matrix.py render recipes/k-exaone-2.0/vllm/disagg-b200-chat/.kustomize-matrix.yaml
 # Inspect only this Kustomize overlay (from the repository root):
-#   kustomize build recipes/k-exaone-2.0/vllm/disagg-b200-chat/kustomize/overlays/generic
+#   kustomize build recipes/k-exaone-2.0/vllm/disagg-b200-chat/kustomize/overlays/ib
 # You may edit a copy before applying it.
 
+#
+# InfiniBand attachment for the NIXL KV transfer between prefill and decode.
+#
+# This is cluster networking, not model configuration. Both settings are
+# site-specific and must be checked against your own cluster before use:
+#
+#   - The RDMA extended-resource name. `rdma/shared_ib` is one common spelling;
+#     others expose `rdma/ib` or `rdma/rdma_shared_device_a`. Prefer a shared
+#     flavour: with an exclusive-mode resource, two co-located workers each
+#     claiming HCAs can deadlock NCCL bootstrap.
+#   - UCX_TLS. `rc_x`/`rc` are the InfiniBand verbs transports and are wrong on
+#     a RoCE or EFA fabric. `tcp` is omitted on purpose so a misconfigured
+#     fabric fails loudly rather than silently falling back to a slow transport.
+#
+# Verify the transport engaged before trusting any measurement: read
+# `vllm:nixl_xfer_time_seconds` from a decode worker and divide _sum by _count.
+# A KV transfer should take milliseconds, not seconds.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -16,33 +33,6 @@ metadata:
 spec:
   backendFramework: vllm
   components:
-  - minAvailable: 1
-    name: Frontend
-    podTemplate:
-      spec:
-        containers:
-        - args:
-          - exec python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size
-            64 --http-host 0.0.0.0 --http-port 8000
-          command:
-          - /bin/bash
-          - -lc
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
-          name: main
-          ports:
-          - containerPort: 8000
-            name: http
-            protocol: TCP
-          volumeMounts:
-          - mountPath: /model-cache
-            name: model-cache
-            readOnly: true
-        volumes:
-        - name: model-cache
-          persistentVolumeClaim:
-            claimName: model-cache
-    replicas: 1
-    type: frontend
   - minAvailable: 1
     name: PrefillWorker
     podTemplate:
@@ -74,10 +64,10 @@ spec:
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          imagePullPolicy: IfNotPresent
           name: main
           resources:
             limits:
-              memory: 480Gi
               nvidia.com/gpu: "4"
               rdma/shared_ib: "4"
             requests:
@@ -90,6 +80,7 @@ spec:
               - IPC_LOCK
               - SYS_PTRACE
               - SYS_RESOURCE
+            runAsGroup: 0
             runAsUser: 0
           startupProbe:
             failureThreshold: 60
@@ -102,8 +93,6 @@ spec:
           - mountPath: /model-cache
             name: model-cache
             readOnly: true
-          - mountPath: /dev/shm
-            name: dshm
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:
@@ -115,11 +104,7 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            medium: Memory
-          name: dshm
     replicas: 1
-    # digest-pinned image has no semver tag for the operator to parse
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 40Gi
     type: worker
@@ -127,11 +112,6 @@ spec:
     name: DecodeWorker
     podTemplate:
       spec:
-        # Pack decode onto prefill's node so the NIXL KV hop stays on one fabric.
-        # PREFERRED, not required: the operator schedules the deployment as a gang, so a
-        # required affinity on a peer that is not placed yet leaves the whole gang Pending
-        # forever -- neither role can go first. Co-location is an optimisation here, not a
-        # correctness requirement: KV moves over IB RDMA, which works cross-node, just slower.
         affinity:
           podAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -174,10 +154,10 @@ spec:
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cuda","kv_connector_extra_config":{"num_threads":8}}'
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          imagePullPolicy: IfNotPresent
           name: main
           resources:
             limits:
-              memory: 480Gi
               nvidia.com/gpu: "4"
               rdma/shared_ib: "4"
             requests:
@@ -190,6 +170,7 @@ spec:
               - IPC_LOCK
               - SYS_PTRACE
               - SYS_RESOURCE
+            runAsGroup: 0
             runAsUser: 0
           startupProbe:
             failureThreshold: 60
@@ -202,8 +183,6 @@ spec:
           - mountPath: /model-cache
             name: model-cache
             readOnly: true
-          - mountPath: /dev/shm
-            name: dshm
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:
@@ -215,15 +194,46 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            medium: Memory
-          name: dshm
     replicas: 1
-    # digest-pinned image has no semver tag for the operator to parse
+    # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 40Gi
     type: worker
+  - minAvailable: 1
+    name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - exec python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size
+            64 --http-host 0.0.0.0 --http-port 8000
+          command:
+          - /bin/bash
+          - -lc
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          volumeMounts:
+          - mountPath: /model-cache
+            name: model-cache
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+    replicas: 1
+    type: frontend
   env:
+  - name: UCX_TLS
+    value: rc_x,rc,cuda_copy,cuda_ipc
+  # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the two
+  # fabrics stay separated by role.
+  - name: NCCL_IB_DISABLE
+    value: "1"
   - name: HF_HOME
     value: /model-cache
   - name: HF_HUB_OFFLINE
@@ -234,16 +244,9 @@ spec:
     value: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
   - name: VLLM_WORKER_MULTIPROC_METHOD
     value: spawn
-  # rc_x/rc are the InfiniBand RDMA transports. tcp is omitted on purpose -- see the header.
-  - name: UCX_TLS
-    value: rc_x,rc,cuda_copy,cuda_ipc
   - name: UCX_MEMTYPE_CACHE
     value: "n"
   - name: UCX_RCACHE_MAX_UNRELEASED
     value: "1024"
   - name: UCX_NET_DEVICES
     value: all
-  # TP is intra-pod and belongs on NVLink. Exposing the HCAs makes NCCL probe IB for
-  # tensor-parallel traffic as well; pin it off so the two fabrics stay separated by role.
-  - name: NCCL_IB_DISABLE
-    value: "1"

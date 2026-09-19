@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# InfiniBand attachment for the NIXL KV transfer between prefill and decode.
+#
+# This is cluster networking, not model configuration. Both settings are
+# site-specific and must be checked against your own cluster before use:
+#
+#   - The RDMA extended-resource name. `rdma/shared_ib` is one common spelling;
+#     others expose `rdma/ib` or `rdma/rdma_shared_device_a`. Prefer a shared
+#     flavour: with an exclusive-mode resource, two co-located workers each
+#     claiming HCAs can deadlock NCCL bootstrap.
+#   - UCX_TLS. `rc_x`/`rc` are the InfiniBand verbs transports and are wrong on
+#     a RoCE or EFA fabric. `tcp` is omitted on purpose so a misconfigured
+#     fabric fails loudly rather than silently falling back to a slow transport.
+#
+# Verify the transport engaged before trusting any measurement: read
+# `vllm:nixl_xfer_time_seconds` from a decode worker and divide _sum by _count.
+# A KV transfer should take milliseconds, not seconds.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: k-exaone-2-disagg
+spec:
+  env:
+    - {name: UCX_TLS, value: "rc_x,rc,cuda_copy,cuda_ipc"}
+    # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the two
+    # fabrics stay separated by role.
+    - {name: NCCL_IB_DISABLE, value: "1"}
+  components:
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              resources:
+                requests: {rdma/shared_ib: "4"}
+                limits: {rdma/shared_ib: "4"}
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              resources:
+                requests: {rdma/shared_ib: "4"}
+                limits: {rdma/shared_ib: "4"}

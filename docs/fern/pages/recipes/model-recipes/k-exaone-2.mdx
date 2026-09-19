@@ -53,7 +53,7 @@ This recipe serves `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4` — a 764.5B-param
 <div data-variant="disagg">
 
 - **8x B200**, ideally on a single node. Prefill and decode are co-located by a *preferred* pod affinity so the KV hop stays on one fabric where capacity allows; a required affinity deadlocks the operator's gang scheduling. KV moves over IB RDMA, so a split placement still works, just slower.
-- An **RDMA device plugin** exposing InfiniBand HCAs as a Kubernetes extended resource. The manifest requests `rdma/shared_ib`; the name is cluster-specific — see [Notes](#notes).
+- An **RDMA device plugin** exposing InfiniBand HCAs as a Kubernetes extended resource. `deploy-ib.yaml` already carries the fabric settings — do not add your own on top. Review them first; they are cluster-specific. See [Notes](#notes).
 
 </div>
 
@@ -84,7 +84,7 @@ kubectl wait --for=condition=Ready dgd/k-exaone-2-agg -n ${NAMESPACE} --timeout=
 <div data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-ib.yaml -n ${NAMESPACE}
 kubectl wait --for=condition=Ready dgd/k-exaone-2-disagg -n ${NAMESPACE} --timeout=7200s
 ```
 
@@ -163,13 +163,28 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
 | Aggregated | 4x B200 | Aggregated | TP4 | MTP, DL=2 | n/a |
 | Disaggregated | 8x B200 | 1P1D | TP4 / TP4 | MTP, DL=2 on both roles | NIXL/UCX over IB RDMA |
 
+## Supported Features
+
+| Feature | | Notes |
+| --- | --- | --- |
+| NVFP4 (W4A4) weights | ✅ | the FLASHINFER_CUTLASS MoE backend is **mandatory** — see [Notes](#notes) |
+| FP8 KV cache | ✅ | the checkpoint declares `kv_cache_quant_algo: FP8`; it is the default path |
+| Prefix caching | ✅ | on by default |
+| Speculative decoding (MTP) | ✅ | `--spec-method exaone_moe_mtp --spec-tokens 2` |
+| Reasoning parser | ✅ | `--dyn-reasoning-parser qwen3` |
+| Tool calling | ✅ | `--dyn-tool-call-parser qwen3_coder` |
+| Disaggregated serving | ✅ | NIXL over UCX; needs an RDMA device plugin |
+| KV-aware routing | ✅ | wired end to end; inert at the shipped `replicas: 1`, correct when you scale out |
+| 262,144-token context | ✅ | the checkpoint's native window, served in full with no rope scaling |
+| Expert parallelism | ➖ | measured within noise at TP4; not enabled |
+
 ## Notes
 
 - **The MoE backend pin is a correctness requirement.** vLLM's `auto` selection picks FLASHINFER_TRTLLM, which silently corrupts long-form output on this checkpoint — fluent, plausible, wrong, with no error. Both manifests pin `--kernel-config '{"moe_backend":"FLASHINFER_CUTLASS"}'`; the pinned kernel is slower and that cost is inside the figures above.
 - **Use the `--dyn-*` parser flags.** Plain `--reasoning-parser` and `--tool-call-parser` configure the engine only and never reach the Dynamo frontend, so tool calling silently does nothing.
 - **TP4 is both the floor and the optimum.** ~530 GB of weights does not fit TP2 on 180 GB B200s, and TP8 — despite 5.7x the KV capacity — is slower per GPU, because this model is communication-bound rather than KV-capacity-bound.
 - **Disaggregated: prefill and decode must agree** on speculative decoding and block size. A mismatch changes KV block geometry and produces silent garbage rather than an error. `--max-num-seqs` is the deliberate exception: 32 on prefill, 256 on decode.
-- **The RDMA extended-resource name is cluster-specific.** The manifest requests `rdma/shared_ib`; other clusters expose `rdma/ib` or `rdma/rdma_shared_device_a`. Prefer a shared flavour — with an exclusive-mode resource, two co-located workers each claiming HCAs can deadlock NCCL bootstrap. Verify the transport engaged before trusting any measurement:
+- **The fabric settings are pre-injected, and they are cluster-specific.** Disaggregation needs InfiniBand, so the published manifest is `deploy-ib.yaml` rather than `deploy-generic.yaml`: the fabric configuration is a Kustomize component (`kustomize/components/ib`) layered onto a base that carries none, so it is visible in one place instead of scattered through the manifest. Two values need checking against your cluster. The RDMA extended resource is requested as `rdma/shared_ib`; other clusters expose `rdma/ib` or `rdma/rdma_shared_device_a`, and a shared flavour is preferable — with an exclusive-mode resource, two co-located workers each claiming HCAs can deadlock NCCL bootstrap. `UCX_TLS` is set to `rc_x,rc,cuda_copy,cuda_ipc`, which are the InfiniBand verbs transports and are wrong on a RoCE or EFA fabric; `tcp` is omitted deliberately so a misconfigured fabric fails loudly instead of silently falling back to a slow transport. Verify the transport engaged before trusting any measurement:
 
   ```bash
   kubectl exec <decode-worker> -n ${NAMESPACE} -- \
@@ -177,11 +192,13 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
   ```
 
   Divide `_sum` by `_count`: a ~1 GB KV transfer should take milliseconds, not seconds.
+- **KV-aware routing does nothing until you scale out — but scaling out is all it takes.** The frontend ships `--router-mode kv --router-kv-events` and the worker (prefill, in the disaggregated recipe) ships `--kv-events-config`, so the block index is published and consumed. Both halves are inert at `replicas: 1`, because one worker is one destination. Raising `replicas` is sufficient; no flag edit is needed. Measured on a 2 x TP4 deployment this workload sees no throughput gain from it — a 9.494% prefix hit rate against round-robin's 9.458% — because achieved reuse is capacity-capped, so it is shipped for correct scale-out behaviour rather than for throughput.
+- **There is no cache-clearing endpoint.** `dynamo.vllm` runs the Dynamo worker rather than vLLM's OpenAI server, so `POST /reset_prefix_cache` is not served anywhere and `VLLM_SERVER_DEV_MODE` has no effect. To isolate benchmark points, use a fresh `cache_salt` per run — the shipped `perf.yaml` does — or restart the deployment between measurements.
 - **Context length is 262,144**, the model's native maximum. The checkpoint uses unscaled rope, so longer contexts would require a rope-scaling override with unvalidated accuracy.
 
 ## Source
 
 - [Recipe directory](https://github.com/ai-dynamo/dynamo/tree/main/recipes/k-exaone-2.0)
 - [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml)
-- [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-generic.yaml)
+- [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-ib.yaml)
 - [Model card](https://huggingface.co/LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4)

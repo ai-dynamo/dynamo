@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Merging `spec.env` by name needs the merge key that ai-dynamo/dynamo#15064 adds to
+# the generated Kustomize OpenAPI document. Without it kustomize treats `spec.env` as
+# an atomic list, and this patch would REPLACE the base environment rather than add to
+# it -- silently dropping MODEL_NAME and HF_HOME. `render --check` catches that.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+      name: k-exaone-2-disagg
+    path: patch-dgd.yaml

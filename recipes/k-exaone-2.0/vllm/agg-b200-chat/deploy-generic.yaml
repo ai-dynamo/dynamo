@@ -28,6 +28,7 @@ spec:
           - /bin/bash
           - -lc
           image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+          imagePullPolicy: IfNotPresent
           name: main
           ports:
           - containerPort: 8000
@@ -67,10 +68,10 @@ spec:
           - /bin/bash
           - -lc
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          imagePullPolicy: IfNotPresent
           name: main
           resources:
             limits:
-              memory: 480Gi
               nvidia.com/gpu: "4"
             requests:
               memory: 200Gi
@@ -79,7 +80,9 @@ spec:
             capabilities:
               add:
               - IPC_LOCK
+              - SYS_PTRACE
               - SYS_RESOURCE
+            runAsGroup: 0
             runAsUser: 0
           startupProbe:
             failureThreshold: 60
@@ -92,8 +95,6 @@ spec:
           - mountPath: /model-cache
             name: model-cache
             readOnly: true
-          - mountPath: /dev/shm
-            name: dshm
         nodeSelector:
           nvidia.com/gpu.product: NVIDIA-B200
         tolerations:
@@ -105,11 +106,8 @@ spec:
         - name: model-cache
           persistentVolumeClaim:
             claimName: model-cache
-        - emptyDir:
-            medium: Memory
-          name: dshm
     replicas: 1
-    # digest-pinned image has no semver tag for the operator to parse
+    # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 40Gi
     type: worker
