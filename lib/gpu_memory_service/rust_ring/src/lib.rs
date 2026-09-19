@@ -41,7 +41,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 const HEADER_SIZE: usize = 64;
 const RECORD_SIZE: usize = 512;
@@ -63,6 +63,147 @@ const R_BLOCK_PAIRS: usize = 80;
 const BLOCK_PAIR_STRIDE: usize = 8;
 
 const OP_RESTORE_CHUNK: u8 = 1;
+
+const CRASH_MAGIC: u32 = 0x4753_4d43;
+const CRASH_VERSION: u32 = 1;
+static CRASH_FD: AtomicI32 = AtomicI32::new(-1);
+static CRASH_INSTALLER_PID: AtomicI32 = AtomicI32::new(-1);
+static CRASH_FIRED: AtomicBool = AtomicBool::new(false);
+
+#[repr(C)]
+struct CrashRecord {
+    magic: u32,
+    version: u32,
+    signal_number: i32,
+    pid: i32,
+}
+
+/// Notify the persistent GMS daemon and freeze this process.
+///
+/// This handler deliberately uses only async-signal-safe libc calls and atomic
+/// operations. It never returns: GMS either proves MPS client termination and
+/// SIGKILLs the process, or leaves it stopped so unsafe shared HBM cannot be
+/// reused.
+extern "C" fn gpu_crash_handler(
+    signal_number: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    _context: *mut libc::c_void,
+) {
+    let pid = unsafe { libc::getpid() };
+    if pid != CRASH_INSTALLER_PID.load(Ordering::Relaxed) {
+        // Forking after CUDA/interlock initialization is unsupported. A child
+        // must not impersonate or stop its registered parent process.
+        unsafe { libc::_exit(128 + signal_number) };
+    }
+    if CRASH_FIRED.swap(true, Ordering::AcqRel) {
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+    let record = CrashRecord {
+        magic: CRASH_MAGIC,
+        version: CRASH_VERSION,
+        signal_number,
+        pid,
+    };
+    let fd = CRASH_FD.load(Ordering::Acquire);
+    if fd >= 0 {
+        unsafe {
+            libc::write(
+                fd,
+                (&record as *const CrashRecord).cast::<libc::c_void>(),
+                std::mem::size_of::<CrashRecord>(),
+            );
+        }
+    }
+    unsafe {
+        libc::kill(pid, libc::SIGSTOP);
+    }
+    loop {
+        unsafe { libc::pause() };
+    }
+}
+
+/// Install the one-shot process crash interlock after CUDA has joined MPS.
+#[pyfunction]
+fn install_gpu_crash_interlock(notification_fd: i32, signals: Vec<i32>) -> PyResult<()> {
+    if notification_fd < 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "notification_fd must be non-negative",
+        ));
+    }
+    if signals.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "at least one catchable signal is required",
+        ));
+    }
+    if let Some(signal_number) = signals
+        .iter()
+        .find(|signal_number| {
+            **signal_number <= 0
+                || **signal_number == libc::SIGKILL
+                || **signal_number == libc::SIGSTOP
+        })
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "signal {signal_number} cannot be intercepted"
+        )));
+    }
+    if CRASH_FD
+        .compare_exchange(-1, notification_fd, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "GPU crash interlock is already installed",
+        ));
+    }
+
+    CRASH_INSTALLER_PID.store(unsafe { libc::getpid() }, Ordering::Release);
+    let stack_size = (libc::SIGSTKSZ as usize).max(64 * 1024);
+    let stack = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            stack_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if stack == libc::MAP_FAILED {
+        CRASH_FD.store(-1, Ordering::Release);
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let alt_stack = libc::stack_t {
+        ss_sp: stack,
+        ss_flags: 0,
+        ss_size: stack_size,
+    };
+    if unsafe { libc::sigaltstack(&alt_stack, std::ptr::null_mut()) } != 0 {
+        unsafe { libc::munmap(stack, stack_size) };
+        CRASH_FD.store(-1, Ordering::Release);
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    for signal_number in signals {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = gpu_crash_handler as *const () as usize;
+        action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESETHAND;
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        if unsafe { libc::sigaction(signal_number, &action, std::ptr::null_mut()) } != 0 {
+            CRASH_FD.store(-1, Ordering::Release);
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    Ok(())
+}
+
+/// Enter the same fail-closed path from normal Python teardown.
+#[pyfunction]
+#[pyo3(signature = (reason=0))]
+fn trigger_gpu_crash_interlock(reason: i32) {
+    gpu_crash_handler(reason, std::ptr::null_mut(), std::ptr::null_mut());
+}
 
 type PopRecord = (u8, u8, u32, u32, Py<PyBytes>, Vec<(u32, u32)>);
 
@@ -1925,6 +2066,8 @@ fn crc32_combine_chunks(crcs: Vec<u32>, chunk_bytes: u64, total_bytes: u64) -> u
 
 #[pymodule]
 fn gms_rust_ring(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(install_gpu_crash_interlock, m)?)?;
+    m.add_function(wrap_pyfunction!(trigger_gpu_crash_interlock, m)?)?;
     m.add_function(wrap_pyfunction!(push_record, m)?)?;
     m.add_function(wrap_pyfunction!(try_pop_record, m)?)?;
     m.add_function(wrap_pyfunction!(crc32_combine_chunks, m)?)?;

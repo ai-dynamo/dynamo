@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Optional, Tuple
 
 from gpu_memory_service.client.rpc import _GMSRPCTransport
@@ -91,7 +92,7 @@ class _GMSClientSession:
         self._transport.connect(timeout_ms=30_000 if timeout_ms is None else timeout_ms)
         try:
             response = self._transport.handshake(lock_type, timeout_ms)
-        except Exception:
+        except OSError:
             try:
                 self._transport.close()
             except Exception:
@@ -300,16 +301,62 @@ class _GMSClientSession:
         process_start_time: str,
         rank: int = 0,
     ) -> bool:
-        return self._transport.request(
+        response, fd = self._transport.request_with_fd(
             RegisterGPUClientRequest(
                 backend=backend,
                 cohort=cohort,
                 client_pid=client_pid,
                 process_start_time=process_start_time,
                 rank=rank,
+                crash_interlock=False,
             ),
             RegisterGPUClientResponse,
-        ).registered
+        )
+        if fd >= 0:
+            os.close(fd)
+            raise RuntimeError(
+                "GMS returned a crash-interlock FD to the bool-only registration API"
+            )
+        return response.registered
+
+    def register_gpu_client_with_crash_interlock(
+        self,
+        *,
+        backend: str,
+        cohort: str,
+        client_pid: int,
+        process_start_time: str,
+        rank: int = 0,
+    ) -> int:
+        """Register a CUDA client and return its one-shot crash notification FD.
+
+        The caller transfers the returned FD to the native signal interlock and
+        must not close it afterward. The daemon owns the corresponding read end.
+        """
+        response, fd = self._transport.request_with_fd(
+            RegisterGPUClientRequest(
+                backend=backend,
+                cohort=cohort,
+                client_pid=client_pid,
+                process_start_time=process_start_time,
+                rank=rank,
+                crash_interlock=True,
+            ),
+            RegisterGPUClientResponse,
+        )
+        if not response.registered or not response.crash_interlock_armed or fd < 0:
+            if fd >= 0:
+                os.close(fd)
+            raise RuntimeError("GMS did not arm the requested GPU crash interlock")
+        # Do not let an exec'd helper keep the daemon's pipe alive after the
+        # registered CUDA process exits. Python normally applies PEP 446 to
+        # SCM_RIGHTS descriptors; make the crash-liveness contract explicit.
+        try:
+            os.set_inheritable(fd, False)
+        except Exception:
+            os.close(fd)
+            raise
+        return fd
 
     def quiesce_gpu_cohort(
         self,

@@ -155,12 +155,13 @@ class GMSMemorySaverImpl:
     ):
         self._device = torch.device(get_vmm_device_type().value, device_index)
         cohort = os.environ.get("GMS_SGLANG_WRITER_COHORT_PATH")
+        crash_interlock_fd = None
         if cohort:
             from gpu_memory_service.integrations.common.gpu_quiescence import (
                 register_gpu_client,
             )
 
-            register_gpu_client(
+            crash_interlock_fd = register_gpu_client(
                 backend_name="sglang",
                 device=device_index,
                 cohort=cohort,
@@ -190,6 +191,15 @@ class GMSMemorySaverImpl:
                 shared=self._kv_shared,
             ),
         }
+        if crash_interlock_fd is not None:
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                arm_gpu_crash_interlock,
+            )
+
+            arm_gpu_crash_interlock(
+                crash_interlock_fd,
+                backend_name="sglang",
+            )
 
         logger.info(
             "[GMS] Initialized weights: requested=%s granted=%s (device=%d)",

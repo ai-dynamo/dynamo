@@ -557,21 +557,30 @@ class GMS:
         # ----------------------------------------------------------------
 
         if msg_type is RegisterGPUClientRequest:
-            self._gpu_quiescence.register(
+            crash_fd = self._gpu_quiescence.register(
                 backend=msg.backend,
                 cohort=msg.cohort,
                 pid=msg.client_pid,
                 process_start_time_value=msg.process_start_time,
                 rank=msg.rank,
+                crash_interlock=msg.crash_interlock,
             )
             logger.info(
-                "Registered GPU client backend=%s cohort=%s pid=%d rank=%d",
+                "Registered GPU client backend=%s cohort=%s pid=%d rank=%d interlock=%s",
                 msg.backend,
                 msg.cohort,
                 msg.client_pid,
                 msg.rank,
+                crash_fd >= 0,
             )
-            return RegisterGPUClientResponse(registered=True), -1, False
+            return (
+                RegisterGPUClientResponse(
+                    registered=True,
+                    crash_interlock_armed=crash_fd >= 0,
+                ),
+                crash_fd,
+                False,
+            )
 
         if msg_type is QuiesceGPUCohortRequest:
             result = await self._gpu_quiescence.quiesce(

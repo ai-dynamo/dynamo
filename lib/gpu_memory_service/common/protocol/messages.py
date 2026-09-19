@@ -243,10 +243,15 @@ class RegisterGPUClientRequest(msgspec.Struct, tag="register_gpu_client_request"
     client_pid: int
     process_start_time: str
     rank: int = 0
+    # Ask the daemon for a one-shot pipe whose write end is installed in a
+    # native fatal-signal handler. Disabled by default: deployments must opt in
+    # to both the GMS MPS provider and the crash-interlock contract.
+    crash_interlock: bool = False
 
 
 class RegisterGPUClientResponse(msgspec.Struct, tag="register_gpu_client_response"):
     registered: bool
+    crash_interlock_armed: bool = False
 
 
 class QuiesceGPUCohortRequest(msgspec.Struct, tag="quiesce_gpu_cohort_request"):
