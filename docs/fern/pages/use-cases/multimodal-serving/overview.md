@@ -48,3 +48,95 @@ Reference implementations for deploying multimodal models for each backend:
 - [vLLM Multimodal](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md)
 
 To use an author-provided custom vision tower or projector, see [Custom Vision Encoders](custom-vision-encoders.md).
+
+## Shared Image Download Cache
+
+The optional shared cache stores encoded bytes from HTTP and HTTPS image URLs
+before image decoding. Workers can reuse those bytes across processes while
+keeping their local decoded-image caches independent. Data URLs,
+frontend-decoded NIXL inputs, video, and audio do not use this cache.
+
+### Backend Support
+
+| Backend | Mode | Shared encoded-image cache |
+| --- | --- | --- |
+| vLLM | Aggregated and disaggregated paths that load URLs through Dynamo `ImageLoader` | Supported |
+| TensorRT-LLM | Aggregated and disaggregated paths that load URLs through Dynamo `ImageLoader` | Supported |
+| SGLang | Standard URL loading | Not supported. Dynamo passes URL strings directly to SGLang. |
+| SGLang | `--frontend-decoding` | Only URL items that still reach Dynamo `ImageLoader` can use the cache. NIXL-decoded items bypass it. |
+
+Dynamo does not provision or discover a cache service. Deploy Redis Cluster or
+Dragonfly separately and provide a cluster endpoint that every participating
+URL-loading worker can reach. The connection URL carries the endpoint,
+authentication, and TLS choice.
+
+Set the following environment variables on every participating worker:
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `DYN_MM_SHARED_IMAGE_CACHE_ENABLED` | `0` | Set to `1` to enable the shared cache. |
+| `DYN_MM_SHARED_IMAGE_CACHE_URL` | None | Redis Cluster or Dragonfly connection URL. Required when the cache is enabled. |
+| `DYN_MM_SHARED_IMAGE_CACHE_TTL_SECS` | `3600` | Positive cache-entry lifetime in seconds. |
+| `DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS` | `0.1` | Positive connection timeout in seconds. |
+| `DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS` | `2.0` | Positive Redis operation timeout in seconds. |
+| `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum encoded image size downloaded while the shared cache is enabled, in MiB. The limit also applies when a request lacks a session scope and bypasses cache reads and writes. |
+| `DYN_MM_IMAGE_CACHE_SESSION_SCOPED` | `0` | Set to `1` to partition Dynamo image and image-embedding caches by session affinity. |
+
+Store the full connection URL in a Kubernetes Secret and inject it into each
+worker rather than placing credentials in a manifest:
+
+```yaml
+env:
+  - name: DYN_MM_SHARED_IMAGE_CACHE_ENABLED
+    value: "1"
+  - name: DYN_MM_SHARED_IMAGE_CACHE_URL
+    valueFrom:
+      secretKeyRef:
+        name: multimodal-image-cache
+        key: connection-url
+  - name: DYN_MM_IMAGE_CACHE_SESSION_SCOPED
+    value: "1"
+```
+
+> [!WARNING]
+> Use a `rediss://` URL unless Redis traffic is protected by equivalent
+> transport encryption, such as an encrypted service mesh. A `redis://` URL
+> sends cache data and any URL credentials without TLS and should be used only
+> on an appropriately secured in-cluster network.
+
+Cache reads and fills run on the request path. A miss waits for Redis `SET` so
+the fill completes before the request returns. Redis errors fail open, but an
+outage can add up to `DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS` of latency.
+Warnings are emitted initially and at most once per minute; individual
+operation failures remain available at debug level. Dynamo does not currently
+use a bounded asynchronous write queue.
+
+### Session Scoping
+
+Enable `DYN_MM_IMAGE_CACHE_SESSION_SCOPED=1` when the same URL can resolve to
+different content for different sessions. Dynamo derives the
+scope from these headers, in precedence order:
+
+1. `x-dynamo-session-id`
+2. Recognized agent headers: Claude Code `x-claude-code-session-id` (or
+   `x-claude-code-agent-id` for a child agent), Codex `thread-id`, then OpenCode
+   `x-session-id`
+
+Use `x-dynamo-session-id` to provide an explicit Dynamo session identity.
+Dynamo normalizes it and the recognized agent headers into both an
+`AgentContext` and the session affinity used for routing and image-cache
+scoping.
+
+> [!WARNING]
+> Session scoping partitions cache entries; it is not an authentication
+> boundary. Unless a trusted proxy sets or overwrites `x-dynamo-session-id`,
+> the caller controls the scope. Configure the proxy to derive this header
+> from the authenticated identity on every request, and treat scope identifiers
+> as secrets. A caller that learns another identifier can reuse cached content
+> stored under that scope for the same URL.
+
+When session scoping is enabled, a missing or blank scope bypasses the local
+decoded-image cache, in-flight request deduplication, the shared encoded-image
+cache, and Dynamo-owned image embedding caches. A valid scope partitions all of
+those caches. The scope does not partition backend KV cache keys; affinity can
+route a session back to the same worker, but KV identity remains content-based.

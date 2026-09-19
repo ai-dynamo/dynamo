@@ -20,6 +20,7 @@ from dynamo.vllm.worker_factory import (
     _await_benchmark_then_restore_workers,
     _DecodeWorkerLifecycle,
     _merge_benchmark_rank_results,
+    _register_request_cache_metrics,
     _stop_worker_gc_policy,
     _wait_and_load_benchmark,
 )
@@ -66,6 +67,45 @@ def _make_factory(**overrides) -> WorkerFactory:
     }
     defaults.update(overrides)
     return WorkerFactory(**defaults)
+
+
+def test_register_request_cache_metrics_includes_multimodal_image_loader():
+    endpoint = Mock()
+    embedding_cache = object()
+    image_loader = object()
+    handler = SimpleNamespace(
+        embedding_cache_manager=embedding_cache,
+        _multimodal_request_processor=SimpleNamespace(image_loader=image_loader),
+    )
+    config = SimpleNamespace(
+        enable_multimodal=True,
+        served_model_name="served-model",
+        model="source-model",
+        component="backend",
+    )
+
+    with (
+        patch(
+            "dynamo.vllm.worker_factory.register_embedding_cache_metrics"
+        ) as register_embedding,
+        patch(
+            "dynamo.vllm.worker_factory.register_image_loader_metrics"
+        ) as register_image,
+    ):
+        _register_request_cache_metrics(endpoint, handler, config)
+
+    register_embedding.assert_called_once_with(
+        endpoint=endpoint,
+        cache=embedding_cache,
+        model_name="served-model",
+        component_name="backend",
+    )
+    register_image.assert_called_once_with(
+        endpoint=endpoint,
+        loader=image_loader,
+        model_name="served-model",
+        component_name="backend",
+    )
 
 
 def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
