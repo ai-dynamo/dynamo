@@ -8,22 +8,33 @@ SGLang ``TokenizerWorker``. Design notes: AGENTS.md, "Multi-process gateway".
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
 import os
+import signal
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import types
-from typing import Optional
+from typing import Callable, Optional
 
 import sglang as sgl
 
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
+from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
 
 ENV_PARENT_PID = "DYN_SGLANG_GATEWAY_PARENT_PID"
 ENV_CHILD_INDEX = "DYN_SGLANG_GATEWAY_CHILD_INDEX"
 ENV_SYSTEM_PORT = "DYN_SYSTEM_PORT"
 ENV_SYSTEM_PORT_BASE = "DYN_SGLANG_GATEWAY_SYSTEM_PORT"
+# Runtime-data keys on every gateway child's model card: consumers that count
+# workers or sum per-worker capacity can collapse the N instances of one engine.
+GATEWAY_ENGINE_ID_KEY = "dynamo.sglang.gateway_engine"
+GATEWAY_WORKERS_KEY = "dynamo.sglang.gateway_workers"
+# Children drain like any worker (grace + drain + cleanup); give them that budget.
+CHILD_DRAIN_AND_CLEANUP_SECS = 60.0
 
 DIRECT_ENGINE_WORKER_FLAGS = (
     "image_diffusion_worker",
@@ -171,6 +182,60 @@ def child_environment(index: int) -> dict[str, str]:
     return env
 
 
+def gateway_engine_id() -> Optional[str]:
+    pid = os.environ.get(ENV_PARENT_PID)
+    if pid is None:
+        return None
+    return f"{socket.gethostname()}:{pid}"
+
+
+def child_shutdown_timeout() -> float:
+    return get_grace_period_seconds() + CHILD_DRAIN_AND_CLEANUP_SECS
+
+
+def start_parent_watchdog(
+    parent_pid: int,
+    on_parent_death: Optional[Callable[[], None]] = None,
+    poll_seconds: float = 2.0,
+) -> threading.Thread:
+    """The leader owns the schedulers; a child that outlives it would stay registered
+    and fail every request. Ask the kernel for SIGTERM on parent death and poll as a
+    fallback for the window before the flag is set and for non-Linux hosts."""
+    if on_parent_death is None:
+
+        def on_parent_death() -> None:
+            logging.error(
+                "gateway parent pid=%d is gone; shutting down child pid=%d",
+                parent_pid,
+                os.getpid(),
+            )
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+    except (OSError, AttributeError):
+        pass
+
+    def poll() -> None:
+        while True:
+            try:
+                os.kill(parent_pid, 0)
+            except ProcessLookupError:
+                on_parent_death()
+                return
+            except PermissionError:
+                pass
+            if os.getppid() != parent_pid:
+                on_parent_death()
+                return
+            threading.Event().wait(poll_seconds)
+
+    thread = threading.Thread(target=poll, name="gateway-parent-watchdog", daemon=True)
+    thread.start()
+    return thread
+
+
 def metrics_fanout_endpoint() -> Optional[str]:
     """Where child 0 re-publishes the schedulers' KV metrics for its siblings."""
     pid = os.environ.get(ENV_PARENT_PID)
@@ -182,6 +247,7 @@ def metrics_fanout_endpoint() -> Optional[str]:
 def build_gateway_engine():
     """Child side: join the parent's engine through a ``TokenizerWorker``."""
     parent_pid = int(os.environ[ENV_PARENT_PID])
+    start_parent_watchdog(parent_pid)
     attach = getattr(sgl.Engine, "attach_tokenizer_worker", None)
     if attach is not None:
         engine = attach(parent_pid)
@@ -215,9 +281,9 @@ def build_gateway_engine():
     return GatewayEngine(tm, server_args, port_args, scheduler_info)
 
 
-def _reap(proc: subprocess.Popen, timeout: float = 60) -> None:
+def _reap(proc: subprocess.Popen, timeout: Optional[float] = None) -> None:
     try:
-        proc.wait(timeout=timeout)
+        proc.wait(timeout=child_shutdown_timeout() if timeout is None else timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()

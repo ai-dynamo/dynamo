@@ -66,9 +66,19 @@ child republishes KV events under its own worker id, otherwise the router would 
 on instance 0 only; the cost is N copies of each KV event. On multi-node engines the
 non-leader nodes resolve all N leader instances by worker group id
 (`Client.wait_for_instances_by_runtime_data`) and attribute their remote-rank KV events to
-each. The leader owns the engine subprocesses and the shared memory, runs the deferred
-shutdown handlers, and terminates and reaps the children; a child exiting during shutdown is
-not an error.
+each. Only the metrics owner publishes the engine-level gauges (total blocks, cache
+usage, load time), so a scrape across children counts the engine once; every child still publishes
+its own routing usage. Each child's model card carries `dynamo.sglang.gateway_engine`
+(`host:leader_pid`) and `dynamo.sglang.gateway_workers`, so anything that counts workers or sums
+per-worker capacity from discovery can collapse the N instances of one engine. Only child 0's
+system port is fixed; sibling health lives on random ports, so fixed probes see one of N processes.
+
+Lifecycle: the leader owns the engine subprocesses and the shared memory, runs the deferred
+shutdown handlers, and terminates and reaps the children with the worker's own shutdown budget
+(`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` + drain + cleanup); a child exiting during shutdown is
+not an error. Children run a parent watchdog (`PR_SET_PDEATHSIG` plus a liveness poll) and
+SIGTERM themselves when the leader dies, since without the schedulers they would stay registered
+and fail every request.
 
 ## Entry Point
 

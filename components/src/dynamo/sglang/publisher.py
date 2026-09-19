@@ -168,6 +168,30 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
 # This is the same pattern used by dynamo+vLLM.
 
 
+def _open_metrics_sockets(
+    ctx: zmq.asyncio.Context,
+    metrics_ipc_name: str,
+    fanout_endpoint: Optional[str],
+    owner: bool,
+) -> tuple[zmq.asyncio.Socket, Optional[zmq.asyncio.Socket]]:
+    """The schedulers push KvMetrics to one PULL socket. Its owner (the single
+    worker, or gateway child 0) re-publishes every message on ``fanout_endpoint``
+    so sibling gateways can report the same usage for their own identities."""
+    if owner:
+        sock = get_zmq_socket(ctx, zmq.PULL, metrics_ipc_name, True)
+        fanout = (
+            get_zmq_socket(ctx, zmq.PUB, fanout_endpoint, True)
+            if fanout_endpoint is not None
+            else None
+        )
+        return sock, fanout
+    if fanout_endpoint is None:
+        raise ValueError("a sibling gateway needs the metrics fan-out endpoint")
+    sock = get_zmq_socket(ctx, zmq.SUB, fanout_endpoint, False)
+    sock.setsockopt(zmq.SUBSCRIBE, b"")
+    return sock, None
+
+
 class DynamoSglangPublisher:
     """
     Handles SGLang kv events and metrics reception and publishing.
@@ -215,23 +239,18 @@ class DynamoSglangPublisher:
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
         self._ctx: zmq.asyncio.Context | None = None
         self._fanout: zmq.asyncio.Socket | None = None
+        # Engine-level gauges (total blocks, cache usage) describe one engine; only
+        # the process that consumes the schedulers' metrics publishes them, so a
+        # scrape across gateway children does not count the engine N times.
+        self._publishes_engine_gauges = owns_engine_metrics()
         if node_rank == 0:
             self._ctx = zmq.asyncio.Context()
-            fanout = metrics_fanout_endpoint()
-            if owns_engine_metrics():
-                self._sock = get_zmq_socket(
-                    self._ctx,
-                    zmq.PULL,
-                    self.engine.port_args.metrics_ipc_name,
-                    True,
-                )
-                if fanout is not None:
-                    self._fanout = get_zmq_socket(self._ctx, zmq.PUB, fanout, True)
-            else:
-                # Sibling gateway: the schedulers push to child 0 only, which
-                # re-publishes every KvMetrics so this instance reports real usage.
-                self._sock = get_zmq_socket(self._ctx, zmq.SUB, fanout, False)
-                self._sock.setsockopt(zmq.SUBSCRIBE, b"")
+            self._sock, self._fanout = _open_metrics_sockets(
+                self._ctx,
+                self.engine.port_args.metrics_ipc_name,
+                metrics_fanout_endpoint(),
+                self._publishes_engine_gauges,
+            )
         else:
             self._ctx = None
             self._sock = None
@@ -273,13 +292,12 @@ class DynamoSglangPublisher:
                 self.metrics_publisher.publish(
                     dp_rank, kv_used_blocks=active_decode_blocks
                 )
-                dp_rank_str = str(dp_rank)
-                # Publish total blocks (always available in KvMetrics)
-                self.component_gauges.set_total_blocks(dp_rank_str, total_blocks)
-                # Publish GPU cache usage percentage (always available in KvMetrics)
-                self.component_gauges.set_gpu_cache_usage(
-                    dp_rank_str, kv_metrics.gpu_cache_usage_perc
-                )
+                if self._publishes_engine_gauges:
+                    dp_rank_str = str(dp_rank)
+                    self.component_gauges.set_total_blocks(dp_rank_str, total_blocks)
+                    self.component_gauges.set_gpu_cache_usage(
+                        dp_rank_str, kv_metrics.gpu_cache_usage_perc
+                    )
             except Exception:
                 if self._running:
                     logging.exception(
@@ -325,9 +343,10 @@ class DynamoSglangPublisher:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(self.dp_rank, kv_used_blocks=0)
-        dp_rank_str = str(self.dp_rank)
-        self.component_gauges.set_total_blocks(dp_rank_str, 0)
-        self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
+        if self._publishes_engine_gauges:
+            dp_rank_str = str(self.dp_rank)
+            self.component_gauges.set_total_blocks(dp_rank_str, 0)
+            self.component_gauges.set_gpu_cache_usage(dp_rank_str, 0.0)
 
     def init_kv_event_publish(self) -> List[KvEventPublisher]:
         """Initialize KV event publisher(s) if configured.

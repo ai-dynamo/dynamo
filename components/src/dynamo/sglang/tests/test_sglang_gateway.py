@@ -136,6 +136,102 @@ def test_system_port_untouched_when_disabled(not_a_child, monkeypatch, value):
     assert gateway.ENV_SYSTEM_PORT_BASE not in os.environ
 
 
+def test_parent_watchdog_fires_when_parent_is_gone():
+    import threading
+
+    died = threading.Event()
+    dead_pid = 2**22 - 7  # above pid_max on every default Linux, so never alive
+    thread = gateway.start_parent_watchdog(
+        dead_pid, on_parent_death=died.set, poll_seconds=0.01
+    )
+    assert died.wait(5)
+    thread.join(5)
+    assert not thread.is_alive()
+
+
+def test_parent_watchdog_stays_quiet_while_parent_lives():
+    import os
+    import threading
+    import time
+
+    died = threading.Event()
+    gateway.start_parent_watchdog(
+        os.getppid(), on_parent_death=died.set, poll_seconds=0.01
+    )
+    time.sleep(0.1)
+    assert not died.is_set()
+
+
+def test_gateway_engine_id_and_shutdown_budget(monkeypatch):
+    monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
+    assert gateway.gateway_engine_id() is None
+    monkeypatch.setenv(gateway.ENV_PARENT_PID, "777")
+    assert gateway.gateway_engine_id().endswith(":777")
+    monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "12")
+    assert gateway.child_shutdown_timeout() == 12 + gateway.CHILD_DRAIN_AND_CLEANUP_SECS
+
+
+def _child_env(monkeypatch, parent_pid="4321"):
+    monkeypatch.setenv(gateway.ENV_PARENT_PID, parent_pid)
+    monkeypatch.setenv(gateway.ENV_CHILD_INDEX, "1")
+    monkeypatch.setattr(gateway, "start_parent_watchdog", lambda pid: None)
+
+
+def test_build_gateway_engine_prefers_attach_api(monkeypatch):
+    _child_env(monkeypatch)
+    seen = {}
+
+    def attach(pid):
+        seen["pid"] = pid
+        return SimpleNamespace(port_args=SimpleNamespace(metrics_ipc_name="ipc:///p"))
+
+    monkeypatch.setattr(
+        gateway.sgl.Engine, "attach_tokenizer_worker", attach, raising=False
+    )
+    engine = gateway.build_gateway_engine()
+    assert seen["pid"] == 4321
+    assert engine.port_args.metrics_ipc_name == "ipc:///p"
+
+
+def test_build_gateway_engine_falls_back_to_facade(monkeypatch):
+    import sglang.srt.managers.multi_tokenizer_mixin as mixin
+    import sglang.srt.runtime_context as runtime_context
+
+    _child_env(monkeypatch)
+    monkeypatch.setattr(
+        gateway.sgl.Engine, "attach_tokenizer_worker", None, raising=False
+    )
+    port_args = SimpleNamespace(
+        metrics_ipc_name="ipc:///p", tokenizer_ipc_name="ipc:///t"
+    )
+    server_args = SimpleNamespace(tokenizer_worker_num=2)
+    info = {"max_req_input_len": 64, "startup_time": {"t": 1}}
+    created = {}
+
+    class FakeWorker:
+        def __init__(self, sa, pa):
+            created["port_args"] = pa
+
+        def set_startup_time(self, t):
+            created["startup_time"] = t
+
+    monkeypatch.setattr(
+        mixin, "read_from_shared_memory", lambda name: (port_args, server_args, info)
+    )
+    monkeypatch.setattr(mixin, "get_tokenizer_worker_class", lambda sa: FakeWorker)
+    monkeypatch.setattr(
+        runtime_context, "publish", lambda sa, role: created.setdefault("role", role)
+    )
+
+    engine = gateway.build_gateway_engine()
+    assert isinstance(engine, gateway.GatewayEngine)
+    assert created["role"] == "tokenizer"
+    assert created["startup_time"] == {"t": 1}
+    assert created["port_args"].tokenizer_ipc_name != "ipc:///t"
+    assert engine.port_args.metrics_ipc_name == "ipc:///p"
+    assert engine.tokenizer_manager.max_req_input_len == 64
+
+
 def test_gateway_engine_facade_generates_through_tokenizer_manager():
     seen = {}
 
@@ -218,7 +314,6 @@ def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(
     monkeypatch.setattr(gateway.sys, "argv", ["dynamo.sglang", "--model-path", "/m"])
 
     async def fast_sleep(_):
-        # let the loop observe the dead child on its first check
         spawned[1].returncode = 1
 
     monkeypatch.setattr(gateway.asyncio, "sleep", fast_sleep)

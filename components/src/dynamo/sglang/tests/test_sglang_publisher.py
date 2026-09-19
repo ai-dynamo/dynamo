@@ -859,3 +859,41 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
             await task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_metrics_fanout_reaches_sibling_gateways(tmp_path):
+    import zmq
+    import zmq.asyncio
+
+    metrics_ep = f"ipc://{tmp_path}/metrics"
+    fanout_ep = f"ipc://{tmp_path}/fanout"
+    ctx = zmq.asyncio.Context()
+    try:
+        owner_sock, fanout = publisher_mod._open_metrics_sockets(
+            ctx, metrics_ep, fanout_ep, owner=True
+        )
+        assert fanout is not None
+        sibling_sock, sibling_fanout = publisher_mod._open_metrics_sockets(
+            ctx, metrics_ep, fanout_ep, owner=False
+        )
+        assert sibling_fanout is None
+        await asyncio.sleep(0.3)  # PUB/SUB slow joiner
+
+        scheduler = ctx.socket(zmq.PUSH)
+        scheduler.connect(metrics_ep)
+        payload = {"data_parallel_rank": 3, "gpu_cache_usage_perc": 0.5}
+        await scheduler.send_pyobj(payload)
+
+        received = await asyncio.wait_for(owner_sock.recv_pyobj(), 5)
+        assert received == payload
+        await fanout.send_pyobj(received)
+        relayed = await asyncio.wait_for(sibling_sock.recv_pyobj(), 5)
+        assert relayed == payload
+
+        with pytest.raises(ValueError, match="fan-out"):
+            publisher_mod._open_metrics_sockets(ctx, metrics_ep, None, owner=False)
+        for s in (scheduler, owner_sock, fanout, sibling_sock):
+            s.close(linger=0)
+    finally:
+        ctx.term()
