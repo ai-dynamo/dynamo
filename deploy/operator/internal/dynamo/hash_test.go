@@ -234,6 +234,108 @@ func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withFrontend)), mustComputeBetaDGDWorkersSpecHash(t, betaDGD(t, withoutFrontend)))
 }
 
+// The synthesized elastic-EP follower must not reach the worker-spec hash. It is a
+// worker DCD by component type, so the plain IsWorkerComponent filter would have
+// hashed it -- and because it appears the moment an operator carrying this feature
+// rolls out, that would change the desired hash of every existing elastic-EP DGD and
+// roll a serving leader whose requested spec never changed.
+func TestComputeBetaDGDWorkersSpecHash_ExcludesSynthesizedElasticEPFollower(t *testing.T) {
+	dgd := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"decode": {ComponentType: commonconsts.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
+	}))
+	dgd.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    commonconsts.MainContainerName,
+				Command: []string{"python3"},
+				Args:    []string{"-m", "dynamo.vllm", "--enable-elastic-ep", "--data-parallel-backend", "ray"},
+			}},
+		},
+	}
+
+	t.Log("generate the DCDs the hash is computed from")
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	if err != nil {
+		t.Fatalf("GenerateDynamoComponentsDeployments: %v", err)
+	}
+
+	t.Log("the follower is generated, and is a worker by component type")
+	follower := dcds["decode-"+commonconsts.GroveRoleSuffixFollower]
+	if follower == nil {
+		t.Fatalf("expected a synthesized follower DCD; got %d generated DCDs", len(dcds))
+	}
+	if !IsWorkerComponent(string(follower.Spec.ComponentType)) {
+		t.Fatal("follower is not a worker component, so this test no longer guards the hash")
+	}
+
+	t.Log("yet it is excluded from the hash, while the leader it derives from is not")
+	if participatesInWorkerSpecHash(follower) {
+		t.Error("the synthesized follower must not contribute to the worker-spec hash")
+	}
+	if leader := dcds["decode"]; leader == nil || !participatesInWorkerSpecHash(leader) {
+		t.Error("the elastic-EP leader must still contribute to the worker-spec hash")
+	}
+}
+
+// The DERIVED follower count must not reach the worker-spec hash either.
+//
+// Excluding the follower DCD (above) is not enough: generation also stamps
+// KubeAnnotationElasticEPFollowerReplicas onto the LEADER's pod template, and
+// ComputeDGDWorkersSpecHash computes the hash by running generation. Hashing that stamp
+// made the same declaration produce a new worker generation purely because a newer operator
+// records a number the older one did not, so an operator upgrade restarted GPU workers whose
+// rendered spec was unchanged.
+//
+// It bit the Grove pathway hardest, where the value does nothing whatsoever: Grove never
+// synthesizes a follower and never reads it, but the Grove renderer stamps the resulting
+// hash onto every worker pod. Measured before the fix -- an unchanged Grove dp=2 component
+// moved b61319fa -> 9761526a.
+//
+// The stamp reaches the hash by TWO routes: workerHashSpec covers spec.podTemplate.annotations,
+// and GetDCDKubeAnnotations copies the pod-template annotations into the separate Annotations
+// field of the hashed struct. This test calls workerHashSpec directly, so it pins the first
+// route only; the second is covered by the end-to-end measurement recorded below.
+func TestComputeBetaDGDWorkersSpecHash_DerivedFollowerCountDoesNotRoll(t *testing.T) {
+	// The annotation cannot arrive from user input any more -- generation strips the
+	// operator-owned elastic-EP keys before synthesis (stripOperatorOwnedElasticEPAnnotations).
+	// Its only remaining source at hash time is the operator's OWN stamp on a genuine
+	// elastic-EP leader, which is exactly the value that must not create a worker generation.
+	//
+	// So this asserts the strip where that stamp is hashed, rather than trying to smuggle a
+	// hand-set value in: workerHashSpec must drop the key from the pod template it hashes.
+	//
+	// End-to-end proof that the hash is restored lives in the commit for this fix, measured
+	// against the merge base: an unchanged Grove dp=2 component moved b61319fa -> 9761526a
+	// before, and back to b61319fa after.
+	dcd := &v1beta1.DynamoComponentDeployment{
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				PodTemplate: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+						commonconsts.KubeAnnotationElasticEPFollowerReplicas: "3",
+						"nvidia.com/unrelated":                               "keep-me",
+					}},
+				},
+			},
+		},
+	}
+
+	hashed := workerHashSpec(dcd)
+	if hashed.PodTemplate == nil {
+		t.Fatal("workerHashSpec dropped the pod template entirely")
+	}
+	if _, present := hashed.PodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas]; present {
+		t.Error("the derived follower count must not be hashed: it is computed from " +
+			"--data-parallel-size, which the container args already contribute, so hashing " +
+			"it only makes a newer operator disagree with an older one about an unchanged " +
+			"declaration -- restarting every elastic-EP worker, Grove included")
+	}
+	if got := hashed.PodTemplate.Annotations["nvidia.com/unrelated"]; got != "keep-me" {
+		t.Errorf("unrelated pod annotations must still be hashed, got %q", got)
+	}
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresGeneratedDCDObjectIdentity(t *testing.T) {
 	dgd := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
