@@ -70,6 +70,9 @@ pub(crate) fn build_generate_request(
     }
 
     let guided = request.sampling_options.guided_decoding.as_ref();
+    // 0.5.20 still accepts these legacy fields. Keep them for 0.5.19 servers;
+    // remove this allowance when the minimum native server version is 0.5.20.
+    #[allow(deprecated)]
     let sampling_params = pb::SamplingParams {
         temperature: request.sampling_options.temperature,
         top_p: request.sampling_options.top_p,
@@ -88,6 +91,7 @@ pub(crate) fn build_generate_request(
             .and_then(|value| value.json.as_ref())
             .map(json_value_to_string),
         regex: guided.and_then(|value| value.regex.clone()),
+        ..Default::default()
     };
 
     let output_options = &request.output_options;
@@ -139,6 +143,7 @@ pub(crate) fn build_generate_request(
             bootstrap_host,
             bootstrap_port,
         )?,
+        ..Default::default()
     })
 }
 
@@ -191,12 +196,12 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
     }
     if request.sampling_options.seed.is_some() {
         return Err(client::invalid_arg(
-            "seed is not represented by SGLang's native gRPC proto",
+            "seed is not supported by the SGLang sidecar",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
         return Err(client::invalid_arg(
-            "max_thinking_tokens is not represented by SGLang's native gRPC proto",
+            "max_thinking_tokens is not supported by the SGLang sidecar",
         ));
     }
     if request
@@ -232,7 +237,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             || guided.structural_tag.is_some())
     {
         return Err(client::invalid_arg(
-            "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
+            "the SGLang sidecar currently supports only JSON-schema and regex guided decoding",
         ));
     }
     if request
@@ -243,7 +248,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         != 0
     {
         return Err(client::invalid_arg(
-            "engine priority is not represented by SGLang's native gRPC proto",
+            "engine priority is not supported by the SGLang sidecar",
         ));
     }
     Ok(())

@@ -11,10 +11,10 @@ available there, Dynamo should remove this directory, pin and install the
 matching `sglang` wheel as a build dependency, and compile the packaged proto
 instead.
 
-The contract was copied from SGLang commit
-[`cc7d6659fd68694797892d0d863b2549a5b61b69`](https://github.com/sgl-project/sglang/blob/cc7d6659fd68694797892d0d863b2549a5b61b69/proto/sglang/runtime/v1/sglang.proto).
+The contract was copied from SGLang v0.5.20, commit
+[`94602c9c2b7cbdb8efd5c52802dac6a1c180089e`](https://github.com/sgl-project/sglang/blob/94602c9c2b7cbdb8efd5c52802dac6a1c180089e/proto/sglang/runtime/v1/sglang.proto).
 The upstream file's SHA-256 is
-`a2e14952ddb2b34b6e22cbbc4e76d76d70c44f2dbf087cb9918aed3399d9ef42`.
+`004e87f07bd5a40d5f83f4b48f7cd796a221891cbd8c928eb7b799a9790ab75d`.
 The local file adds SPDX and temporary-copy comments and applies Dynamo's
 `clang-format` style; these changes do not alter the protobuf descriptor. The
 SGLang sidecar generates both client and server types and temporarily exposes
