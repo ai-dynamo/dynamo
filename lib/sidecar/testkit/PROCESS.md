@@ -4,7 +4,8 @@
 # vLLM process and handoff integration
 
 The final CPU process suite collected and executed six tests successfully:
-**6 passed, 0 failed, 0 ignored**, in 22.47 seconds. This execution used the working changes
+**6 passed, 0 failed, 0 ignored**, in 22.51 seconds inside the isolated CPU container.
+This execution used the final guarded-path source
 on base `cdcd721e72fdfd521c93f35c7f91745b1f7dd01f`, native protocol 0.3.0,
 and the actual rebuilt `dynamo-vllm-sidecar` executable. Pinned vLLM is 0.29.0;
 these CPU results do not establish real-engine compatibility, GPU work release,
@@ -101,7 +102,7 @@ building the binary and tests.
 | Process source formatting and whitespace | Passed |
 | Targeted process Clippy | Final process source passed with `-D warnings` in 1 minute; runtime including tests also passed in 43.82 seconds |
 | Isolated CPU container | Initial implementation: 54 collected/executed (9 conformance, 2 Mocker, 2 common transport, 35 retained vLLM socket, 6 process), all passed. After the cancellation contract correction: all 6 strengthened process cases passed again in 22.48 seconds; after guarded-path containment, all 6 passed again in 22.51 seconds. All containers disabled external networking; zero ignored. |
-| Current-head CI | Pending; tracked by the stack's validation report |
+| Current-head CI | Per-commit workflow and case results are tracked separately in the stack's validation report; local execution does not establish CI completion. |
 | Pinned native-engine compatibility/cancellation/handoff | Cancellation passed; native handoff executed and failed due to the upstream float conversion described in NATIVE.md. CPU Mocker evidence is not credited as native transfer. |
 
 The `cross_process` target requires the `process-tests` feature for the
