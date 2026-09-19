@@ -84,6 +84,7 @@ import json
 import logging
 import math
 import os
+import platform
 import queue
 import random
 import shutil
@@ -92,7 +93,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from itertools import count
 from types import SimpleNamespace
@@ -147,6 +148,334 @@ ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
 
 def _utc_now_rfc3339() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# ---------------------------------------------------------------------------
+# Engine provenance for the self-benchmark artifact
+# ---------------------------------------------------------------------------
+
+# Default substituted for indexer_kv_dtype="auto" by the DeepSeek sparse
+# indexer (vllm/v1/attention/backends/mla/indexer.py: dsa_indexer_uses_fp4
+# calls resolve_indexer_kv_dtype("fp8")). MiniMax M3 uses "bf16"; recording
+# the DeepSeek default is the useful case and the raw field is recorded too.
+_INDEXER_KV_DTYPE_DEFAULT = "fp8"
+
+# Sparse-indexer topology, read off hf_config when the model has an indexer.
+_INDEXER_FIELDS = ("index_topk", "index_n_heads", "index_head_dim")
+
+# JSON-safe scalars of vllm_config.speculative_config. The nested
+# *_model_config / *_parallel_config attributes must never be serialised.
+_SPECULATIVE_FIELDS = (
+    "method",
+    "model",
+    "num_speculative_tokens",
+    "draft_tensor_parallel_size",
+)
+
+
+def _json_safe(value: Any) -> Any:
+    """Coerce a vLLM config value into something ``json.dump`` accepts.
+
+    Enums become ``.name``: a plain ``Enum`` is not serialisable at all
+    (``AttentionBackendEnum``, ``CUDAGraphMode``) and an ``IntEnum`` would
+    silently become a bare integer (``KVQuantMode``). Dataclasses become
+    dicts, ``torch`` dtypes become their short name (vLLM's own convention).
+    Sets/frozensets become sorted lists -- hash order is per-process, and
+    Task 2's cross-rank merge needs a deterministic order, not hash order --
+    falling back to sorting by ``str()`` when the elements are not mutually
+    comparable. numpy/torch scalars go through ``.item()`` before the
+    ``str()`` fallback, and anything else falls back to ``str()``.
+    """
+    if isinstance(value, enum.Enum):
+        return value.name
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (set, frozenset)):
+        safe_items = [_json_safe(item) for item in value]
+        try:
+            return sorted(safe_items)
+        except TypeError:
+            return sorted(safe_items, key=str)
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            member.name: _json_safe(getattr(value, member.name, None))
+            for member in fields(value)
+        }
+    to_scalar = getattr(value, "item", None)
+    if callable(to_scalar):
+        try:
+            return _json_safe(to_scalar())
+        except Exception:
+            pass
+    return str(value).removeprefix("torch.")
+
+
+def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, Any]:
+    """Attention facts the engine-core process can read.
+
+    Only *requested* values exist here: vLLM resolves the attention backend
+    inside the model workers and never writes it back into the config, so the
+    ``*_resolved`` fields stay None until the worker probe fills them.
+    """
+    indexer = {
+        name: _json_safe(getattr(hf_config, name, None))
+        for name in _INDEXER_FIELDS
+        if getattr(hf_config, name, None) is not None
+    }
+    indexer_kv_dtype = None
+    resolve = getattr(attention_config, "resolve_indexer_kv_dtype", None)
+    if indexer and callable(resolve):
+        try:
+            indexer_kv_dtype = _json_safe(resolve(_INDEXER_KV_DTYPE_DEFAULT))
+        except Exception:
+            indexer_kv_dtype = None
+            logger.debug(
+                "Could not resolve indexer_kv_dtype for engine provenance",
+                exc_info=True,
+            )
+    per_kind = getattr(attention_config, "backend_per_kind", None) or {}
+    block: dict[str, Any] = {
+        "backend_requested": _json_safe(getattr(attention_config, "backend", None)),
+        "backend_per_kind": {
+            str(kind): _json_safe(backend) for kind, backend in per_kind.items()
+        },
+        "mla_prefill_backend_requested": _json_safe(
+            getattr(attention_config, "mla_prefill_backend", None)
+        ),
+        "flash_attn_version": _json_safe(
+            getattr(attention_config, "flash_attn_version", None)
+        ),
+        "use_trtllm_attention": _json_safe(
+            getattr(attention_config, "use_trtllm_attention", None)
+        ),
+        "indexer_kv_dtype": indexer_kv_dtype,
+        "indexer_kv_dtype_configured": _json_safe(
+            getattr(attention_config, "indexer_kv_dtype", None)
+        ),
+        "backend_resolved": None,
+        "mla_prefill_backend_resolved": None,
+        "resolution": "pending_worker_probe",
+    }
+    if indexer:
+        block["indexer"] = indexer
+    return block
+
+
+def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str, Any]:
+    """KV-cache facts, including the per-group specs the workers reported.
+
+    ``num_gpu_blocks`` is deliberately NOT recorded here: vLLM writes it
+    per engine-core process after profiling with no cross-DP-rank reduction,
+    so it is rank-varying data, not engine identity. It is already recorded
+    per-rank at ``limits.num_gpu_blocks``.
+    """
+    groups: list[dict[str, Any]] = []
+    for group in getattr(kv_cache_config, "kv_cache_groups", None) or []:
+        spec = getattr(group, "kv_cache_spec", None)
+        if spec is None:
+            continue
+        entry: dict[str, Any] = {
+            "type": type(spec).__name__,
+            "dtype": _json_safe(getattr(spec, "dtype", None)),
+            "head_size": _json_safe(getattr(spec, "head_size", None)),
+            "num_kv_heads": _json_safe(getattr(spec, "num_kv_heads", None)),
+            "block_size": _json_safe(getattr(spec, "block_size", None)),
+        }
+        kv_quant_mode = getattr(spec, "kv_quant_mode", None)
+        if kv_quant_mode is not None:
+            entry["kv_quant_mode"] = _json_safe(kv_quant_mode)
+        groups.append(entry)
+    block: dict[str, Any] = {
+        "cache_dtype": _json_safe(getattr(cache_config, "cache_dtype", None)),
+        "block_size": _json_safe(getattr(cache_config, "block_size", None)),
+        "enable_prefix_caching": _json_safe(
+            getattr(cache_config, "enable_prefix_caching", None)
+        ),
+        "groups": groups,
+    }
+    # vLLM 0.29.0 resolves the layout in the engine-core process and records
+    # it on both configs; 0.28.0 keeps it in a worker-process global and the
+    # key is simply absent there.
+    layout = getattr(kv_cache_config, "kv_cache_layout", None) or getattr(
+        cache_config, "kv_cache_layout", None
+    )
+    if layout is not None:
+        block["kv_cache_layout"] = _json_safe(layout)
+    return block
+
+
+def _bench_engine_quantization(vllm_config: Any, model_config: Any) -> dict[str, Any]:
+    """Quantization as declared by the checkpoint and as resolved by vLLM.
+
+    ``model_config.quantization_config`` is deliberately NOT read: it is the
+    user-facing *online*-quantization spec, not the checkpoint dict. The
+    normalised checkpoint dict lives on ``model_arch_config``.
+    """
+    arch_config = getattr(model_config, "model_arch_config", None)
+    checkpoint_config = getattr(arch_config, "quantization_config", None)
+    quant_config = getattr(vllm_config, "quant_config", None)
+    return {
+        "method": _json_safe(getattr(model_config, "quantization", None)),
+        "checkpoint_config": (
+            _json_safe(checkpoint_config)
+            if isinstance(checkpoint_config, dict)
+            else None
+        ),
+        "quant_config_class": (
+            type(quant_config).__name__ if quant_config is not None else None
+        ),
+    }
+
+
+def _bench_engine_versions() -> dict[str, Any]:
+    """Engine and runtime versions; every lookup is best-effort."""
+    try:
+        # instrumented_scheduler already imported the real vllm at module
+        # level, so this resolves from sys.modules and cannot pick up the
+        # dynamo.vllm package by accident.
+        import vllm
+
+        vllm_version = getattr(vllm, "__version__", None)
+    except Exception:
+        vllm_version = None
+        logger.debug("Could not determine vllm version", exc_info=True)
+    try:
+        import vllm.envs as vllm_envs
+
+        build_commit = getattr(vllm_envs, "VLLM_BUILD_COMMIT", None)
+    except Exception:
+        build_commit = None
+        logger.debug("Could not determine vllm build commit", exc_info=True)
+    try:
+        from importlib.metadata import version as _package_version
+
+        dynamo_version = _package_version("ai-dynamo")
+    except Exception:
+        dynamo_version = None
+        logger.debug("Could not determine ai-dynamo package version", exc_info=True)
+    return {
+        "vllm": _json_safe(vllm_version),
+        "vllm_build_commit": _json_safe(build_commit),
+        "dynamo": _json_safe(dynamo_version),
+        "python": platform.python_version(),
+    }
+
+
+def _bench_capture_engine(
+    vllm_config: Any,
+    kv_cache_config: Any,
+    *,
+    cudagraph_mode: str,
+    cudagraph_capture_sizes: list[int],
+    dp_rank: int | None,
+) -> dict[str, Any]:
+    """One-shot engine provenance for the self-benchmark artifact.
+
+    Every field is read defensively; a missing attribute becomes None and any
+    unexpected failure is recorded under ``capture_error``. A provenance gap
+    must never cost a collection its measurements. ``cudagraph_mode`` and
+    ``cudagraph_capture_sizes`` are the values ``_bench_init`` already
+    normalised from ``compilation_config`` for the ``cudagraph`` block in
+    ``_bench_write_results``; recording the same values here instead of
+    re-deriving them keeps a single source of truth. ``dp_rank`` is likewise
+    passed in rather than read from ``parallel_config.data_parallel_rank``:
+    see the comment on ``engine["parallel"]["data_parallel_rank"]`` below.
+    """
+    engine: dict[str, Any] = {}
+    try:
+        model_config = getattr(vllm_config, "model_config", None)
+        cache_config = getattr(vllm_config, "cache_config", None)
+        attention_config = getattr(vllm_config, "attention_config", None)
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        hf_config = getattr(model_config, "hf_config", None)
+
+        engine["attention"] = _bench_engine_attention(attention_config, hf_config)
+        engine["kv_cache"] = _bench_engine_kv_cache(cache_config, kv_cache_config)
+        engine["quantization"] = _bench_engine_quantization(vllm_config, model_config)
+        engine["scheduler"] = {
+            "max_num_batched_tokens": _json_safe(
+                getattr(scheduler_config, "max_num_batched_tokens", None)
+            ),
+            "max_num_seqs": _json_safe(getattr(scheduler_config, "max_num_seqs", None)),
+            "async_scheduling": _json_safe(
+                getattr(scheduler_config, "async_scheduling", None)
+            ),
+            "enable_chunked_prefill": _json_safe(
+                getattr(scheduler_config, "enable_chunked_prefill", None)
+            ),
+            "long_prefill_token_threshold": _json_safe(
+                getattr(scheduler_config, "long_prefill_token_threshold", None)
+            ),
+        }
+        engine["model"] = {
+            # scheduler_config.max_model_len is an InitVar and is never
+            # stored; model_config is the only readable source.
+            "dtype": _json_safe(getattr(model_config, "dtype", None)),
+            "max_model_len": _json_safe(getattr(model_config, "max_model_len", None)),
+            "model_type": _json_safe(getattr(hf_config, "model_type", None)),
+            "architectures": _json_safe(
+                getattr(model_config, "architectures", None) or []
+            ),
+            "model": _json_safe(getattr(model_config, "model", None)),
+        }
+        engine["parallel"] = {
+            "data_parallel_size": _json_safe(
+                getattr(parallel_config, "data_parallel_size", None)
+            ),
+            # The one field that legitimately differs per rank; the merge
+            # excludes it from the identical-across-ranks check. Sourced
+            # from the resolved dp_rank (self._fpm_dp_rank, computed by
+            # _resolve_dp_rank), NOT parallel_config.data_parallel_rank
+            # directly: vLLM zeroes that field on every child process for
+            # dense (non-MoE) models under external DP (see
+            # _resolve_dp_rank's comment), which would silently disagree
+            # with this artifact's own ``dp.rank``.
+            "data_parallel_rank": _json_safe(dp_rank),
+            "tensor_parallel_size": _json_safe(
+                getattr(parallel_config, "tensor_parallel_size", None)
+            ),
+            "pipeline_parallel_size": _json_safe(
+                getattr(parallel_config, "pipeline_parallel_size", None)
+            ),
+            "enable_expert_parallel": _json_safe(
+                getattr(parallel_config, "enable_expert_parallel", None)
+            ),
+            "enable_eplb": _json_safe(getattr(parallel_config, "enable_eplb", None)),
+            "all2all_backend": _json_safe(
+                getattr(parallel_config, "all2all_backend", None)
+            ),
+            "eplb_config": _json_safe(getattr(parallel_config, "eplb_config", None)),
+        }
+        engine["speculative"] = (
+            {
+                name: _json_safe(getattr(speculative_config, name, None))
+                for name in _SPECULATIVE_FIELDS
+            }
+            if speculative_config is not None
+            else None
+        )
+        engine["graph"] = {
+            # Same normalisation _bench_init already applied to the same
+            # fields; passed in as keyword args rather than re-derived here.
+            "cudagraph_mode": cudagraph_mode,
+            "cudagraph_capture_sizes": cudagraph_capture_sizes,
+            # The worker calls resolve_cudagraph_mode_and_sizes() and rewrites
+            # both fields; under a multiproc executor this copy never sees it.
+            "resolution": "pre_resolution",
+        }
+        engine["versions"] = _bench_engine_versions()
+        engine["resolved"] = None
+        engine["resolution"] = "pending_worker_probe"
+    except Exception as error:
+        logger.warning("Engine provenance capture failed: %s", error, exc_info=True)
+        engine["capture_error"] = str(error)
+    return engine
 
 
 def recurrent_shadow_range(
@@ -2486,6 +2815,18 @@ class InstrumentedScheduler(AsyncScheduler):
                 "biases measured latency",
                 self._bench_vocab_size,
             )
+
+        # Engine provenance: one snapshot of what this engine was configured
+        # with. Worker-resolved facts will be attached later by the
+        # launcher's one-shot worker probe (AIC-1950 task 3) -- that code
+        # does not exist yet, this is a forward reference.
+        self._bench_engine = _bench_capture_engine(
+            vllm_config,
+            getattr(self, "kv_cache_config", None),
+            cudagraph_mode=self._bench_cudagraph_mode,
+            cudagraph_capture_sizes=self._bench_cudagraph_capture_sizes,
+            dp_rank=self._fpm_dp_rank,
+        )
 
         logger.info(
             "Benchmark mode enabled: %s (cudagraph_mode=%s, capture_sizes=%s)",
@@ -6387,6 +6728,11 @@ class InstrumentedScheduler(AsyncScheduler):
                     self, "_bench_decode_capture_sizes", []
                 ),
             },
+            **(
+                {"engine": self._bench_engine}
+                if getattr(self, "_bench_engine", None) is not None
+                else {}
+            ),
             "results": [
                 {
                     "point": asdict(r.point),

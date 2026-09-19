@@ -12,6 +12,8 @@ spinning up vLLM engine internals.
 
 from __future__ import annotations
 
+import dataclasses
+import enum
 import hashlib
 import json
 import threading
@@ -6484,3 +6486,405 @@ def test_random_kda_allows_hybrid_warm_chains_without_expert_parallelism(monkeyp
     stub._bench_random_kda = True
     assert stub._kvwarm_warm_eligible()
     assert stub._kvwarm_meta["skip_reason"] is None
+
+
+# --------------------------------------------------------------------------
+# Engine provenance (AIC-1950)
+# --------------------------------------------------------------------------
+
+
+class _ProvenanceBackend(enum.Enum):
+    """Stands in for vLLM's AttentionBackendEnum: a plain Enum whose value is
+    a class path, so json.dumps() raises on it and only ``.name`` is usable."""
+
+    FLASHINFER_MLA = "vllm.v1.attention.backends.mla.flashinfer.FlashInferMLA"
+
+
+class _ProvenanceQuantMode(enum.IntEnum):
+    """Stands in for KVQuantMode: an IntEnum that would silently serialise as
+    a bare integer."""
+
+    FP8_PER_TENSOR = 1
+
+
+class _ProvenanceDtype:
+    """Stands in for a torch dtype: not JSON-serialisable, str() is
+    ``torch.<name>``."""
+
+    def __str__(self) -> str:
+        return "torch.bfloat16"
+
+
+class _ProvenanceNumpyScalar:
+    """Stands in for a numpy/torch scalar: has ``.item()``, but str() would
+    produce a wrapper repr rather than the bare value."""
+
+    def __init__(self, value):
+        self._value = value
+
+    def item(self):
+        return self._value
+
+    def __str__(self) -> str:
+        return f"array({self._value})"
+
+
+@dataclasses.dataclass
+class _ProvenanceEplbConfig:
+    window_size: int = 100
+    num_redundant_experts: int = 0
+
+
+class MLAAttentionSpec(SimpleNamespace):
+    """The class name is the payload: the provenance block records
+    ``type(spec).__name__`` for every KV cache group."""
+
+
+class _ExplodingConfig:
+    """Any attribute read raises, which getattr(..., default) does not
+    swallow: exercises the capture_error path."""
+
+    def __getattr__(self, name):
+        raise RuntimeError("boom")
+
+
+def _provenance_vllm_config(
+    *,
+    with_indexer: bool = True,
+    with_layout: bool = True,
+):
+    hf_config = SimpleNamespace(model_type="deepseek_v32")
+    if with_indexer:
+        hf_config.index_topk = 2048
+        hf_config.index_n_heads = 64
+        hf_config.index_head_dim = 128
+    attention_config = SimpleNamespace(
+        backend=_ProvenanceBackend.FLASHINFER_MLA,
+        backend_per_kind={"mla_attention": _ProvenanceBackend.FLASHINFER_MLA},
+        mla_prefill_backend=None,
+        flash_attn_version=3,
+        use_trtllm_attention=None,
+        indexer_kv_dtype="auto",
+        resolve_indexer_kv_dtype=lambda default: default,
+    )
+    cache_config = SimpleNamespace(
+        cache_dtype="fp8_ds_mla",
+        block_size=64,
+        enable_prefix_caching=True,
+        num_gpu_blocks=1234,
+    )
+    if with_layout:
+        cache_config.kv_cache_layout = "LBNHC"
+    spec = MLAAttentionSpec(
+        dtype=_ProvenanceDtype(),
+        head_size=576,
+        num_kv_heads=1,
+        block_size=64,
+        kv_quant_mode=_ProvenanceQuantMode.FP8_PER_TENSOR,
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec)],
+    )
+    if with_layout:
+        kv_cache_config.kv_cache_layout = "LBNHC"
+    model_config = SimpleNamespace(
+        dtype=_ProvenanceDtype(),
+        max_model_len=163840,
+        architectures=["DeepseekV32ForCausalLM"],
+        model="/weights/dsv32",
+        quantization="modelopt_fp4",
+        model_arch_config=SimpleNamespace(
+            quantization_config={"quant_method": "modelopt_fp4", "group_size": 16}
+        ),
+        hf_config=hf_config,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=model_config,
+        cache_config=cache_config,
+        attention_config=attention_config,
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8192,
+            max_num_seqs=256,
+            async_scheduling=True,
+            enable_chunked_prefill=True,
+            long_prefill_token_threshold=0,
+        ),
+        parallel_config=SimpleNamespace(
+            data_parallel_size=16,
+            data_parallel_rank=3,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_expert_parallel=True,
+            enable_eplb=False,
+            all2all_backend="deepep_low_latency",
+            eplb_config=_ProvenanceEplbConfig(),
+        ),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            cudagraph_capture_sizes=[8, 2, 1, 0],
+            max_cudagraph_capture_size=8,
+        ),
+        speculative_config=None,
+        quant_config=None,
+    )
+    return vllm_config, kv_cache_config
+
+
+def test_json_safe_coerces_enums_dtypes_and_dataclasses():
+    coerce = instrumented_scheduler_module._json_safe
+
+    assert coerce(_ProvenanceBackend.FLASHINFER_MLA) == "FLASHINFER_MLA"
+    assert coerce(_ProvenanceQuantMode.FP8_PER_TENSOR) == "FP8_PER_TENSOR"
+    assert coerce(_ProvenanceDtype()) == "bfloat16"
+    assert coerce(_ProvenanceEplbConfig()) == {
+        "window_size": 100,
+        "num_redundant_experts": 0,
+    }
+    assert coerce({"a": [1, _ProvenanceBackend.FLASHINFER_MLA]}) == {
+        "a": [1, "FLASHINFER_MLA"]
+    }
+    assert coerce(None) is None
+    assert coerce(True) is True
+    assert coerce(7) == 7
+    assert coerce("plain") == "plain"
+    json.dumps(coerce({"nested": _ProvenanceEplbConfig()}))
+    # Sets/frozensets: hash order is per-process and would break Task 2's
+    # cross-rank equality check, so they must come back sorted.
+    assert coerce({3, 1, 2}) == [1, 2, 3]
+    assert coerce(frozenset({"b", "a", "c"})) == ["a", "b", "c"]
+    # Mixed types aren't mutually comparable (int < str raises); falls back
+    # to sorting by str(), still deterministic.
+    assert coerce({1, "a"}) == [1, "a"]
+    # numpy/torch scalars: .item() before the str() fallback.
+    assert coerce(_ProvenanceNumpyScalar(42)) == 42
+
+
+def test_bench_capture_engine_records_requested_engine_facts():
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        # Deliberately different from the fixture's vllm_config.parallel_
+        # config.data_parallel_rank (3): proves data_parallel_rank in the
+        # emitted block comes from this parameter, not from re-reading
+        # parallel_config, which vLLM zeroes for dense-model DP children.
+        dp_rank=7,
+    )
+
+    assert engine["attention"] == {
+        "backend_requested": "FLASHINFER_MLA",
+        "backend_per_kind": {"mla_attention": "FLASHINFER_MLA"},
+        "mla_prefill_backend_requested": None,
+        "flash_attn_version": 3,
+        "use_trtllm_attention": None,
+        "indexer_kv_dtype": "fp8",
+        "indexer_kv_dtype_configured": "auto",
+        "backend_resolved": None,
+        "mla_prefill_backend_resolved": None,
+        "resolution": "pending_worker_probe",
+        "indexer": {
+            "index_topk": 2048,
+            "index_n_heads": 64,
+            "index_head_dim": 128,
+        },
+    }
+    assert engine["kv_cache"] == {
+        "cache_dtype": "fp8_ds_mla",
+        "block_size": 64,
+        "enable_prefix_caching": True,
+        "kv_cache_layout": "LBNHC",
+        "groups": [
+            {
+                "type": "MLAAttentionSpec",
+                "dtype": "bfloat16",
+                "head_size": 576,
+                "num_kv_heads": 1,
+                "block_size": 64,
+                "kv_quant_mode": "FP8_PER_TENSOR",
+            }
+        ],
+    }
+    assert engine["quantization"] == {
+        "method": "modelopt_fp4",
+        "checkpoint_config": {"quant_method": "modelopt_fp4", "group_size": 16},
+        "quant_config_class": None,
+    }
+    assert engine["scheduler"] == {
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 256,
+        "async_scheduling": True,
+        "enable_chunked_prefill": True,
+        "long_prefill_token_threshold": 0,
+    }
+    assert engine["model"] == {
+        "dtype": "bfloat16",
+        "max_model_len": 163840,
+        "model_type": "deepseek_v32",
+        "architectures": ["DeepseekV32ForCausalLM"],
+        "model": "/weights/dsv32",
+    }
+    assert engine["parallel"] == {
+        "data_parallel_size": 16,
+        "data_parallel_rank": 7,
+        "tensor_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "enable_expert_parallel": True,
+        "enable_eplb": False,
+        "all2all_backend": "deepep_low_latency",
+        "eplb_config": {"window_size": 100, "num_redundant_experts": 0},
+    }
+    assert engine["speculative"] is None
+    assert engine["graph"] == {
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes": [1, 2, 8],
+        "resolution": "pre_resolution",
+    }
+    assert engine["resolved"] is None
+    assert engine["resolution"] == "pending_worker_probe"
+    assert set(engine["versions"]) == {
+        "vllm",
+        "vllm_build_commit",
+        "dynamo",
+        "python",
+    }
+    assert isinstance(engine["versions"]["python"], str)
+    # Whatever the engine hands us, the artifact writer must never raise.
+    json.dumps(engine)
+
+
+def test_bench_capture_engine_omits_absent_optional_blocks():
+    """vLLM 0.28.0 has no kv_cache_layout, and a model without a sparse
+    indexer has no indexer topology."""
+    vllm_config, kv_cache_config = _provenance_vllm_config(
+        with_indexer=False, with_layout=False
+    )
+
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        dp_rank=7,
+    )
+
+    assert "kv_cache_layout" not in engine["kv_cache"]
+    assert "indexer" not in engine["attention"]
+    assert engine["attention"]["indexer_kv_dtype"] is None
+
+
+def test_bench_capture_engine_records_capture_error_instead_of_raising():
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        _ExplodingConfig(),
+        None,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=None,
+    )
+
+    assert engine == {"capture_error": "boom"}
+
+
+def test_benchmark_output_includes_engine_block(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path))
+    stub._bench_expected_points = 0
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = []
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+    stub._bench_engine = {"versions": {"vllm": "0.28.0"}, "resolved": None}
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    output = json.loads(output_path.read_text())
+    assert output["schema_version"] == 2
+    assert output["engine"] == {"versions": {"vllm": "0.28.0"}, "resolved": None}
+
+
+def test_benchmark_output_omits_engine_block_when_not_captured(tmp_path):
+    output_path = tmp_path / "benchmark.json"
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(output_path=str(output_path))
+    stub._bench_expected_points = 0
+    stub._bench_results = []
+    stub._bench_skipped_points = []
+    stub._bench_missing_phases = []
+    stub.max_num_scheduled_tokens = 40
+    stub.max_num_running_reqs = 8
+    stub.max_model_len = 128
+    stub.block_size = 8
+    stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    assert "engine" not in json.loads(output_path.read_text())
+
+
+def test_bench_init_wires_engine_capture_into_written_results(tmp_path):
+    """Drives the real ``_bench_init`` (not ``_bench_capture_engine`` called
+    directly) end to end into a real ``_bench_write_results``. The other
+    engine-provenance tests all call ``_bench_capture_engine`` directly or
+    hand-set ``stub._bench_engine``, so none of them would notice if the
+    ``_bench_init`` call site were ever deleted; this one would."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._fpm_dp_rank = 7
+    stub.max_num_running_reqs = 8
+    stub._bench_hash_block_size = 16
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=False, num_gpu_blocks=64)
+    stub.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    output_path = tmp_path / "out.json"
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            data_parallel_master_ip="127.0.0.1",
+        ),
+        additional_config={
+            "benchmark": {"mode": "agg", "output_path": str(output_path)}
+        },
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=CUDAGraphMode.NONE,
+            cudagraph_capture_sizes=[],
+            max_cudagraph_capture_size=0,
+        ),
+        speculative_config=None,
+    )
+
+    InstrumentedScheduler._bench_init(stub, vllm_config)
+
+    assert isinstance(stub._bench_engine, dict)
+    assert stub._bench_engine["graph"] == {
+        "cudagraph_mode": "NONE",
+        "cudagraph_capture_sizes": [],
+        "resolution": "pre_resolution",
+    }
+    # The I2 regression this test exists for: the rank in the capture must
+    # equal the same self._fpm_dp_rank the rest of the artifact uses, not a
+    # field vLLM may have zeroed on parallel_config.
+    assert stub._bench_engine["parallel"]["data_parallel_rank"] == 7
+    assert set(stub._bench_engine["versions"]) == {
+        "vllm",
+        "vllm_build_commit",
+        "dynamo",
+        "python",
+    }
+
+    stub.max_num_scheduled_tokens = 40
+    stub.max_model_len = 128
+    stub.block_size = 8
+
+    InstrumentedScheduler._bench_write_results(stub)
+
+    # _bench_init suffixes output_path with "_dp<rank>" for dp_rank > 0, so
+    # the actual artifact is not at the original tmp_path / "out.json".
+    with open(stub._bench_config.output_path) as f:
+        output = json.load(f)
+    assert output["engine"]["parallel"]["data_parallel_rank"] == 7
+    assert output["engine"]["parallel"]["data_parallel_rank"] == output["dp"]["rank"]
