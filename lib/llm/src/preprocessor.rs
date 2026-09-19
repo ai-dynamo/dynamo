@@ -1380,6 +1380,19 @@ fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
     parse_bool_opt(value)
 }
 
+/// Run CPU-bound preprocessing off the async runtime. On the multi-thread runtime
+/// `block_in_place` hands this worker to the blocking pool, so the I/O tasks that
+/// share the runtime keep draining sockets while a long conversation renders;
+/// under load a synchronous render here can leave request bodies unread for
+/// tens of seconds. Falls back to inline on the current-thread runtime, where
+/// `block_in_place` is not available.
+fn off_runtime<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
     match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
         Ok(value) => match parse_embedding_add_special_tokens(&value) {
@@ -2782,7 +2795,7 @@ impl OpenAIPreprocessor {
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            self.apply_template(request)
+            off_runtime(|| self.apply_template(request))
                 .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
