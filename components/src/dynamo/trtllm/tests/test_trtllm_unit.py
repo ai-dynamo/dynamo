@@ -4,6 +4,7 @@
 """Unit tests for TRTLLM backend components."""
 
 import asyncio
+import logging
 import os
 import re
 import warnings
@@ -182,8 +183,11 @@ def test_deprecated_publish_events_flag_alias_maps_to_both_controls(
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+        ),
     ):
         config = parse_args(["--publish-events-and-metrics"])
     assert config.publish_kv_events is True
@@ -206,8 +210,12 @@ def test_deprecated_publish_events_env_alias_maps_to_both_controls(monkeypatch, 
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning,
+            match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated",
+        ),
     ):
         config = parse_args([])
     assert config.publish_kv_events is True
@@ -745,3 +753,156 @@ async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_
     engine_args = exc_info.value.engine_args
     assert "num_postprocess_workers" not in engine_args
     assert any("num_postprocess_workers=4" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+def test_warn_override_collisions_names_the_source(caplog):
+    """The shared collision warner labels the message with the config source."""
+    target = {"max_seq_len": 1024}
+    source = {"max_seq_len": 2048}
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source, source_name="extra_engine_args")
+    assert any(
+        "extra_engine_args will replace max_seq_len" in r.message
+        and "1024" in r.message
+        and "2048" in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.core
+def test_warn_override_collisions_recurses_into_model_objects(caplog):
+    """Per-key reporting for model-valued targets only where the merge is per key."""
+
+    class FakeKvCacheConfig:
+        def __init__(self):
+            self.max_tokens = 1000
+            self.free_gpu_memory_fraction = 0.85
+
+    target = {"kv_cache_config": FakeKvCacheConfig()}
+    source = {"kv_cache_config": {"max_tokens": 2592}}
+
+    # Override path (default): deep_update replaces the model whole, so the
+    # warning must stay whole-object — a per-key line would understate that
+    # the engine receives a plain dict with the other fields dropped.
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source)
+    assert any(
+        "kv_cache_config" in r.message and "FakeKvCacheConfig" in r.message
+        for r in caplog.records
+    )
+    assert not any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+
+    caplog.clear()
+
+    # Extra-args path: update_llm_args_with_extra_options merges into the
+    # model per key, so recurse_models=True reports per-key dotted paths.
+    with caplog.at_level("WARNING"):
+        warn_override_collisions(target, source, recurse_models=True)
+    assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+    # Untouched keys inside the model are not reported; the whole object is
+    # never dumped as a single opaque value on the per-key path.
+    assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, caplog):
+    """extra_engine_args silently replacing an existing arg_map value now logs.
+
+    --override-engine-args warns via warn_override_collisions;
+    --extra-engine-args went through TRT-LLM's
+    update_llm_args_with_extra_options with no equivalent report. Recipe
+    YAMLs legitimately override arg_map defaults, so this path logs at INFO.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text(
+        "max_batch_size: 999\n" "kv_cache_config:\n" "  max_tokens: 2592\n"
+    )
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
+    )
+
+    with (
+        caplog.at_level("INFO"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert exc_info.value.engine_args["max_batch_size"] == 999
+    matching = [
+        r
+        for r in caplog.records
+        if "extra_engine_args will replace max_batch_size" in r.message
+        and "999" in r.message
+    ]
+    assert matching, "expected an extra_engine_args collision record"
+    # Recipe YAMLs legitimately override arg_map defaults, so this path must
+    # log at INFO, not WARNING (caplog.at_level("INFO") captures both).
+    assert all(r.levelno == logging.INFO for r in matching)
+
+    # A model-valued key must report per-key on this path. This pins
+    # recurse_models=True at the llm_worker call site: dropping the
+    # argument makes this key fall back to the whole-object dump.
+    assert any(
+        "extra_engine_args will replace kv_cache_config.max_tokens" in r.message
+        and r.levelno == logging.INFO
+        for r in caplog.records
+    ), "expected a per-key report for the model-valued kv_cache_config"
+    assert not any(
+        "replace kv_cache_config:" in r.message for r in caplog.records
+    ), "whole-object dump on the extra-args path means recurse_models=True is gone"
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_extra_engine_args_non_mapping_root_keeps_clear_error(
+    tmp_path, monkeypatch
+):
+    """A YAML root that is not a mapping is rejected with the upstream message.
+
+    The collision warner skips non-mapping roots so that
+    update_llm_args_with_extra_options still raises its clear
+    `Configuration file root must be a mapping.` error instead of the
+    AttributeError the warner would otherwise hit.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("- one\n- two\n")
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+    ):
+        with pytest.raises(ValueError, match="root must be a mapping"):
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
