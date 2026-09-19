@@ -49,6 +49,7 @@ struct FakeVllm {
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
     server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
+    kv_ranks_override: Arc<Mutex<Option<Vec<u32>>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
@@ -409,7 +410,13 @@ impl pb::control_server::Control for FakeVllm {
         _request: Request<pb::GetKvEventSourcesRequest>,
     ) -> Result<Response<pb::GetKvEventSourcesResponse>, Status> {
         Ok(Response::new(pb::GetKvEventSourcesResponse {
-            sources: (0..2)
+            sources: self
+                .kv_ranks_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(|| vec![0, 1])
+                .into_iter()
                 .map(|rank| pb::KvEventSource {
                     transport: "zmq".to_string(),
                     endpoint: format!("tcp://*:{}", 20081 + rank),
@@ -602,6 +609,7 @@ fn server_info() -> pb::ServerInfo {
             data_parallel_rank: 0,
             decode_context_parallel_size: 1,
             world_size: 2,
+            data_parallel_size_local: 0,
         }),
         max_model_len: 8192,
         kv_block_size: 16,
@@ -609,6 +617,7 @@ fn server_info() -> pb::ServerInfo {
         max_running_requests: 128,
         max_batched_tokens: 2048,
         max_loras: 4,
+        effective_attention_block_size: None,
         rl_capabilities: Some(pb::RlCapabilities {
             weight_transfer_enabled: true,
             weight_transfer_backend: "nccl".to_string(),
@@ -671,11 +680,11 @@ fn discovery_rejects_zero_data_parallelism() {
 }
 
 #[test]
-fn startup_compatibility_rejects_tensor_or_pipeline_parallelism_change() {
+fn startup_compatibility_rejects_parallelism_change() {
     let bootstrap = DiscoveredModel::from_proto(model_info(), server_info())
         .expect("valid bootstrap discovery");
 
-    for dimension in ["tensor", "pipeline"] {
+    for dimension in ["tensor", "pipeline", "local_dp"] {
         let mut changed_server = server_info();
         let parallelism = changed_server
             .parallelism
@@ -684,6 +693,7 @@ fn startup_compatibility_rejects_tensor_or_pipeline_parallelism_change() {
         match dimension {
             "tensor" => parallelism.tensor_parallel_size += 1,
             "pipeline" => parallelism.pipeline_parallel_size += 1,
+            "local_dp" => parallelism.data_parallel_size_local = 1,
             _ => unreachable!(),
         }
         let observed = DiscoveredModel::from_proto(model_info(), changed_server)
@@ -1379,6 +1389,17 @@ fn discovery_rejects_incompatible_model_metadata() {
     }
 }
 
+// Older servers omit local ownership. A nonzero starting rank must still fail
+// discovery rather than register an assumed complete group.
+#[test]
+fn discovery_rejects_nonzero_dp_start_without_local_size() {
+    let mut server = server_info();
+    let parallelism = server.parallelism.as_mut().unwrap();
+    parallelism.data_parallel_size = 8;
+    parallelism.data_parallel_rank = 4;
+    assert!(DiscoveredModel::from_proto(model_info(), server).is_err());
+}
+
 #[test]
 fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let mut server = server_info();
@@ -1743,6 +1764,68 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
         struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
+}
+
+// Regression: a frontend hosting ranks 4..8 must register and route that local
+// range, or hybrid deployments reject discovery or advertise unreachable engines.
+#[tokio::test]
+async fn hybrid_discovery_routes_and_tracks_only_local_absolute_dp_ranks() {
+    let service = FakeVllm::default();
+    let mut info = server_info();
+    let parallelism = info.parallelism.as_mut().unwrap();
+    parallelism.data_parallel_size = 8;
+    parallelism.data_parallel_rank = 4;
+    parallelism.data_parallel_size_local = 4;
+    *service.server_info_override.lock().await = Some(info);
+    *service.kv_ranks_override.lock().await = Some(vec![4, 5, 6, 7]);
+    let server = FakeServer::start(service).await;
+    let (engine, worker) = engine_from_args(&server.endpoint).await;
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                16,
+                Some(RlAdminBaseUrl::parse("http://worker:8120/").unwrap())
+            )
+            .unwrap()
+        )
+    );
+    let registration = engine.start(0).await.expect("hybrid startup").llm.unwrap();
+    assert_eq!(registration.data_parallel_size, Some(4));
+    assert_eq!(registration.data_parallel_start_rank, Some(4));
+    assert_eq!(registration.total_kv_blocks, Some(1024));
+    let sources = engine.kv_event_sources().await.expect("local KV sources");
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| source.dp_rank())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([4, 5, 6, 7])
+    );
+    let mut routed_request = request();
+    routed_request
+        .routing
+        .get_or_insert_with(Default::default)
+        .dp_rank = Some(7);
+    let outputs = collect(&engine, routed_request).await;
+    assert_eq!(outputs[0].token_ids, [42]);
+    assert_eq!(
+        *server.service.data_parallel_rank_metadata.lock().await,
+        vec![Some("7".to_string())]
+    );
+
+    for invalid_ranks in [
+        vec![3, 5, 6, 7],
+        vec![4, 5, 6, 8],
+        vec![4, 5, 6],
+        vec![4, 5, 6, 6],
+    ] {
+        *server.service.kv_ranks_override.lock().await = Some(invalid_ranks);
+        assert!(
+            engine.kv_event_sources().await.is_err(),
+            "KV sources must cover exactly the local range"
+        );
+    }
 }
 
 #[tokio::test]

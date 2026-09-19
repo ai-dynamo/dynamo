@@ -116,6 +116,7 @@ impl VllmMockerService {
                 data_parallel_rank: DP_RANK,
                 decode_context_parallel_size: 1,
                 world_size: 1,
+                ..Default::default()
             }),
             max_model_len: engine_args
                 .max_model_len
@@ -142,6 +143,7 @@ impl VllmMockerService {
                 })?
                 .unwrap_or_default(),
             rl_capabilities: None,
+            ..Default::default()
         };
         // The wire role is separate from the aggregated scheduler used to
         // emulate disaggregated requests.
