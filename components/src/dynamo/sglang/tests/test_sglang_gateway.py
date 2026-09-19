@@ -51,6 +51,17 @@ def test_gateway_worker_count_only_on_leader_and_not_in_children(monkeypatch):
     assert gateway.gateway_worker_count(_server_args(8), dyn) == 1
 
 
+def test_child_index_decides_metrics_ownership(monkeypatch):
+    monkeypatch.delenv(gateway.ENV_CHILD_INDEX, raising=False)
+    assert gateway.gateway_child_index() == 0
+    assert gateway.owns_engine_metrics()
+    parent = SimpleNamespace(metrics_ipc_name="ipc:///parent")
+    assert gateway._child_port_args(parent) is parent
+    monkeypatch.setenv(gateway.ENV_CHILD_INDEX, "2")
+    assert not gateway.owns_engine_metrics()
+    assert gateway._child_port_args(parent).metrics_ipc_name != "ipc:///parent"
+
+
 def test_gateway_engine_facade_generates_through_tokenizer_manager():
     seen = {}
 
@@ -93,6 +104,7 @@ def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(monkeypatch):
             self.cmd, self.env, self.pid = cmd, env, 4000 + len(spawned)
             self.returncode = None
             self.terminated = False
+            self.waited = False
 
         def poll(self):
             return self.returncode
@@ -102,6 +114,7 @@ def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(monkeypatch):
             self.returncode = -15
 
         def wait(self, timeout=None):
+            self.waited = True
             return self.returncode
 
     def fake_popen(cmd, env):
@@ -145,7 +158,59 @@ def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(monkeypatch):
     assert all(p.cmd[1:3] == ["-m", "dynamo.sglang"] for p in spawned)
     assert all(p.cmd[3:] == ["--model-path", "/m"] for p in spawned)
     assert all(gateway.ENV_PARENT_PID in p.env for p in spawned)
+    assert [p.env[gateway.ENV_CHILD_INDEX] for p in spawned] == ["0", "1", "2"]
     assert all(p.terminated for p in spawned if p.pid != spawned[1].pid)
+    assert all(p.waited for p in spawned)
+    assert shm.unlinked
+
+
+def test_serve_via_gateway_children_cleans_up_when_spawn_fails(monkeypatch):
+    spawned = []
+
+    class FakeProc:
+        def __init__(self):
+            self.pid = 5000 + len(spawned)
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    def fake_popen(cmd, env):
+        if len(spawned) == 1:
+            raise OSError("no more pids")
+        p = FakeProc()
+        spawned.append(p)
+        return p
+
+    class FakeShm:
+        unlinked = False
+
+        def unlink(self):
+            self.unlinked = True
+
+    shm = FakeShm()
+    monkeypatch.setattr(gateway.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        "sglang.srt.managers.multi_tokenizer_mixin.write_data_for_multi_tokenizer",
+        lambda port_args, server_args, info: shm,
+    )
+    engine = SimpleNamespace(
+        port_args=SimpleNamespace(),
+        server_args=SimpleNamespace(),
+        tokenizer_manager=SimpleNamespace(startup_time={}),
+        _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
+    )
+    with pytest.raises(OSError, match="no more pids"):
+        asyncio.run(gateway.serve_via_gateway_children(engine, 3, asyncio.Event()))
+    assert len(spawned) == 1 and spawned[0].terminated
     assert shm.unlinked
 
 

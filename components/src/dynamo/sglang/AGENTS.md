@@ -43,10 +43,21 @@ builds a `TokenizerWorker` registered with the router (`build_gateway_engine`), 
 in `GatewayEngine` (what the handlers use of an `sgl.Engine`: `tokenizer_manager`,
 `server_args`, `port_args`, `async_generate`, scheduler info) and runs the ordinary
 `init_decode`/`init_prefill` path as its own endpoint instance, so the router sees N
-instances per engine. Children get a private `metrics_ipc_name`; the parent keeps the
-real one, the engine subprocesses, and shuts the children down. Snapshot mode and
-non-leader nodes are untouched. If SGLang exposes `Engine.attach_tokenizer_worker`,
-children use it instead of the facade.
+instances per engine. `--gateway-workers` sets `tokenizer_worker_num` to exactly N so
+the router and child counts match; it is rejected for the direct-engine workers
+(embedding, rerank, multimodal, diffusion) and with `--enable-lora`, whose dynamic LoRA
+state would live in one child only.
+
+Metrics: the schedulers push KV metrics to one PULL socket and publish forward-pass
+metrics once, so child 0 (`DYN_SGLANG_GATEWAY_CHILD_INDEX=0`, `owns_engine_metrics()`)
+keeps the engine's `metrics_ipc_name` and the FPM relay; other children bind an idle
+private socket and advertise only the bootstrap zeros for their own instance. Every
+child republishes KV events under its own worker id, otherwise the router would see
+prefixes on instance 0 only and send it all traffic; the cost is N copies of each KV
+event on the event plane. The parent owns the engine subprocesses and the shared
+memory, runs the deferred shutdown handlers, and terminates and reaps the children.
+Snapshot mode and non-leader nodes are untouched. If SGLang exposes
+`Engine.attach_tokenizer_worker`, children use it instead of the facade.
 
 ## Entry Point
 

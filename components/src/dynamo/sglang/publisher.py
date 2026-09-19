@@ -33,6 +33,7 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     publishes_kv_events,
 )
+from dynamo.sglang.gateway import gateway_child_index, owns_engine_metrics
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -558,9 +559,18 @@ async def setup_sgl_metrics(
 
     publisher.init_engine_metrics_publish()
     node_rank = getattr(config.server_args, "node_rank", 0) or 0
+    # Every gateway child republishes KV events under its own worker id so the
+    # router can match prefixes on any instance of the engine; scheduler metrics
+    # and forward-pass metrics are consumed once, by the process that owns them.
     if node_rank <= 0 and config.dynamo_args.use_kv_events:
         publisher.init_kv_event_publish()
-    publisher.init_fpm_relay()
+    if owns_engine_metrics():
+        publisher.init_fpm_relay()
+    else:
+        logging.info(
+            "gateway child %d: scheduler and forward-pass metrics are relayed by child 0",
+            gateway_child_index(),
+        )
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")

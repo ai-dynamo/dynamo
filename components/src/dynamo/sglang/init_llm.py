@@ -82,7 +82,11 @@ async def init_decode(
     if snapshot_engine is None and gateway_count > 1:
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
-        await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+        try:
+            await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+        finally:
+            if run_deferred_handlers is not None:
+                await run_deferred_handlers()
         return
 
     if server_args.enable_trace:
@@ -247,7 +251,11 @@ async def init_prefill(
     if snapshot_engine is None and gateway_count > 1:
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
-        await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+        try:
+            await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+        finally:
+            if run_deferred_handlers is not None:
+                await run_deferred_handlers()
         return
 
     if server_args.enable_trace:

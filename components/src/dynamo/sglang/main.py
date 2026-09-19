@@ -64,17 +64,39 @@ async def worker(argv: list[str] | None = None):
         )
 
     gateway_workers = getattr(config.dynamo_args, "gateway_workers", None) or 1
-    if (
-        gateway_workers > 1
-        and config.server_args.tokenizer_worker_num < gateway_workers
-    ):
-        # SGLang only launches its MultiTokenizerRouter (the shared-memory handoff the
-        # gateway children join) when its own worker count is above 1.
-        override_server_args(
-            config.server_args,
-            "dynamo.gateway",
-            tokenizer_worker_num=gateway_workers,
-        )
+    if gateway_workers > 1:
+        direct_engine_worker = [
+            flag
+            for flag in (
+                "image_diffusion_worker",
+                "video_generation_worker",
+                "rerank_worker",
+                "embedding_worker",
+                "multimodal_encode_worker",
+                "multimodal_worker",
+                "diffusion_worker",
+            )
+            if getattr(config.dynamo_args, flag, False)
+        ]
+        if direct_engine_worker:
+            raise ValueError(
+                "--gateway-workers > 1 is only supported by the decode and prefill "
+                f"LLM workers, not with --{direct_engine_worker[0].replace('_', '-')}"
+            )
+        if getattr(config.server_args, "enable_lora", False):
+            raise ValueError(
+                "--gateway-workers > 1 is not supported with --enable-lora: dynamic "
+                "LoRA state lives in each gateway process"
+            )
+        if config.server_args.tokenizer_worker_num != gateway_workers:
+            # SGLang launches its MultiTokenizerRouter (the shared-memory handoff the
+            # gateway children join) with exactly tokenizer_worker_num workers, so the
+            # router and child counts must match.
+            override_server_args(
+                config.server_args,
+                "dynamo.gateway",
+                tokenizer_worker_num=gateway_workers,
+            )
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
