@@ -120,6 +120,21 @@ def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
             continue
 
         spec_schema = pruned_schema(source_schema.get("properties", {}).get("spec"))
+        if spec_schema is not None and (group, version, kind) == (
+            "nvidia.com",
+            "v1beta1",
+            "DynamoGraphDeployment",
+        ):
+            # Merge shared environment entries by name in Kustomize without
+            # changing the CRD's server-side apply ownership semantics.
+            env_schema = source_schema["properties"]["spec"]["properties"]["env"]
+            spec_schema["properties"]["env"] = pruned_schema(
+                {
+                    **env_schema,
+                    "x-kubernetes-list-type": "map",
+                    "x-kubernetes-list-map-keys": ["name"],
+                }
+            )
         definition_name = f"{group}.{version}.{kind}"
         properties: dict[str, Any] = {
             "apiVersion": {"type": "string"},
