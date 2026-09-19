@@ -70,12 +70,11 @@ The Rust HTTP server also reads these environment variables, which are not expos
 </ParamField>
 
 <ParamField path="DYN_HTTP_LISTEN_BACKLOG" type="integer" default="4096">
-  Listen backlog of the frontend HTTP socket, capped by the kernel at
-  `net.core.somaxconn`. Raise it when many clients open connections within a few
-  seconds (for example a benchmark client with one connection per session): a
-  connection that arrives while the accept queue is full is dropped, and on hosts
-  with `net.ipv4.tcp_syncookies=1` the client sees `Connection reset by peer`
-  instead of a retry.
+  Listen backlog of the frontend socket, for both plain HTTP and TLS, capped by
+  the kernel at `net.core.somaxconn`. Raise it when many clients open connections
+  within a few seconds (for example a load client with one connection per
+  session): connections that arrive while the accept queue is full are delayed
+  or, depending on the host's TCP settings, fail.
 </ParamField>
 
 <ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">

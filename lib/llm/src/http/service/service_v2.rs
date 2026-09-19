@@ -872,9 +872,7 @@ impl HttpService {
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
     /// port-allocation gap for tests that need to know the bound port up front. Not
-    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
-    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
-    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// supported in TLS mode, which binds internally. Returns an error if invoked on a
     /// service built with `enable_tls(true)`.
     ///
     /// [`spawn`]: HttpService::spawn
@@ -924,8 +922,7 @@ impl HttpService {
         if self.enable_tls {
             if listener.is_some() {
                 return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode; \
-                     axum_server::bind_rustls owns its own bind. \
+                    "Pre-bound listener is not supported in TLS mode. \
                      Use run()/spawn() (which bind internally) when enable_tls is set."
                 ));
             }
@@ -950,7 +947,18 @@ impl HttpService {
             let config = RustlsConfig::from_config(Arc::new(server_config));
 
             let handle = tls_handle.unwrap_or_default();
-            let server = axum_server::bind_rustls(addr, config)
+            let std_listener = bind_listener(addr)
+                .and_then(|l| l.into_std())
+                .map_err(|e| {
+                    tracing::error!(
+                        protocol = %protocol,
+                        address = %address,
+                        error = %e,
+                        "Failed to bind server to address"
+                    );
+                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
+                })?;
+            let server = axum_server::from_tcp_rustls(std_listener, config)
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
@@ -1147,8 +1155,8 @@ fn listen_backlog() -> u32 {
 }
 
 /// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
-/// clients connecting within seconds overflow that, and with `tcp_syncookies=1`
-/// the overflowed handshakes are reset instead of retried.
+/// clients connecting within seconds overflow that, and overflowed connections
+/// are delayed or, depending on host TCP settings, fail.
 fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
     let socket = if addr.is_ipv4() {
         tokio::net::TcpSocket::new_v4()?
