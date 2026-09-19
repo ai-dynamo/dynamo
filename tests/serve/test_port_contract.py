@@ -268,6 +268,12 @@ _HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)(\w+)\2")
 _SERVICE = re.compile(
     r"(?<![\w./-])python3?\s+(?:-\S+\s+)*-m\s+(?:dynamo\.\S*|\$\{?\w+\}?)"
 )
+# What bash allows before a segment's command word: variable assignments, and an
+# expansion, which is how the sglang scripts pass a GPU pin.
+_ASSIGNMENT = re.compile(r"\w+=\S*|\$\{?\S*")
+# A prefix command runs the rest of the segment, so the service is still launched.
+# `env` carries its own flags and their arguments, as in `env -u DYN_SYSTEM_PORT`.
+_PREFIX_COMMAND = re.compile(r"env|exec|nohup|setsid|stdbuf|time|sudo")
 
 
 class _Command(NamedTuple):
@@ -275,6 +281,7 @@ class _Command(NamedTuple):
     text: str  # quotes dropped, continuations joined, pipelines kept together
     quoted: str  # per-character mask of text: "q" came from inside quotes
     terminator: str  # operator that ended the command; "&" backgrounds it
+    segments: tuple[int, ...]  # offsets in text where each pipeline segment starts
 
 
 def _read_quoted(script: str, index: int) -> tuple[int, str]:
@@ -301,6 +308,7 @@ def _split_commands(script: str) -> list[_Command]:
     parts: list[str] = []
     mask: list[str] = []
     heredocs: list[tuple[str, bool]] = []  # (delimiter, "<<-" drops leading tabs)
+    segments: list[int] = [0]
     prev = ""  # last character added, for comment detection
     prev_code = ""  # last non-blank character added, for redirection detection
     line = 1
@@ -332,8 +340,17 @@ def _split_commands(script: str) -> list[_Command]:
                     stripped,
                     "".join(mask)[lead : lead + len(stripped)],
                     terminator,
+                    tuple(
+                        sorted(
+                            {
+                                min(max(offset - lead, 0), len(stripped))
+                                for offset in segments
+                            }
+                        )
+                    ),
                 )
             )
+        segments[:] = [0]
         if terminator not in ("&&", "||"):
             # Bash runs a whole AND-OR list in the background, so the terminator
             # that closes the list applies to every member, not just the last.
@@ -411,6 +428,7 @@ def _split_commands(script: str) -> list[_Command]:
             continue
         if char == "|":
             add(" ", False)  # a pipeline is backgrounded as a whole
+            segments.append(sum(map(len, parts)))
             index += 1
             continue
         add(char, False)
@@ -427,6 +445,19 @@ def _calls_wait_any_exit(script: str) -> bool:
     )
 
 
+def _in_command_position(command: _Command, start: int) -> bool:
+    """Report whether a match is the command word of its pipeline segment."""
+    segment = max(offset for offset in command.segments if offset <= start)
+    for word in command.text[segment:start].split():
+        if _ASSIGNMENT.fullmatch(word):
+            continue
+        # A prefix command consumes the rest of the segment as its own command
+        # line, so the service still runs. Anything else, `echo` or `grep`, takes
+        # the match as an argument and launches nothing.
+        return bool(_PREFIX_COMMAND.fullmatch(word))
+    return True
+
+
 def _service_launches(script: str) -> list[tuple[int, str, bool]]:
     """Return (line, command, is_background) for each Dynamo service launched."""
     launches = []
@@ -436,6 +467,8 @@ def _service_launches(script: str) -> list[tuple[int, str, bool]]:
         for match in _SERVICE.finditer(command.text):
             if command.quoted[match.start()] == "q":
                 continue  # a quoted match builds a command string, it does not run one
+            if not _in_command_position(command, match.start()):
+                continue  # named as an argument, as in `echo python -m dynamo.frontend`
             launches.append((command.line, match.group(0), command.terminator == "&"))
     return launches
 
@@ -499,6 +532,24 @@ eval "$CMD" &
 python -m dynamo.planner
 wait_any_exit # watch the children
 """
+
+
+_ARGUMENT_SAMPLE = """\
+#!/bin/bash
+echo python -m dynamo.frontend
+echo "starting" | grep python -m dynamo.vllm
+env ${GPU_PIN:+"$GPU_PIN"} python3 -m dynamo.sglang &
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm &
+wait_any_exit
+"""
+
+
+def test_only_a_segment_command_word_counts_as_a_launch() -> None:
+    """A `python` named as an argument is not a service the script runs."""
+    assert _service_launches(_ARGUMENT_SAMPLE) == [
+        (4, "python3 -m dynamo.sglang", True),
+        (5, "python -m dynamo.vllm", True),
+    ]
 
 
 def test_quoted_match_does_not_hide_a_later_launch() -> None:
