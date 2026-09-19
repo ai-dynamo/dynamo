@@ -3876,7 +3876,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunks[0]["choices"][0]["delta"]["content"] == "A"
         assert chunks[0]["choices"][0]["finish_reason"] == "stop"
 
-    def test_processor_finishes_locally_without_stopping_parent_context(self):
+    @pytest.mark.parametrize("with_tool_parser", [False, True])
+    def test_processor_finishes_locally_without_stopping_parent_context(
+        self, with_tool_parser
+    ):
         routed_engine = FakeRoutedEngine(
             items=[
                 {
@@ -3902,7 +3905,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         )
         post = SglangStreamingPostProcessor(
             tokenizer=self.ByteTokenizer(),
-            tool_call_parser=None,
+            tool_call_parser=(
+                FunctionCallParser(
+                    tools=convert_tools([parity_tool()]), tool_call_parser="gpt-oss"
+                )
+                if with_tool_parser
+                else None
+            ),
             reasoning_parser=None,
             stop_strings={"END"},
         )
@@ -4332,6 +4341,78 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         assert post._decode_context_ids == [ord("a")]
         assert post._pending_decode_ids == []
+
+    @pytest.mark.parametrize("stop_kind", ["eos", "token", "string"])
+    def test_gpt_oss_retains_stop_closer(self, stop_kind):
+        closer = "<|call|>"
+
+        class ToolTokenizer:
+            def decode(self, token_ids, *, skip_special_tokens):
+                return "".join(closer if i == 200012 else chr(i) for i in token_ids)
+
+        tools = convert_tools([parity_tool()])
+        post = SglangStreamingPostProcessor(
+            tokenizer=ToolTokenizer(),
+            tool_call_parser=FunctionCallParser(
+                tools=tools, tool_call_parser="gpt-oss"
+            ),
+            reasoning_parser=None,
+            sglang_tools=tools,
+            tool_call_parser_name="gpt-oss",
+            eos_token_ids=[200012],
+            stop_token_ids={200012},
+            stop_strings={closer} if stop_kind == "string" else set(),
+        )
+        wire = (
+            "<|start|>assistant<|channel|>commentary to=functions.get_weather"
+            '<|constrain|>json<|message|>{"city":"Paris"}'
+        )
+        token_ids = list(wire.encode()) + [200012]
+        expected_logprob_text = wire + closer
+        if stop_kind == "string":
+            post.process_output({"token_ids": list((wire + "<|ca").encode())})
+            token_ids = list(b"ll|>ignored")
+            expected_logprob_text = "ll|>"
+        result = post.process_output(
+            {
+                "token_ids": token_ids,
+                "finish_reason": None if stop_kind == "string" else "stop",
+                "stop_reason": 200012 if stop_kind == "token" else None,
+                "log_probs": [-0.25] * len(token_ids),
+            }
+        )
+        assert result["finish_reason"] == "tool_calls"
+        calls = result["delta"]["tool_calls"]
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "get_weather"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+        assert not result["delta"].get("content")
+        assert "".join(post._tool_text_parts) == wire + closer
+        assert (
+            "".join(entry["token"] for entry in result["logprobs"]["content"])
+            == expected_logprob_text
+        )
+        if stop_kind == "string":
+            assert post.local_stop_reason == closer
+            assert post.process_output({"token_ids": list(b"later")}) is None
+
+    @pytest.mark.parametrize("keep", [False, True])
+    def test_reasoning_only_explicit_retention(self, keep):
+        # No tool parser exists to declare a tool closer.
+        reasoner = types.SimpleNamespace(
+            detector=types.SimpleNamespace(no_stop_trim=keep),
+            parse_stream_chunk=lambda text: (text, ""),
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=reasoner,
+            eos_token_ids=[ord("!")],
+        )
+        result = post.process_output(
+            {"token_ids": list(b"done!"), "finish_reason": "stop"}
+        )
+        assert result["delta"]["reasoning_content"] == ("done!" if keep else "done")
 
     def test_strips_only_the_exact_matched_stop_suffix(self, tokenizer):
         """Matched metadata, not configured membership alone, selects the suffix."""
