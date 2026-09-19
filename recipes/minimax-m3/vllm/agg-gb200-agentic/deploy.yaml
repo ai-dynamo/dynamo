@@ -14,103 +14,7 @@
 # limitations under the License.
 #
 # MiniMax M3 NVFP4 on vLLM, aggregated serving on GB200.
-# Topology: two independent TP4 replicas with KV-aware routing and CPU KV offload.
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: minimax-m3-agg-gb200-vllm-patches
-  labels:
-    app.kubernetes.io/name: minimax-m3-agg-gb200-agentic
-    app.kubernetes.io/component: vllm-patches
-data:
-  01_PR54288_stop_final_sampled_token_offload.patch: |
-    diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-    index da0aea06de5a432e98bcaeddf0b3a71a2f5b6795..b43df41f6761ca56e236353aa25b85e664c16af8 100644
-    --- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-    +++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-    @@ -1344,7 +1344,10 @@ class OffloadingConnectorScheduler:
-                 if req.status is RequestStatus.FINISHED_ABORTED:
-                     num_tokens_after_batch = req.num_computed_tokens
-                 elif req.is_finished():
-    -                num_tokens_after_batch = req.num_tokens
-    +                # Clamp to the GPU prefix cache's commit point. The final sampled
-    +                # token's slot is never committed (under spec decode it holds a
-    +                # rejected draft's KV), so a block ending there must not be stored.
-    +                num_tokens_after_batch = max(req.num_prompt_tokens, req.num_tokens - 1)
-                 else:
-                     num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-                     num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
-  02_PR52771_fix_mtp_eagle_offload_hits.patch: |
-    diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-    index b43df41f6761ca56e236353aa25b85e664c16af8..2054b08da52a553261d6b9a79ef2223c87591139 100644
-    --- a/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-    +++ b/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
-    @@ -208,7 +208,21 @@ class SchedulerOffloadConfig(NamedTuple):
-                 and vllm_config.speculative_config.use_eagle_block_drop()
-             )
-             if use_eagle_block_drop and not eagle_groups:
-    -            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
-    +            # No group is annotated as holding drafter layers. This happens
-    +            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
-    +            # is a regular decoder layer merged into the target's
-    +            # full-attention group, and for separate-draft models that miss
-    +            # annotation. Treating every group as a drafter group here makes
-    +            # the volatile-tail pop apply to ALL groups, which can zero the
-    +            # whole request's offload hit whenever any group's servable
-    +            # window is a single chunk (issue #52735). Drafter KV served one
-    +            # chunk stale can only lower speculative acceptance rates — the
-    +            # target model verifies every draft — so fail toward serving.
-    +            logger.info_once(
-    +                "KV offloading: speculative decoding is enabled but no "
-    +                "KV-cache group is annotated as a drafter group; treating "
-    +                "all groups as non-draft for offloading."
-    +            )
-
-             if eagle_groups:
-                 logger.info(
-    @@ -395,15 +409,19 @@ class RequestOffloadState:
-             accepted position may be rewritten after spec-token rejection. During
-             prefill the trailing chunk is stable (the draft input for a chunk's
-             last position is the next prompt token), so it is stored immediately.
-    -        The exclusion must be applied consistently everywhere
-    -        ``next_stored_chunk_idx`` is derived: otherwise the trailing chunk of
-    -        each step is skipped on collection but jumped over by
-    -        ``next_stored_chunk_idx``, so it is never re-considered and a
-    -        permanent hole breaks prefix-reuse lookup.
-    +        Once the request has finished, no further spec-token rejection can
-    +        rewrite the tail, so the exclusion is lifted and the final chunk
-    +        becomes storable (issue #52735). The exclusion must be applied
-    +        consistently everywhere ``next_stored_chunk_idx`` is derived:
-    +        otherwise the trailing chunk of each step is skipped on collection but
-    +        jumped over by ``next_stored_chunk_idx``, so it is never re-considered
-    +        and a permanent hole breaks prefix-reuse lookup. ``is_finished`` is
-    +        monotonic, so the finish-time calls all see the lifted exclusion.
-             """
-             num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
-             is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-    -        if group_config.is_eagle_group and is_decoding:
-    +        # Finished requests have no pending speculation.
-    +        if group_config.is_eagle_group and is_decoding and not self.req.is_finished():
-                 num_chunks = max(0, num_chunks - 1)
-             num_allocated_chunks = (
-                 len(group_state.block_ids) // self.config.blocks_per_chunk
-    @@ -761,9 +779,13 @@ class OffloadingConnectorScheduler:
-                     )
-
-                     # For eagle groups, query one extra chunk that will be popped.
-    -                # We only need to increase the query size for sliding window groups.
-    +                # Widening applies to every group type: without it, the pop
-    +                # below shrinks max_hit_size_tokens past what was queried,
-    +                # which can push the confirmed boundary under a coarser
-    +                # sibling group's chunk granularity and zero the whole
-    +                # request's hit (issue #52735).
-                     query_max = max_hit_size_tokens
-    -                if is_eagle_unverified and sliding_window_size_in_chunks is not None:
-    +                if is_eagle_unverified:
-                         query_max = min(
-                             max_hit_size_tokens + tokens_per_chunk,
-                             len(offload_keys) * tokens_per_chunk,
+# Topology: three independent TP4 replicas with KV-aware routing and CPU KV offload.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -145,7 +49,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-76b18bfea93735c34c5898561abf94485a27318c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -178,8 +82,8 @@ spec:
     - name: Worker
       type: worker
       runtimeVersionOverride: "1.5.0"
-      # Two independent TP4 replicas; the frontend routes using KV events.
-      replicas: 2
+      # Three independent TP4 replicas; the frontend routes using KV events.
+      replicas: 3
       sharedMemorySize: 448Gi
       podTemplate:
         metadata:
@@ -188,6 +92,7 @@ spec:
         spec:
           priorityClassName: inference
           imagePullSecrets:
+            - name: acr-token-secret
             - name: nvcr-pull
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB200
@@ -205,29 +110,9 @@ spec:
               # Reuse the namespace's provisioned rack-scoped NVLink channel;
               # this cluster identity cannot create ComputeDomain resources.
               resourceClaimTemplateName: mm3-pb-k3-al289-cd-channel
-          initContainers:
-            - name: patch-vllm
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-76b18bfea93735c34c5898561abf94485a27318c-vllm-runtime
-              imagePullPolicy: IfNotPresent
-              command: ["/bin/bash", "-c"]
-              args:
-                - |
-                  set -eux
-                  command -v patch >/dev/null
-                  vllm_site="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
-                  cp -a "$vllm_site/vllm" /opt/vllm-patched/
-                  patch --batch --forward -p1 -d /opt/vllm-patched < /opt/vllm-patches/01_PR54288_stop_final_sampled_token_offload.patch
-                  patch --batch --forward -p1 -d /opt/vllm-patched < /opt/vllm-patches/02_PR52771_fix_mtp_eagle_offload_hits.patch
-                  test "$(sha256sum /opt/vllm-patched/vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py | awk '{print $1}')" = "53334babbd1957e46a5645724cf4527c8e281fc183e88d2b79884c5f544f1655"
-              volumeMounts:
-                - name: vllm-patches
-                  mountPath: /opt/vllm-patches
-                  readOnly: true
-                - name: patched-vllm
-                  mountPath: /opt/vllm-patched
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-76b18bfea93735c34c5898561abf94485a27318c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -240,6 +125,7 @@ spec:
                 - --served-model-name
                 - $(SERVED_MODEL_NAME)
                 - --trust-remote-code
+                - --language-model-only
                 - --tensor-parallel-size
                 - "4"
                 - --block-size
@@ -256,7 +142,6 @@ spec:
                 - --kv-cache-metrics
                 - --kv-cache-dtype
                 - fp8
-                - --language-model-only
                 - --no-enable-flashinfer-autotune
                 - --enable-bf16x3-router-gemm
                 - --attention-config
@@ -264,7 +149,7 @@ spec:
                 - --compilation-config
                 - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024,1536,2048,2560,3072,4096,6144,8192]}'
                 - --speculative-config
-                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","use_local_argmax_reduction":true}'
+                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.89,"use_local_argmax_reduction":true}'
                 # For performance analysis --
                 # - --speculative-config
                 # - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","rejection_sample_method":"synthetic","synthetic_acceptance_length":2.89,"use_local_argmax_reduction":true}'
@@ -294,8 +179,6 @@ spec:
                   value: /shared-model-cache
                 - name: HF_MODULES_CACHE
                   value: /tmp/hf_modules
-                - name: PYTHONPATH
-                  value: /opt/vllm-patched
                 - name: PYTHONHASHSEED
                   value: "0"
                 - name: HF_HUB_OFFLINE
@@ -353,15 +236,7 @@ spec:
               volumeMounts:
                 - name: shared-model-cache
                   mountPath: /shared-model-cache
-                - name: patched-vllm
-                  mountPath: /opt/vllm-patched
-                  readOnly: true
           volumes:
             - name: shared-model-cache
               persistentVolumeClaim:
                 claimName: shared-model-cache
-            - name: vllm-patches
-              configMap:
-                name: minimax-m3-agg-gb200-vllm-patches
-            - name: patched-vllm
-              emptyDir: {}
