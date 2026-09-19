@@ -62,6 +62,17 @@ impl SelectionCore {
         for key in &affected {
             self.publish_scheduler_config(key);
         }
+        for key in &affected {
+            if let Some(entry) = self.entry(key)
+                && let Err(error) = entry.scheduler.wait_for_worker_config().await
+            {
+                for result in &mut results {
+                    if result.as_ref().is_ok_and(|record| record.key() == *key) {
+                        *result = Err(SelectionError::NotReady(error.to_string()));
+                    }
+                }
+            }
+        }
         results
     }
 
@@ -97,6 +108,14 @@ impl SelectionCore {
             .set_lifecycle(worker_id, WorkerLifecycle::Draining, Vec::new());
         self.publish_scheduler_config(&key);
         self.cleanup_indexer_registration(&previous).await;
+        if let Some(entry) = self.entry(&key) {
+            match entry.scheduler.wait_for_worker_removal(worker_id).await {
+                // Deletion remains available after shutdown. A stopped core
+                // rejects re-registration, so no new worker can inherit state.
+                Err(KvSchedulerError::SubscriberShutdown) if self.cancel_token.is_cancelled() => {}
+                result => result?,
+            }
+        }
         let record = self
             .catalog
             .set_lifecycle(worker_id, WorkerLifecycle::Unschedulable, Vec::new())
@@ -127,6 +146,11 @@ impl SelectionCore {
     }
 
     fn prepare_worker(&self, record: &mut WorkerCatalogRecord) -> Result<(), SelectionError> {
+        if record.dp_start().checked_add(record.dp_size()).is_none() {
+            return Err(SelectionError::BadRequest(
+                "data parallel rank range overflows u32".to_string(),
+            ));
+        }
         let queueing_enabled = self
             .kv_router_config
             .queueing_enabled(Some(&record.model_name))
@@ -161,6 +185,20 @@ impl SelectionCore {
         previous: Option<WorkerCatalogRecord>,
         deferred: Option<&mut HashSet<RoutingPartitionId>>,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
+        // A cancelled removal can leave a committed Draining record. Finish
+        // withdrawing it before the same ID becomes schedulable again.
+        if let Some(old) = previous
+            .as_ref()
+            .filter(|old| old.lifecycle == WorkerLifecycle::Draining)
+        {
+            self.cleanup_indexer_registration(old).await;
+            if let Some(entry) = self.entry(&old.key()) {
+                entry
+                    .scheduler
+                    .wait_for_worker_removal(old.worker_id)
+                    .await?;
+            }
+        }
         let previous = previous.filter(|old| old.lifecycle == WorkerLifecycle::Schedulable);
         let moved_partition = previous
             .as_ref()
@@ -172,6 +210,12 @@ impl SelectionCore {
                 .set_lifecycle(old.worker_id, WorkerLifecycle::Draining, Vec::new());
             self.publish_scheduler_config(&old.key());
             self.cleanup_indexer_registration(old).await;
+            if let Some(entry) = self.entry(&old.key()) {
+                entry
+                    .scheduler
+                    .wait_for_worker_removal(old.worker_id)
+                    .await?;
+            }
             None
         } else {
             previous
@@ -200,7 +244,12 @@ impl SelectionCore {
             Some(affected) if !moved_partition => {
                 affected.insert(record.key());
             }
-            _ => self.publish_scheduler_config(&record.key()),
+            _ => {
+                self.publish_scheduler_config(&record.key());
+                if let Some(entry) = self.entry(&record.key()) {
+                    entry.scheduler.wait_for_worker_config().await?;
+                }
+            }
         }
         Ok(record)
     }
