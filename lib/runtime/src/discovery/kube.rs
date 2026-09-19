@@ -417,6 +417,16 @@ impl Discovery for KubeDiscoveryClient {
         let list_state = self.list_state.clone();
 
         tokio::spawn(async move {
+            let receiver_closed = out_tx.closed();
+            tokio::pin!(receiver_closed);
+            let cancelled = async {
+                match cancel_token.as_ref() {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::pin!(cancelled);
+
             tracing::debug!(
                 stream_id = %stream_id,
                 initial_count = initial_instances.len(),
@@ -444,16 +454,16 @@ impl Discovery for KubeDiscoveryClient {
             }
 
             loop {
-                let recv_result = if let Some(ref token) = cancel_token {
-                    tokio::select! {
-                        result = broadcast_rx.recv() => result,
-                        _ = token.cancelled() => {
-                            tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
-                            break;
-                        }
+                let recv_result = tokio::select! {
+                    result = broadcast_rx.recv() => result,
+                    _ = &mut receiver_closed => {
+                        tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                        break;
                     }
-                } else {
-                    broadcast_rx.recv().await
+                    _ = &mut cancelled => {
+                        tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
+                        break;
+                    }
                 };
 
                 match recv_result {
@@ -502,7 +512,17 @@ impl Discovery for KubeDiscoveryClient {
                             dropped = n,
                             "Broadcast receiver lagged, reconciling from list_state"
                         );
-                        let state = list_state.read().await;
+                        let state = tokio::select! {
+                            state = list_state.read() => state,
+                            _ = &mut receiver_closed => {
+                                tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
+                                break;
+                            }
+                            _ = &mut cancelled => {
+                                tracing::info!(stream_id = %stream_id, "Watch cancelled via cancel token");
+                                break;
+                            }
+                        };
                         let current: HashMap<DiscoveryInstanceId, DiscoveryInstance> = state
                             .values()
                             .flat_map(|m| m.filter(&query))
