@@ -6,6 +6,7 @@
 #
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -236,6 +237,57 @@ class _ReasoningParserMetadata:
     engine_reasoning_ended: bool | None
     response_reasoning_ended: bool | None
     parser_kwargs: dict[str, Any] | None
+
+
+def _ensure_reasoning_parser_output_capable(
+    parser_name: str,
+    parser_class: type[ReasoningParser],
+    tokenizer: TokenizerLike,
+    chat_template_kwargs: dict[str, Any],
+    model_config: Any,
+) -> None:
+    # vLLM ships boundary-only parsers (e.g. GptOssReasoningParser) that raise
+    # NotImplementedError from every output-parsing method, while this
+    # processor calls extract_reasoning_streaming per request. Probe once here
+    # so the combination is rejected at engine setup instead of failing every
+    # request with a 500 (issue #14936). The probe constructor mirrors the
+    # production construction sites (chat_template_kwargs, model_config).
+    probe = parser_class(
+        tokenizer,
+        chat_template_kwargs=chat_template_kwargs,
+        model_config=model_config,
+    )
+    try:
+        inspect.signature(probe.extract_reasoning_streaming).bind(
+            "", "", "", [], [], []
+        )
+    except TypeError as e:
+        raise RuntimeError(
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) has an "
+            f"extract_reasoning_streaming signature this processor cannot call: {e}"
+        ) from e
+    try:
+        probe.extract_reasoning_streaming("", "", "", [], [], [])
+    except NotImplementedError as e:
+        msg = (
+            f"reasoning_parser {parser_name!r} ({parser_class.__name__}) only "
+            "provides boundary detection; this processor needs a parser that "
+            "implements extract_reasoning_streaming (issue #14936)"
+        )
+        if parser_name == "openai_gptoss":
+            msg += (
+                "; gpt-oss output parsing requires HarmonyParser, which this "
+                "processor does not support yet"
+            )
+        raise RuntimeError(msg) from e
+    except Exception as e:
+        # Parsers are not contracted to accept empty input; the probe only
+        # proves the method is implemented, so log and accept.
+        logger.debug(
+            "reasoning_parser %r probe raised %r on empty input; accepting",
+            parser_name,
+            e,
+        )
 
 
 def _build_reasoning_parser_metadata(
@@ -1224,6 +1276,13 @@ class EngineFactory:
         if reasoning_parser_name:
             reasoning_parser_class = ReasoningParserManager.get_reasoning_parser(
                 reasoning_parser_name
+            )
+            _ensure_reasoning_parser_output_capable(
+                reasoning_parser_name,
+                reasoning_parser_class,
+                tokenizer,
+                getattr(self.flags, "default_chat_template_kwargs", None) or {},
+                model_config,
             )
         else:
             reasoning_parser_class = None

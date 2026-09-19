@@ -1427,7 +1427,7 @@ async def test_benchmark_wait_failure_logs_stop_failure_and_keeps_original(
         await _await_benchmark_then_restore_workers({}, Mock(), Mock())
 
     assert exc_info.value is original
-    assert "Failed to stop the FPM GC policy" in caplog.text
+    assert "Failed to restore model workers" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1585,7 +1585,7 @@ async def test_failure_path_stop_is_time_boxed_and_original_error_wins(
         await _await_benchmark_then_restore_workers({}, Mock(), Mock())
 
     assert exc_info.value is original
-    assert "Failed to stop the FPM GC policy" in caplog.text
+    assert "Failed to restore model workers" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1857,3 +1857,44 @@ class TestEncodeWorkerEmbeddingCacheCapacity:
         handler_cls = await self._create_encode_worker(0.0)
 
         assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_random_state_worker_is_disabled_after_benchmark(monkeypatch, failed):
+    async def wait(_config, _vllm_config):
+        if failed:
+            raise RuntimeError("benchmark failed")
+        return {"status": "complete"}
+
+    monkeypatch.setattr("dynamo.vllm.worker_factory._wait_and_load_benchmark", wait)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._stop_worker_gc_policy", AsyncMock()
+    )
+    client = SimpleNamespace(collective_rpc=AsyncMock())
+    if failed:
+        with pytest.raises(RuntimeError, match="benchmark failed"):
+            await _await_benchmark_then_restore_workers(
+                {"randomize_kda_state": True}, Mock(), client
+            )
+    else:
+        await _await_benchmark_then_restore_workers(
+            {"randomize_kda_state": True}, Mock(), client
+        )
+    client.collective_rpc.assert_awaited_once_with("finish_benchmark_kda_state")
+
+
+@pytest.mark.asyncio
+async def test_random_state_stop_failure_still_restores_gc(monkeypatch):
+    wait = AsyncMock(return_value={"status": "complete"})
+    stop_gc = AsyncMock()
+    monkeypatch.setattr("dynamo.vllm.worker_factory._wait_and_load_benchmark", wait)
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", stop_gc)
+    client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("state stop failed"))
+    )
+    with pytest.raises(RuntimeError, match="state stop failed"):
+        await _await_benchmark_then_restore_workers(
+            {"randomize_kda_state": True}, Mock(), client
+        )
+    stop_gc.assert_awaited_once_with(client)

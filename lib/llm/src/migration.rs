@@ -24,15 +24,14 @@ use crate::{
     session_affinity::explicit_target,
 };
 
+use dynamo_kv_router::scheduling::AbortCause;
 use dynamo_runtime::engine::Data;
-use dynamo_runtime::error::{self, BackendError, DynamoError, ErrorType};
+use dynamo_runtime::error::{self, DynamoError, ErrorReason, ErrorType};
 use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
     ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
-    network::egress::route_span::{
-        RouteTraceContext, attach_route_trace_context, error_type_from_chain, error_type_name,
-    },
+    network::egress::route_span::{RouteTraceContext, attach_route_trace_context, error_type_name},
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -72,28 +71,64 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
+/// A classifier decision is terminal even when its client-visible error type
+/// would normally identify a retryable worker failure.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct ClassifierRejection(#[source] pub(crate) DynamoError);
+
+const MIGRATION_BLOCKING_REASONS: &[&str] = &[
+    "request.cancelled",
+    "request.deadline_exceeded",
+    "backend.cancelled",
+    "capacity.exhausted",
+    "capacity.pool_exhausted",
+];
+
+fn blocks_migration(reason: &ErrorReason) -> bool {
+    MIGRATION_BLOCKING_REASONS.contains(&reason.as_str())
+}
+
+fn is_migration_eligible(reason: &ErrorReason) -> bool {
+    matches!(
+        reason.as_str(),
+        "transport.cannot_connect"
+            | "transport.disconnected"
+            | "transport.connection_timeout"
+            | "backend.cannot_connect"
+            | "backend.disconnected"
+            | "backend.connection_timeout"
+            | "backend.response_timeout"
+            | "backend.engine_shutdown"
+            | "backend.stream_incomplete"
+            | "backend.worker_unavailable"
+            | "capacity.worker_overloaded"
+    )
+}
+
+fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
+    let mut migratable = None;
+    let mut current = Some(err);
+    while let Some(source) = current {
+        if source.is::<ClassifierRejection>() {
+            return None;
+        }
+        if let Some(error) = source.downcast_ref::<DynamoError>() {
+            if blocks_migration(error.reason()) {
+                return None;
+            }
+            if is_migration_eligible(error.reason()) {
+                migratable.get_or_insert(error);
+            }
+        }
+        current = source.source();
+    }
+    migratable
+}
+
 /// Check if an error chain indicates the request should be migrated.
-fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
-    const MIGRATABLE: &[ErrorType] = &[
-        ErrorType::CannotConnect,
-        ErrorType::Disconnected,
-        ErrorType::ConnectionTimeout,
-        // a stalled/frozen worker's stream-inactivity timeout surfaces
-        // as ResponseTimeout (push_router fault detection quarantines the worker
-        // via the same signal); migrate instead of hanging to the stream timeout.
-        ErrorType::ResponseTimeout,
-        ErrorType::Backend(BackendError::EngineShutdown),
-        // A truncated stream from a departed worker is recoverable by failover.
-        ErrorType::Backend(BackendError::StreamIncomplete),
-        // One overloaded worker: another may have room. Pool-wide exhaustion is
-        // ResourceExhausted below and stays non-migratable.
-        ErrorType::WorkerOverloaded,
-        // One worker answered that it no longer serves this instance: another
-        // may. Pool-wide absence is Unavailable and is not a worker fault.
-        ErrorType::WorkerUnavailable,
-    ];
-    const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
-    error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
+pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
+    migratable_error_in_chain(err).is_some()
 }
 
 /// Whether a worker-scoped failure can be retried without violating an explicit route.
@@ -394,37 +429,65 @@ where
             };
             if let Some(response) = response_stream.next().await {
                 // Check if this is a migratable error that should trigger stream recreation.
-                if let Some(err) = response.error.as_ref()
-                    && is_migratable_for_request(&self.request, err)
-                {
-                    if self.retries_left == 0 {
-                        let route_trace = self.active_route_trace.clone();
-                        self.record_migration_exhausted(MigrationCause {
-                            reason: err.error_type(),
-                            from_worker_id: route_trace
-                                .as_deref()
-                                .and_then(RouteTraceContext::selected_worker_id),
-                            attempt: self.failed_attempt(route_trace.as_deref()),
-                        });
+                if let Some(err) = response.error.as_ref() {
+                    if is_migratable_for_request(&self.request, err) {
+                        let Some(migration_error) = migratable_error_in_chain(err) else {
+                            tracing::warn!(error = %err, "Migration eligibility had no semantic error");
+                            continue;
+                        };
+                        if self.retries_left == 0 {
+                            let route_trace = self.active_route_trace.clone();
+                            self.record_migration_exhausted(MigrationCause {
+                                reason: migration_error.error_type(),
+                                from_worker_id: route_trace
+                                    .as_deref()
+                                    .and_then(RouteTraceContext::selected_worker_id),
+                                attempt: self.failed_attempt(route_trace.as_deref()),
+                            });
+                            // The stream host parked the lifecycle on this
+                            // failure. The client receives this worker error
+                            // (below), so the classifier's abort cause must be
+                            // the same error, not the synthetic exhaustion
+                            // error `new_stream` would otherwise abort with.
+                            self.abort_request_lifecycle(err);
+                        } else {
+                            self.queue_migration(
+                                migration_error.error_type(),
+                                self.active_route_trace.clone(),
+                            );
+                        }
+                        tracing::warn!(error = %err, "Stream disconnected, recreating stream");
+                        self.metrics.inc_migration_ongoing_request(&self.model_name);
+                        let migration_event =
+                            MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+                        // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
+                        // When no replacement is established, preserve the triggering stream error.
+                        if let Err(err) = self.new_stream(Some(migration_event)).await {
+                            tracing::warn!(error = ?err, "Cannot recreate stream");
+                        } else {
+                            continue;
+                        }
                     } else {
-                        self.queue_migration(err.error_type(), self.active_route_trace.clone());
-                    }
-                    tracing::warn!(error = %err, "Stream disconnected, recreating stream");
-                    self.metrics.inc_migration_ongoing_request(&self.model_name);
-                    let migration_event =
-                        MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
-                    // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
-                    // When no replacement is established, preserve the triggering stream error.
-                    if let Err(err) = self.new_stream(Some(migration_event)).await {
-                        tracing::warn!(error = ?err, "Cannot recreate stream");
-                    } else {
-                        continue;
+                        // The stream host parks the classifier lifecycle on any
+                        // type-migratable failure, but an explicit worker pin can
+                        // veto the retry here. Nothing will claim the parked
+                        // lifecycle, so abort it with the cause now rather than
+                        // letting Drop emit a late, cause-less event.
+                        self.abort_request_lifecycle(err);
                     }
                 }
                 self.track_response(&response);
                 return Some(response);
             }
             return None;
+        }
+    }
+
+    /// Abort any classifier lifecycle parked for a retry this request will not
+    /// make. No-op when nothing is parked.
+    fn abort_request_lifecycle(&self, error: &AbortCause) {
+        if let Some(state) = self.request.migration_state.as_ref() {
+            state.abort_request_lifecycle(Some(error));
         }
     }
 
@@ -437,7 +500,9 @@ where
                 migration_event.as_ref(),
                 frontend_service::migration_outcome::FAILURE,
             );
-            return Err(Error::msg("Migration limit exhausted"));
+            let error = Error::msg("Migration limit exhausted");
+            self.abort_request_lifecycle(error.as_ref());
+            return Err(error);
         }
         while self.retries_left > 0 {
             self.retries_left -= 1;
@@ -496,14 +561,15 @@ where
                     migration_event.as_ref(),
                     frontend_service::migration_outcome::CANCELLED,
                 );
-                return Err(DynamoError::builder()
+                let error = DynamoError::builder()
                     .error_type(ErrorType::Cancelled)
                     .message(format!(
                         "Context id {} is stopped or killed",
                         self.context.id()
                     ))
-                    .build()
-                    .into());
+                    .build();
+                self.abort_request_lifecycle(&error);
+                return Err(error.into());
             }
             let source_guards = self
                 .request
@@ -532,7 +598,11 @@ where
                     return Ok(());
                 }
                 Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
-                    let reason = error_type_from_chain(err.as_ref());
+                    let Some(migration_error) = migratable_error_in_chain(err.as_ref()) else {
+                        tracing::warn!(error = %err, "Migration eligibility had no semantic error");
+                        return Err(err);
+                    };
+                    let reason = migration_error.error_type();
                     if migration_event.is_none() {
                         migration_event = Some(MigrationEvent::new(
                             frontend_service::migration_type::NEW_REQUEST,
@@ -551,6 +621,7 @@ where
                             migration_event.as_ref(),
                             frontend_service::migration_outcome::FAILURE,
                         );
+                        self.abort_request_lifecycle(err.as_ref());
                         return Err(err);
                     }
                     self.queue_migration(reason, Some(route_trace));
@@ -564,6 +635,7 @@ where
                             frontend_service::migration_outcome::FAILURE
                         };
                     self.record_migration_outcome(migration_event.as_ref(), outcome);
+                    self.abort_request_lifecycle(err.as_ref());
                     return Err(err);
                 }
             }
@@ -572,7 +644,9 @@ where
             migration_event.as_ref(),
             frontend_service::migration_outcome::FAILURE,
         );
-        Err(Error::msg("Migration limit exhausted"))
+        let error = Error::msg("Migration limit exhausted");
+        self.abort_request_lifecycle(error.as_ref());
+        Err(error)
     }
 
     /// The attempt a failure belongs to. Prefers the attempt's own trace
@@ -675,8 +749,8 @@ where
         if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
             self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
         }
-        for token_id in token_ids.iter() {
-            self.request.token_ids.push(*token_id);
+        if !token_ids.is_empty() {
+            Arc::make_mut(&mut self.request.token_ids).extend(token_ids.iter().copied());
         }
     }
 
@@ -710,7 +784,7 @@ mod tests {
         GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
         preprocessor::RoutingHints, timing::RequestTracker,
     };
-    use dynamo_runtime::error::{DynamoError, ErrorType};
+    use dynamo_runtime::error::{BackendError, DynamoError, ErrorType};
     use dynamo_runtime::pipeline::AsyncEngine;
     use dynamo_runtime::pipeline::context::Controller;
     use dynamo_runtime::protocols::maybe_error::MaybeError;
@@ -749,6 +823,101 @@ mod tests {
         );
     }
 
+    // Migration short-circuits on any blocking semantic reason in the chain, so
+    // pre_stream_failure_error must withhold those reasons before attaching a cause.
+    #[test]
+    fn pre_stream_failure_with_migration_sensitive_cause_is_still_migratable() {
+        use dynamo_runtime::pipeline::network::StreamPrologueError;
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::pre_stream_failure_error;
+
+        for &(error_type, reason) in &[
+            (ErrorType::Cancelled, "request.cancelled"),
+            (ErrorType::DeadlineExceeded, "request.deadline_exceeded"),
+            (
+                ErrorType::Backend(BackendError::Cancelled),
+                "backend.cancelled",
+            ),
+            (ErrorType::ResourceExhausted, "capacity.pool_exhausted"),
+            (ErrorType::CapacityExhausted, "capacity.exhausted"),
+        ] {
+            let worker_error = DynamoError::builder()
+                .error_type(error_type)
+                .reason(ErrorReason::new(reason).unwrap())
+                .message("no capacity on the downstream worker")
+                .build();
+
+            assert!(!is_migratable(&worker_error), "{reason} setup");
+
+            let err = pre_stream_failure_error(StreamPrologueError::new(
+                format!("Generate Error: {worker_error}"),
+                worker_error,
+            ));
+            assert!(
+                is_migratable(&err),
+                "a {reason} worker error must not make a pre-stream failure stop migrating"
+            );
+            assert!(
+                std::error::Error::source(&err).is_none(),
+                "a {reason} cause must be withheld"
+            );
+        }
+
+        let nested = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("downstream worker rejected the request")
+            .cause(
+                DynamoError::builder()
+                    .error_type(ErrorType::ResourceExhausted)
+                    .message("no capacity on the downstream worker")
+                    .build(),
+            )
+            .build();
+        let err = pre_stream_failure_error(StreamPrologueError::new(
+            "Generate Error: downstream worker rejected the request",
+            nested,
+        ));
+        assert!(is_migratable(&err));
+        assert!(std::error::Error::source(&err).is_none());
+
+        let worker_error = DynamoError::builder()
+            .error_type(ErrorType::WorkerOverloaded)
+            .reason(ErrorReason::new("capacity.worker_overloaded").unwrap())
+            .message("selected worker is full")
+            .build();
+        let err = pre_stream_failure_error(StreamPrologueError::new(
+            "Generate Error: selected worker is full",
+            worker_error,
+        ));
+        assert!(is_migratable(&err));
+        let source = std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<DynamoError>())
+            .expect("worker-scoped cause must remain attached");
+        assert_eq!(source.reason().as_str(), "capacity.worker_overloaded");
+    }
+
+    // dynamo-runtime cannot import this module, so the addressed router keeps a copy.
+    #[test]
+    fn migration_sensitive_reasons_match_the_blocking_set() {
+        use dynamo_runtime::pipeline::network::egress::addressed_router::testing::migration_sensitive_error_reasons;
+
+        let router_reasons = migration_sensitive_error_reasons();
+        let missing_from_router: Vec<_> = MIGRATION_BLOCKING_REASONS
+            .iter()
+            .filter(|reason| !router_reasons.contains(reason))
+            .collect();
+        let missing_from_here: Vec<_> = router_reasons
+            .iter()
+            .filter(|reason| !MIGRATION_BLOCKING_REASONS.contains(reason))
+            .collect();
+
+        assert!(
+            missing_from_router.is_empty() && missing_from_here.is_empty(),
+            "MIGRATION_BLOCKING_REASONS and MIGRATION_SENSITIVE_ERROR_REASONS must match: \
+             missing from addressed_router.rs: {missing_from_router:?}; \
+             missing from migration.rs: {missing_from_here:?}"
+        );
+    }
+
     #[test]
     fn worker_unavailable_is_migratable_but_pool_unavailable_is_not() {
         assert!(is_migratable(&migratable_error(
@@ -759,10 +928,23 @@ mod tests {
 
     // Guard: genuinely non-migratable errors stay non-migratable.
     #[test]
-    fn cancelled_and_exhausted_are_not_migratable() {
-        for et in [ErrorType::Cancelled, ErrorType::ResourceExhausted] {
+    fn terminal_error_types_are_not_migratable() {
+        for et in [
+            ErrorType::Cancelled,
+            ErrorType::DeadlineExceeded,
+            ErrorType::ResourceExhausted,
+        ] {
             let err = DynamoError::builder().error_type(et).message("x").build();
             assert!(!is_migratable(&err), "{et:?} must not be migratable");
+            let wrapped = DynamoError::builder()
+                .error_type(ErrorType::CannotConnect)
+                .message("outer transport error")
+                .cause(err)
+                .build();
+            assert!(
+                !is_migratable(&wrapped),
+                "{et:?} must block migration through a retryable outer error"
+            );
         }
     }
 
@@ -1276,24 +1458,73 @@ mod tests {
     /// request that had a healthy worker available, or bounces a pool-wide
     /// rejection around until retries run out.
     #[test]
-    fn worker_overload_migrates_but_pool_exhaustion_does_not() {
-        let worker_busy = DynamoError::builder()
-            .error_type(ErrorType::WorkerOverloaded)
-            .message("Selected worker is overloaded, please retry later")
+    fn semantic_reasons_preserve_worker_scoped_migration() {
+        use dynamo_runtime::error::{ErrorClass, ErrorReason};
+
+        let cases = [
+            (
+                ErrorClass::CapacityExhausted,
+                "capacity.worker_overloaded",
+                true,
+            ),
+            (
+                ErrorClass::CapacityExhausted,
+                "capacity.pool_exhausted",
+                false,
+            ),
+            (ErrorClass::Unavailable, "transport.disconnected", true),
+            (ErrorClass::Unavailable, "backend.unavailable", false),
+        ];
+
+        for (class, reason, expected) in cases {
+            let error = DynamoError::builder()
+                .class(class)
+                .reason(ErrorReason::new(reason).unwrap())
+                .diagnostic("worker failure")
+                .build();
+            assert_eq!(is_migratable(&error), expected, "reason: {reason}");
+        }
+    }
+
+    #[test]
+    fn migration_uses_inner_semantic_cause_and_preserves_exclusions() {
+        use dynamo_runtime::error::{ErrorClass, ErrorReason};
+
+        let disconnected = DynamoError::builder()
+            .class(ErrorClass::Unavailable)
+            .reason(ErrorReason::new("transport.disconnected").unwrap())
             .build();
-        assert!(
-            is_migratable(&worker_busy),
-            "one overloaded worker must fail over to another"
+        let wrapped = DynamoError::builder()
+            .error_type(ErrorType::Unknown)
+            .cause(disconnected)
+            .build();
+        assert_eq!(
+            migratable_error_in_chain(&wrapped).map(DynamoError::error_type),
+            Some(ErrorClass::Unavailable)
         );
 
-        let pool_exhausted = DynamoError::builder()
-            .error_type(ErrorType::ResourceExhausted)
-            .message("All workers are busy, please retry later")
+        let cancelled = DynamoError::builder()
+            .class(ErrorClass::Cancelled)
+            .reason(ErrorReason::new("request.cancelled").unwrap())
             .build();
-        assert!(
-            !is_migratable(&pool_exhausted),
-            "pool-wide exhaustion must not migrate; no worker has room"
-        );
+        let conflicted = DynamoError::builder()
+            .class(ErrorClass::Unavailable)
+            .reason(ErrorReason::new("transport.disconnected").unwrap())
+            .cause(cancelled)
+            .build();
+        assert!(!is_migratable(&conflicted));
+
+        let exhausted = DynamoError::builder()
+            .class(ErrorClass::CapacityExhausted)
+            .reason(ErrorReason::new("capacity.exhausted").unwrap())
+            .cause(
+                DynamoError::builder()
+                    .class(ErrorClass::Unavailable)
+                    .reason(ErrorReason::new("transport.disconnected").unwrap())
+                    .build(),
+            )
+            .build();
+        assert!(!is_migratable(&exhausted));
     }
 
     /// Tests the normal case where the RetryManager successfully processes all responses
@@ -2316,6 +2547,7 @@ mod tests {
         }
 
         let request = create_mock_request(3);
+        let original_request = request.clone();
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             Arc::new(LlmEngineMock(context_id.clone()));
 
@@ -2335,15 +2567,27 @@ mod tests {
         .await
         .expect("Failed to build RetryManager");
 
+        // Metadata-only chunks must not copy the shared prompt.
+        retry_manager.track_response(&Annotated::from_data(LLMEngineOutput::default()));
+        assert!(Arc::ptr_eq(
+            &original_request.token_ids,
+            &retry_manager.request.token_ids
+        ));
+
         let mut responses = Vec::new();
         while let Some(r) = retry_manager.next().await {
             responses.push(r);
         }
         assert_eq!(responses.len(), 3);
         assert_eq!(
-            retry_manager.request.token_ids,
-            vec![1, 2, 3, 200, 201, 202]
+            retry_manager.request.token_ids.as_slice(),
+            &[1, 2, 3, 200, 201, 202]
         );
+        assert_eq!(original_request.token_ids.as_slice(), &[1, 2, 3]);
+        assert!(!Arc::ptr_eq(
+            &original_request.token_ids,
+            &retry_manager.request.token_ids
+        ));
     }
 
     /// Regression test for the migration-discards-withheld-text bug: a chunk delivered

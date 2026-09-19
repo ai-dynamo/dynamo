@@ -4,6 +4,7 @@
 pub mod config;
 mod filter;
 mod local;
+mod lora_filter;
 pub mod overlap;
 pub mod overlap_refresh;
 pub mod policy;
@@ -12,6 +13,7 @@ pub mod policy_queue;
 pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
+pub mod request_classifier;
 pub mod selector;
 
 mod worker_selection_config;
@@ -19,6 +21,9 @@ mod worker_selection_config;
 mod types;
 pub use filter::*;
 pub use local::LocalScheduler;
+pub use lora_filter::LoraWorkerFilter;
+#[cfg(feature = "standalone-selection")]
+pub(crate) use lora_filter::narrow_allowed_worker_ids_by_lora;
 pub use overlap::{
     CacheHitEstimates, OverlapAnalysis, OverlapScoresResponse, OverlapSignals,
     SelectedWorkerTierSnapshot, SharedCacheOverlapScore, WorkerOverlapScore,
@@ -38,4 +43,8 @@ pub use prefill_load::{
     prefill_load_hint_from_effective_tokens,
 };
 pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
+pub use request_classifier::{
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    RequestClassifierContext, RequestClassifierWorker, RequestLifecycle,
+};
 pub use types::*;

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -17,7 +17,11 @@ use super::overlap_refresh::{NoopOverlapScoresRefresh, OverlapScoresRefresh};
 use super::policy_config::PolicyProfile;
 use super::prefill_load::PrefillLoadEstimator;
 use super::queue::{
-    ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor, SchedulerQueue,
+    BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
+    SchedulerQueue,
+};
+use super::request_classifier::{
+    ClassifyRequest, RequestClassifier, RequestClassifierRuntime, RequestLifecycle,
 };
 use super::selector::{DefaultWorkerSelector, WorkerSelector};
 use super::types::{
@@ -30,8 +34,8 @@ use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::topology::WorkerDpRange;
 use crate::sequences::{
-    ActiveSequencesMultiWorker, PrefillTokenDeltas, SequenceError, SequencePublisher,
-    SequenceRequest,
+    ActiveSequencesMultiWorker, LifecycleMutationOutcome, PrefillTokenDeltas, SequenceError,
+    SequencePublisher, SequenceRequest,
 };
 use dynamo_tokens::SequenceHash;
 
@@ -52,6 +56,7 @@ where
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
+    request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -270,6 +275,7 @@ where
             slots,
             queue,
             queue_updates,
+            request_classifier: OnceLock::new(),
             track_prefill_tokens_default,
             worker_type,
         }
@@ -290,21 +296,63 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let tracked = request.mode.is_tracked();
+        self.schedule_request_admitted_with_context(request, Instant::now())
+            .await
+    }
+
+    /// Schedule with the router's original ingress timing.
+    #[doc(hidden)]
+    pub async fn schedule_request_admitted_with_context(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: Instant,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let (admitted, booking) = self
+            .schedule_request_with_booking_and_context(request, ingress_at)
+            .await?;
+        if let Some(booking) = booking {
+            let _ = booking.commit();
+        }
+        Ok(admitted)
+    }
+
+    /// Schedule a request and return an armed handle for its booking: dropping
+    /// the handle frees the booking, `commit` hands it to a longer-lived owner.
+    /// The handle is `None` unless the mode is `TrackedWithLifecycle`.
+    pub(crate) async fn schedule_request_with_booking(
+        &self,
+        request: ScheduleRequest,
+    ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
+        self.schedule_request_with_booking_and_context(request, Instant::now())
+            .await
+    }
+
+    /// Classify before acquiring a booking lease, preserving the caller's
+    /// ingress timestamp across the classifier's await and returning the
+    /// booking armed for its host.
+    pub(crate) async fn schedule_request_with_booking_and_context(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: Instant,
+    ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
+        let tracked = request.mode.is_tracked();
+        let classified_request = self.classify_request(&request, ingress_at).await?;
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
-        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
 
-        let mut lifecycle_lease = self
+        let lifecycle_lease = self
             .queue
             .enqueue_admitted_with_block_hashes_and_lease(
                 request,
                 block_hashes,
                 lifecycle_lease,
                 tracked.then_some(attempt_tx),
+                classified_request,
+                ingress_at,
             )
             .await;
 
@@ -320,10 +368,62 @@ where
         } else {
             AdmissionAttempt::Untracked
         };
-        if let Some(lease) = lifecycle_lease.as_mut() {
-            lease.disarm();
+        // No await between `commit()` and the handle build: the booking is
+        // always guarded by exactly one of the lease and the handle.
+        let booking = lifecycle_lease
+            .and_then(|lease| lease.commit())
+            .map(|booking| self.queue.booking_handle(booking));
+        Ok((AdmittedSchedulingResponse { response, attempt }, booking))
+    }
+
+    async fn classify_request(
+        &self,
+        request: &SchedulingRequest,
+        ingress_at: Instant,
+    ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
+        let Some(classifier) = self.request_classifier.get() else {
+            return Ok(None);
+        };
+        let Some(request_id) = request.mode.tracked_request_id() else {
+            return Ok(None);
+        };
+        // A tracked admission with no registered lifecycle (Python bindings
+        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // classifying it would corrupt plugin bookkeeping. It uses the default
+        // queue inputs, exactly as if no classifier were installed.
+        if !classifier.has_request(request_id) {
+            return Ok(None);
         }
-        Ok(AdmittedSchedulingResponse { response, attempt })
+        classifier
+            .classify_with(self.queue.build_classify_request(request, ingress_at))
+            .await
+            .map(Some)
+    }
+
+    /// Install the request classifier plugin. Must be called from within a
+    /// Tokio runtime: it spawns the classifier's event-delivery task.
+    ///
+    /// Returns `false` when a classifier is already installed.
+    #[doc(hidden)]
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.request_classifier
+            .set(RequestClassifierRuntime::new(classifier, shutdown))
+            .is_ok()
+    }
+
+    #[doc(hidden)]
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.request_classifier
+            .get()
+            .map(|classifier| classifier.begin_request(request_id))
+            .transpose()
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -486,10 +586,6 @@ where
         .await
     }
 
-    pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        self.queue.register_workers(worker_ids);
-    }
-
     pub async fn add_request(&self, req: SequenceRequest) -> Result<(), SequenceError> {
         self.slots.add_request(req, Instant::now())
     }
@@ -505,11 +601,23 @@ where
 
     /// Book a request only when its worker is already registered, so a request
     /// racing worker removal cannot lazily recreate the removed worker/rank.
-    pub async fn add_request_if_registered(
+    /// The returned handle guards the booking: dropping it frees the booking,
+    /// `commit` hands it over.
+    #[doc(hidden)]
+    pub fn add_request_if_registered_guarded(
         &self,
         req: SequenceRequest,
-    ) -> Result<(), SequenceError> {
-        self.slots.add_request_if_registered(req, Instant::now())
+    ) -> Result<BookingHandle, SequenceError> {
+        let request_id = req.request_id.clone();
+        let worker = req.worker;
+        let attempt_id = self
+            .slots
+            .add_request_if_registered_admitted(req, Instant::now())?;
+        Ok(self.queue.booking_handle(SchedulerBookingDescriptor {
+            request_id,
+            worker,
+            attempt_id,
+        }))
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
@@ -566,19 +674,70 @@ where
         Ok(())
     }
 
+    /// Whether `request_id` currently holds a booking on any worker.
+    pub fn has_request(&self, request_id: &str) -> bool {
+        self.slots.request_worker(request_id).is_some()
+    }
+
+    #[doc(hidden)]
+    pub fn has_booking(&self, booking: &SchedulerBookingDescriptor) -> bool {
+        self.slots.has_booking(booking)
+    }
+
+    /// Release a booking only if `booking` still describes it; `NoChange` when
+    /// the id was freed or rebooked since the descriptor was taken.
+    #[doc(hidden)]
+    pub async fn free_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        self.free_if_booking_with_cleanup(booking, || {}).await
+    }
+
+    /// Complete owner cleanup after a successful release (including a stale
+    /// booking's `NoChange`), before the cancellable queue-progress wait.
+    pub(crate) async fn free_if_booking_with_cleanup(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        cleanup: impl FnOnce(),
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        let outcome = self.slots.free_if_booking(
+            &booking.request_id,
+            booking.worker,
+            booking.attempt_id,
+            Instant::now(),
+        )?;
+        cleanup();
+        if outcome.is_applied() {
+            self.queue.update_worker(booking.worker).await;
+        }
+        Ok(outcome)
+    }
+
     #[doc(hidden)]
     pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
         self.queue.booking_cleanup()
     }
 
+    /// `NoChange` when the booking no longer matches or its prefill was
+    /// already marked complete.
     #[doc(hidden)]
     pub async fn mark_prefill_completed_if_booking(
         &self,
         booking: &SchedulerBookingDescriptor,
-    ) -> Result<(), KvSchedulerError> {
+    ) -> Result<LifecycleMutationOutcome, KvSchedulerError> {
         self.queue
             .mark_prefill_completed_if_booking(booking.clone())
             .await
+    }
+
+    /// Republish the ordered prefill-completion event while `booking` is live.
+    #[doc(hidden)]
+    pub fn publish_prefill_completed_if_booking(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+    ) -> bool {
+        self.slots.publish_prefill_completed_if_booking(booking)
     }
 
     pub fn pending_count(&self) -> usize {
@@ -591,10 +750,6 @@ where
 
     pub fn class_queue_stats(&self, class_index: usize) -> Option<ClassQueueStats> {
         self.queue.class_queue_stats(class_index)
-    }
-
-    pub fn supports_overlap_refresh(&self) -> bool {
-        self.queue.supports_overlap_refresh()
     }
 
     pub fn worker_type(&self) -> &'static str {
@@ -623,6 +778,22 @@ where
         self.queue
             .add_output_block_if_booking(booking.clone(), decay_fraction)
             .await
+    }
+
+    /// `add_output_block_if_booking` applied inline, like `add_output_block`,
+    /// for callers that cannot await.
+    #[doc(hidden)]
+    pub fn add_output_block_if_booking_sync(
+        &self,
+        booking: &SchedulerBookingDescriptor,
+        decay_fraction: Option<f64>,
+    ) -> Result<LifecycleMutationOutcome, SequenceError> {
+        self.slots.add_output_block_if_booking(
+            &booking.request_id,
+            booking.worker,
+            booking.attempt_id,
+            decay_fraction,
+        )
     }
 
     #[doc(hidden)]
@@ -691,6 +862,7 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
@@ -698,6 +870,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
+    use crate::scheduling::request_classifier::ClassifyFuture;
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -888,6 +1061,135 @@ mod tests {
 
         let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
         assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    struct CountingClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for CountingClassifier {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    /// A tracked admission with no registered lifecycle takes the default
+    /// path without reaching the plugin; only `begin_request_lifecycle` opts
+    /// a request into classification. The runtime itself rejects ids it does
+    /// not know, so this bypass lives here in the scheduler.
+    #[tokio::test]
+    async fn tracked_request_without_lifecycle_bypasses_the_classifier() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(scheduler.install_request_classifier(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            cancel_token.clone(),
+        ));
+
+        scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "unregistered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("registered")
+            .unwrap()
+            .unwrap();
+        scheduler
+            .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "registered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn booking_admission_classifies_and_releases_on_drop() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(scheduler.install_request_classifier(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            cancel_token.clone(),
+        ));
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("booked")
+            .unwrap()
+            .unwrap();
+
+        let (_, booking) = scheduler
+            .schedule_request_with_booking(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "booked".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            scheduler.get_potential_loads(None, 0, HashMap::new(), false)[0].active_requests,
+            1
+        );
+        drop(booking.expect("admission must return an armed booking"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while scheduler.get_potential_loads(None, 0, HashMap::new(), false)[0].active_requests
+                != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the booking must release the attempt");
+        cancel_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn booking_admission_applies_classifier_deadline_from_original_ingress() {
+        struct DeadlineClassifier(Instant);
+        impl RequestClassifier for DeadlineClassifier {
+            fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+                assert_eq!(request.ingress_at(), self.0);
+                request.set_due_at(self.0 + Duration::from_secs(1));
+                Box::pin(async move { Ok(request) })
+            }
+        }
+
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let ingress_at = Instant::now();
+        assert!(scheduler.install_request_classifier(
+            Box::new(DeadlineClassifier(ingress_at)),
+            cancel_token.clone(),
+        ));
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("expired")
+            .unwrap()
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let result = scheduler
+            .schedule_request_with_booking_and_context(
+                request(ScheduleMode::TrackedWithLifecycle {
+                    request_id: "expired".to_string(),
+                }),
+                ingress_at,
+            )
+            .await;
+        assert!(matches!(result, Err(KvSchedulerError::DeadlineExceeded)));
+        assert_eq!(
+            scheduler.get_potential_loads(None, 0, HashMap::new(), false)[0].active_requests,
+            0
+        );
         cancel_token.cancel();
     }
 
@@ -1485,21 +1787,6 @@ mod tests {
         let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 40);
-
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn test_register_workers_uses_default_dp_fallback() {
-        let (scheduler, _slots, _cfg_tx, cancel_token) =
-            make_scheduler(HashMap::new(), None, false, None);
-
-        scheduler.register_workers(&HashSet::from([42]));
-        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
-
-        assert_eq!(loads.len(), 1);
-        assert_eq!(loads[0].worker_id, 42);
-        assert_eq!(loads[0].dp_rank, 0);
 
         cancel_token.cancel();
     }

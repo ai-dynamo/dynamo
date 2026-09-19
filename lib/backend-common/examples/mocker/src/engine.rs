@@ -363,6 +363,7 @@ impl LLMEngine for MockerBackend {
                 total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
                 max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
                 max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+                max_gpu_lora_count: None,
                 data_parallel_size: None,
                 data_parallel_start_rank: None,
                 enable_eagle: false,
@@ -431,7 +432,7 @@ impl LLMEngine for MockerBackend {
         }
 
         let direct = DirectRequest {
-            tokens: request.token_ids.clone(),
+            tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             uuid: Some(uuid),
             dp_rank: DP_RANK,

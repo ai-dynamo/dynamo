@@ -358,3 +358,48 @@ def test_expected_unique_blocks_rejects_invalid_numbers(
         name = "DYN_RELAY_EXPECTED_UNIQUE_BLOCKS"
         environment = {name: value}
     assert_cli_error(["--dc-id", "dc-a", *argv], environment, capsys, name, diagnostic)
+
+
+def test_sources_file_is_explicitly_empty_until_runtime_loads_sources() -> None:
+    config = parse_args(
+        ["--dc-id", "dc", "--sources-file", "/etc/relay/sources.json"],
+        {"DYN_RELAY_CONNECTION_REVISION": "connection"},
+    )
+    assert config.sources_file == "/etc/relay/sources.json"
+    assert config.connection_revision == "connection"
+    assert config.namespaces == ()
+    assert config.watch_all is False
+
+
+@pytest.mark.parametrize(
+    "extra,environment",
+    [
+        ([], {"DYN_RELAY_CONNECTION_REVISION": ""}),
+        (["--watch-all"], {"DYN_RELAY_CONNECTION_REVISION": "connection"}),
+        (["--namespaces", "a"], {"DYN_RELAY_CONNECTION_REVISION": "connection"}),
+        (
+            [],
+            {
+                "DYN_RELAY_CONNECTION_REVISION": "connection",
+                "DYN_RELAY_WATCH_ALL": "true",
+            },
+        ),
+    ],
+)
+def test_sources_file_rejects_ambiguous_or_empty_guard_configuration(
+    extra: list[str], environment: dict[str, str]
+) -> None:
+    with pytest.raises(SystemExit):
+        parse_args(
+            ["--dc-id", "dc", "--sources-file", "/etc/relay/sources.json", *extra],
+            environment,
+        )
+
+
+def test_standalone_sources_file_needs_no_connection_guard() -> None:
+    config = parse_args(
+        ["--dc-id", "dc", "--sources-file", "/etc/relay/sources.json"], {}
+    )
+    assert config.connection_revision is None
+    assert config.watch_all is False
+    assert config.namespaces == ()
