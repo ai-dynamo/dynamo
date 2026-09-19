@@ -192,3 +192,12 @@ wire scenarios, 2 retained Mocker cases, 2 shared transport cases and 35 retaine
 vLLM socket cases. Zero failed or ignored. The common target explicitly enables
 `tonic-v14` to cover the implementation vLLM consumes, rather than relying on
 workspace feature unification.
+
+The final support audit added one distinct G5 case,
+`engine::unit_worker::draft_updates_require_both_native_capabilities`, covering
+absent metadata and every draft/transfer flag combination. It checks exact
+advertisement and rejection before native-client access. The focused case passed;
+the final isolated CPU container collected/executed **62 units (11 common, 51
+vLLM), zero failed/ignored**. With the unchanged 48 shared/retained wire cases
+above, the final second-PR suite accounts for 110 executed cases. No production
+change was required for this additional rejection check.
