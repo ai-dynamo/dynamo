@@ -40,12 +40,25 @@ def install_graceful_shutdown(
     shutdown_started = False
     shutdown_signum: int | None = None
     deferred_handlers_ran = False
+    shutdown_task: asyncio.Task[None] | None = None
 
     async def run_deferred_handlers() -> None:
         nonlocal deferred_handlers_ran
         if not shutdown_started or deferred_handlers_ran:
             return
         deferred_handlers_ran = True
+
+        # Join the shutdown sequence first. It is a detached task, and it sets
+        # `shutdown_event` *before* awaiting the runtime teardown — so the serve
+        # loop that called us has already returned and the loop is about to
+        # close. Without this the teardown is destroyed while still suspended.
+        if shutdown_task is not None:
+            try:
+                await asyncio.shield(shutdown_task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logging.exception("Graceful shutdown sequence failed")
 
         signums = (
             [shutdown_signum]
@@ -78,7 +91,8 @@ def install_graceful_shutdown(
 
     def _schedule_shutdown(signum: int, frame: Any | None) -> None:
         def _kick() -> None:
-            asyncio.create_task(_shutdown_sequence(signum, frame))
+            nonlocal shutdown_task
+            shutdown_task = asyncio.create_task(_shutdown_sequence(signum, frame))
 
         loop.call_soon_threadsafe(_kick)
 
