@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSink};
 use dynamo_runtime::component::{Component, Endpoint};
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
@@ -29,8 +30,62 @@ use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
 const FPM_TOPIC: &str = "forward-pass-metrics";
 const FPM_VERSION: i32 = 1;
-/// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL`.
+/// Matches Python `_FpmPublisherThread.HEARTBEAT_INTERVAL` by default.
 const IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+/// Prevents an override from effectively disabling the liveness signal.
+const MAX_IDLE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(300);
+
+fn parse_idle_heartbeat_interval(value: Result<String, std::env::VarError>) -> Duration {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return IDLE_HEARTBEAT_INTERVAL,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
+                %error,
+                "ignoring invalid FPM idle heartbeat interval"
+            );
+            return IDLE_HEARTBEAT_INTERVAL;
+        }
+    };
+
+    match value.trim().parse::<u64>() {
+        Ok(0) => {
+            tracing::warn!(
+                env = env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
+                "ignoring zero FPM idle heartbeat interval"
+            );
+            IDLE_HEARTBEAT_INTERVAL
+        }
+        Ok(milliseconds) => {
+            let interval = Duration::from_millis(milliseconds);
+            if interval <= MAX_IDLE_HEARTBEAT_INTERVAL {
+                interval
+            } else {
+                tracing::warn!(
+                    env = env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
+                    value,
+                    max_ms = MAX_IDLE_HEARTBEAT_INTERVAL.as_millis() as u64,
+                    "ignoring FPM idle heartbeat interval above the maximum"
+                );
+                IDLE_HEARTBEAT_INTERVAL
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
+                value,
+                %error,
+                "ignoring invalid FPM idle heartbeat interval"
+            );
+            IDLE_HEARTBEAT_INTERVAL
+        }
+    }
+}
+
+fn idle_heartbeat_interval() -> Duration {
+    parse_idle_heartbeat_interval(std::env::var(env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS))
+}
 
 fn report_fpm_trace_init(
     result: anyhow::Result<Option<crate::fpm_trace::FpmTrace>>,
@@ -384,6 +439,15 @@ impl FpmDirectPublisher {
         // Each task forwards active-pass snapshots and emits periodic idle
         // heartbeats (zeroed snapshot, wall_time=0.0) when the scheduler is
         // idle, matching the Python `_FpmPublisherThread` contract.
+        // All ranks use the value captured when the publisher starts.
+        let heartbeat_interval = idle_heartbeat_interval();
+        if heartbeat_interval != IDLE_HEARTBEAT_INTERVAL {
+            tracing::info!(
+                env = env_llm::DYN_FPM_HEARTBEAT_INTERVAL_MS,
+                interval_ms = heartbeat_interval.as_millis(),
+                "FPM idle heartbeat interval overridden"
+            );
+        }
         let mut fpm_publishers = Vec::with_capacity(dp_size as usize);
         for dp_rank in 0..dp_size {
             let (fpm_tx, mut fpm_rx) = mpsc::unbounded_channel();
@@ -395,7 +459,7 @@ impl FpmDirectPublisher {
 
             rt.spawn(async move {
                 let mut counter: i64 = 0;
-                let heartbeat_sleep = tokio::time::sleep(IDLE_HEARTBEAT_INTERVAL);
+                let heartbeat_sleep = tokio::time::sleep(heartbeat_interval);
                 tokio::pin!(heartbeat_sleep);
 
                 loop {
@@ -408,19 +472,19 @@ impl FpmDirectPublisher {
                                     // Active pass — reset the heartbeat timer.
                                     heartbeat_sleep
                                         .as_mut()
-                                        .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                                        .reset(tokio::time::Instant::now() + heartbeat_interval);
                                     snapshot
                                 }
                                 None => break,
                             }
                         }
                         _ = &mut heartbeat_sleep => {
-                            // No snapshot for IDLE_HEARTBEAT_INTERVAL — emit
+                            // No snapshot for a full heartbeat interval — emit
                             // zeroed idle heartbeat, then reset for the next
                             // interval.
                             heartbeat_sleep
                                 .as_mut()
-                                .reset(tokio::time::Instant::now() + IDLE_HEARTBEAT_INTERVAL);
+                                .reset(tokio::time::Instant::now() + heartbeat_interval);
                             ForwardPassSnapshot::default()
                         }
                     };
@@ -607,6 +671,47 @@ mod tests {
         assert_eq!(partial.dp_rank, 7);
     }
 
+    #[test]
+    fn test_idle_heartbeat_interval_env_override() {
+        assert_eq!(
+            parse_idle_heartbeat_interval(Err(std::env::VarError::NotPresent)),
+            IDLE_HEARTBEAT_INTERVAL
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("250".to_string())),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok(" 5000 ".to_string())),
+            Duration::from_millis(5000)
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("0".to_string())),
+            IDLE_HEARTBEAT_INTERVAL
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("soon".to_string())),
+            IDLE_HEARTBEAT_INTERVAL
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("-1".to_string())),
+            IDLE_HEARTBEAT_INTERVAL
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("300000".to_string())),
+            Duration::from_millis(300_000),
+            "five minutes is the largest accepted interval"
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok("300001".to_string())),
+            IDLE_HEARTBEAT_INTERVAL,
+            "one millisecond past the ceiling falls back"
+        );
+        assert_eq!(
+            parse_idle_heartbeat_interval(Ok(u64::MAX.to_string())),
+            IDLE_HEARTBEAT_INTERVAL
+        );
+    }
     /// Verify all 7 expected field names appear in scheduled_requests and
     /// 6 in queued_requests — matching the Python schema exactly.
     #[test]
