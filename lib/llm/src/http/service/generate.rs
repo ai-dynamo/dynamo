@@ -639,6 +639,7 @@ fn preprocessed_from_generate_with_tracker(
         );
     }
     let mm_routing_info = mm_routing.map(|projection| projection.info);
+    let shared_cache_eligible = request.passthrough.is_empty();
     let GenerateRequest {
         token_ids,
         cache_salt,
@@ -648,6 +649,7 @@ fn preprocessed_from_generate_with_tracker(
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
+        .shared_cache_eligible(shared_cache_eligible)
         .stop_conditions(stop_conditions)
         .sampling_options(sampling_options)
         .output_options(output_options)
@@ -1811,6 +1813,48 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn shared_cache_eligibility_is_captured_before_generate_projection() {
+        for (extra, expected) in [
+            (serde_json::json!({}), true),
+            (serde_json::json!({"extra_keys": ["opaque"]}), false),
+            (serde_json::json!({"prompt_embeds": "opaque"}), false),
+            (
+                serde_json::json!({"features": {"future_feature": true}}),
+                false,
+            ),
+        ] {
+            let mut raw = serde_json::json!({
+                "token_ids": [1, 2, 3, 4],
+                "sampling_params": {},
+                "cache_salt": "tenant-a",
+            });
+            raw.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let request = serde_json::from_value(raw).unwrap();
+            let preprocessed = preprocessed_from_generate(
+                request,
+                "test-model",
+                None,
+                "shared-cache-eligibility",
+                routing_metadata(4, false, Some("adapter")),
+            )
+            .unwrap();
+            assert_eq!(preprocessed.shared_cache_text_eligible(), expected);
+            assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2, 3, 4]);
+            assert_eq!(
+                preprocessed
+                    .routing
+                    .as_ref()
+                    .unwrap()
+                    .cache_namespace
+                    .as_deref(),
+                Some("tenant-a")
+            );
+        }
+    }
+
+    #[test]
     fn engine_fields_reach_envelope_with_resolved_id_and_cache_namespace() {
         let raw = serde_json::json!({
             "request_id": "req-forward",
@@ -2192,6 +2236,7 @@ pub(crate) mod tests {
             .expect("invalid routing metadata must not reject execution");
 
             assert!(preprocessed.mm_routing_info.is_none(), "{name}");
+            assert!(!preprocessed.shared_cache_text_eligible(), "{name}");
             assert_eq!(
                 preprocessed.token_ids.as_slice(),
                 expected_token_ids,

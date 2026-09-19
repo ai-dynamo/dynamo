@@ -36,7 +36,10 @@ use dynamo_runtime::{
 use crate::{
     kv_router::{
         KvEventSourceRequirement, KvRouter, SelectionPolicySource, router_endpoint_id,
-        shared_cache::HicacheSharedKvCache,
+        shared_cache::{
+            HicacheSharedKvCache,
+            vllm_mooncake_store::{MooncakeStoreCache, ValidatedContract},
+        },
     },
     local_model::runtime_config::{
         DisaggregatedEndpoint, ModelRuntimeConfig, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -60,6 +63,113 @@ use crate::{
     },
     worker_type::WorkerType,
 };
+
+#[cfg(test)]
+mod mooncake_tests;
+
+struct MooncakeContractWatch {
+    admitted: tokio::sync::watch::Receiver<Vec<dynamo_runtime::component::Instance>>,
+    configs: RuntimeConfigWatch,
+    block_size: u32,
+}
+
+impl MooncakeContractWatch {
+    fn passive_cache(self) -> (Arc<parking_lot::Mutex<Self>>, Arc<MooncakeStoreCache>) {
+        let watch = Arc::new(parking_lot::Mutex::new(self));
+        let pending_watch = Arc::clone(&watch);
+        let cache = Arc::new(MooncakeStoreCache::new(move || {
+            let Some(watch) = pending_watch.try_lock() else {
+                return true;
+            };
+            watch.admitted.has_changed().unwrap_or(true)
+                || watch.configs.has_changed().unwrap_or(true)
+        }));
+        (watch, cache)
+    }
+
+    fn revalidate(&mut self, cache: &MooncakeStoreCache) {
+        if self.admitted.has_changed().is_err() || self.configs.has_changed().is_err() {
+            cache.update_contract(None, HashSet::new());
+            return;
+        }
+        let admitted = self.admitted.borrow_and_update();
+        let configs = self.configs.borrow_and_update();
+        let result = validate_mooncake_members(
+            admitted.iter().map(|instance| instance.id()),
+            &configs,
+            self.block_size,
+        );
+        match result {
+            Ok((contract, sources)) => cache.update_contract(contract, sources),
+            Err(error) => {
+                tracing::warn!(%error, "Mooncake Store hints disabled for admitted workers");
+                cache.update_contract(None, HashSet::new());
+            }
+        }
+    }
+
+    fn spawn(
+        watch: Arc<parking_lot::Mutex<Self>>,
+        cache: Arc<MooncakeStoreCache>,
+        cancellation: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        let (mut admitted, mut configs) = {
+            let mut watch = watch.lock();
+            watch.revalidate(&cache);
+            (watch.admitted.clone(), watch.configs.clone())
+        };
+        tokio::spawn(async move {
+            loop {
+                let changed = tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    result = admitted.changed() => result,
+                    result = configs.changed() => result,
+                };
+                if changed.is_err() {
+                    break;
+                }
+                watch.lock().revalidate(&cache);
+            }
+            cache.update_contract(None, HashSet::new());
+        })
+    }
+}
+
+fn validate_mooncake_members(
+    admitted: impl IntoIterator<Item = WorkerId>,
+    configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+    block_size: u32,
+) -> anyhow::Result<(Option<ValidatedContract>, HashSet<WorkerWithDpRank>)> {
+    let mut contract = None;
+    let mut sources = HashSet::new();
+    for worker_id in admitted {
+        let runtime = configs.get(&worker_id).ok_or_else(|| {
+            anyhow::anyhow!("admitted worker {worker_id} has no runtime configuration")
+        })?;
+        let candidate = ValidatedContract::from_runtime(runtime)?.ok_or_else(|| {
+            anyhow::anyhow!("admitted worker {worker_id} has no supported Mooncake Store contract")
+        })?;
+        anyhow::ensure!(
+            candidate.main_event_block_size() == block_size,
+            "admitted worker {worker_id} has an incompatible main-event block size"
+        );
+        if let Some(existing) = &contract {
+            anyhow::ensure!(
+                existing == &candidate,
+                "admitted worker {worker_id} has an incompatible Mooncake Store contract"
+            );
+        } else {
+            contract = Some(candidate);
+        }
+        for rank in runtime
+            .data_parallel_rank_range()
+            .map_err(anyhow::Error::msg)?
+        {
+            sources.insert(WorkerWithDpRank::new(worker_id, rank));
+        }
+    }
+    Ok((contract, sources))
+}
 
 struct LoraEndpointDomain {
     routing_table: LoraRoutingTable,
@@ -2289,6 +2399,12 @@ impl ModelManager {
         let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
         let effective_kv_router_config = kv_router_config.clone().unwrap_or_default();
+        effective_kv_router_config
+            .validate()
+            .map_err(anyhow::Error::msg)?;
+        let kv_event_source_requirement =
+            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
+        let mut mooncake = None;
         let worker_type = worker_role.unwrap_or(WorkerType::Aggregated);
         // One construction for the router's partition: the probed instance is
         // the one `KvRouter` hands to the partition scheduler.
@@ -2318,13 +2434,33 @@ impl ModelManager {
                         self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
                     ))
                 }
+                dynamo_kv_router::SharedCacheType::MooncakeStore
+                    if kv_event_source_requirement
+                        .should_subscribe(&effective_kv_router_config)
+                        && !is_eagle =>
+                {
+                    let endpoint = std::env::var("DYN_MOONCAKE_KV_EVENTS_ENDPOINT")
+                        .ok()
+                        .filter(|endpoint| !endpoint.trim().is_empty())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "mooncake-store requires DYN_MOONCAKE_KV_EVENTS_ENDPOINT"
+                            )
+                        })?;
+                    let (watch, cache) = MooncakeContractWatch {
+                        admitted: client.instance_source.as_ref().clone(),
+                        configs: workers_with_configs.clone(),
+                        block_size: kv_cache_block_size,
+                    }
+                    .passive_cache();
+                    mooncake = Some((watch, Arc::clone(&cache), endpoint));
+                    Some(cache)
+                }
+                dynamo_kv_router::SharedCacheType::MooncakeStore => None,
             }
         } else {
             None
         };
-
-        let kv_event_source_requirement =
-            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
         let cache_required = wants_cache
             || effective_kv_router_config.serve_indexer
             || effective_kv_router_config.enable_session_prefix_index
@@ -2364,6 +2500,13 @@ impl ModelManager {
         )
         .await?;
         chooser.set_endpoint_registration(registration);
+        if let Some((watch, cache, endpoint)) = mooncake {
+            let cancellation = chooser.cancellation_token();
+            let contract_task =
+                MooncakeContractWatch::spawn(watch, Arc::clone(&cache), cancellation.clone());
+            let subscriber_task = cache.spawn_subscriber(endpoint, cancellation);
+            chooser.set_shared_cache_tasks([contract_task, subscriber_task]);
+        }
 
         // F2: feed the LoRA LoadEstimator in KV mode. Start exactly one active-sequence
         // subscription per decode endpoint. WORKER_TYPE_DECODE is the routing path for BOTH

@@ -1453,6 +1453,7 @@ mod tests {
                 primary: indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
+                shared_cache: None,
                 primary_records_routing_decisions: false,
                 session_updates: None,
             },
@@ -1511,6 +1512,7 @@ mod tests {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(event_id),
                         tokens_hash: LocalBlockHash(event_id),
@@ -1927,6 +1929,7 @@ mod tests {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(event_id),
                         tokens_hash: LocalBlockHash(event_id),

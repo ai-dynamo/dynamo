@@ -411,7 +411,16 @@ def update_engine_config_with_dynamo(
                     "worker_extension_cls=%s",
                     worker_extension_cls,
                 )
-            elif str(existing_ext) != worker_extension_cls:
+            elif existing_ext == (
+                "dynamo.vllm.mooncake_store_runtime.MooncakeStoreWorkerExtension"
+            ):
+                defaults[
+                    "worker_extension_cls"
+                ] = "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension"
+            elif existing_ext not in (
+                worker_extension_cls,
+                "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension",
+            ):
                 raise ValueError(
                     f"DYN_FPM_GC_POLICY requires "
                     f"worker_extension_cls='{worker_extension_cls}' so model "

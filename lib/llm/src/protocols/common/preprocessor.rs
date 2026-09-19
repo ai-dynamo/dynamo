@@ -319,6 +319,11 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) staged_kv_cleanup: bool,
 
+    /// Positive frontend-local provenance, recorded before opaque input fields are discarded.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) shared_cache_eligible: bool,
+
     /// Prompt tokens shared by prefill and decode request clones.
     ///
     /// Disaggregated serving runs those requests concurrently. Keeping the
@@ -527,6 +532,17 @@ where
 }
 
 impl PreprocessedRequest {
+    pub(crate) fn shared_cache_text_eligible(&self) -> bool {
+        self.shared_cache_eligible
+            && self.prompt_embeds.is_none()
+            && self.multi_modal_data.is_none()
+            && self.multi_modal_uuids.is_none()
+            && self.mm_routing_info.is_none()
+            && self.encoder_result.is_none()
+            && self.mm_processor_kwargs.is_none()
+            && self.media_io_kwargs.is_none()
+    }
+
     pub fn has_annotation(&self, annotation: &str) -> bool {
         self.annotations.contains(&annotation.to_string())
     }
@@ -627,6 +643,50 @@ mod tests {
             .output_options(OutputOptions::default())
             .build()
             .expect("valid request")
+    }
+
+    #[test]
+    fn shared_cache_eligibility_is_positive_and_frontend_local() {
+        let mut request = request_with_tokens(vec![1, 2, 3]);
+        assert!(!request.shared_cache_text_eligible());
+        request.shared_cache_eligible = true;
+        assert!(request.shared_cache_text_eligible());
+        assert!(request.clone().shared_cache_text_eligible());
+
+        let mut encoded = serde_json::to_value(&request).unwrap();
+        assert!(encoded.get("shared_cache_eligible").is_none());
+        encoded["shared_cache_eligible"] = serde_json::json!(true);
+        let decoded: PreprocessedRequest = serde_json::from_value(encoded).unwrap();
+        assert!(!decoded.shared_cache_text_eligible());
+    }
+
+    #[test]
+    fn shared_cache_eligibility_rejects_non_text_without_changing_tokens() {
+        let mut text = request_with_tokens(vec![1, 2, 3]);
+        text.shared_cache_eligible = true;
+        let mut unsupported = Vec::new();
+        let mut request = text.clone();
+        request.prompt_embeds = Some("embeddings".into());
+        unsupported.push(request);
+        let mut request = text.clone();
+        request.multi_modal_data = Some(Default::default());
+        unsupported.push(request);
+        let mut request = text.clone();
+        request.multi_modal_uuids = Some(Default::default());
+        unsupported.push(request);
+        let mut request = text.clone();
+        request.encoder_result = Some(serde_json::json!({}));
+        unsupported.push(request);
+        let mut request = text.clone();
+        request.mm_processor_kwargs = Some(serde_json::json!({}));
+        unsupported.push(request);
+        let mut request = text.clone();
+        request.media_io_kwargs = Some(serde_json::json!({}));
+        unsupported.push(request);
+        for request in unsupported {
+            assert!(!request.shared_cache_text_eligible());
+            assert_eq!(request.block_mm_routing_info().0, text.token_ids.as_slice());
+        }
     }
 
     #[test]

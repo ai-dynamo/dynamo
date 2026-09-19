@@ -58,8 +58,8 @@ pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingParti
 #[allow(deprecated)]
 pub use indexer::{
     AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
-    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
-    ThreadPoolIndexer,
+    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedCacheQuery, SharedKvCache,
+    SyncIndexer, ThreadPoolIndexer,
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{

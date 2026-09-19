@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import pytest
 
 from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
-from dynamo.llm import ModelInput, ModelType, WorkerType
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 from dynamo.vllm.capacity import get_metrics_model_name, get_spec_decode_runtime_data
 from dynamo.vllm.engine_generate import (
     VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
@@ -156,3 +157,88 @@ def test_spec_decode_runtime_data_ignores_invalid_nextn(speculative_config):
     vllm_config = SimpleNamespace(speculative_config=None)
 
     assert get_spec_decode_runtime_data(config, vllm_config) is None
+
+
+@pytest.mark.parametrize("reply_state", ["agreed", "missing", "unsupported"])
+def test_mooncake_optional_json_metadata_preserves_serving_capabilities(
+    monkeypatch, reply_state
+):
+    from dynamo.vllm import mooncake_store_runtime as runtime
+    from dynamo.vllm.capacity import publish_vllm_token_budget
+
+    metadata = ModelRuntimeConfig()
+    publish_vllm_token_budget(metadata, 4096)
+    assert publish_engine_generate_capability(
+        metadata, ModelInput.Tokens, ModelType.Chat, WorkerType.Aggregated, False
+    )
+    descriptor = {
+        "schema_version": 1,
+        "adapter": "vllm-1085b644",
+        "vllm_revision": runtime.VLLM_REVISION,
+        "hash": {
+            "algorithm": "sha256",
+            "digest_encoding": "hex",
+            "gpu_event_hash": "low64",
+            "seed_policy": "pythonhashseed-0",
+            "key_separator": "@",
+        },
+        "input": {"text_only": True, "normalized_namespaces": True, "lora": True},
+        "main_event_group": 0,
+        "main_event_block_size": 16,
+        "gpu_to_store_group": [0],
+        "coordinator": {
+            "lcm_block_size": 16,
+            "speculative": False,
+            "drop_blocks": False,
+            "partial_hash_hits": False,
+        },
+        "groups": [
+            {
+                "group_id": 0,
+                "kind": "full_attention",
+                "spec": "FullAttentionSpec",
+                "manager": "FullAttentionManager",
+                "block_size": 16,
+                "hash_block_size": 16,
+                "key_prefixes": ["deployment@model@group:0"],
+                "sliding_window": None,
+                "mamba_cache_mode": None,
+            }
+        ],
+    }
+    replies = [{"rank": 0, "dp_rank": 0, "descriptor": descriptor}]
+    if reply_state == "missing":
+        replies = []
+    elif reply_state == "unsupported":
+        replies = [{"unsupported": "unknown revision"}]
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            worker_extension_cls=runtime.WORKER_EXTENSION,
+            world_size=1,
+        )
+    )
+    monkeypatch.setattr(runtime, "_verify_pinned_sources", lambda: None)
+    monkeypatch.setattr(runtime, "_validate_input_config", lambda _: None)
+    engine = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+    published = asyncio.run(
+        runtime.publish_mooncake_store_runtime(
+            metadata,
+            engine,
+            config,
+            dp_range=(0, 1),
+            event_span=16,
+        )
+    )
+    assert published is (reply_state == "agreed")
+    value = metadata.get_engine_specific(runtime.RUNTIME_KEY)
+    if published:
+        assert json.loads(value) == descriptor
+    else:
+        assert value is None
+    assert json.loads(metadata.get_engine_specific(VLLM_GENERATE_CAPABILITY)) is True
+    assert (
+        json.loads(metadata.get_engine_specific(TOKEN_BUDGET_RUNTIME_KEY))[
+            "combined_limit"
+        ]
+        == 4096
+    )
