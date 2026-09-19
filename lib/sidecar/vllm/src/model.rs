@@ -31,6 +31,7 @@ pub(crate) struct DiscoveredModel {
     identity: ModelIdentity,
     server: pb::ServerInfo,
     data_parallel_range: Range<u32>,
+    kv_cache_block_size: Option<u32>,
 }
 
 impl DiscoveredModel {
@@ -53,6 +54,13 @@ impl DiscoveredModel {
         } else {
             0..1
         };
+        let kv_cache_block_size = server
+            .effective_attention_block_size
+            .filter(|&size| size != 0)
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| client::protocol_error("effective attention block size exceeds u32"))?
+            .or_else(|| nonzero(server.kv_block_size));
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -80,6 +88,7 @@ impl DiscoveredModel {
             identity,
             server,
             data_parallel_range,
+            kv_cache_block_size,
         })
     }
 
@@ -183,7 +192,7 @@ impl DiscoveredModel {
             .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: nonzero(self.server.kv_block_size),
+                kv_cache_block_size: self.kv_cache_block_size,
                 total_kv_blocks: self.total_kv_blocks_per_rank(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
@@ -305,31 +314,9 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::local_data_parallel_range;
+#[path = "../../testkit/tests/unit/config/ranks.rs"]
+mod unit_ranks;
 
-    // Regression: ambiguous, out-of-bounds, or overflowing ownership can advertise
-    // unreachable DP ranks; validate the metadata before worker registration.
-    #[test]
-    fn local_dp_ownership_requires_a_valid_unambiguous_range() {
-        for (global, start, local, expected) in [(2, 0, 0, 0..2), (8, 0, 4, 0..4), (8, 4, 4, 4..8)]
-        {
-            assert_eq!(
-                local_data_parallel_range(global, start, local).unwrap(),
-                expected
-            );
-        }
-        for (global, start, local) in [
-            (0, 0, 0),
-            (8, 4, 0),
-            (8, 0, 9),
-            (8, 4, 5),
-            (u32::MAX, u32::MAX - 1, 4),
-        ] {
-            assert!(
-                local_data_parallel_range(global, start, local).is_err(),
-                "invalid range: {start} + {local} of {global}"
-            );
-        }
-    }
-}
+#[cfg(test)]
+#[path = "../../testkit/tests/unit/config/vllm.rs"]
+mod unit_config;

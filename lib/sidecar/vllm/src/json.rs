@@ -112,27 +112,5 @@ fn value_to_json(value: prost_types::Value) -> Result<serde_json::Value, DynamoE
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::{json_to_struct, struct_to_json};
-
-    #[test]
-    fn nested_payload_round_trips_without_shape_changes() {
-        let payload = json!({
-            "string": "value",
-            "bool": true,
-            "number": 42,
-            "null": null,
-            "list": [1, "two", false, {"nested": 3.5}],
-        });
-        let encoded = json_to_struct(payload.clone()).expect("encode");
-        assert_eq!(struct_to_json(encoded).expect("decode"), payload);
-    }
-
-    #[test]
-    fn rejects_non_objects_and_inexact_integers() {
-        assert!(json_to_struct(json!([1, 2])).is_err());
-        assert!(json_to_struct(json!({"value": 9_007_199_254_740_993_u64})).is_err());
-    }
-}
+#[path = "../../testkit/tests/unit/requests/json.rs"]
+mod unit_json;

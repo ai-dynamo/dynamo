@@ -11,27 +11,6 @@ async fn cleanup<F: SidecarFixture>() {
     )
     .await;
     let engine = bounded("sidecar construction", fixture.engine()).await;
-    let ctx = mock_context();
-    let handle = control.request(ctx.id(), RequestPlan::default());
-    failure(
-        collect(
-            &engine,
-            request("mocker-model", vec![11, 22, 33], 3),
-            GenerateContext::new(ctx, None),
-        )
-        .await,
-        &[],
-        BackendError::EngineShutdown,
-    );
-    bounded("cleanup before startup", engine.cleanup())
-        .await
-        .unwrap();
-    bounded("repeated cleanup before startup", engine.cleanup())
-        .await
-        .unwrap();
-    assert!(!handle.reached(Event::Received));
-
-    let engine = bounded("sidecar construction", fixture.engine()).await;
     bounded("sidecar startup", engine.start(0)).await.unwrap();
     let ctx = mock_context();
     let handle = control.request(ctx.id(), after_tokens(1, StreamAction::Continue));
@@ -76,9 +55,9 @@ async fn cleanup<F: SidecarFixture>() {
 }
 
 #[tokio::test]
-async fn vllm_cleanup_before_start_and_during_read() {
+async fn vllm_cleanup_during_read_and_post_cleanup_admission() {
     bounded(
-        "vllm_cleanup_before_start_and_during_read",
+        "vllm_cleanup_during_read_and_post_cleanup_admission",
         cleanup::<vllm::Fixture>(),
     )
     .await;

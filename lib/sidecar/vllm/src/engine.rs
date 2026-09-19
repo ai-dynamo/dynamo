@@ -101,6 +101,20 @@ impl VllmSidecarEngine {
             ));
         }
 
+        let transport = args.sidecar.grpc.config();
+        let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
+        eprintln!(
+            "Discovering vLLM model metadata from {}; startup deadline: {:?}",
+            args.sidecar.grpc_endpoint, transport.startup_deadline
+        );
+        let model = bootstrap_discover(&args.sidecar.grpc_endpoint, transport, bootstrap_deadline)?;
+        Self::from_discovered(args, model)
+    }
+
+    fn from_discovered(
+        args: Args,
+        model: DiscoveredModel,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
         let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
@@ -115,12 +129,6 @@ impl VllmSidecarEngine {
             })
             .transpose()?;
         let transport = args.sidecar.grpc.config();
-        let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
-        eprintln!(
-            "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
-            transport.startup_deadline
-        );
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
         let mode = args.sidecar.common.disaggregation_mode;
         if mode.is_encode() && !model.supports_multimodal {
             return Err(client::invalid_argument(format!(
@@ -1283,3 +1291,7 @@ fn bootstrap_discover(
 fn is_hot_swap_requested() -> bool {
     dynamo_runtime::config::env_is_truthy("DYN_LORA_HOTSWAP_ENABLED")
 }
+
+#[cfg(test)]
+#[path = "../../testkit/tests/unit/config/worker.rs"]
+mod unit_worker;
