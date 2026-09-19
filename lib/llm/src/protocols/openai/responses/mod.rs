@@ -130,9 +130,7 @@ pub(crate) fn patch_response_for_spec(
 }
 
 fn patch_response_usage_for_spec(usage: &mut serde_json::Map<String, serde_json::Value>) {
-    if let Some(serde_json::Value::Object(input_details)) =
-        usage.get_mut("input_tokens_details")
-    {
+    if let Some(serde_json::Value::Object(input_details)) = usage.get_mut("input_tokens_details") {
         input_details
             .entry("cache_write_tokens")
             .or_insert(serde_json::json!(0));
@@ -3927,10 +3925,7 @@ mod tests {
             }
         });
         patch_response_usage_for_spec(populated.as_object_mut().unwrap());
-        assert_eq!(
-            populated["input_tokens_details"]["cache_write_tokens"],
-            7
-        );
+        assert_eq!(populated["input_tokens_details"]["cache_write_tokens"], 7);
     }
 
     /// Validate the JSON wire shape of NvResponse matches the OpenResponses
