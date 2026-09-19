@@ -99,6 +99,17 @@ const LEASE_STATE_LEASED: u32 = 1;
 const LEASE_STATE_SEALED: u32 = 2;
 const LEASE_STATE_RESERVED: u32 = 3;
 const LEASE_STATE_TRANSITION: u32 = 4;
+// An owner-retained allocator page whose last GPU access is complete. IDLE is
+// excluded from the shared free count, but a fenced successor may return a
+// foreign IDLE page to FREE without waiting for whole-context quiescence.
+const LEASE_STATE_IDLE: u32 = 5;
+// A predecessor page that may still be referenced by already-submitted GPU
+// work. Only an explicit GPU-quiescence proof may reclaim this state.
+const LEASE_STATE_QUARANTINED: u32 = 6;
+// A directory-protected SEALED page whose writer died while its record was in
+// TRANSITION. Its bytes and generation must not be exposed until quiescence,
+// but unlike an unprotected quarantine it must be restored rather than freed.
+const LEASE_STATE_QUARANTINED_SEALED: u32 = 7;
 // Preserve the 16-byte record ABI by packing the reader count above the
 // three-bit base state. A writer may leave SEALED only when the packed count is
 // zero. Reader admission and writer admission therefore race on one atomic
@@ -1011,6 +1022,170 @@ fn kv_lease_seal(
     }
 }
 
+/// Mark exact owner leases idle after their final GPU access has completed.
+///
+/// IDLE remains owned and unavailable to other writers during steady state,
+/// while making crash recovery distinguish safe allocator headroom from pages
+/// that may still have predecessor GPU work in flight.
+#[pyfunction]
+#[pyo3(signature = (buf, block_ids, generations, owner_hash = 0))]
+fn kv_lease_park_idle(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    block_ids: Vec<u32>,
+    generations: Vec<u32>,
+    owner_hash: u64,
+) -> PyResult<u32> {
+    let _ = py;
+    if block_ids.len() != generations.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "block_ids and generations length mismatch",
+        ));
+    }
+    let mut unique_ids = HashSet::with_capacity(block_ids.len());
+    if block_ids
+        .iter()
+        .any(|block_id| !unique_ids.insert(*block_id))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "duplicate block_ids are not allowed",
+        ));
+    }
+    let ptr = buf.buf_ptr() as *mut u8;
+    let buf_len = buf.len_bytes();
+    unsafe {
+        let total_blocks = validate_lease_buffer(ptr, buf_len)?;
+        let _mutation = enter_lease_mutation(ptr)?;
+        let mut locked = Vec::with_capacity(block_ids.len());
+        for (block_id, generation) in block_ids.iter().copied().zip(generations) {
+            if block_id >= total_blocks {
+                for id in locked.iter().copied() {
+                    let state_ptr = ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*state_ptr).store(LEASE_STATE_LEASED, Ordering::Release);
+                }
+                return Ok(0);
+            }
+            let base = lease_record_off(block_id);
+            let generation_ptr = ptr.add(base + LR_GENERATION) as *const AtomicU32;
+            let owner_ptr = ptr.add(base + LR_OWNER_HASH) as *const AtomicU64;
+            if (*generation_ptr).load(Ordering::Acquire) != generation
+                || (*owner_ptr).load(Ordering::Acquire) != owner_hash
+            {
+                for id in locked.iter().copied() {
+                    let state_ptr = ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*state_ptr).store(LEASE_STATE_LEASED, Ordering::Release);
+                }
+                return Ok(0);
+            }
+            let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
+            if (*state_ptr)
+                .compare_exchange(
+                    LEASE_STATE_LEASED,
+                    LEASE_STATE_TRANSITION,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                locked.push(block_id);
+            } else {
+                for id in locked.iter().copied() {
+                    let old_state_ptr =
+                        ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*old_state_ptr).store(LEASE_STATE_LEASED, Ordering::Release);
+                }
+                return Ok(0);
+            }
+        }
+        let parked = locked.len() as u32;
+        for block_id in locked {
+            let state_ptr = ptr.add(lease_record_off(block_id) + LR_STATE) as *const AtomicU32;
+            (*state_ptr).store(LEASE_STATE_IDLE, Ordering::Release);
+        }
+        Ok(parked)
+    }
+}
+
+/// Reactivate exact owner IDLE leases before exposing them to GPU writers.
+#[pyfunction]
+#[pyo3(signature = (buf, block_ids, generations, owner_hash = 0))]
+fn kv_lease_activate_idle(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    block_ids: Vec<u32>,
+    generations: Vec<u32>,
+    owner_hash: u64,
+) -> PyResult<u32> {
+    let _ = py;
+    if block_ids.len() != generations.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "block_ids and generations length mismatch",
+        ));
+    }
+    let mut unique_ids = HashSet::with_capacity(block_ids.len());
+    if block_ids
+        .iter()
+        .any(|block_id| !unique_ids.insert(*block_id))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "duplicate block_ids are not allowed",
+        ));
+    }
+    let ptr = buf.buf_ptr() as *mut u8;
+    let buf_len = buf.len_bytes();
+    unsafe {
+        let total_blocks = validate_lease_buffer(ptr, buf_len)?;
+        let _mutation = enter_lease_mutation(ptr)?;
+        let mut locked = Vec::with_capacity(block_ids.len());
+        for (block_id, generation) in block_ids.iter().copied().zip(generations) {
+            if block_id >= total_blocks {
+                for id in locked.iter().copied() {
+                    let state_ptr = ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*state_ptr).store(LEASE_STATE_IDLE, Ordering::Release);
+                }
+                return Ok(0);
+            }
+            let base = lease_record_off(block_id);
+            let generation_ptr = ptr.add(base + LR_GENERATION) as *const AtomicU32;
+            let owner_ptr = ptr.add(base + LR_OWNER_HASH) as *const AtomicU64;
+            if (*generation_ptr).load(Ordering::Acquire) != generation
+                || (*owner_ptr).load(Ordering::Acquire) != owner_hash
+            {
+                for id in locked.iter().copied() {
+                    let state_ptr = ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*state_ptr).store(LEASE_STATE_IDLE, Ordering::Release);
+                }
+                return Ok(0);
+            }
+            let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
+            if (*state_ptr)
+                .compare_exchange(
+                    LEASE_STATE_IDLE,
+                    LEASE_STATE_TRANSITION,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                locked.push(block_id);
+            } else {
+                for id in locked.iter().copied() {
+                    let old_state_ptr =
+                        ptr.add(lease_record_off(id) + LR_STATE) as *const AtomicU32;
+                    (*old_state_ptr).store(LEASE_STATE_IDLE, Ordering::Release);
+                }
+                return Ok(0);
+            }
+        }
+        let activated = locked.len() as u32;
+        for block_id in locked {
+            let state_ptr = ptr.add(lease_record_off(block_id) + LR_STATE) as *const AtomicU32;
+            (*state_ptr).store(LEASE_STATE_LEASED, Ordering::Release);
+        }
+        Ok(activated)
+    }
+}
+
 /// Atomically pin exact SEALED generations for read-only use.
 ///
 /// The operation is all-or-nothing. A successful pin prevents release,
@@ -1133,7 +1308,10 @@ fn kv_lease_unpin_read(
         ));
     }
     let mut unique_ids = HashSet::with_capacity(block_ids.len());
-    if block_ids.iter().any(|block_id| !unique_ids.insert(*block_id)) {
+    if block_ids
+        .iter()
+        .any(|block_id| !unique_ids.insert(*block_id))
+    {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "duplicate block_ids are not allowed",
         ));
@@ -1149,6 +1327,58 @@ fn kv_lease_unpin_read(
             .filter(|(block_id, _generation)| *block_id < total_blocks)
             .collect();
         Ok(release_read_pins(ptr, &pins))
+    }
+}
+
+/// Return whether every exact generation still names recoverable immutable KV.
+///
+/// SEALED includes active reader counts. QUARANTINED_SEALED is not readable
+/// yet, but its directory record must survive until phase-two quiescence turns
+/// it back into SEALED. Other states are mutable, reusable, or stale.
+#[pyfunction]
+#[pyo3(signature = (buf, block_ids, generations))]
+fn kv_lease_exact_recoverable(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    block_ids: Vec<u32>,
+    generations: Vec<u32>,
+) -> PyResult<bool> {
+    let _ = py;
+    if block_ids.len() != generations.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "block_ids and generations length mismatch",
+        ));
+    }
+    let mut unique_ids = HashSet::with_capacity(block_ids.len());
+    if block_ids
+        .iter()
+        .any(|block_id| !unique_ids.insert(*block_id))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "duplicate block_ids are not allowed",
+        ));
+    }
+    let ptr = buf.buf_ptr() as *mut u8;
+    let buf_len = buf.len_bytes();
+    unsafe {
+        let total_blocks = validate_lease_buffer(ptr, buf_len)?;
+        let _mutation = enter_lease_mutation(ptr)?;
+        for (block_id, generation) in block_ids.into_iter().zip(generations) {
+            if block_id >= total_blocks {
+                return Ok(false);
+            }
+            let base = lease_record_off(block_id);
+            let generation_ptr = ptr.add(base + LR_GENERATION) as *const AtomicU32;
+            if (*generation_ptr).load(Ordering::Acquire) != generation {
+                return Ok(false);
+            }
+            let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
+            let kind = lease_state_kind((*state_ptr).load(Ordering::Acquire));
+            if kind != LEASE_STATE_SEALED && kind != LEASE_STATE_QUARANTINED_SEALED {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -1290,7 +1520,10 @@ fn kv_lease_release(
             }
             let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
             let mut state = (*state_ptr).load(Ordering::Acquire);
-            while state == LEASE_STATE_LEASED || state == LEASE_STATE_SEALED {
+            while state == LEASE_STATE_LEASED
+                || state == LEASE_STATE_SEALED
+                || state == LEASE_STATE_IDLE
+            {
                 match (*state_ptr).compare_exchange(
                     state,
                     LEASE_STATE_TRANSITION,
@@ -1448,6 +1681,168 @@ fn kv_lease_reclaim_foreign_except(
     }
 }
 
+/// Classify foreign records without reusing pages that may have GPU work.
+///
+/// Foreign IDLE pages are safe to return to FREE because their owner published
+/// IDLE only after GPU completion. Exact protected SEALED pages remain readable
+/// with their reader counts intact. Every other foreign mutable/ambiguous page
+/// becomes QUARANTINED and is excluded from allocation until explicit
+/// quiescence-driven reclaim.
+unsafe fn quarantine_foreign_lease_blocks(
+    ptr: *mut u8,
+    buf_len: usize,
+    owner_hash: u64,
+    protected_blocks: &[u32],
+) -> PyResult<(u32, u32)> {
+    let mut released_idle = 0u32;
+    let mut quarantined = 0u32;
+    let total_blocks = validate_lease_buffer(ptr, buf_len)?;
+    let _recovery = enter_lease_recovery(ptr)?;
+    let free_count_ptr = ptr.add(L_FREE_COUNT) as *const AtomicU64;
+    for block_id in 0..total_blocks {
+        let base = lease_record_off(block_id);
+        let owner_ptr = ptr.add(base + LR_OWNER_HASH) as *const AtomicU64;
+        let observed_owner = (*owner_ptr).load(Ordering::Acquire);
+        if observed_owner == owner_hash {
+            continue;
+        }
+        let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
+        let state = (*state_ptr).load(Ordering::Acquire);
+        let kind = lease_state_kind(state);
+        if kind == LEASE_STATE_TRANSITION {
+            if protected_blocks.binary_search(&block_id).is_ok() {
+                // A protected transition may be an interrupted SEALED writer
+                // mutation. Preserve the bytes, but keep them unreadable until
+                // phase two proves that predecessor GPU work is quiescent.
+                (*owner_ptr).store(owner_hash, Ordering::Release);
+                (*state_ptr).store(LEASE_STATE_QUARANTINED_SEALED, Ordering::Release);
+                quarantined = quarantined.wrapping_add(1);
+            } else if observed_owner == 0 {
+                // Both owner-zero transition windows are safe to free: an
+                // acquire has not published an owner yet, while a release has
+                // already cleared it after completing the writer's work.
+                (*state_ptr).store(LEASE_STATE_FREE, Ordering::Release);
+                released_idle = released_idle.wrapping_add(1);
+            } else {
+                (*owner_ptr).store(owner_hash, Ordering::Release);
+                (*state_ptr).store(LEASE_STATE_QUARANTINED, Ordering::Release);
+                quarantined = quarantined.wrapping_add(1);
+            }
+            continue;
+        }
+        if observed_owner == 0 {
+            continue;
+        }
+        if kind == LEASE_STATE_IDLE {
+            (*owner_ptr).store(0, Ordering::Release);
+            (*state_ptr).store(LEASE_STATE_FREE, Ordering::Release);
+            released_idle = released_idle.wrapping_add(1);
+            continue;
+        }
+        if protected_blocks.binary_search(&block_id).is_ok() && kind == LEASE_STATE_SEALED {
+            if lease_reader_count(state) == 0 {
+                // A completed immutable generation with no in-flight readers
+                // is safe to expose immediately.
+                continue;
+            }
+            // Reader claims mean predecessor GPU reads may still be queued.
+            // Keep the exact generation but make it unreadable until phase
+            // two, rather than later clearing arbitrary foreign SEALED counts.
+            (*owner_ptr).store(owner_hash, Ordering::Release);
+            (*state_ptr).store(LEASE_STATE_QUARANTINED_SEALED, Ordering::Release);
+            quarantined = quarantined.wrapping_add(1);
+            continue;
+        }
+        if kind == LEASE_STATE_LEASED || kind == LEASE_STATE_SEALED {
+            (*owner_ptr).store(owner_hash, Ordering::Release);
+            (*state_ptr).store(LEASE_STATE_QUARANTINED, Ordering::Release);
+            quarantined = quarantined.wrapping_add(1);
+        }
+    }
+    let mut exact_free = 0u64;
+    for block_id in 0..total_blocks {
+        let state_ptr = ptr.add(lease_record_off(block_id) + LR_STATE) as *const AtomicU32;
+        if (*state_ptr).load(Ordering::Acquire) == LEASE_STATE_FREE {
+            exact_free += 1;
+        }
+    }
+    (*free_count_ptr).store(exact_free, Ordering::Release);
+    Ok((released_idle, quarantined))
+}
+
+#[pyfunction]
+#[pyo3(signature = (buf, protected_blocks, owner_hash = 0))]
+fn kv_lease_quarantine_foreign(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    mut protected_blocks: Vec<u32>,
+    owner_hash: u64,
+) -> PyResult<(u32, u32)> {
+    let _ = py;
+    protected_blocks.sort_unstable();
+    protected_blocks.dedup();
+    unsafe {
+        quarantine_foreign_lease_blocks(
+            buf.buf_ptr() as *mut u8,
+            buf.len_bytes(),
+            owner_hash,
+            &protected_blocks,
+        )
+    }
+}
+
+/// Reclaim quarantine created by this recovery owner after external proof.
+#[pyfunction]
+#[pyo3(signature = (buf, owner_hash = 0))]
+fn kv_lease_reclaim_quarantined(
+    py: Python<'_>,
+    buf: PyBuffer<u8>,
+    owner_hash: u64,
+) -> PyResult<u32> {
+    let _ = py;
+    let ptr = buf.buf_ptr() as *mut u8;
+    let buf_len = buf.len_bytes();
+    unsafe {
+        let total_blocks = validate_lease_buffer(ptr, buf_len)?;
+        let _recovery = enter_lease_recovery(ptr)?;
+        let mut reclaimed = 0u32;
+        for block_id in 0..total_blocks {
+            let base = lease_record_off(block_id);
+            let owner_ptr = ptr.add(base + LR_OWNER_HASH) as *const AtomicU64;
+            let observed_owner = (*owner_ptr).load(Ordering::Acquire);
+            if observed_owner != owner_hash {
+                continue;
+            }
+            let state_ptr = ptr.add(base + LR_STATE) as *const AtomicU32;
+            let state = (*state_ptr).load(Ordering::Acquire);
+            match lease_state_kind(state) {
+                LEASE_STATE_QUARANTINED => {
+                    (*owner_ptr).store(0, Ordering::Release);
+                    (*state_ptr).store(LEASE_STATE_FREE, Ordering::Release);
+                    reclaimed = reclaimed.wrapping_add(1);
+                }
+                LEASE_STATE_QUARANTINED_SEALED => {
+                    // The directory still names this exact block generation.
+                    // Quiescence makes the interrupted writer harmless, so
+                    // restore it to readable SEALED rather than freeing it.
+                    (*state_ptr).store(LEASE_STATE_SEALED, Ordering::Release);
+                }
+                _ => {}
+            }
+        }
+        let free_count_ptr = ptr.add(L_FREE_COUNT) as *const AtomicU64;
+        let mut exact_free = 0u64;
+        for block_id in 0..total_blocks {
+            let state_ptr = ptr.add(lease_record_off(block_id) + LR_STATE) as *const AtomicU32;
+            if (*state_ptr).load(Ordering::Acquire) == LEASE_STATE_FREE {
+                exact_free += 1;
+            }
+        }
+        (*free_count_ptr).store(exact_free, Ordering::Release);
+        Ok(reclaimed)
+    }
+}
+
 // IEEE CRC32 polynomial in reversed representation, matching zlib.
 const CRC32_POLY: u32 = 0xEDB8_8320;
 
@@ -1544,12 +1939,17 @@ fn gms_rust_ring(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(kv_lease_seal, m)?)?;
+    m.add_function(wrap_pyfunction!(kv_lease_park_idle, m)?)?;
+    m.add_function(wrap_pyfunction!(kv_lease_activate_idle, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_pin_read, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_unpin_read, m)?)?;
+    m.add_function(wrap_pyfunction!(kv_lease_exact_recoverable, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_adopt, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_release, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_reclaim_foreign, m)?)?;
     m.add_function(wrap_pyfunction!(kv_lease_reclaim_foreign_except, m)?)?;
+    m.add_function(wrap_pyfunction!(kv_lease_quarantine_foreign, m)?)?;
+    m.add_function(wrap_pyfunction!(kv_lease_reclaim_quarantined, m)?)?;
     m.add("RECORD_SIZE", RECORD_SIZE)?;
     m.add("HEADER_SIZE", HEADER_SIZE)?;
     m.add("MAX_BLOCK_PAIRS", MAX_BLOCK_PAIRS_PER_RECORD)?;
