@@ -157,7 +157,17 @@ def _kill_process_group(process: ManagedProcess) -> None:
 
 
 def _kill_launcher_only(process: ManagedProcess) -> None:
-    """Crash only the engine parent, leaving child cleanup to the runtime."""
+    """Crash the launcher, or exercise the opt-in catchable-crash interlock.
+
+    The default deliberately kills only the parent and leaves orphan cleanup to
+    the runtime.  MPS qualification is a different fault model: the registered
+    CUDA child must still be alive when GMS asks MPS to terminate it.  Deliver
+    ABRT leaf-first in that explicit mode, then signal the launcher last so its
+    failover lock is released.
+    """
+    if os.environ.get("GMS_TEST_FAULT_SIGNAL", "KILL").strip().upper() == "ABRT":
+        _kill_process_group(process)
+        return
     pid = process.get_pid()
     assert pid is not None, "engine launcher has no PID"
     os.kill(pid, signal.SIGKILL)
@@ -423,9 +433,9 @@ def test_gms_authoritative_hbm_failover_vllm(
             == primary_output
         )
 
-        # Deliberately kill only the launcher. The successor must wait for
-        # orphaned EngineCore/CUDA worker cohort guards to disappear; killing
-        # the complete tree in the harness would hide that product guarantee.
+        # The default deliberately kills only the launcher. The explicit MPS
+        # qualification mode instead ABRTs live CUDA descendants leaf-first so
+        # terminate_client can establish a capability-grade proof.
         _kill_launcher_only(primary)
         with DaemonClient(manager.kv_directory_socket) as directory:
             _entries, _epoch, writer = _wait_for_directory_writer(

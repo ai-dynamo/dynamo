@@ -9,6 +9,9 @@ import signal
 import struct
 
 import pytest
+from gpu_memory_service.integrations.common.gpu_quiescence import (
+    arm_gpu_crash_interlock,
+)
 
 gms_rust_ring = pytest.importorskip("gms_rust_ring")
 
@@ -21,9 +24,9 @@ def test_native_handler_reports_signal_and_stops_until_authority_kills():
     if child == 0:
         os.close(read_fd)
         try:
-            gms_rust_ring.install_gpu_crash_interlock(write_fd, [signal.SIGABRT])
+            arm_gpu_crash_interlock(write_fd, backend_name="vllm")
             os.kill(os.getpid(), signal.SIGABRT)
-        except Exception:
+        except (ImportError, OSError, RuntimeError, ValueError):
             os._exit(2)
         os._exit(3)
 
@@ -43,6 +46,37 @@ def test_native_handler_reports_signal_and_stops_until_authority_kills():
         assert waited == child
         assert os.WIFSTOPPED(status)
         assert os.WSTOPSIG(status) == signal.SIGSTOP
+    finally:
+        os.close(read_fd)
+        try:
+            os.kill(child, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(child, 0)
+        except ChildProcessError:
+            pass
+
+
+def test_native_handler_leaves_sigterm_for_graceful_shutdown():
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        try:
+            arm_gpu_crash_interlock(write_fd, backend_name="vllm")
+            os.kill(os.getpid(), signal.SIGTERM)
+        except (ImportError, OSError, RuntimeError, ValueError):
+            os._exit(2)
+        os._exit(3)
+
+    os.close(write_fd)
+    try:
+        waited, status = os.waitpid(child, os.WUNTRACED)
+        assert waited == child
+        assert os.WIFSIGNALED(status)
+        assert os.WTERMSIG(status) == signal.SIGTERM
+        assert os.read(read_fd, 1) == b""
     finally:
         os.close(read_fd)
         try:
