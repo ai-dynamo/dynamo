@@ -22,5 +22,6 @@ mod native_http;
 #[doc(hidden)]
 pub mod proto;
 mod protocol;
+mod response;
 
 pub use engine::SglangSidecarEngine;
