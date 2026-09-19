@@ -559,9 +559,10 @@ def _test_frontend_kv_routing(
     namespace: str,
     model_name: str,
     block_size: int,
+    dp_ranks: tuple[int, ...] = (0,),
 ) -> None:
-    """Verify engine events drive HTTP routing to two independently warmed workers."""
-    assert len(system_ports) == 2
+    """Verify engine events drive HTTP routing to two independently warmed ranks."""
+    assert len(system_ports) * len(dp_ranks) == 2
     url = f"http://localhost:{frontend_port}/v1/chat/completions"
     prompts = [
         "Amber rabbits explore quiet meadows. " * 96,
@@ -572,10 +573,13 @@ def _test_frontend_kv_routing(
         with managed_runtime() as runtime:
             worker_ids = sorted(
                 await poll_for_worker_instances(
-                    runtime.endpoint(f"{namespace}.backend.generate"), 2
+                    runtime.endpoint(f"{namespace}.backend.generate"), len(system_ports)
                 )
             )
-            assert len(worker_ids) == 2, worker_ids
+            assert len(worker_ids) == len(system_ports), worker_ids
+            targets = [
+                (worker_id, rank) for worker_id in worker_ids for rank in dp_ranks
+            ]
 
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30)
@@ -585,8 +589,8 @@ def _test_frontend_kv_routing(
                     prompt: str,
                     *,
                     query_only: bool = False,
-                    worker_id: int | None = None,
-                ) -> tuple[int, float | None]:
+                    target: tuple[int, int] | None = None,
+                ) -> tuple[tuple[int, int], float | None]:
                     payload = {
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],
@@ -600,20 +604,25 @@ def _test_frontend_kv_routing(
                     }
                     headers = (
                         {
-                            "x-dynamo-worker-instance-id": str(worker_id),
-                            "x-dynamo-dp-rank": "0",
+                            "x-dynamo-worker-instance-id": str(target[0]),
+                            "x-dynamo-dp-rank": str(target[1]),
                         }
-                        if worker_id is not None
+                        if target is not None
                         else None
                     )
                     nvext, generated = await send_router_chat_request(
                         session, url, payload, headers
                     )
                     selected = require_router_worker_id({"nvext": nvext})
-                    selected_id = selected["decode_worker_id"]
-                    assert selected_id in worker_ids, selected
-                    assert selected["prefill_worker_id"] == selected_id, selected
-                    assert selected["decode_dp_rank"] == 0, selected
+                    selected_target = (
+                        selected["decode_worker_id"],
+                        selected["decode_dp_rank"],
+                    )
+                    assert selected_target in targets, selected
+                    assert (
+                        selected["prefill_worker_id"],
+                        selected["prefill_dp_rank"],
+                    ) == selected_target, selected
                     hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
                     if query_only:
                         assert not generated, nvext
@@ -622,7 +631,7 @@ def _test_frontend_kv_routing(
                         assert generated, "Request completed without generating text"
                         assert isinstance(hit_rate, (int, float)), nvext
                         assert 0 <= hit_rate <= 1, nvext
-                    return selected_id, hit_rate
+                    return selected_target, hit_rate
 
                 baselines = {
                     port: await get_stored_kv_event_counts(session, port)
@@ -630,9 +639,9 @@ def _test_frontend_kv_routing(
                 }
                 for prompt in prompts:
                     await send(prompt, query_only=True)
-                for prompt, worker_id in zip(prompts, worker_ids):
-                    selected, _ = await send(prompt, worker_id=worker_id)
-                    assert selected == worker_id, (selected, worker_id)
+                for prompt, target in zip(prompts, targets):
+                    selected, _ = await send(prompt, target=target)
+                    assert selected == target, (selected, target)
 
                 deadline = time.monotonic() + 60
                 observed = []
@@ -647,7 +656,7 @@ def _test_frontend_kv_routing(
                     }
                     if all(
                         selected == expected
-                        for (selected, _), expected in zip(observed, worker_ids)
+                        for (selected, _), expected in zip(observed, targets)
                     ) and all(
                         all(
                             current > baseline
@@ -659,16 +668,16 @@ def _test_frontend_kv_routing(
                     await asyncio.sleep(0.1)
                 else:
                     raise AssertionError(
-                        f"KV events did not converge: expected workers={worker_ids}, "
+                        f"KV events did not converge: expected targets={targets}, "
                         f"routing={observed}, Stored counters={counts}, baselines={baselines}"
                     )
 
                 for prompt_index in (0, 0, 1, 0, 1, 1):
                     selected, hit_rate = await send(prompts[prompt_index])
-                    assert selected == worker_ids[prompt_index], (
+                    assert selected == targets[prompt_index], (
                         prompt_index,
                         selected,
-                        worker_ids,
+                        targets,
                     )
                     assert hit_rate is not None and hit_rate >= 0.5, (
                         prompt_index,
