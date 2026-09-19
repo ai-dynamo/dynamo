@@ -3,7 +3,8 @@
 """NOTICES-Apt.txt generator.
 
 Enumerates installed dpkg packages via `dpkg-query -W` and resolves licenses
-by parsing each package's `/usr/share/doc/<pkg>/copyright` file.
+by parsing each package's `/usr/share/doc/<pkg>/copyright` file. Packages whose
+files dpkg has removed are skipped; see _FILELESS_STATES.
 
 Two parsers:
   - DEP-5 (machine-readable copyright format): structured `License:` fields
@@ -35,6 +36,16 @@ logger = logging.getLogger(__name__)
 ECOSYSTEM = "dpkg"
 
 _COPYRIGHT_DIR = Path("usr/share/doc")
+
+# dpkg states in which the package's files are no longer on the filesystem: only
+# its dpkg entry, and any conffiles it left behind, remain. `dpkg-query -W` lists
+# these exactly like installed packages, so without this filter a package the
+# base image installed and then removed is reported as a shipped dependency —
+# with no /usr/share/doc/<pkg>/copyright to resolve, hence UNKNOWN, hence a
+# policy violation for something the image does not contain. Every other state
+# (installed, unpacked, half-configured, half-installed, triggers-*) leaves the
+# unpacked files in place, so those stay in the inventory.
+_FILELESS_STATES = frozenset({"not-installed", "config-files"})
 
 
 # ---- Debian short-name → SPDX ID mapping ----------------------------------------
@@ -406,7 +417,7 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
     (e.g. macOS dev shells, Alpine builders, distroless images). Inside the
     runtime images we ship, dpkg-query is always present.
     """
-    cmd = ["dpkg-query", "-W", "-f=${Package}\\t${Version}\\n"]
+    cmd = ["dpkg-query", "-W", "-f=${Package}\\t${Version}\\t${db:Status-Status}\\n"]
     if root != Path("/"):
         cmd.insert(1, f"--admindir={root / 'var/lib/dpkg'}")
 
@@ -422,13 +433,20 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
 
     components: list[Component] = []
     unresolved = 0
+    skipped: list[str] = []
     for line in result.stdout.splitlines():
         if "\t" not in line:
             continue
-        name, version = line.split("\t", 1)
-        name = name.strip()
-        version = version.strip()
+        fields = line.split("\t", 2)
+        name = fields[0].strip()
+        version = fields[1].strip()
+        # Empty when dpkg-query does not know the field: it prints nothing and
+        # still exits 0, so an unsupported field must not empty the inventory.
+        status = fields[2].strip() if len(fields) > 2 else ""
         if not name or not version:
+            continue
+        if status in _FILELESS_STATES:
+            skipped.append(f"{name}@{version} ({status})")
             continue
         spdx = _resolve_license(name, version, root)
         if spdx == UNKNOWN:
@@ -444,11 +462,17 @@ def collect_components(root: Path = Path("/")) -> list[Component]:
         )
 
     logger.info(
-        "Collected %d dpkg packages from %s (%d unresolved → UNKNOWN)",
+        "Collected %d dpkg packages from %s (%d unresolved → UNKNOWN, "
+        "%d skipped with no files installed)",
         len(components),
         root,
         unresolved,
+        len(skipped),
     )
+    if skipped:
+        # Name them: a skipped package leaves its conffiles under /etc, so the
+        # NOTICES and CSV it drops out of are the only record that it was there.
+        logger.info("Skipped dpkg entries: %s", ", ".join(sorted(skipped)))
     return components
 
 
