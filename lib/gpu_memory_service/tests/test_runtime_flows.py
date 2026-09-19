@@ -349,6 +349,9 @@ def test_gpu_crash_interlock_fd_drives_daemon_quiescence_and_host_teardown(
             rank=0,
         )
         assert not os.get_inheritable(crash_fd)
+        # This test forges the fixed record instead of installing the native
+        # handler, so it must also emulate the handler's fail-closed SIGSTOP.
+        os.kill(child.pid, signal.SIGSTOP)
         os.write(
             crash_fd,
             struct.pack("=IIii", 0x47534D43, 1, signal.SIGABRT, child.pid),
