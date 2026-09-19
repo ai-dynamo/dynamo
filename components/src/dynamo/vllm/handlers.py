@@ -126,6 +126,9 @@ _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
+# Keep in sync with MAX_MAINTENANCE_SECONDS in lib/bindings/python/rust/lib.rs;
+# the binding rejects larger values before the rendezvous RPC can run.
+_RL_INIT_WEIGHTS_TIMEOUT_MAX_S = 86_400.0
 # Ceiling on the Ray GCS round-trips behind get_ep_capacity. The reconciler polls
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
@@ -168,12 +171,22 @@ def build_prompt_tokens_details(
 
 
 def _rl_init_weights_timeout_s() -> float:
-    return float(
+    timeout_s = float(
         os.environ.get(
             _RL_INIT_WEIGHTS_TIMEOUT_ENV,
             str(_RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S),
         )
     )
+    # Keep the rendezvous watchdog within the runtime maintenance API's bound.
+    if math.isfinite(timeout_s) and timeout_s > _RL_INIT_WEIGHTS_TIMEOUT_MAX_S:
+        logger.warning(
+            "%s=%s exceeds the maximum of %s seconds; using the maximum",
+            _RL_INIT_WEIGHTS_TIMEOUT_ENV,
+            timeout_s,
+            _RL_INIT_WEIGHTS_TIMEOUT_MAX_S,
+        )
+        return _RL_INIT_WEIGHTS_TIMEOUT_MAX_S
+    return timeout_s
 
 
 class _DeferredAbort:
@@ -1204,6 +1217,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
         self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
+        # Canary maintenance lease for the transfer this worker is running, if
+        # any. A worker has one weight-update group, so one lease is enough and
+        # holding it in a single slot is what makes the terminators idempotent —
+        # see _begin_rl_maintenance and _end_rl_maintenance.
+        self._rl_maintenance_lease: int | None = None
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -2113,44 +2131,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        allow_unpaused = body.get("allow_unpaused", False)
-        reset_prefix_cache = body.get("reset_prefix_cache", True)
-        if not isinstance(allow_unpaused, bool):
-            return {
-                "status": "error",
-                "message": "'allow_unpaused' must be a boolean",
-            }
-        if not isinstance(reset_prefix_cache, bool):
-            return {
-                "status": "error",
-                "message": "'reset_prefix_cache' must be a boolean",
-            }
-        if allow_unpaused and reset_prefix_cache:
-            return {
-                "status": "error",
-                "message": (
-                    "Unpaused weight updates cannot reset the prefix cache. "
-                    "Set 'reset_prefix_cache' to false or pause generation first."
-                ),
-            }
+        rpc = body.get("engine_rpc", "update_weights_from_path")
         async with self._pause_lock:
-            if not self._paused and not allow_unpaused:
-                return {
-                    "status": "error",
-                    "message": (
-                        "Worker must be paused via pause_generation() before "
-                        "updating weights. Call pause_generation() first, then "
-                        "update, then resume_generation()."
-                    ),
-                }
-            version = body.get("weight_version", "unknown")
-            rpc = body.get("engine_rpc", "update_weights_from_path")
-            rpc_kwargs = {
-                k: v
-                for k, v in body.items()
-                if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
-            }
             try:
+                allow_unpaused = body.get("allow_unpaused", False)
+                reset_prefix_cache = body.get("reset_prefix_cache", True)
+                if not isinstance(allow_unpaused, bool):
+                    return {
+                        "status": "error",
+                        "message": "'allow_unpaused' must be a boolean",
+                    }
+                if not isinstance(reset_prefix_cache, bool):
+                    return {
+                        "status": "error",
+                        "message": "'reset_prefix_cache' must be a boolean",
+                    }
+                if allow_unpaused and reset_prefix_cache:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Unpaused weight updates cannot reset the prefix cache. "
+                            "Set 'reset_prefix_cache' to false or pause generation first."
+                        ),
+                    }
+                if not self._paused and not allow_unpaused:
+                    return {
+                        "status": "error",
+                        "message": (
+                            "Worker must be paused via pause_generation() before "
+                            "updating weights. Call pause_generation() first, then "
+                            "update, then resume_generation()."
+                        ),
+                    }
+                version = body.get("weight_version", "unknown")
+                rpc_kwargs = {
+                    k: v
+                    for k, v in body.items()
+                    if k not in _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS
+                }
                 await self.engine_client.collective_rpc(rpc, kwargs=rpc_kwargs)
                 if reset_prefix_cache:
                     # Weights changed: stale prefix/KV cache must be invalidated
@@ -2172,6 +2190,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"[RL] update_weights_from_distributed failed: {e}")
                 return {"status": "error", "message": str(e)}
+            finally:
+                if rpc == "finish_weight_update":
+                    # Finish ends the lease even when validation or the RPC fails.
+                    self._end_rl_maintenance()
 
     async def update_weights_from_tensor(self, body: dict) -> dict:
         """Not implemented: in-process tensor transfer is not yet supported."""
@@ -2187,6 +2209,31 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             "message": "update_weights_from_tensor is not implemented",
         }
 
+    def _begin_rl_maintenance(self, timeout_s: float) -> None:
+        """Take the lease for a new transfer, superseding any lease still held.
+
+        A worker has one weight-update group, so an init means the previous
+        transfer is over however it ended. Releasing its lease here keeps a
+        transfer that never reached a terminator from holding a window until
+        its deadline.
+        """
+        self._end_rl_maintenance()
+        self._rl_maintenance_lease = self.runtime.begin_health_check_maintenance(
+            timeout_s, self.config.endpoint
+        )
+
+    def _end_rl_maintenance(self) -> None:
+        """Release this worker's lease, once.
+
+        Clearing the slot before releasing makes the terminators idempotent: a
+        transfer that reaches both `finish_weight_update` and
+        `destroy_weights_update_group` releases its lease on the first and does
+        nothing on the second, rather than releasing a lease it does not own.
+        """
+        lease, self._rl_maintenance_lease = self._rl_maintenance_lease, None
+        if lease is not None:
+            self.runtime.end_health_check_maintenance(lease)
+
     async def init_weights_update_group(self, body: dict) -> dict:
         """Initialize the distributed weight-update communication group."""
         if body is None:
@@ -2201,6 +2248,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         async with self._pause_lock:
             try:
                 timeout_s = _rl_init_weights_timeout_s()
+                # Give the canary the same bound as the rendezvous watchdog.
+                self._begin_rl_maintenance(timeout_s)
                 rpc_task = asyncio.create_task(
                     self.engine_client.collective_rpc(rpc, kwargs=kwargs)
                 )
@@ -2209,10 +2258,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
+                    self._end_rl_maintenance()
                     raise
                 if rpc_task not in done:
                     rpc_task.cancel()
                     await asyncio.gather(rpc_task, return_exceptions=True)
+                    self._end_rl_maintenance()
                     logger.error(
                         f"[RL] init_weights_update_group timed out after "
                         f"{timeout_s:.1f} seconds (rpc={rpc}); terminating the "
@@ -2221,11 +2272,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self._shutdown_worker()
 
                 await rpc_task
+                # The lease expires timeout_s seconds after initialization began.
+                # Later transfers do not renew it; finish or destroy releases it
+                # early if the transaction ends before that absolute deadline.
                 logger.info(f"[RL] Weight update group initialized (rpc={rpc})")
                 return {"status": "ok", "message": "Weight update group initialized"}
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
+                self._end_rl_maintenance()
                 logger.error(f"[RL] init_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
 
@@ -2250,6 +2305,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             except Exception as e:
                 logger.error(f"[RL] destroy_weights_update_group failed: {e}")
                 return {"status": "error", "message": str(e)}
+            finally:
+                # Restore the normal timeout even when teardown fails.
+                self._end_rl_maintenance()
 
     @abstractmethod
     def generate(self, request: RequestT, context: Context) -> AsyncIterator[ResponseT]:
@@ -3017,6 +3075,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     def cleanup(self):
         """Clean up resources including temporary directories."""
+        self._end_rl_maintenance()
         if self._ep_capacity_executor is not None:
             # wait=False on purpose: a snapshot stuck on an unresponsive GCS must
             # not hold up worker shutdown, and the process is going away anyway.
