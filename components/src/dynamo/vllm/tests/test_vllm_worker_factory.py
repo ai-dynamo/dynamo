@@ -17,9 +17,11 @@ from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     SnapshotEngineSetupResult,
     WorkerFactory,
+    _attach_engine_resolved,
     _await_benchmark_then_restore_workers,
     _benchmark_engine_identity,
     _DecodeWorkerLifecycle,
+    _make_engine_probe,
     _merge_benchmark_rank_results,
     _stop_worker_gc_policy,
     _wait_and_load_benchmark,
@@ -1982,10 +1984,17 @@ def _engine_rank_payload_group(dp_rank: int, engine: dict | None, size: int) -> 
     unrelated degraded rank alongside two ranks that genuinely disagree.
     """
     point = {"benchmark_id": 1, "point_type": "prefill"}
+    # Scaled the same way as results[0].fpms[0] below, so a rank's own local
+    # result matches its own copy of the synchronized group at every rank,
+    # not just rank 0.
     rank_results = [
-        {"dp_rank": r, "fpms": [{"counter_id": 1, "dp_rank": r, "wall_time": 0.01}]}
+        {
+            "dp_rank": r,
+            "fpms": [{"counter_id": 1, "dp_rank": r, "wall_time": 0.01 * (r + 1)}],
+        }
         for r in range(size)
     ]
+    group_wall_time = 0.01 * size
     payload: dict = {
         "schema_version": 2,
         "artifact_type": "rank",
@@ -1996,7 +2005,7 @@ def _engine_rank_payload_group(dp_rank: int, engine: dict | None, size: int) -> 
             "started_at": "2026-09-19T12:00:00Z",
             "completed_at": "2026-09-19T12:00:10Z",
             "benchmark_elapsed_seconds": 10.0,
-            "measured_iteration_seconds": 0.01,
+            "measured_iteration_seconds": group_wall_time,
         },
         "dp": {"rank": dp_rank, "size": size},
         "coverage": {
@@ -2022,7 +2031,7 @@ def _engine_rank_payload_group(dp_rank: int, engine: dict | None, size: int) -> 
                 "point": point,
                 "expected_dp_ranks": list(range(size)),
                 "complete": True,
-                "wall_time": 0.01,
+                "wall_time": group_wall_time,
                 "rank_results": rank_results,
             }
         ],
@@ -2219,3 +2228,383 @@ def test_merge_without_engine_provenance_is_unchanged(tmp_path, caplog):
 
     assert "engine" not in merged
     assert "engine provenance" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# Engine provenance worker probe (AIC-1950, Task 3)
+# --------------------------------------------------------------------------
+
+
+class _FakeAttentionBackend:
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def get_name(self) -> str:
+        return self._name
+
+
+class _FakePrefillBackend:
+    """A class object, which is how vLLM stores MLAAttention.prefill_backend."""
+
+
+class _FakeAttentionLayer:
+    def __init__(self, backend_name: str, prefill_backend=None) -> None:
+        self._backend = _FakeAttentionBackend(backend_name)
+        if prefill_backend is not None:
+            self.prefill_backend = prefill_backend
+
+    def get_attn_backend(self):
+        return self._backend
+
+
+def _fake_worker(
+    layers: dict,
+    capture_sizes=(1, 2, 8),
+    rank: int = 2,
+    data_parallel_rank=5,
+    data_parallel_index=None,
+    tensor_parallel_size=None,
+):
+    parallel_kwargs = {"data_parallel_rank": data_parallel_rank}
+    if data_parallel_index is not None:
+        parallel_kwargs["data_parallel_index"] = data_parallel_index
+    if tensor_parallel_size is not None:
+        parallel_kwargs["tensor_parallel_size"] = tensor_parallel_size
+    return SimpleNamespace(
+        rank=rank,
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(
+                static_forward_context=layers,
+                cudagraph_mode=SimpleNamespace(name="FULL_DECODE_ONLY"),
+                cudagraph_capture_sizes=list(capture_sizes),
+            ),
+            parallel_config=SimpleNamespace(**parallel_kwargs),
+        ),
+    )
+
+
+def _merged_with_engine(tmp_path, rank_count: int = 1) -> dict:
+    """A merged document plus the rank files it points at, all on disk."""
+    rank_files = []
+    for dp_rank in range(rank_count):
+        path = tmp_path / f"rank{dp_rank}.json"
+        path.write_text(json.dumps({"engine": _engine_block(dp_rank)}))
+        rank_files.append(str(path))
+    merged_path = tmp_path / "merged.json"
+    merged = {
+        "engine": _engine_block(0),
+        "rank_files": rank_files,
+        "merged_output_path": str(merged_path),
+    }
+    merged["engine"]["parallel"]["data_parallel_rank"] = None
+    merged_path.write_text(json.dumps(merged))
+    return merged
+
+
+class _ExplodingAttentionLayer:
+    """A layer whose backend accessor raises, e.g. a half-initialised layer."""
+
+    prefill_backend = _FakePrefillBackend
+
+    def get_attn_backend(self):
+        raise RuntimeError("backend selector exploded")
+
+
+def test_engine_probe_reads_backends_off_the_attention_layers():
+    probe = _make_engine_probe()
+    layers = {
+        "model.layers.0.self_attn.attn": _FakeAttentionLayer(
+            "FLASHINFER_MLA", _FakePrefillBackend
+        ),
+        "model.layers.1.self_attn.attn": _FakeAttentionLayer(
+            "FLASHINFER_MLA", _FakePrefillBackend
+        ),
+        # A standard (non-MLA) attention layer: it has no prefill_backend
+        # attribute at all, the same as real vLLM's non-MLA Attention layers.
+        "model.layers.2.self_attn.attn": _FakeAttentionLayer("FLASH_ATTN"),
+        # A half-initialised layer whose backend accessor raises: it must be
+        # skipped entirely (no entry, no prefill contribution) and must not
+        # fail the probe for the healthy layers.
+        "model.layers.3.self_attn.attn": _ExplodingAttentionLayer(),
+        "model.layers.1.mlp": SimpleNamespace(),
+    }
+
+    result = probe(_fake_worker(layers, rank=6, tensor_parallel_size=4))
+
+    assert result["attention_backends"] == {
+        "model.layers.0.self_attn.attn": "FLASHINFER_MLA",
+        "model.layers.1.self_attn.attn": "FLASHINFER_MLA",
+        "model.layers.2.self_attn.attn": "FLASH_ATTN",
+    }
+    assert "model.layers.3.self_attn.attn" not in result["attention_backends"]
+    # Only the MLA layers contribute a prefill backend; the standard layer
+    # does not dilute or clear it, and the exploding layer never reaches its
+    # own prefill_backend attribute.
+    assert result["mla_prefill_backend"] == "_FakePrefillBackend"
+    assert result["cudagraph_mode_resolved"] == "FULL_DECODE_ONLY"
+    assert result["cudagraph_capture_sizes_resolved"] == [1, 2, 8]
+    assert result["dp_rank"] == 5
+    assert result["worker_rank"] == 6
+    # tp_rank is derived from worker_rank % tensor_parallel_size, never from
+    # the raw global rank directly -- 6 % 4 == 2, distinct from both inputs,
+    # so this cannot pass by coincidentally echoing one of them.
+    assert result["tp_rank"] == 2
+
+
+def test_engine_probe_prefers_data_parallel_index_over_zeroed_rank():
+    """vLLM zeroes parallel_config.data_parallel_rank on every engine for a
+    dense (non-MoE) model under external DP, keeping the true rank only in
+    data_parallel_index -- the same trap instrumented_scheduler.py already
+    routes around. The probe must not silently report dp_rank=0 here."""
+    probe = _make_engine_probe()
+    worker = _fake_worker(
+        {}, data_parallel_rank=0, data_parallel_index=3, tensor_parallel_size=4
+    )
+
+    result = probe(worker)
+
+    assert result["dp_rank"] == 3
+
+
+def test_engine_probe_tp_rank_is_none_without_tensor_parallel_size():
+    """No tensor_parallel_size on the config means the TP-local rank cannot
+    be derived: tp_rank must be None, never the raw global rank (the bug
+    this derivation replaces)."""
+    probe = _make_engine_probe()
+    worker = _fake_worker({}, rank=7)
+
+    result = probe(worker)
+
+    assert result["tp_rank"] is None
+    assert result["worker_rank"] == 7
+
+
+def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    probe_result = {
+        "tp_rank": 0,
+        "dp_rank": 0,
+        "attention_backends": {"model.layers.0.self_attn.attn": "FLASHINFER_MLA"},
+        "mla_prefill_backend": "TrtllmRaggedMLAPrefill",
+        "cudagraph_mode_resolved": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes_resolved": [1, 2],
+    }
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[probe_result, probe_result])
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] == probe_result
+    assert merged["engine"]["resolution"] == "worker_probe"
+    assert merged["engine"]["attention"]["backend_resolved"] == "FLASHINFER_MLA"
+    assert (
+        merged["engine"]["attention"]["mla_prefill_backend_resolved"]
+        == "TrtllmRaggedMLAPrefill"
+    )
+    assert merged["engine"]["attention"]["resolution"] == "worker_probe"
+    on_disk = json.loads((tmp_path / "merged.json").read_text())
+    assert on_disk["engine"]["resolved"] == probe_result
+    for dp_rank in (0, 1):
+        rank_doc = json.loads((tmp_path / f"rank{dp_rank}.json").read_text())
+        assert rank_doc["engine"]["resolved"] == probe_result
+        assert rank_doc["engine"]["resolution"] == "worker_probe"
+        # The rank's own provenance is untouched.
+        assert rank_doc["engine"]["parallel"]["data_parallel_rank"] == dp_rank
+
+
+def test_attach_engine_resolved_marks_mixed_backends(tmp_path):
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            return_value=[
+                {
+                    "attention_backends": {
+                        "layer.0": "FLASHINFER_MLA",
+                        "layer.1": "TRITON_ATTN",
+                    },
+                    "mla_prefill_backend": None,
+                }
+            ]
+        )
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+    assert merged["engine"]["attention"]["resolution"] == "worker_probe_mixed"
+    assert merged["engine"]["resolved"]["attention_backends"]["layer.1"] == (
+        "TRITON_ATTN"
+    )
+
+
+def test_attach_engine_resolved_records_probe_failure(tmp_path):
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("worker died"))
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+    rank_doc = json.loads((tmp_path / "rank0.json").read_text())
+    assert rank_doc["engine"]["resolution"] == "probe_failed: RuntimeError: worker died"
+
+
+def test_attach_engine_resolved_handles_an_empty_rpc_result(tmp_path):
+    """No worker answered at all (e.g. zero ranks in this DP group's RPC
+    fan-out); treated the same as a probe failure, not a crash."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[]))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"].startswith("probe_failed:")
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+
+
+def test_attach_engine_resolved_handles_a_non_dict_rpc_result(tmp_path):
+    """A worker answered with something that isn't the probe's dict shape
+    (e.g. it raised inside the RPC handler and vLLM surfaced ``None``);
+    treated the same as a probe failure, not a crash."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[None]))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"].startswith("probe_failed:")
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+
+
+def test_attach_engine_resolved_survives_a_malformed_dict_shaped_result(tmp_path):
+    """A dict-shaped RPC result whose ``attention_backends`` is not a
+    ``dict[str, str]`` (a malformed or future-incompatible probe payload)
+    used to raise ``AttributeError`` out of ``_apply_engine_resolved`` and
+    escape the launcher: applying the result and writing it out now run
+    inside the same fail-soft try as the RPC itself, so this is recorded as
+    a probe failure instead."""
+    merged = _merged_with_engine(tmp_path)
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            return_value=[
+                {"attention_backends": ["FLASH_ATTN"], "mla_prefill_backend": None}
+            ]
+        )
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))  # must not raise
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"].startswith("probe_failed:")
+    assert "AttributeError" in merged["engine"]["resolution"]
+    assert merged["engine"]["attention"]["backend_resolved"] is None
+    on_disk = json.loads((tmp_path / "merged.json").read_text())
+    assert on_disk["engine"]["resolution"] == merged["engine"]["resolution"]
+    rank_doc = json.loads((tmp_path / "rank0.json").read_text())
+    assert rank_doc["engine"]["resolution"] == merged["engine"]["resolution"]
+
+
+def test_attach_engine_resolved_records_the_exception_type_on_a_timeout(
+    monkeypatch, tmp_path
+):
+    """``asyncio.wait_for`` raises a bare ``TimeoutError``, whose ``str()``
+    is empty; the recorded reason must still name the exception type so a
+    hung probe -- the single most likely production failure -- does not
+    degrade into a useless, reason-free ``"probe_failed: "``."""
+    monkeypatch.setattr("dynamo.vllm.worker_factory.ENGINE_PROBE_TIMEOUT_SECONDS", 0.05)
+    merged = _merged_with_engine(tmp_path)
+
+    async def hangs(*_args, **_kwargs):
+        await asyncio.sleep(2.0)
+        return [{}]
+
+    engine_client = SimpleNamespace(collective_rpc=hangs)
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] is None
+    assert merged["engine"]["resolution"] == "probe_failed: TimeoutError: "
+
+
+def test_attach_engine_resolved_preserves_non_engine_rank_file_content(tmp_path):
+    """Only the ``engine`` block changes; everything else in a rank file --
+    results, timing, coverage, key order, exact floats -- must round-trip
+    the rewrite unchanged."""
+    rank_path = tmp_path / "rank0.json"
+    original = {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "engine": _engine_block(0),
+        "results": [
+            {
+                "point": {"benchmark_id": 1, "point_type": "prefill"},
+                "fpms": [{"counter_id": 1, "wall_time": 0.123456789012345}],
+            }
+        ],
+        "timing": {"benchmark_elapsed_seconds": 12.5},
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+    }
+    rank_path.write_text(json.dumps(original))
+    merged_path = tmp_path / "merged.json"
+    merged = {
+        "engine": _engine_block(0),
+        "rank_files": [str(rank_path)],
+        "merged_output_path": str(merged_path),
+    }
+    merged_path.write_text(json.dumps(merged))
+    engine_client = SimpleNamespace(
+        collective_rpc=AsyncMock(
+            return_value=[
+                {
+                    "attention_backends": {"layer.0": "FLASH_ATTN"},
+                    "mla_prefill_backend": None,
+                }
+            ]
+        )
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    rewritten = json.loads(rank_path.read_text())
+    assert rewritten["engine"]["resolution"] == "worker_probe"
+    for key in ("schema_version", "artifact_type", "results", "timing", "coverage"):
+        assert rewritten[key] == original[key]
+
+
+def test_attach_engine_resolved_is_a_noop_without_an_engine_block():
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock())
+
+    asyncio.run(_attach_engine_resolved({"status": "complete"}, engine_client))
+
+    engine_client.collective_rpc.assert_not_awaited()
+
+
+def test_benchmark_wait_probes_the_engine_before_restoring_workers(monkeypatch):
+    calls = []
+
+    async def fake_wait(_cfg, _vllm_config):
+        calls.append("wait")
+        return {"status": "complete"}
+
+    async def fake_attach(_merged, _client):
+        calls.append("probe")
+
+    async def fake_stop(_client):
+        calls.append("stop")
+
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._wait_and_load_benchmark", fake_wait
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._attach_engine_resolved", fake_attach
+    )
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", fake_stop)
+
+    results = asyncio.run(_await_benchmark_then_restore_workers({}, Mock(), Mock()))
+
+    assert results == {"status": "complete"}
+    assert calls == ["wait", "probe", "stop"]
