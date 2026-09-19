@@ -68,6 +68,9 @@ pub(crate) fn build_generate_request(
     }
 
     let guided = request.sampling_options.guided_decoding.as_ref();
+    // 0.5.20 still accepts these legacy fields. Keep them for 0.5.19 servers;
+    // remove this allowance when the minimum native server version is 0.5.20.
+    #[allow(deprecated)]
     let sampling_params = pb::SamplingParams {
         temperature: request.sampling_options.temperature,
         top_p: request.sampling_options.top_p,
@@ -86,6 +89,7 @@ pub(crate) fn build_generate_request(
             .and_then(|value| value.json.as_ref())
             .map(json_value_to_string),
         regex: guided.and_then(|value| value.regex.clone()),
+        ..Default::default()
     };
 
     let output_options = &request.output_options;
@@ -137,6 +141,7 @@ pub(crate) fn build_generate_request(
             bootstrap_host,
             bootstrap_port,
         )?,
+        ..Default::default()
     })
 }
 
