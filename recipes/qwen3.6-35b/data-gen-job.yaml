@@ -60,12 +60,11 @@ spec:
               set -euo pipefail
               GEN_SRC=/tmp/dynamo-jsonl
               rm -rf "$GEN_SRC"
-              git init -q "$GEN_SRC"
-              git -C "$GEN_SRC" remote add origin https://github.com/ai-dynamo/dynamo.git
-              git -C "$GEN_SRC" fetch --depth=1 origin "$DYNAMO_REF"
-              git -C "$GEN_SRC" checkout -q FETCH_HEAD
+              mkdir -p "$GEN_SRC"
+              curl -fsSL "https://github.com/ai-dynamo/dynamo/archive/refs/heads/${DYNAMO_REF}.tar.gz" \
+                | tar xzf - --strip-components=1 -C "$GEN_SRC"
               cd "$GEN_SRC/benchmarks/multimodal/jsonl"
-              echo "[gen] using dynamo @ $(git -C $GEN_SRC rev-parse --short HEAD)"
+              echo "[gen] using dynamo ref ${DYNAMO_REF}"
               python3 main.py --help | head -3
               OUTPUT_DIR="/perf-cache/datasets"
               IMAGE_DIR="/perf-cache/images/2400x1080"
