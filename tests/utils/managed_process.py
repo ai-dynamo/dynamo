@@ -701,7 +701,7 @@ class ManagedProcess:
         try:
             with open(self._log_path, "r", encoding="utf-8", errors="ignore") as f:
                 return list(deque(f, maxlen=lines))
-        except Exception as e:
+        except OSError as e:
             self._logger.warning("Could not read log file %s: %s", self._log_path, e)
             return []
 
