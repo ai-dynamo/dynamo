@@ -42,6 +42,12 @@ areas:
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
   path_globs: []
+# Experiment: only public sidecar contracts require human approval.
+# This team must exist with explicit repository write access before merge.
+- label: agent-sidecar
+  github_team: '@ai-dynamo/agent-sidecar-codeowners'
+  path_globs:
+  - lib/sidecar/
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
   path_globs:
@@ -75,7 +81,8 @@ areas:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
-  - lib/sidecar/vllm/
+  - lib/sidecar/vllm/api/
+  - lib/sidecar/vllm/Cargo.toml
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
   path_globs:
@@ -88,7 +95,8 @@ areas:
   - components/src/dynamo/trtllm/utils/
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
-  - lib/sidecar/trtllm/
+  - lib/sidecar/trtllm/api/
+  - lib/sidecar/trtllm/Cargo.toml
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
   path_globs:
@@ -97,7 +105,8 @@ areas:
   - components/src/dynamo/sglang/tests/
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
-  - lib/sidecar/sglang/
+  - lib/sidecar/sglang/api/
+  - lib/sidecar/sglang/Cargo.toml
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
   path_globs:
@@ -239,9 +248,9 @@ areas:
   - examples/custom_backend/
   - lib/backend-common/
   - lib/backend-common/examples/
-  - lib/sidecar/dynamo-sidecar
-  - lib/sidecar/README.md
-  - lib/sidecar/common/
+  - lib/sidecar/api/
+  - lib/sidecar/common/api/
+  - lib/sidecar/common/Cargo.toml
   - lib/bindings/
   - lib/bindings/c/
   - lib/bindings/python/
@@ -533,6 +542,33 @@ areas:
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
 required_owners:
+- glob: lib/sidecar/api/
+  owners:
+  - runtime
+- glob: lib/sidecar/common/api/
+  owners:
+  - runtime
+- glob: lib/sidecar/common/Cargo.toml
+  owners:
+  - runtime
+- glob: lib/sidecar/vllm/api/
+  owners:
+  - backend-vllm
+- glob: lib/sidecar/vllm/Cargo.toml
+  owners:
+  - backend-vllm
+- glob: lib/sidecar/sglang/api/
+  owners:
+  - backend-sglang
+- glob: lib/sidecar/sglang/Cargo.toml
+  owners:
+  - backend-sglang
+- glob: lib/sidecar/trtllm/api/
+  owners:
+  - backend-trtllm
+- glob: lib/sidecar/trtllm/Cargo.toml
+  owners:
+  - backend-trtllm
 - glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
   - operator

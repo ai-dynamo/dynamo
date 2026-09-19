@@ -193,7 +193,7 @@ COPY --from=vllm-builder /out/dynamo-vllm-sidecar /usr/local/bin/
 COPY --from=sglang-builder /out/dynamo-sglang-sidecar /usr/local/bin/
 COPY --from=trtllm-builder /out/dynamo-trtllm-sidecar /usr/local/bin/
 
-COPY --chmod=755 lib/sidecar/dynamo-sidecar /usr/local/bin/dynamo-sidecar
+COPY --chmod=755 lib/sidecar/api/dynamo-sidecar /usr/local/bin/dynamo-sidecar
 
 # Numeric UID so Kubernetes runAsNonRoot can verify it.
 USER 1000
