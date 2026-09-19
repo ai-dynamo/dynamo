@@ -29,6 +29,11 @@ RUN apt-get update \
     && ln -sf /usr/bin/ffprobe /usr/local/bin/ffprobe \
     && rm -rf /var/lib/apt/lists/*
 
+# fastvideo-kernel 0.3.5's optional native extension targets torch 2.12,
+# while the vLLM 0.29 image uses torch 2.13. FastH3 VSA uses the portable
+# Triton path, so install without dependencies and do not require the native
+# extension. Avoid importing the package while building because that initializes
+# Triton, which requires a CUDA driver even though the image build does not.
 RUN uv pip install \
         --system \
         --no-deps \
@@ -36,7 +41,7 @@ RUN uv pip install \
         fastvideo-kernel==0.3.5 \
     && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)' \
     && python3 -c \
-        'import av, fastvideo_kernel; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
+        'from importlib.util import find_spec; import av; assert find_spec("fastvideo_kernel") is not None; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 
 RUN python3 <<'PY'
 import io
