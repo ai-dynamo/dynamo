@@ -772,6 +772,15 @@ fn parse_hf_uri(uri: &str) -> anyhow::Result<(String, String)> {
     if repo.is_empty() || filename.is_empty() {
         anyhow::bail!("malformed hf:// uri: {uri}");
     }
+    // This uri comes off another worker's card. The filename is joined onto a snapshot
+    // directory, and the repo is both a cache key and an outbound Hub request, so neither
+    // may carry `.`/`..` or an absolute path.
+    if !crate::hub::is_hf_repo_file(filename) {
+        anyhow::bail!("invalid filename in hf:// uri: {uri}");
+    }
+    if !crate::hub::is_hf_repo_path(repo) {
+        anyhow::bail!("invalid repository in hf:// uri: {uri}");
+    }
     Ok((repo.to_string(), filename.to_string()))
 }
 
@@ -884,6 +893,10 @@ pub struct ModelDeploymentCard {
 
     /// Model information
     pub model_info: Option<ModelInfoType>,
+
+    /// HF Commit SHA
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_commit_sha: Option<std::collections::HashMap<String, String>>,
 
     /// Tokenizer configuration
     pub tokenizer: Option<TokenizerKind>,
@@ -1177,6 +1190,20 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend(name.as_bytes());
                     bytes_to_hash.push(0);
                     bytes_to_hash.extend(h.as_bytes());
+                }
+
+                // sort for stable hash; same rationale as extras above.
+                if let Some(hf_commit_sha) = self.hf_commit_sha.as_ref() {
+                    let mut shas: Vec<(&str, &str)> = hf_commit_sha
+                        .iter()
+                        .map(|(repo, sha)| (repo.as_str(), sha.as_str()))
+                        .collect();
+                    shas.sort_unstable();
+                    for (repo, sha) in &shas {
+                        bytes_to_hash.extend(repo.as_bytes());
+                        bytes_to_hash.push(0);
+                        bytes_to_hash.extend(sha.as_bytes());
+                    }
                 }
 
                 if let Some(prompt_context_vec) = self.prompt_context.as_ref() {
@@ -1548,6 +1575,25 @@ impl ModelDeploymentCard {
         self.source_path = Some(source_path.display().to_string());
     }
 
+    /// Records the commit SHA `snapshot_path` is named after. Returns whether it was
+    /// recorded, so a caller can keep the rest of the card consistent with the pin.
+    pub(crate) fn set_hf_commit_sha(&mut self, repo: &str, snapshot_path: &Path) -> bool {
+        let Some(sha) = snapshot_path.file_name().and_then(|n| n.to_str()) else {
+            return false;
+        };
+        // A reader treats a revision that is not a commit SHA as a branch or tag and
+        // accepts whatever the hub resolves it to, so publishing anything else here
+        // would quietly reopen the worker/frontend skew this field closes.
+        if !crate::hub::is_hf_commit_sha(sha) {
+            tracing::debug!("not recording HF revision for {repo}: {sha:?} is not a commit SHA");
+            return false;
+        }
+        self.hf_commit_sha
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(repo.to_string(), sha.to_string());
+        true
+    }
+
     /// Allow user to override the name we register this model under.
     /// Corresponds to vllm's `--served-model-name`.
     pub fn set_name(&mut self, name: &str) {
@@ -1659,21 +1705,46 @@ impl ModelDeploymentCard {
             })
             .collect::<anyhow::Result<_>>()?;
 
-        // Pre-resolve hf:// repos once per unique repo; otherwise the
-        // resolve loop would call hub::from_hf N times for one model.
-        let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
-            std::collections::HashMap::new();
+        // Ordered and deduplicated: one repo is resolved once in a stable order, and a
+        // file named by two card slots is required once rather than checked twice.
+        let mut repo_files: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
         for (uri, _) in &entries {
             if uri.starts_with("hf://") {
-                let (repo, _) = parse_hf_uri(uri)?;
-                if let std::collections::hash_map::Entry::Vacant(e) = hf_snapshots.entry(repo) {
-                    let repo_name = e.key().clone();
-                    let snap = crate::hub::from_hf(&repo_name, /* ignore_weights = */ true)
-                        .await
-                        .with_context(|| format!("hub::from_hf({repo_name})"))?;
-                    e.insert(snap);
-                }
+                let (repo, filename) = parse_hf_uri(uri)?;
+                repo_files.entry(repo).or_default().push(filename);
             }
+        }
+        for filenames in repo_files.values_mut() {
+            filenames.sort_unstable();
+            filenames.dedup();
+        }
+
+        let mut hf_snapshots: std::collections::HashMap<String, PathBuf> =
+            std::collections::HashMap::new();
+        for (repo_name, filenames) in &repo_files {
+            let snap = if let Some(sha) = self.hf_commit_sha.as_ref().and_then(|m| m.get(repo_name))
+            {
+                crate::hub::from_hf_at_revision(
+                    repo_name,
+                    sha,
+                    Some(filenames),
+                    /* ignore_weights =*/ true,
+                )
+                .await
+                .with_context(|| format!("hub::from_hf_at_revision({repo_name}, {sha})"))?
+            } else {
+                crate::hub::from_hf(repo_name, /* ignore_weights = */ true)
+                    .await
+                    .with_context(|| format!("hub::from_hf({repo_name})"))?
+            };
+            // Whichever arm resolved it, the snapshot has to hold every file this card
+            // names, or resolution dies further down on an opaque copy error instead of
+            // naming what is missing.
+            if let Some(missing) = crate::hub::first_missing_file(&snap, Some(filenames)) {
+                anyhow::bail!("{repo_name} resolved without required file {missing:?}");
+            }
+            hf_snapshots.insert(repo_name.clone(), snap);
         }
 
         let client = reqwest::Client::builder()
@@ -1895,6 +1966,7 @@ impl ModelDeploymentCard {
             display_name,
             source_path: None,
             model_info,
+            hf_commit_sha: None,
             tokenizer,
             gen_config,
             prompt_formatter,
@@ -2432,6 +2504,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{HFConfig, ModelDeploymentCard};
+    use crate::hub::tests::build_hf_cache;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
 
@@ -2529,6 +2602,50 @@ mod tests {
         dynamo_runtime::logging::init();
         let path = "tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
         let _ = HFConfig::from_json_file(path).unwrap();
+    }
+
+    #[test]
+    fn test_set_hf_commit_sha_extracts_from_snapshot_path() {
+        let mut card = ModelDeploymentCard::default();
+        let temp = tempfile::tempdir().unwrap();
+        let snapshot = build_hf_cache(temp.path(), "Qwen/Qwen3-0.6B", &["config.json"]);
+        card.set_hf_commit_sha("Qwen/Qwen3-0.6B", &snapshot);
+        assert_eq!(
+            card.hf_commit_sha
+                .as_ref()
+                .unwrap()
+                .get("Qwen/Qwen3-0.6B")
+                .map(String::as_str),
+            Some("0000000000000000000000000000000000000000")
+        );
+    }
+
+    #[test]
+    fn test_set_hf_commit_sha_ignores_a_snapshot_dir_that_is_not_a_sha() {
+        let mut card = ModelDeploymentCard::default();
+        let temp = tempfile::tempdir().unwrap();
+        // A reader would treat "main" as a branch and accept the latest commit for it,
+        // so it must never reach the card in the first place.
+        let snapshot = temp.path().join("models--Qwen--Qwen3-0.6B/snapshots/main");
+        std::fs::create_dir_all(&snapshot).unwrap();
+
+        card.set_hf_commit_sha("Qwen/Qwen3-0.6B", &snapshot);
+
+        assert!(card.hf_commit_sha.is_none());
+    }
+
+    #[test]
+    fn test_parse_hf_uri_rejects_a_filename_that_leaves_the_snapshot() {
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/..").is_err());
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/.").is_err());
+    }
+
+    #[test]
+    fn test_parse_hf_uri_rejects_a_repo_that_leaves_the_snapshot() {
+        // `rsplit_once` only isolates the last segment, so the repo needs its own check.
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/../evil/config.json").is_err());
+        assert!(super::parse_hf_uri("hf:///abs/config.json").is_err());
+        assert!(super::parse_hf_uri("hf://Qwen/Qwen3-0.6B/config.json").is_ok());
     }
 
     /// Qwen3.5 models have text_config.eos_token_id = 248044 (<|endoftext|>) but the
@@ -3472,6 +3589,48 @@ mod worker_type_tests {
             encode_dnf, encode_single_alt,
             "adding an OR alternative must change mdcsum"
         );
+    }
+
+    /// Verify `mdcsum` distinguishes HF revisions; each case needs a
+    /// fresh card because the checksum is cached.
+    #[test]
+    fn mdcsum_covers_hf_commit_sha() {
+        fn hash(hf_commit_sha: Option<std::collections::HashMap<String, String>>) -> String {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.hf_commit_sha = hf_commit_sha;
+            card.mdcsum().to_string()
+        }
+
+        let baseline = hash(None);
+        let sha_a = hash(Some(
+            [("Qwen/Qwen3-0.6B".to_string(), "aaaa".to_string())].into(),
+        ));
+        let sha_b = hash(Some(
+            [("Qwen/Qwen3-0.6B".to_string(), "bbbb".to_string())].into(),
+        ));
+        assert_ne!(baseline, sha_a, "hf_commit_sha must change mdcsum");
+        assert_ne!(
+            sha_a, sha_b,
+            "two workers resolving different commits for the same repo must produce different mdcsums"
+        );
+
+        // Read-order independence: same (repo, sha) pairs, different HashMap
+        // construction order, must hash the same (sort_unstable normalizes it).
+        let multi_1 = hash(Some(
+            [
+                ("Qwen/Qwen3-0.6B".to_string(), "aaaa".to_string()),
+                ("meta-llama/Llama-3".to_string(), "cccc".to_string()),
+            ]
+            .into(),
+        ));
+        let multi_2 = hash(Some(
+            [
+                ("meta-llama/Llama-3".to_string(), "cccc".to_string()),
+                ("Qwen/Qwen3-0.6B".to_string(), "aaaa".to_string()),
+            ]
+            .into(),
+        ));
+        assert_eq!(multi_1, multi_2, "entry order must not affect mdcsum");
     }
 
     /// Serde back-compat: an old-format card (no `worker_type` / `needs`

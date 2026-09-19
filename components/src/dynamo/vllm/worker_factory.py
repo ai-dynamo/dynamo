@@ -914,6 +914,7 @@ class WorkerFactory:
                 [WorkerType.Prefill, WorkerType.Decode],
                 [WorkerType.Aggregated],
             ],
+            revision=config.engine_args.revision,
         )
         register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the encode worker endpoint...")

@@ -2546,6 +2546,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             # LoRA cards need base-model metadata, not weights.
             ignore_weights=True,
             max_gpu_lora_count=getattr(self.config.engine_args, "max_loras", None),
+            revision=self.config.engine_args.revision,
         )
 
     async def _unregister_lora_discovery(self, lora_name: str) -> None:
