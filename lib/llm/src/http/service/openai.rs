@@ -3374,17 +3374,44 @@ async fn chat_completions(
 
     let annotations = request.annotations();
 
-    // issue the generate call on the engine
-    let stream = engine.generate(request).await.map_err(|e| {
-        if super::metrics::request_was_rejected(e.as_ref()) {
-            state
-                .metrics_clone()
-                .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
-        }
-        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        err_response
-    })?;
+    // With early commit the backend call runs inside the response stream, so
+    // the SSE response (and its keep-alive frames) exists while the request
+    // queues at the backend. A generate error then becomes an SSE error frame.
+    let early_commit = streaming && state.early_commit_streaming();
+    let stream = if early_commit {
+        let ctx = request.context();
+        let metrics = state.metrics_clone();
+        let model = model.clone();
+        let inner = async_stream::stream! {
+            match engine.generate(request).await {
+                Ok(mut stream) => {
+                    while let Some(item) = stream.next().await {
+                        yield item;
+                    }
+                }
+                Err(e) => {
+                    if super::metrics::request_was_rejected(e.as_ref()) {
+                        metrics.inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+                    }
+                    tracing::error!(error = %e, "Failed to generate completions");
+                    yield Annotated::from_error(e.to_string());
+                }
+            }
+        };
+        dynamo_runtime::engine::ResponseStream::new(Box::pin(inner), ctx)
+    } else {
+        // issue the generate call on the engine
+        engine.generate(request).await.map_err(|e| {
+            if super::metrics::request_was_rejected(e.as_ref()) {
+                state
+                    .metrics_clone()
+                    .inc_rejection(&model, super::metrics::Endpoint::ChatCompletions);
+            }
+            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?
+    };
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -3420,8 +3447,13 @@ async fn chat_completions(
         // once the response is built, so it does not bound this wait:
         // `UntilFirstEvent` ends on the first event or on the client
         // disconnecting, and on nothing else.
+        let backend_error_check = if early_commit {
+            BackendErrorCheck::Skip
+        } else {
+            state.streaming_backend_error_check()
+        };
         let stream = until_client_disconnects(
-            check_for_backend_error_info(stream, state.streaming_backend_error_check()),
+            check_for_backend_error_info(stream, backend_error_check),
             &ctx,
         )
         .await
@@ -3530,7 +3562,8 @@ async fn chat_completions(
                 }
             }
         };
-        let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
+        let keep_alive =
+            state.sse_keep_alive_for_response(stream_can_defer_all_output || early_commit);
         let stream = monitor_for_disconnects_with_activity_and_error_signal(
             stream,
             ctx,
@@ -3540,6 +3573,15 @@ async fn chat_completions(
             error_signal,
         );
 
+        let stream: std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<Event, axum::Error>> + Send>,
+        > = if early_commit {
+            // A leading comment puts the headers and first bytes on the wire
+            // before the backend is called.
+            Box::pin(stream::once(async { Ok(Event::default().comment("")) }).chain(stream))
+        } else {
+            Box::pin(stream)
+        };
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = keep_alive {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));

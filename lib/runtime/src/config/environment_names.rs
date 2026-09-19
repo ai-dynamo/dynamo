@@ -375,6 +375,14 @@ pub mod llm {
     /// disabled.
     pub const DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS: &str = "DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS";
 
+    /// Commit the streaming chat completions response (HTTP 200 plus a leading
+    /// SSE comment) before the backend is called, and emit SSE comments every
+    /// 15 s (unless `DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS` is set) until the
+    /// first token arrives. Keeps otherwise idle client connections busy while a
+    /// request queues at the backend. Backend errors before the first event are
+    /// then reported as SSE error frames instead of a typed 4xx/5xx status.
+    pub const DYN_HTTP_EARLY_COMMIT_STREAMING: &str = "DYN_HTTP_EARLY_COMMIT_STREAMING";
+
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";
 
@@ -1103,6 +1111,7 @@ mod tests {
             llm::DYN_LORA_MCF_CONFIG,
             llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
+            llm::DYN_HTTP_EARLY_COMMIT_STREAMING,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::metrics::DYN_METRICS_REQUEST_DURATION,
             llm::metrics::DYN_METRICS_INPUT_SEQUENCE,

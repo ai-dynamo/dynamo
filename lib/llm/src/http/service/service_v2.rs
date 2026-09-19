@@ -146,6 +146,7 @@ pub struct State {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    early_commit_streaming: bool,
 }
 
 /// Typed config needed only to construct HTTP shared state.
@@ -158,6 +159,7 @@ struct StateConfig {
     nvext_enabled: bool,
     sse_keep_alive: Option<Duration>,
     streaming_backend_error_check: BackendErrorCheck,
+    early_commit_streaming: bool,
 }
 
 fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Duration> {
@@ -203,6 +205,10 @@ fn parse_sse_keep_alive(value: Result<String, std::env::VarError>) -> Option<Dur
 
 fn sse_keep_alive_from_env() -> Option<Duration> {
     parse_sse_keep_alive(std::env::var(env_llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS))
+}
+
+fn early_commit_streaming_from_env() -> bool {
+    dynamo_runtime::config::env_is_truthy(env_llm::DYN_HTTP_EARLY_COMMIT_STREAMING)
 }
 
 const DEFERRED_RESPONSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -558,6 +564,7 @@ impl State {
             frontend_api_config: config.frontend_api_config,
             sse_keep_alive: config.sse_keep_alive,
             streaming_backend_error_check: config.streaming_backend_error_check,
+            early_commit_streaming: config.early_commit_streaming,
         }
     }
 
@@ -654,6 +661,12 @@ impl State {
     /// status.
     pub fn streaming_backend_error_check(&self) -> BackendErrorCheck {
         self.streaming_backend_error_check
+    }
+
+    /// Whether streaming chat completions commit the SSE response before the
+    /// backend call. See `DYN_HTTP_EARLY_COMMIT_STREAMING`.
+    pub fn early_commit_streaming(&self) -> bool {
+        self.early_commit_streaming
     }
 
     /// Returns true if Anthropic billing preamble stripping is enabled.
@@ -1302,6 +1315,7 @@ impl HttpServiceConfigBuilder {
                 nvext_enabled,
                 sse_keep_alive: config.sse_keep_alive,
                 streaming_backend_error_check: config.streaming_backend_error_check,
+                early_commit_streaming: early_commit_streaming_from_env(),
             },
         ));
         state
