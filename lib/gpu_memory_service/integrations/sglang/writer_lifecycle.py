@@ -24,6 +24,7 @@ from gpu_memory_service.integrations.common.process_lifecycle import (
 )
 
 _boot: tuple[int, Path] | None = None
+_COHORT_ENV = "GMS_SGLANG_WRITER_COHORT_PATH"
 # Keep these open through scheduler return and CUDA/process teardown. The kernel
 # releases them on exit. Never unlink a cohort file: delayed children must open
 # the same inode as the successor fencing it, not a replacement.
@@ -52,10 +53,11 @@ def prepare_writer_cohort() -> Path:
         raise
     _writer_fds.append(fd)
     _boot = (os.getpid(), path)
+    os.environ[_COHORT_ENV] = str(path)
     return path
 
 
-async def fence_predecessor_writers() -> None:
+async def fence_predecessor_writers() -> Path | None:
     """Called with active flock held; cancellation never advances ownership.
 
     There is deliberately no timeout: a delayed or unkillable writer is not proof
@@ -68,15 +70,18 @@ async def fence_predecessor_writers() -> None:
         previous = marker.read_text().strip()
     except FileNotFoundError:
         previous = None
+    predecessor = None
     if previous is not None and previous != current.name:
         if uuid.UUID(hex=previous).hex != previous:
             raise RuntimeError("Invalid GMS writer-cohort identity")
-        await retire_writer_cohort(current.parent / previous)
+        predecessor = current.parent / previous
+        await retire_writer_cohort(predecessor)
     # A crash before atomic replace leaves the old identity; a crash after it
     # causes the next owner to fence this boot. The main flock serializes this.
     pending = current.parent / (current.name + ".active")
     pending.write_text(current.name)
     os.replace(pending, marker)
+    return predecessor
 
 
 def run_guarded_scheduler(
@@ -85,6 +90,7 @@ def run_guarded_scheduler(
     """Picklable multiprocessing entry; arm before any SGLang/CUDA work."""
     arm_parent_death_signal(expected_parent_pid=expected_parent_pid)
     _hold_writer_guard(Path(guard_path))
+    os.environ[_COHORT_ENV] = guard_path
     # The parent may have exited while waiting for the shared flock.
     arm_parent_death_signal(expected_parent_pid=expected_parent_pid)
     return scheduler(*args, **kwargs)

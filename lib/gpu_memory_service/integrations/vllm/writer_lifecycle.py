@@ -197,7 +197,7 @@ def join_writer_cohort_process() -> None:
     arm_parent_death_signal(expected_parent_pid=expected_parent)
 
 
-async def fence_predecessor_writers() -> None:
+async def fence_predecessor_writers() -> Path | None:
     """Retire predecessor CPU submitters; GPU completion is a separate contract."""
     current = prepare_writer_cohort()
     marker = current.parent / "active"
@@ -205,10 +205,13 @@ async def fence_predecessor_writers() -> None:
         previous = marker.read_text().strip()
     except FileNotFoundError:
         previous = None
+    predecessor = None
     if previous is not None and previous != current.name:
         if uuid.UUID(hex=previous).hex != previous:
             raise RuntimeError("invalid vLLM predecessor writer-cohort identity")
-        await retire_writer_cohort(current.parent / previous)
+        predecessor = current.parent / previous
+        await retire_writer_cohort(predecessor)
     pending = current.parent / (current.name + ".active")
     pending.write_text(current.name)
     os.replace(pending, marker)
+    return predecessor

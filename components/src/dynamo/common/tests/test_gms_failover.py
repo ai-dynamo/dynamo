@@ -551,9 +551,25 @@ async def test_gms_failover_promotes_directory_before_lease_reclaim(monkeypatch)
     async def to_thread(fn, *args):
         return fn(*args)
 
-    def reclaim(backend_name, role, protected_blocks=None, protected_leases=None):
+    def reclaim(
+        backend_name,
+        role,
+        *,
+        gpu_quiesced,
+        recovery_owner_id=None,
+        protected_blocks=None,
+        protected_leases=None,
+    ):
         order.append(
-            ("reclaim", backend_name, role, protected_blocks, protected_leases)
+            (
+                "reclaim",
+                backend_name,
+                role,
+                gpu_quiesced,
+                recovery_owner_id,
+                protected_blocks,
+                protected_leases,
+            )
         )
 
     monkeypatch.setattr(
@@ -562,16 +578,64 @@ async def test_gms_failover_promotes_directory_before_lease_reclaim(monkeypatch)
     )
     monkeypatch.setattr("dynamo.common.gms_failover.asyncio.to_thread", to_thread)
     monkeypatch.setattr(
-        "dynamo.common.gms_failover._reclaim_foreign_kv_leases_after_fence",
+        "dynamo.common.gms_failover._recover_foreign_kv_leases_after_fence",
         reclaim,
     )
 
     await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
 
-    assert order == [
-        ("promote", "vllm", "shadow"),
-        ("reclaim", "vllm", "shadow", {7, 9}, {(7, 17), (9, 19)}),
-    ]
+    assert order[0] == ("promote", "vllm", "shadow")
+    recovery = order[1]
+    assert recovery[:4] == ("reclaim", "vllm", "shadow", False)
+    assert recovery[4]
+    assert recovery[5:] == ({7, 9}, {(7, 17), (9, 19)})
+
+
+@pytest.mark.asyncio
+async def test_gpu_proof_reclaim_runs_after_phase_one_returns(monkeypatch):
+    from types import SimpleNamespace
+
+    from gpu_memory_service.integrations.common import gpu_quiescence
+
+    from dynamo.common import gms_failover
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "off")
+    monkeypatch.setenv("DYN_TEST_GMS_GPU_QUIESCENCE_COMMAND", "/bin/true")
+    proof_allowed = asyncio.Event()
+    calls = []
+
+    async def prove(**_kwargs):
+        await proof_allowed.wait()
+        return SimpleNamespace(
+            quiesced=True, provider="test", detail="", elapsed_ms=0.1
+        )
+
+    def recover(_backend, _role, *, gpu_quiesced, recovery_owner_id=None, **_kwargs):
+        calls.append((gpu_quiesced, recovery_owner_id))
+
+    monkeypatch.setattr(
+        gpu_quiescence,
+        "prove_predecessor_gpu_quiescence",
+        prove,
+    )
+    monkeypatch.setattr(
+        gms_failover,
+        "_recover_foreign_kv_leases_after_fence",
+        recover,
+    )
+
+    await run_gms_failover_post_lock_fence(backend_name="test", role="shadow")
+
+    # Phase one is a takeover barrier, but the platform proof is not.
+    assert len(calls) == 1
+    assert calls[0][0] is False
+    assert calls[0][1]
+    assert gms_failover._gpu_quiescence_tasks
+    proof_allowed.set()
+    await asyncio.gather(*tuple(gms_failover._gpu_quiescence_tasks))
+    await asyncio.sleep(0)
+    assert calls == [(False, calls[0][1]), (True, calls[0][1])]
+    assert not gms_failover._gpu_quiescence_tasks
 
 
 @pytest.mark.asyncio
@@ -589,7 +653,7 @@ async def test_cancelled_fence_drains_directory_promotion(monkeypatch):
 
     monkeypatch.setattr("dynamo.common.gms_failover.asyncio.to_thread", to_thread)
     monkeypatch.setattr(
-        "dynamo.common.gms_failover._reclaim_foreign_kv_leases_after_fence",
+        "dynamo.common.gms_failover._recover_foreign_kv_leases_after_fence",
         lambda *args, **kwargs: reclaimed.append((args, kwargs)),
     )
 
@@ -623,16 +687,23 @@ def test_post_fence_reclaim_uses_allocator_namespace(monkeypatch):
     monkeypatch.setattr(kv_lease_client, "resolve_lease_device", lambda _env: 0)
     monkeypatch.setattr(
         kv_lease_client,
-        "reclaim_foreign_kv_leases_in_shm_dir",
+        "recover_foreign_kv_leases_in_shm_dir",
         lambda engine, device, **kwargs: (
             calls.append((engine, device, kwargs))
-            or SimpleNamespace(files=1, reclaimed_blocks=2, errors=0)
+            or SimpleNamespace(
+                files=1,
+                released_idle_blocks=3,
+                quarantined_blocks=4,
+                reclaimed_blocks=0,
+                errors=0,
+            )
         ),
     )
 
-    gms_failover._reclaim_foreign_kv_leases_after_fence(
+    gms_failover._recover_foreign_kv_leases_after_fence(
         "sglang",
         "shadow",
+        gpu_quiesced=False,
         protected_blocks={7},
         protected_leases={(7, 17)},
     )
@@ -653,11 +724,13 @@ def test_post_fence_reclaim_honors_disabled_engine_override(monkeypatch):
     calls = []
     monkeypatch.setattr(
         kv_lease_client,
-        "reclaim_foreign_kv_leases_in_shm_dir",
+        "recover_foreign_kv_leases_in_shm_dir",
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
-    gms_failover._reclaim_foreign_kv_leases_after_fence("sglang", "shadow")
+    gms_failover._recover_foreign_kv_leases_after_fence(
+        "sglang", "shadow", gpu_quiesced=False
+    )
 
     assert calls == []
 
