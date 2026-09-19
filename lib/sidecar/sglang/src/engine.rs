@@ -78,6 +78,19 @@ impl SglangSidecarEngine {
         Self::from_parsed_async(<Args as clap::Parser>::parse())
     }
 
+    /// Parse embedded launcher arguments now, then discover metadata after the
+    /// shared sidecar runner has started probes and connected the runtime.
+    pub fn try_from_args_async(
+        argv: Vec<String>,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        SidecarStartupError,
+    > {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args))
+    }
+
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -86,13 +99,17 @@ impl SglangSidecarEngine {
         runtime.block_on(Self::from_parsed_async(args))
     }
 
-    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    fn validate_args(args: &Args) -> Result<(), DynamoError> {
         if args.sidecar.common.route_to_encoder {
             return Err(client::invalid_arg(
                 "route-to-encoder is not supported by the SGLang sidecar",
             ));
         }
+        Ok(())
+    }
 
+    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::validate_args(&args)?;
         let endpoint = args.sidecar.grpc_endpoint;
         let transport = args.sidecar.grpc.config();
         let discovery = bootstrap_discover(&endpoint, &transport).await?;

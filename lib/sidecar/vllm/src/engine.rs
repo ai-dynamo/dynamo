@@ -98,6 +98,19 @@ impl VllmSidecarEngine {
         Self::from_parsed_async(<Args as clap::Parser>::parse())
     }
 
+    /// Parse embedded launcher arguments now, then discover metadata after the
+    /// shared sidecar runner has started probes and connected the runtime.
+    pub fn try_from_args_async(
+        argv: Vec<String>,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        SidecarStartupError,
+    > {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args))
+    }
+
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -106,7 +119,7 @@ impl VllmSidecarEngine {
         runtime.block_on(Self::from_parsed_async(args))
     }
 
-    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    fn validate_args(args: &Args) -> Result<(), DynamoError> {
         if args.sidecar.common.dyn_tool_call_parser.is_some()
             || args.sidecar.common.dyn_reasoning_parser.is_some()
         {
@@ -114,7 +127,11 @@ impl VllmSidecarEngine {
                 "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
             ));
         }
+        Ok(())
+    }
 
+    async fn from_parsed_async(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+        Self::validate_args(&args)?;
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
         let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());

@@ -3078,10 +3078,12 @@ name = "dynamo-sidecar-common"
 version = "1.6.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "dynamo-backend-common",
  "dynamo-runtime",
  "futures",
+ "temp-env",
  "tokio",
  "tokio-util",
  "tonic 0.13.1",

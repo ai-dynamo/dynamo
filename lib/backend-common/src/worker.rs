@@ -557,12 +557,13 @@ impl Worker {
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
         let outcome = {
-            let inner_fut = self.run_inner(runtime, drt, &shutdown_token);
+            let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
+                    runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
                     let deadline = shutdown_deadline(timeout, grace);
@@ -589,6 +590,7 @@ impl Worker {
 
         // Final safety net: guarantee engine.cleanup() runs if start()
         // succeeded. No-op if cleanup already ran via the orchestrator.
+        runtime.mark_shutting_down();
         self.cleanup_once().await;
 
         outcome
@@ -893,6 +895,7 @@ impl Worker {
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
+        endpoint.drt().runtime().mark_shutting_down();
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {

@@ -79,6 +79,19 @@ impl TrtllmSidecarEngine {
         std::future::ready(Self::from_parsed(<Args as clap::Parser>::parse()))
     }
 
+    /// Parse embedded launcher arguments now, then discover metadata after the
+    /// shared sidecar runner has started probes and connected the runtime.
+    pub fn try_from_args_async(
+        argv: Vec<String>,
+    ) -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        SidecarStartupError,
+    > {
+        let args = <Args as clap::Parser>::try_parse_from(argv)?;
+        let initialized = Self::from_parsed(args)?;
+        Ok(std::future::ready(Ok(initialized)))
+    }
+
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));

@@ -25,3 +25,7 @@ tonic = { workspace = true }
 tonic-v14 = { workspace = true, optional = true }
 tracing = { workspace = true }
 url = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+temp-env = { version = "0.3.6", features = ["async_closure"] }

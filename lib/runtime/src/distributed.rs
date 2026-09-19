@@ -439,10 +439,7 @@ impl DistributedRuntime {
     /// Check configured runtime dependencies, independently of model registration.
     /// The HTTP caller bounds this operation; it never performs inference.
     pub(crate) async fn check_dependencies(&self) -> Result<()> {
-        anyhow::ensure!(
-            !self.runtime.primary_token().is_cancelled(),
-            "runtime is shutting down"
-        );
+        anyhow::ensure!(!self.runtime.is_shutting_down(), "runtime is shutting down");
         if let Some(client) = &self.nats_client {
             anyhow::ensure!(
                 client.client().connection_state() == async_nats::connection::State::Connected,
@@ -450,10 +447,7 @@ impl DistributedRuntime {
             );
         }
         self.discovery_client.check_connection().await?;
-        anyhow::ensure!(
-            !self.runtime.primary_token().is_cancelled(),
-            "runtime is shutting down"
-        );
+        anyhow::ensure!(!self.runtime.is_shutting_down(), "runtime is shutting down");
         Ok(())
     }
 
