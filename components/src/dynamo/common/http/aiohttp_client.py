@@ -34,10 +34,9 @@ class AiohttpClient(HttpClient):
 
     def _effective_timeout(self, timeout: float) -> aiohttp.ClientTimeout:
         # The override caps ``total`` (whole request). ``sock_connect``
-        # bounds the TCP+TLS handshake independently — without it a
-        # stuck origin would burn the full ``total`` budget before any
-        # byte arrives, matching what httpx's ``Timeout.connect`` gives
-        # us on the other backend.
+        # bounds just the TCP+TLS handshake, so a stuck origin fast-fails at
+        # the connect budget instead of burning the full ``total`` before any
+        # byte arrives.
         total = (
             self._config.per_call_timeout_override
             if self._config.per_call_timeout_override is not None

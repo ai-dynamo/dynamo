@@ -17,6 +17,13 @@ latency for Weka. These are CPU simulations with AIC engine timing, not GPU
 measurements. Finite replay throughput includes arrivals, tool gaps, and queue drain;
 it does not by itself establish maximum sustainable server throughput.
 
+The reported campaign was measured at commit
+`c3266067365b53630cdaf4fd6a29ba95775385c3`, using AISimulate 0.12.0.dev1.
+A subsequent ancestry merge incorporates the already-landed parent PR and its
+upstream AISimulate 0.12.0.dev2 dependency. The performance campaign has not been
+rerun on that newer dependency; use the measured commit to reproduce these numbers.
+The 41 targeted offline-router tests also pass with the newer native dependency.
+
 ## Controller and comparison
 
 The controller uses:

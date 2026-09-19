@@ -9,6 +9,12 @@ Run these commands from the selected Dynamo worktree, using its `.venv`.
 Generated traces and reports belong outside the repository. No dataset is
 included here.
 
+For the recorded headline numbers, use commit
+`c3266067365b53630cdaf4fd6a29ba95775385c3` before building the worktree's environment.
+That revision pins AISimulate 0.12.0.dev1. The later PR ancestry merge includes an
+upstream 0.12.0.dev2 bump; running the current head evaluates that newer dependency,
+not an exact reproduction of the recorded campaign.
+
 The first-32-request example below introduces the tools. Its 300-second TTL is
 not the main cache-pressure experiment. For that comparison, start with the
 first **128 requests, four shared copies, 20 cycles, a 60-second period, and a
