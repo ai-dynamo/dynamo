@@ -18,7 +18,8 @@ Engine protocols and request conversion remain in each engine's crate.
 ## Health and startup
 
 Set `DYN_SYSTEM_PORT` to enable the sidecar HTTP server. The standalone sidecar
-executables bind this listener before connecting to runtime dependencies or
+executables and Python module launchers (`python -m dynamo.<engine>.sidecar`)
+bind this listener before connecting to runtime dependencies or
 waiting for engine metadata:
 
 - `/live` returns HTTP 200 whenever the listener can respond, including while
@@ -34,6 +35,10 @@ The existing `DYN_SYSTEM_LIVE_PATH` and `DYN_SYSTEM_HEALTH_PATH` settings also
 apply. Metrics, metadata, and engine routes become available on the same listener
 once the runtime connects. Keep a separate engine startup/readiness probe: a
 healthy sidecar alone does not mean the engine can serve requests.
+
+Shutdown withdraws sidecar readiness immediately. Metadata discovery before
+`Worker.start()` is cancelled; once engine startup has begun, the existing Worker
+startup, drain, and cleanup ordering remains in effect.
 
 This implements the probe portion of [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 Continuous engine health reconciliation, engine replacement and KV recovery, and

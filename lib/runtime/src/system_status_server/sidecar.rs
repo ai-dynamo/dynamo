@@ -5,7 +5,10 @@
 //! One listener serves these probes throughout startup and shutdown; the usual
 //! metrics, metadata and engine routes become available when the runtime connects.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use axum::{Router, extract::Request, http::StatusCode, response::IntoResponse, routing::get};
@@ -40,6 +43,7 @@ impl SidecarStatusServer {
         let readiness_state = connected.clone();
         let readiness_shutdown = shutdown.clone();
         let runtime_routes = connected.clone();
+        let last_ready = Arc::new(AtomicBool::new(false));
         let app = Router::new()
             .route(&config.system_live_path, get(|| async { StatusCode::OK }))
             .route(
@@ -47,21 +51,33 @@ impl SidecarStatusServer {
                 get(move || {
                     let connected = readiness_state.clone();
                     let shutdown = readiness_shutdown.clone();
+                    let last_ready = last_ready.clone();
                     async move {
-                        let ready = if let Some(state) = connected.get() {
-                            !shutdown.is_cancelled()
-                                && matches!(
-                                    tokio::time::timeout(
-                                        Duration::from_secs(1),
-                                        state.drt.check_dependencies(),
-                                    )
-                                    .await,
-                                    Ok(Ok(()))
-                                )
-                                && !shutdown.is_cancelled()
-                        } else {
-                            false
-                        };
+                        let result = async {
+                            anyhow::ensure!(!shutdown.is_cancelled(), "sidecar is shutting down");
+                            let state = connected
+                                .get()
+                                .ok_or_else(|| anyhow::anyhow!("runtime initializing"))?;
+                            tokio::time::timeout(
+                                Duration::from_secs(1),
+                                state.drt.check_dependencies(),
+                            )
+                            .await
+                            .map_err(|_| anyhow::anyhow!("runtime dependency check timed out"))??;
+                            anyhow::ensure!(!shutdown.is_cancelled(), "sidecar is shutting down");
+                            Ok::<_, anyhow::Error>(())
+                        }
+                        .await;
+                        let ready = result.is_ok();
+                        // Log transitions, not every kubelet probe.
+                        if last_ready.swap(ready, Ordering::AcqRel) != ready {
+                            match result {
+                                Ok(()) => {
+                                    tracing::info!("Sidecar ready; runtime dependencies available")
+                                }
+                                Err(error) => tracing::warn!(%error, "Sidecar not ready"),
+                            }
+                        }
                         let (code, status) = if ready {
                             (StatusCode::OK, "ready")
                         } else {
@@ -91,6 +107,7 @@ impl SidecarStatusServer {
             app,
         )
         .await?;
+        tracing::info!(%address, "Sidecar probes started; runtime initializing");
         Ok(Some(Self {
             connected,
             info: Arc::new(SystemStatusServerInfo::new(address, Some(handle))),
@@ -203,10 +220,13 @@ mod tests {
         let base = format!("http://{}", server.info.socket_addr);
         let client = reqwest::Client::new();
         assert_eq!(status(&client, &base, "/health").await, 200);
-        drt.runtime().primary_token().cancel();
+        // Hold Phase 2 open: readiness must fail before transport teardown.
+        let guard = runtime.graceful_shutdown_tracker().register_task();
+        runtime.shutdown();
         assert_eq!(status(&client, &base, "/health").await, 503);
         assert_eq!(status(&client, &base, "/live").await, 200);
-        runtime.shutdown();
+        assert!(!drt.runtime().primary_token().is_cancelled());
+        drop(guard);
     }
 
     #[tokio::test]
