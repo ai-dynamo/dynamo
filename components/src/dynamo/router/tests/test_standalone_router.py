@@ -123,3 +123,80 @@ async def test_get_overlap_scores_forwards_cache_namespace() -> None:
         False,
         "tenant-a",
     )
+
+
+@pytest.mark.asyncio
+async def test_generate_forwards_fields_added_after_the_wrapper() -> None:
+    """Fields the wrapper does not name must still reach the kv router.
+
+    PreprocessedRequest grows fields after this router ships (e.g.
+    require_reasoning); rebuilding the request from an explicit allow-list
+    dropped them, so the backend saw builder defaults -- in particular
+    require_reasoning=false, which turns off reasoning token accounting.
+    """
+    handler, router = handler_with_router()
+    request = {
+        "model": "test-model",
+        "token_ids": [1, 2, 3],
+        "require_reasoning": True,
+        "kv_hint": {"block_ids": [7]},
+        "router": {"ttft_target": 42},
+        "agent_context": {"user_id": "u1"},
+        "media_io_kwargs": {"allow_remote": True},
+        "is_probe": True,
+        "request_timestamp_ms": 123.5,
+        "migration_link": {"trace_id": "t", "span_id": "s"},
+    }
+
+    async def responses():
+        yield {"token_ids": [4], "finish_reason": "stop"}
+
+    router.generate_from_request.return_value = responses()
+
+    _ = [output async for output in handler.generate(request)]
+
+    forwarded = router.generate_from_request.await_args.args[0]
+    assert forwarded["require_reasoning"] is True
+    assert forwarded["kv_hint"] == {"block_ids": [7]}
+    assert forwarded["router"] == {"ttft_target": 42}
+    assert forwarded["agent_context"] == {"user_id": "u1"}
+    assert forwarded["media_io_kwargs"] == {"allow_remote": True}
+    assert forwarded["is_probe"] is True
+    assert forwarded["request_timestamp_ms"] == 123.5
+    assert forwarded["migration_link"] == {"trace_id": "t", "span_id": "s"}
+
+
+@pytest.mark.asyncio
+async def test_generate_synthesizes_routing_from_legacy_dp_rank() -> None:
+    handler, router = handler_with_router()
+    request = {"model": "test-model", "token_ids": [1, 2, 3], "dp_rank": 3}
+
+    async def responses():
+        yield {"token_ids": [4], "finish_reason": "stop"}
+
+    router.generate_from_request.return_value = responses()
+
+    _ = [output async for output in handler.generate(request)]
+
+    forwarded = router.generate_from_request.await_args.args[0]
+    assert forwarded["routing"] == {"dp_rank": 3}
+    assert forwarded["model"] == "test-model"
+    assert forwarded["token_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_generate_applies_model_fallback_when_missing() -> None:
+    handler, router = handler_with_router()
+    request = {"token_ids": [9]}
+
+    async def responses():
+        yield {"token_ids": [4], "finish_reason": "stop"}
+
+    router.generate_from_request.return_value = responses()
+
+    _ = [output async for output in handler.generate(request)]
+
+    forwarded = router.generate_from_request.await_args.args[0]
+    assert forwarded["model"] == "unknown"
+    assert forwarded["routing"] is None
+    assert forwarded["token_ids"] == [9]

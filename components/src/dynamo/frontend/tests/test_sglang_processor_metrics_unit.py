@@ -179,6 +179,9 @@ def test_stream_emits_llm_metrics_annotation(module_stubs):
         "completion_tokens": 3,
         "total_tokens": 13,
         "prompt_tokens_details": {"cached_tokens": 4},
+        # Emits exactly what the SGLang decode bridge now builds; the
+        # whole-dict equality below pins the streaming passthrough.
+        "completion_tokens_details": {"reasoning_tokens": 5},
     }
     processor = module.SglangProcessor(
         tokenizer=None,

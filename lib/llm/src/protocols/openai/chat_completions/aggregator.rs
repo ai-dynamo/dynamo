@@ -1833,6 +1833,10 @@ mod tests {
             prompt_tokens: 2,
             completion_tokens: 2,
             total_tokens: 4,
+            completion_tokens_details: Some(dynamo_protocols::types::CompletionTokensDetails {
+                reasoning_tokens: Some(2),
+                ..Default::default()
+            }),
             ..Default::default()
         });
 
@@ -1858,9 +1862,15 @@ mod tests {
             }))
         );
         assert_eq!(response.inner.choices.len(), 1);
+        let aggregated_usage = response.inner.usage.expect("aggregated usage");
+        assert_eq!(aggregated_usage.total_tokens, 4);
+        // The non-streaming fold must keep the backend-reported reasoning
+        // count, not just the totals.
         assert_eq!(
-            response.inner.usage.expect("aggregated usage").total_tokens,
-            4
+            aggregated_usage
+                .completion_tokens_details
+                .and_then(|details| details.reasoning_tokens),
+            Some(2)
         );
     }
 

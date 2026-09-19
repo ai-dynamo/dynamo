@@ -1267,6 +1267,133 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
+async def test_token_stream_usage_includes_reasoning_tokens():
+    """SGLang reports reasoning tokens in meta_info; the OpenAI usage contract
+    expects them nested under completion_tokens_details."""
+
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101],
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 0,
+                        "output_ids": [102],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 11,
+                            "completion_tokens": 7,
+                            "cached_tokens": 4,
+                            "reasoning_tokens": 3,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks[-1]["completion_usage"] == {
+        "prompt_tokens": 11,
+        "completion_tokens": 7,
+        "total_tokens": 18,
+        "completion_tokens_details": {"reasoning_tokens": 3},
+        "prompt_tokens_details": {"cached_tokens": 4},
+    }
+
+
+@pytest.mark.asyncio
+async def test_token_stream_usage_preserves_reasoning_tokens_per_choice():
+    """A reported zero is a real count, and an unreported count stays absent."""
+
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 5,
+                            "completion_tokens": 2,
+                            "reasoning_tokens": 0,
+                        },
+                    },
+                    {
+                        "index": 1,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 5,
+                            "completion_tokens": 3,
+                            "reasoning_tokens": 2,
+                        },
+                    },
+                    {
+                        "index": 2,
+                        "output_ids": [],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop"},
+                            "prompt_tokens": 5,
+                            "completion_tokens": 4,
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert chunks == [
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+                "completion_tokens_details": {"reasoning_tokens": 0},
+            },
+        },
+        {
+            "index": 1,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 3,
+                "total_tokens": 8,
+                "completion_tokens_details": {"reasoning_tokens": 2},
+            },
+        },
+        {
+            "index": 2,
+            "finish_reason": "stop",
+            "token_ids": [],
+            "completion_usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 4,
+                "total_tokens": 9,
+            },
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 

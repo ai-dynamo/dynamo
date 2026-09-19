@@ -91,28 +91,25 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
     # Duplicated from dynamo.router/__main__.py since neither package exports
     # it. TODO(idhanani): file follow-up to lift this into dynamo.router as a
     # shared helper before the field list drifts.
+    #
+    # Like dynamo.router, forward the inbound request wholesale and overlay
+    # only the synthesized fields: an explicit allow-list drops every
+    # PreprocessedRequest field added after this copy was written
+    # (require_reasoning, kv_hint, router, ...).
     routing = request.get("routing")
     dp_rank = request.get("dp_rank")
     if routing is None and dp_rank is not None:
         routing = {"dp_rank": dp_rank}
 
-    return {
-        "model": request.get("model", "unknown"),
-        "token_ids": request["token_ids"],
-        "stop_conditions": request.get("stop_conditions", {}),
-        "sampling_options": request.get("sampling_options", {}),
-        "output_options": request.get("output_options", {}),
-        "eos_token_ids": request.get("eos_token_ids", []),
-        "annotations": request.get("annotations", []),
-        "routing": routing,
-        "router_config_override": request.get("router_config_override"),
-        "prefill_result": request.get("prefill_result"),
-        "bootstrap_info": request.get("bootstrap_info"),
-        "extra_args": request.get("extra_args"),
-        "mm_processor_kwargs": request.get("mm_processor_kwargs"),
-        "agent_context": request.get("agent_context"),
-        "request_timestamp_ms": request.get("request_timestamp_ms"),
-    }
+    wrapped = dict(request)
+    wrapped.update(
+        {
+            "model": request.get("model", "unknown"),
+            "token_ids": request["token_ids"],
+            "routing": routing,
+        }
+    )
+    return wrapped
 
 
 def _inject_thunderagent_route_proof(
