@@ -2411,6 +2411,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "temp-env",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
