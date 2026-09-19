@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import types
-from typing import Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 import sglang as sgl
 
@@ -29,6 +29,7 @@ ENV_PARENT_PID = "DYN_SGLANG_GATEWAY_PARENT_PID"
 ENV_CHILD_INDEX = "DYN_SGLANG_GATEWAY_CHILD_INDEX"
 ENV_SYSTEM_PORT = "DYN_SYSTEM_PORT"
 ENV_SYSTEM_PORT_BASE = "DYN_SGLANG_GATEWAY_SYSTEM_PORT"
+ENV_LOAD_TIME = "DYN_SGLANG_GATEWAY_LOAD_TIME_S"
 # Runtime-data keys on every gateway child's model card: consumers that count
 # workers or sum per-worker capacity can collapse the N instances of one engine.
 GATEWAY_ENGINE_ID_KEY = "dynamo.sglang.gateway_engine"
@@ -170,7 +171,7 @@ def reserve_system_port_for_children() -> None:
     os.environ[ENV_SYSTEM_PORT] = "-1"
 
 
-def child_environment(index: int) -> dict[str, str]:
+def child_environment(index: int, load_time: Optional[float] = None) -> dict[str, str]:
     env = {
         **os.environ,
         ENV_PARENT_PID: str(os.getpid()),
@@ -179,7 +180,34 @@ def child_environment(index: int) -> dict[str, str]:
     base = env.pop(ENV_SYSTEM_PORT_BASE, None)
     if base is not None:
         env[ENV_SYSTEM_PORT] = base if index == 0 else "0"
+    env.pop(ENV_LOAD_TIME, None)
+    if index == 0 and load_time is not None:
+        # The leader measured the load; the metrics owner publishes it once.
+        env[ENV_LOAD_TIME] = repr(load_time)
     return env
+
+
+def attached_engine_load_time() -> Optional[float]:
+    raw = os.environ.get(ENV_LOAD_TIME)
+    return float(raw) if raw else None
+
+
+def follow_pause_broadcasts(
+    tokenizer_manager, on_change: Callable[[], Awaitable[None]]
+) -> bool:
+    """A pause or resume issued through any sibling reaches this process only as the
+    router's broadcast into its ``TokenizerWorker``; run ``on_change`` after each one so
+    this child's discovery registration follows the shared state."""
+    apply = getattr(tokenizer_manager, "_apply_pause_continue_broadcast", None)
+    if apply is None:
+        return False
+
+    async def apply_and_follow(obj):
+        await apply(obj)
+        await on_change()
+
+    tokenizer_manager._apply_pause_continue_broadcast = apply_and_follow
+    return True
 
 
 def gateway_engine_id() -> Optional[str]:
@@ -290,7 +318,10 @@ def _reap(proc: subprocess.Popen, timeout: Optional[float] = None) -> None:
 
 
 async def serve_via_gateway_children(
-    engine, count: int, shutdown_event: asyncio.Event
+    engine,
+    count: int,
+    shutdown_event: asyncio.Event,
+    load_time: Optional[float] = None,
 ) -> None:
     from sglang.srt.managers.multi_tokenizer_mixin import write_data_for_multi_tokenizer
 
@@ -311,7 +342,7 @@ async def serve_via_gateway_children(
             procs.append(
                 subprocess.Popen(
                     [sys.executable, "-m", "dynamo.sglang", *argv],
-                    env=child_environment(index),
+                    env=child_environment(index, load_time),
                 )
             )
         logging.info(

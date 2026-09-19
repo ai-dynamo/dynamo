@@ -15,7 +15,11 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.gateway import gateway_worker_count, serve_via_gateway_children
+from dynamo.sglang.gateway import (
+    attached_engine_load_time,
+    gateway_worker_count,
+    serve_via_gateway_children,
+)
 from dynamo.sglang.health_check import (
     SglangDisaggHealthCheckPayload,
     SglangHealthCheckPayload,
@@ -77,7 +81,7 @@ async def init_decode(
         # Gateway child: the parent owns the engine, this process only holds a
         # TokenizerWorker registered with its router.
         engine = attached_engine
-        load_time = None
+        load_time = attached_engine_load_time()
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -90,7 +94,9 @@ async def init_decode(
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
-            await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+            await serve_via_gateway_children(
+                engine, gateway_count, shutdown_event, load_time=load_time
+            )
         finally:
             engine.shutdown()
             if run_deferred_handlers is not None:
@@ -149,6 +155,8 @@ async def init_decode(
         first_token_source=first_token_source,
     )
     handler.register_engine_routes(runtime)
+    if attached_engine is not None:
+        handler.follow_shared_pause_state()
 
     if config.serving_mode == DisaggregationMode.DECODE:
         health_check_payload = SglangDisaggHealthCheckPayload(
@@ -255,7 +263,7 @@ async def init_prefill(
         # Gateway child: the parent owns the engine, this process only holds a
         # TokenizerWorker registered with its router.
         engine = attached_engine
-        load_time = None
+        load_time = attached_engine_load_time()
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -268,7 +276,9 @@ async def init_prefill(
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
-            await serve_via_gateway_children(engine, gateway_count, shutdown_event)
+            await serve_via_gateway_children(
+                engine, gateway_count, shutdown_event, load_time=load_time
+            )
         finally:
             engine.shutdown()
             if run_deferred_handlers is not None:
@@ -319,6 +329,8 @@ async def init_prefill(
         engine, config, publisher, generate_endpoint, shutdown_event
     )
     handler.register_engine_routes(runtime)
+    if attached_engine is not None:
+        handler.follow_shared_pause_state()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 

@@ -409,3 +409,40 @@ def test_serve_via_gateway_children_reuses_engine_published_shm(
 
     asyncio.run(run())
     assert calls == []
+
+
+def test_child_zero_receives_the_leader_load_time(not_a_child, monkeypatch):
+    monkeypatch.delenv(gateway.ENV_LOAD_TIME, raising=False)
+    env0 = gateway.child_environment(0, load_time=12.5)
+    env1 = gateway.child_environment(1, load_time=12.5)
+    assert env0[gateway.ENV_LOAD_TIME] == "12.5"
+    assert gateway.ENV_LOAD_TIME not in env1
+    assert gateway.ENV_LOAD_TIME not in gateway.child_environment(0)
+    assert gateway.attached_engine_load_time() is None
+    monkeypatch.setenv(gateway.ENV_LOAD_TIME, env0[gateway.ENV_LOAD_TIME])
+    assert gateway.attached_engine_load_time() == 12.5
+
+
+def test_follow_pause_broadcasts_resyncs_after_each_broadcast():
+    seen = []
+
+    class FakeWorker:
+        is_pause = False
+
+        async def _apply_pause_continue_broadcast(self, obj):
+            self.is_pause = obj.is_pause
+
+    worker = FakeWorker()
+
+    async def on_change():
+        seen.append(worker.is_pause)
+
+    assert gateway.follow_pause_broadcasts(worker, on_change)
+    assert not gateway.follow_pause_broadcasts(SimpleNamespace(), on_change)
+
+    async def run():
+        await worker._apply_pause_continue_broadcast(SimpleNamespace(is_pause=True))
+        await worker._apply_pause_continue_broadcast(SimpleNamespace(is_pause=False))
+
+    asyncio.run(run())
+    assert seen == [True, False]

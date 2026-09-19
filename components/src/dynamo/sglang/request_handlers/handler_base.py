@@ -49,6 +49,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
 from dynamo.sglang.engine_routes import resolve_configured_engine_routes
+from dynamo.sglang.gateway import follow_pause_broadcasts
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
 logger = logging.getLogger(__name__)
@@ -884,6 +885,13 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             await self.generate_endpoint.unregister_endpoint_instance()
         else:
             await self.generate_endpoint.register_endpoint_instance()
+
+    def follow_shared_pause_state(self) -> None:
+        async def resync() -> None:
+            async with self._engine_route_lock:
+                await self._sync_discovery_with_sglang_pause_state()
+
+        follow_pause_broadcasts(getattr(self.engine, "tokenizer_manager", None), resync)
 
     async def _invoke_engine_route(self, route_handler, body: dict) -> dict:
         """Invoke one engine route and then synchronize worker discovery."""
