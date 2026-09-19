@@ -49,6 +49,15 @@ impl PolicyClassConfig {
         self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
     }
 
+    /// Any zero per-worker limit means `queue_rejection` rejects every queued
+    /// entry (`current >= limit` holds at zero usage), so the class can never
+    /// hold a queued request and must keep the direct admission path.
+    pub fn never_queues(&self) -> bool {
+        self.request_queue_limit_per_worker == Some(0)
+            || self.raw_isl_token_queue_limit_per_worker == Some(0)
+            || self.cached_token_queue_limit_per_worker == Some(0)
+    }
+
     pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
         let absolute_busy = self
             .prefill_busy_threshold
@@ -101,6 +110,21 @@ impl FamilyBucketClassifier {
         let family_index = requested
             .and_then(|name| self.family_indices.get(name).copied())
             .unwrap_or(self.default_family_index);
+        self.class_index_for_family(family_index, uncached_tokens)
+    }
+
+    fn strict_class_index(&self, requested: &str, uncached_tokens: usize) -> Option<usize> {
+        self.explicit_class_indices
+            .get(requested)
+            .copied()
+            .or_else(|| {
+                self.family_indices
+                    .get(requested)
+                    .map(|family_index| self.class_index_for_family(*family_index, uncached_tokens))
+            })
+    }
+
+    fn class_index_for_family(&self, family_index: usize, uncached_tokens: usize) -> usize {
         let bucket_index = self
             .buckets
             .partition_point(|bucket| bucket.min_tokens <= uncached_tokens)
@@ -159,6 +183,21 @@ impl PolicyProfile {
 
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
         &self.classes[index]
+    }
+
+    pub(crate) fn resolve_class_index_strict(
+        &self,
+        requested: &str,
+        uncached_tokens: usize,
+    ) -> Option<usize> {
+        match &self.classifier {
+            PolicyClassifier::SyntheticSingle { class_index } => {
+                (self.classes[*class_index].name == requested).then_some(*class_index)
+            }
+            PolicyClassifier::FamilyBucket(classifier) => {
+                classifier.strict_class_index(requested, uncached_tokens)
+            }
+        }
     }
 }
 

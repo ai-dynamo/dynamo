@@ -722,6 +722,21 @@ impl ErrorMessage {
             );
         }
 
+        if let Some(error) = super::metrics::queue_deadline_error(err.as_ref()) {
+            super::metrics::record_failure(error);
+            let code = StatusCode::TOO_MANY_REQUESTS;
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details: None,
+                    metric_error_type: Some(ErrorType::Cancelled),
+                }),
+            );
+        }
+
         if super::metrics::request_was_cancelled(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
                 SanitizedError::Cancelled,
@@ -4076,6 +4091,7 @@ async fn responses(
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();
         let producer_error_signal = error_signal.clone();
+        let producer_ctx = ctx.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -4120,7 +4136,23 @@ async fn responses(
                     continue;
                 };
 
-                converter.append_chunk_events(&stream_resp, &mut events);
+                let terminal_failure = converter.append_chunk_events(&stream_resp, &mut events);
+                if terminal_failure {
+                    producer_error_signal.set(ErrorType::Internal);
+                    producer_ctx.kill();
+
+                    let terminal_event = events
+                        .pop()
+                        .expect("terminal failure is missing response.failed");
+                    for event in events.drain(..) {
+                        yield event.map_err(axum::Error::new);
+                    }
+                    if terminal_event.is_ok() {
+                        producer_error_signal.mark_terminal_event_emitted();
+                    }
+                    yield terminal_event.map_err(axum::Error::new);
+                    return;
+                }
                 for event in events.drain(..) {
                     yield event.map_err(axum::Error::new);
                 }
@@ -6794,6 +6826,26 @@ mod tests {
             assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
             assert_eq!(response.1.message, "Service temporarily unavailable");
         }
+    }
+
+    #[test]
+    fn caller_deadline_maps_to_http_429_without_overload_accounting() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+        let error: anyhow::Error = DynamoError::builder()
+            .error_type(DynamoErrorType::DeadlineExceeded)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded").unwrap(),
+            )
+            .message("internal deadline detail")
+            .build()
+            .into();
+        assert!(!super::super::metrics::request_was_rejected(error.as_ref()));
+
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.message, "request deadline exceeded");
+        assert_eq!(response.1.metric_error_type, Some(ErrorType::Cancelled));
     }
 
     #[test]

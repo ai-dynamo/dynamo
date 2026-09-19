@@ -9,7 +9,7 @@ use std::time::Duration;
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
@@ -78,24 +78,122 @@ async fn unsupported_tool_choices_fail_before_dispatch_or_streaming() {
     temp_env::async_with_vars(ENV, async {
         let svc = HarnessService::start([]).await;
         for stream in [false, true] {
-            for choice in [
-                json!({"type": "web_search_preview"}),
-                json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "read_file"}]}),
-            ] {
-                let body = json!({
-                    "model": MODEL,
-                    "input": "ping",
-                    "stream": stream,
-                    "tool_choice": choice,
-                    "tools": [tool("read_file")],
-                });
-                let response = post_responses(&svc, &body).await;
-                assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-                let error: Value = response.json().await.unwrap();
-                assert!(error["message"].as_str().unwrap().contains("tool_choice"));
-            }
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": stream,
+                "tool_choice": {"type": "web_search_preview"},
+                "tools": [tool("read_file")],
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            let error: Value = response.json().await.unwrap();
+            assert!(error["message"].as_str().unwrap().contains("tool_choice"));
         }
         assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn allowed_function_tools_filter_before_dispatch() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        for (stream, mode) in [(false, "auto"), (true, "required")] {
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": stream,
+                "tools": [tool("read_file"), tool("write_file")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": mode,
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.bytes().await.unwrap();
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        for (request, expected_choice) in requests.iter().zip([
+            ChatCompletionToolChoiceOption::Auto,
+            ChatCompletionToolChoiceOption::Required,
+        ]) {
+            let tools = request.inner.tools.as_deref().unwrap();
+            assert_eq!(tools.len(), 1);
+            assert_eq!(tools[0].function.name, "read_file");
+            assert_eq!(request.inner.tool_choice, Some(expected_choice));
+        }
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn invalid_allowed_tools_fail_before_dispatch() {
+    temp_env::async_with_vars(ENV, async {
+        let svc = HarnessService::start([]).await;
+        for allowed in [
+            json!([]),
+            json!([{"type": "function", "name": "unknown"}]),
+            json!([{"type": "web_search"}]),
+        ] {
+            let body = json!({
+                "model": MODEL,
+                "input": "ping",
+                "tools": [tool("read_file")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": allowed
+                }
+            });
+            let response = post_responses(&svc, &body).await;
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        }
+        assert!(svc.engine.take_requests().await.is_empty());
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn disallowed_streamed_function_call_kills_backend_context() {
+    temp_env::async_with_vars(ENV, async {
+        let svc =
+            HarnessService::start([load_agent_fixture("fragmented-tool.sse").await.unwrap()]).await;
+        let response = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "List /tmp",
+                "stream": true,
+                "tools": [tool("read_file"), tool("list_directory")],
+                "tool_choice": {
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let events = parse_json_sse(&response.text().await.unwrap())
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| event.event == "response.failed"));
+
+        let contexts = svc.engine.take_contexts().await;
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].is_killed());
         svc.shutdown().await;
     })
     .await;
