@@ -59,74 +59,118 @@ def _float_selection(selection: Mapping[str, JSONValue], name: str) -> float:
     return float(value)
 
 
-def _aic_payload(
+def _ais_perf_config_from_candidate(
+    context: CandidateContext,
     *,
-    backend: str,
-    system: str,
-    model: str,
-    backend_version: str | None,
-    tp: int,
-    attention_dp: int,
-    moe_tp: int,
-    moe_ep: int,
-) -> dict[str, JSONValue]:
-    return {
-        "aic_backend": backend,
-        "aic_system": system,
-        "aic_model_path": model,
-        "aic_backend_version": backend_version,
-        "aic_tp_size": tp,
-        "aic_attention_dp_size": attention_dp,
-        "aic_moe_tp_size": moe_tp if moe_tp * moe_ep > 1 else None,
-        "aic_moe_ep_size": moe_ep if moe_tp * moe_ep > 1 else None,
-    }
-
-
-def _aic_perf_config_from_candidate(
-    context: CandidateContext, *, enabled: bool
+    enabled: bool,
+    core_search_space: Mapping[str, JSONValue],
 ) -> dict[str, JSONValue] | None:
     if not enabled:
         return None
     sample = context.sample
-    mode = str(sample["deployment_mode"])
-    prefix = "prefill_" if mode == "disagg" else ""
-    return _aic_payload(
-        backend=str(sample["backend"]),
-        system=str(sample["hardware_sku"]),
-        model=str(sample["model_name"]),
-        backend_version=str(sample.get("backend_version") or "") or None,
-        tp=int(sample[f"{prefix}tp"]),
-        attention_dp=int(sample[f"{prefix}attention_dp"]),
-        moe_tp=int(sample.get(f"{prefix}moe_tp", 1)),
-        moe_ep=int(sample.get(f"{prefix}moe_ep", 1)),
+    role = "prefill" if str(sample["deployment_mode"]) == "disagg" else "agg"
+    resolved = sample.get("forward_pass_estimators", {})
+    config = (
+        resolved.get(role, {}).get("config") if isinstance(resolved, Mapping) else None
     )
+    if isinstance(config, Mapping):
+        return deepcopy(dict(config))
+    # Custom AIC timing is deliberately absent from the resolver's estimator map.
+    timing = sample.get(f"{role}_timing_model")
+    if isinstance(timing, Mapping) and timing.get("provider") in ("aic", "ais"):
+        config = timing.get("config")
+        if isinstance(config, Mapping):
+            capacity_fields = {
+                "gpu_memory_utilization",
+                "mem_fraction_static",
+                "free_gpu_memory_fraction",
+                "cuda_graph_reserved_bytes",
+            }
+            return deepcopy(
+                {
+                    key: value
+                    for key, value in config.items()
+                    if key not in capacity_fields
+                }
+            )
+    # Fixed/polynomial worker timing does not create a worker estimator. The
+    # Router may still select an AIS load estimate: use the same Core-owned
+    # role request builder, retaining policies, roots and estimator controls.
+    from aisimulate.sweeper.config import SearchSpace
+    from aisimulate.sweeper.forward_pass_estimator import ForwardPassEstimatorResolver
+
+    request_space = dict(core_search_space)
+    request_space.setdefault("model_name", sample["model_name"])
+    request_space.setdefault("hardware_sku", sample["hardware_sku"])
+    request_space.setdefault("backend", [sample["backend"]])
+    request_space.setdefault("backend_version", sample.get("backend_version"))
+    prefix = "prefill_" if role == "prefill" else ""
+    request_sample = dict(sample)
+    for field in ("pp", "moe_tp", "moe_ep"):
+        request_sample.setdefault(prefix + field, 1)
+    request_sample.setdefault(role + "_block_size", None)
+    resolver = ForwardPassEstimatorResolver(SearchSpace.model_validate(request_space))
+    return resolver._request(request_sample, role).to_dict()
 
 
-def _aic_perf_config_from_prediction(
+def _ais_perf_config_from_prediction(
     context: PredictionAdapterContext, *, enabled: bool
 ) -> dict[str, JSONValue] | None:
     if not enabled:
         return None
+    from dataclasses import fields
+
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
     engine = context.engine
-    mode = str(engine.get("mode", "aggregated"))
-    role = "prefill" if mode == "disaggregated" else "aggregated"
+    role = (
+        "prefill"
+        if str(engine.get("mode", "aggregated")) == "disaggregated"
+        else "aggregated"
+    )
     workers = engine.get("workers")
     if not isinstance(workers, Mapping) or not isinstance(workers.get(role), Mapping):
-        raise TypeError(f"Router AIC load model requires engine.workers.{role}")
+        raise TypeError(f"AIS router load model requires engine.workers.{role}")
     worker = workers[role]
-    parallel = worker.get("parallelism")
-    if not isinstance(parallel, Mapping):
-        raise TypeError(f"Router AIC load model requires {role} parallelism")
-    return _aic_payload(
-        backend=str(engine["backend"]),
-        system=str(engine["hardware"]),
-        model=str(engine["model"]),
-        backend_version=str(engine.get("backend_version") or "") or None,
-        tp=int(parallel.get("tensor", 1)),
-        attention_dp=int(parallel.get("attention_data", 1)),
-        moe_tp=int(parallel.get("moe_tensor", 1)),
-        moe_ep=int(parallel.get("moe_expert", 1)),
+    parallel = worker.get("parallelism", {})
+    timing = worker.get("timing", {})
+    # Controls are selected using the upstream schema, including newly added
+    # canonical fields; worker timing settings override engine-level settings.
+    names = {field.name for field in fields(ForwardPassPerfModelConfig)}
+    config = {
+        key: deepcopy(value)
+        for key, value in engine.items()
+        if key in names and value is not None
+    }
+    config.update(
+        {
+            key: deepcopy(value)
+            for key, value in timing.items()
+            if key in names and value is not None
+        }
     )
+    config.update(
+        model=engine["model"],
+        system=worker.get("hardware") or engine["hardware"],
+        backend=engine["backend"],
+        worker_type=role,
+        tp=parallel.get("tensor", 1),
+        pp=parallel.get("pipeline", 1),
+        attention_dp=parallel.get("attention_data", 1),
+    )
+    moe_tp, moe_ep = parallel.get("moe_tensor", 1), parallel.get("moe_expert", 1)
+    if moe_tp * moe_ep > 1:
+        config.update(moe_tp_size=moe_tp, moe_ep_size=moe_ep)
+    cache = worker.get("kv_cache", {})
+    if cache.get("block_size") is not None:
+        config["kv_block_size"] = cache["block_size"]
+    speculation = engine.get("speculation")
+    if isinstance(speculation, Mapping):
+        config["speculation"] = {
+            "kind": speculation["kind"],
+            "params": {"num_speculative_tokens": speculation["num_speculative_tokens"]},
+        }
+    return ForwardPassPerfModelConfig(**config).to_dict()
 
 
 class DynamoRouterSweepConfigProvider:
@@ -169,9 +213,9 @@ class DynamoRouterSweepConfigProvider:
                     config={
                         "router_mode": public.policy,
                         "router_config": router_config,
-                        "aic_perf_config": _aic_perf_config_from_prediction(
+                        "ais_perf_config": _ais_perf_config_from_prediction(
                             context,
-                            enabled=public.prefill_load_model.type == "aic",
+                            enabled=public.prefill_load_model.type == "ais",
                         ),
                     },
                 ),
@@ -218,7 +262,13 @@ class DynamoRouterSweepConfigProvider:
             fragment = SearchSpaceFragment(
                 choices_by_branch={mode: {"mode": ["round_robin"]} for mode in modes}
             )
-            return AdapterSearchPlan(fragment=fragment, state={"public_schema": True})
+            return AdapterSearchPlan(
+                fragment=fragment,
+                state={
+                    "public_schema": True,
+                    "core_search_space": deepcopy(dict(context.core_search_space)),
+                },
+            )
 
         if set(policies) == {"round_robin", "kv_router"}:
             expanded: dict[str, list[float]] = {}
@@ -260,7 +310,11 @@ class DynamoRouterSweepConfigProvider:
             )
             return AdapterSearchPlan(
                 fragment=fragment,
-                state={"public_schema": True, "conditional_public": True},
+                state={
+                    "public_schema": True,
+                    "conditional_public": True,
+                    "core_search_space": deepcopy(dict(context.core_search_space)),
+                },
                 potential_runtime_hooks=(_HOOK,),
             )
 
@@ -293,7 +347,10 @@ class DynamoRouterSweepConfigProvider:
                 float_ranges_by_branch={mode: deepcopy(ranges) for mode in modes},
                 log_float_ranges_by_branch={mode: list(log_ranges) for mode in modes},
             ),
-            state={"public_schema": True},
+            state={
+                "public_schema": True,
+                "core_search_space": deepcopy(dict(context.core_search_space)),
+            },
             potential_runtime_hooks=(_HOOK,),
         )
 
@@ -332,6 +389,7 @@ class DynamoRouterSweepConfigProvider:
             state={
                 "search_space": space.model_dump(mode="json"),
                 "public_schema": public_schema,
+                "core_search_space": deepcopy(dict(context.core_search_space)),
             },
             potential_runtime_hooks=(_HOOK,) if kv_router_possible else (),
         )
@@ -392,16 +450,17 @@ class DynamoRouterSweepConfigProvider:
             }
         else:
             concrete_config = {"mode": mode, **router_config}
-        aic_perf_config = _aic_perf_config_from_candidate(
+        ais_perf_config = _ais_perf_config_from_candidate(
             context,
-            enabled=public_schema and load_model == "aic",
+            enabled=public_schema and load_model == "ais",
+            core_search_space=plan.state.get("core_search_space", {}),
         )
         hook_config: dict[str, JSONValue] = {
             "router_mode": mode,
             "router_config": router_config,
         }
         if public_schema:
-            hook_config["aic_perf_config"] = aic_perf_config
+            hook_config["ais_perf_config"] = ais_perf_config
         hook = RuntimeHookSpec(
             provider=_HOOK.provider,
             kind=_HOOK.kind,

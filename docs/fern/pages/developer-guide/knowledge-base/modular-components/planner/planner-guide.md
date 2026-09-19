@@ -94,23 +94,62 @@ At least one scaling mode must be enabled when using `optimization_target: sla`.
 |-------|------|---------|-------------|
 | `pre_deployment_sweeping_mode` | string | `rapid` | How to generate optional bootstrap performance data: `rapid` (AIC simulation, ~30s), `thorough` (real GPUs, 2-4h), or `none` (skip). |
 
-SLA mode uses a Planner-owned engine-query layer. If `aic_perf_model` is present, the Planner passes the native AIC model identity and engine limits directly to `aiconfigurator_core.sdk.RustForwardPassPerfModel`. Unsupported native AIC configs automatically fall back to the wheel's observed-FPM regression model. If `aic_perf_model` is absent, the wheel starts an FPM regression model and becomes ready after enough self-benchmark or live FPM observations.
+SLA mode constructs each role's model through
+`aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)`. Set
+`ais_perf_model.roles` to the complete AISimulate configuration for each deployed
+role: `prefill` and `decode` for disaggregated deployments, or `aggregated` for an
+aggregated deployment. Each role key must match its `worker_type`.
 
-At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIC is available or enough live FPMs have warmed the regression fallback.
+New configurations default to `estimation_mode: auto` and `fallback_policy: deny`.
+Auto searches `op_level`, `fpm_interpolation`, then `fpm_regression`; `deny` prevents
+fallback only when you explicitly select a mode. Without `ais_perf_model`, the
+Planner creates a cold `fpm_regression` model and trains it from self-benchmark
+or live forward-pass metrics (FPM).
 
-Manual native AIC perf-model config:
+Each role accepts the complete upstream schema, including ordered `systems_paths`,
+`database_mode`, `transfer_policy`, quantization and speculation settings, and
+nested `estimator_config` controls. Explicit estimator controls override the
+Planner's sampling defaults. `fpm_sample_bucket_size: 16` corresponds to a
+`[4, 4]` grid; regression and correction may use separate grids. Unknown fields
+and conflicting worker identities are rejected.
+
+Configure model identity and estimator controls through `ais_perf_model.roles`.
+The retired `aic_perf_model` field and `hf_id` / parallel-pick shape are rejected.
+
+At startup, the planner always tries to fetch self-benchmark results from the `get_perf_metrics` Dynamo endpoint. If unavailable, it falls back to rapid-mode AIC interpolation data or profiler-generated data (npz or JSON) at `profile_results_dir` when configured. These sources are converted to ForwardPassMetrics and used to tune or bootstrap the perf model. With `pre_deployment_sweeping_mode: none`, the planner can still start; throughput decisions report `model_not_ready` until native AIS estimates are available or enough live FPMs have warmed the regression fallback.
+
+Configure the role models in a DynamoGraphDeploymentRequest:
 
 ```yaml
 spec:
   features:
     planner:
       optimization_target: sla
-      aic_perf_model:
-        hf_id: nvidia/Llama-3.1-8B-Instruct-FP8
-        system: h200_sxm
-        backend: vllm
-        prefill_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
-        decode_pick: {tp: 1, pp: 1, dp: 1, moe_tp: 1, moe_ep: 1}
+      mode: disagg
+      ais_perf_model:
+        roles:
+          prefill:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: prefill
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+          decode:
+            model: Qwen/Qwen3-32B
+            system: h200_sxm
+            backend: vllm
+            worker_type: decode
+            estimation_mode: auto
+            fallback_policy: deny
+            tp: 1
+            estimator_config:
+              fpm_regression:
+                sampling:
+                  bins_per_axis: [4, 4]
+                  max_observations: 64
+                min_observations: 5
 ```
 
 ### Throughput-Based Scaling Settings

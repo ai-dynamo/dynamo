@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for the AIC-spec integration in profiler DGD generation."""
+"""Unit tests for AISimulate and AIConfigurator interpolation in profiler DGD generation."""
 
 from pathlib import Path
 
@@ -17,10 +17,10 @@ try:
     )
     from dynamo.profiler.utils.dgd_generation import (
         _build_planner_config,
-        _inject_mocker_aic_args,
+        _inject_mocker_ais_args,
         _load_latest_database_version,
         build_aic_interpolation_spec,
-        build_aic_perf_model_spec,
+        build_ais_perf_model_spec,
         enable_vllm_benchmark_mode,
     )
     from dynamo.profiler.utils.dgd_template import load_dgd_template
@@ -219,7 +219,7 @@ class TestBuildAICInterpolationSpec:
         assert got is None
 
     def test_mocker_rapid_without_throughput_scaling_produces_spec(self):
-        """Mocker-only consumer still gets an AIC spec so --aic-* flags can be
+        """Mocker-only consumer still gets an AIC spec so --ais-* flags can be
         injected on its worker args."""
         planner = PlannerConfig(
             enable_throughput_scaling=False,
@@ -285,6 +285,13 @@ class TestBuildAICInterpolationSpec:
 
 
 class TestInjectMockerAicArgs:
+    @pytest.fixture(autouse=True)
+    def _resolved_version(self, monkeypatch):
+        monkeypatch.setattr(
+            "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
+            lambda **kwargs: "current",
+        )
+
     def _spec(self, backend: str = "trtllm") -> AICInterpolationSpec:
         pick = PickedParallelConfig(tp=1, dp=8, moe_tp=1, moe_ep=8)
         return AICInterpolationSpec(
@@ -303,31 +310,59 @@ class TestInjectMockerAicArgs:
     def test_injects_all_required_flags(self):
         spec = self._spec("trtllm")
         args = ["--model-path", "Qwen/Qwen3-235B", "--disaggregation-mode", "prefill"]
-        out = _inject_mocker_aic_args(args, spec, spec.prefill_pick)
-        assert "--aic-perf-model" in out
-        assert out[out.index("--aic-backend") + 1] == "trtllm"
-        assert out[out.index("--aic-system") + 1] == "h200_sxm"
-        assert out[out.index("--aic-tp-size") + 1] == "1"
-        assert out[out.index("--aic-moe-tp-size") + 1] == "1"
-        assert out[out.index("--aic-moe-ep-size") + 1] == "8"
-        assert out[out.index("--aic-attention-dp-size") + 1] == "8"
+        out = _inject_mocker_ais_args(args, spec, spec.prefill_pick)
+        assert "--ais-perf-model" in out
+        assert out[out.index("--ais-backend") + 1] == "trtllm"
+        assert out[out.index("--ais-system") + 1] == "h200_sxm"
+        assert out[out.index("--ais-tp-size") + 1] == "1"
+        assert out[out.index("--ais-moe-tp-size") + 1] == "1"
+        assert out[out.index("--ais-moe-ep-size") + 1] == "8"
+        assert out[out.index("--ais-attention-dp-size") + 1] == "8"
         # trtllm is not a mocker engine_type; leave --engine-type alone.
         assert "--engine-type" not in out
-        assert out[out.index("--aic-backend-version") + 1] == "current"
+        assert out[out.index("--ais-backend-version") + 1] == "current"
 
     def test_matches_engine_type_for_vllm(self):
         spec = self._spec("vllm")
-        out = _inject_mocker_aic_args([], spec, spec.prefill_pick)
+        out = _inject_mocker_ais_args([], spec, spec.prefill_pick)
         assert out[out.index("--engine-type") + 1] == "vllm"
-        assert out[out.index("--aic-backend") + 1] == "vllm"
-        assert out[out.index("--aic-backend-version") + 1] == "current"
+        assert out[out.index("--ais-backend") + 1] == "vllm"
+        assert out[out.index("--ais-backend-version") + 1] == "current"
 
     def test_matches_engine_type_for_sglang(self):
         spec = self._spec("sglang")
-        out = _inject_mocker_aic_args([], spec, spec.decode_pick)
+        out = _inject_mocker_ais_args([], spec, spec.decode_pick)
         assert out[out.index("--engine-type") + 1] == "sglang"
-        assert out[out.index("--aic-backend") + 1] == "sglang"
-        assert out[out.index("--aic-backend-version") + 1] == "current"
+        assert out[out.index("--ais-backend") + 1] == "sglang"
+        assert out[out.index("--ais-backend-version") + 1] == "current"
+
+    @pytest.mark.parametrize("explicit_capacity", [False, True])
+    def test_dense_tp_pick_starts_with_canonical_estimator(self, explicit_capacity):
+        # Only packaged model metadata/performance tables are used; no weights.
+        from aisimulate_core.sdk import RustForwardPassPerfModel
+
+        from dynamo.mocker.args import parse_args
+        from dynamo.mocker.config import build_mocker_engine_args
+
+        pick = PickedParallelConfig(tp=2)
+        spec = self._spec("vllm").model_copy(
+            update={
+                "hf_id": "Qwen/Qwen3-32B",
+                "prefill_pick": pick,
+                "decode_pick": pick,
+            }
+        )
+        args = ["--model-path", spec.hf_id, "--disaggregation-mode", "prefill"]
+        if explicit_capacity:
+            args.extend(["--num-gpu-blocks-override", "1024"])
+        engine = build_mocker_engine_args(
+            parse_args(_inject_mocker_ais_args(args, spec, pick))
+        )
+        assert engine.num_gpu_blocks > 0
+        assert engine.ais_perf_config["tp"] == 2
+        assert engine.ais_perf_config["moe_tp_size"] is None
+        model = RustForwardPassPerfModel.best_available(engine.ais_perf_config)
+        assert model.diagnostics()["readiness"] == "ready"
 
 
 class TestBuildPlannerConfigEmbedsAicSpec:
@@ -371,7 +406,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
-    def test_aic_perf_model_threads_into_planner_config(self, monkeypatch):
+    def test_ais_perf_model_threads_into_planner_config(self, monkeypatch):
         resolved_versions = []
 
         def resolve_backend_version(*, system, backend):
@@ -391,7 +426,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         dgdr = _dgdr(planner=planner)
         prefill_pick = PickedParallelConfig(tp=1, dp=1)
         decode_pick = PickedParallelConfig(tp=2, dp=1)
-        spec = build_aic_perf_model_spec(
+        spec = build_ais_perf_model_spec(
             dgdr,
             best_prefill_pick=prefill_pick,
             best_decode_pick=decode_pick,
@@ -403,19 +438,21 @@ class TestBuildPlannerConfigEmbedsAicSpec:
             dgdr,
             prefill_pick,
             decode_pick,
-            aic_perf_model=spec,
+            ais_perf_model=spec,
         )
 
-        assert cfg.aic_perf_model is not None
-        assert cfg.aic_perf_model.hf_id == dgdr.model
-        assert cfg.aic_perf_model.system == "h200_sxm"
-        assert cfg.aic_perf_model.backend == "vllm"
-        assert cfg.aic_perf_model.backend_version == "0.24.0"
-        assert cfg.aic_perf_model.prefill_pick == prefill_pick
-        assert cfg.aic_perf_model.decode_pick == decode_pick
+        assert cfg.model_name == dgdr.model
+        assert "aic_perf_model" not in cfg.model_dump()
+        assert cfg.ais_perf_model is not None
+        assert cfg.ais_perf_model.roles["decode"]["model"] == dgdr.model
+        assert cfg.ais_perf_model.roles["decode"]["system"] == "h200_sxm"
+        assert cfg.ais_perf_model.roles["decode"]["backend"] == "vllm"
+        assert cfg.ais_perf_model.roles["decode"]["backend_version"] == "0.24.0"
+        assert cfg.ais_perf_model.roles["prefill"]["tp"] == prefill_pick.tp
+        assert cfg.ais_perf_model.roles["decode"]["tp"] == decode_pick.tp
         assert resolved_versions == [("h200_sxm", "vllm")]
 
-    def test_aic_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
+    def test_ais_perf_model_falls_back_when_database_is_unavailable(self, monkeypatch):
         monkeypatch.setattr(
             "dynamo.profiler.utils.dgd_generation.get_latest_database_version",
             lambda **_: None,
@@ -427,7 +464,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
         dgdr = _dgdr(planner=planner)
 
-        spec = build_aic_perf_model_spec(
+        spec = build_ais_perf_model_spec(
             dgdr,
             best_prefill_pick=PickedParallelConfig(tp=1),
             best_decode_pick=PickedParallelConfig(tp=2),
@@ -437,7 +474,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
 
         assert spec is None
 
-    def test_aic_perf_model_falls_back_when_sdk_is_unavailable(
+    def test_ais_perf_model_falls_back_when_sdk_is_unavailable(
         self, monkeypatch, caplog
     ):
         monkeypatch.setattr(
@@ -451,7 +488,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
         dgdr = _dgdr(planner=planner)
 
-        spec = build_aic_perf_model_spec(
+        spec = build_ais_perf_model_spec(
             dgdr,
             best_prefill_pick=PickedParallelConfig(tp=1),
             best_decode_pick=PickedParallelConfig(tp=2),
@@ -460,7 +497,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
 
         assert spec is None
-        assert "AISimulate's AIC perf model is unavailable" in caplog.text
+        assert "AISimulate perf model is unavailable" in caplog.text
 
     @pytest.mark.parametrize(
         ("mode", "prefill_pick", "decode_pick"),
@@ -472,7 +509,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
             ("disagg", PickedParallelConfig(tp=1), None),
         ],
     )
-    def test_aic_perf_model_skips_mode_missing_required_pick(
+    def test_ais_perf_model_skips_mode_missing_required_pick(
         self, mode, prefill_pick, decode_pick
     ):
         planner = PlannerConfig(
@@ -484,7 +521,7 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         )
         dgdr = _dgdr(planner=planner)
 
-        spec = build_aic_perf_model_spec(
+        spec = build_ais_perf_model_spec(
             dgdr,
             best_prefill_pick=prefill_pick,
             best_decode_pick=decode_pick,
@@ -719,3 +756,87 @@ class TestEnableVllmBenchmarkMode:
         assert mc["image"] == "nvcr.io/foo:1.0"
         assert mc["args"] == ["--model-path", "x"]
         assert _benchmark_mode(component) == "prefill"
+
+
+def test_profiler_preserves_explicit_estimator_config(tmp_path):
+    planner = PlannerConfig(
+        mode="decode",
+        optimization_target="sla",
+        ais_perf_model={
+            "roles": {
+                "decode": {
+                    "model": "Qwen/Qwen3-32B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "estimation_mode": "fpm_regression",
+                    "systems_paths": [str(tmp_path)],
+                    "estimator_config": {"fpm_regression": {"min_observations": 30}},
+                }
+            }
+        },
+    )
+    dgdr = _dgdr(planner=planner)
+    pick = PickedParallelConfig(tp=1)
+    generated = build_ais_perf_model_spec(
+        dgdr,
+        best_prefill_pick=None,
+        best_decode_pick=pick,
+        resolved_backend="vllm",
+        system="h200_sxm",
+    )
+    result = _build_planner_config(dgdr, None, pick, ais_perf_model=generated)
+    reloaded = PlannerConfig.model_validate(result.model_dump(mode="json"))
+    assert reloaded.ais_perf_model == planner.ais_perf_model
+    assert generated is not planner.ais_perf_model
+
+
+@pytest.mark.parametrize(
+    "configured, pick, backend, system, conflict",
+    [
+        (
+            {"model": "different-model"},
+            PickedParallelConfig(),
+            "vllm",
+            "h200_sxm",
+            "model",
+        ),
+        ({}, PickedParallelConfig(tp=4), "vllm", "h200_sxm", "tp"),
+        ({}, PickedParallelConfig(), "sglang", "h200_sxm", "backend"),
+        ({}, PickedParallelConfig(), "vllm", "b200_sxm", "system"),
+        ({}, PickedParallelConfig(pp=2), "vllm", "h200_sxm", "pp"),
+        ({}, PickedParallelConfig(dp=2), "vllm", "h200_sxm", "attention_dp"),
+        (
+            {"tp": 2, "moe_tp_size": 2, "moe_ep_size": 1},
+            PickedParallelConfig(tp=2, moe_tp=1, moe_ep=2),
+            "vllm",
+            "h200_sxm",
+            "moe_tp_size",
+        ),
+    ],
+)
+def test_profiler_rejects_estimator_identity_that_disagrees_with_deployment(
+    configured, pick, backend, system, conflict
+):
+    planner = PlannerConfig(
+        mode="decode",
+        optimization_target="sla",
+        ais_perf_model={
+            "roles": {
+                "decode": {
+                    "model": "Qwen/Qwen3-32B",
+                    "system": "h200_sxm",
+                    "backend": "vllm",
+                    "estimation_mode": "fpm_regression",
+                    **configured,
+                }
+            }
+        },
+    )
+    with pytest.raises(ValueError, match=rf"roles\.decode\.{conflict}=.*conflicts"):
+        build_ais_perf_model_spec(
+            _dgdr(planner=planner),
+            best_prefill_pick=None,
+            best_decode_pick=pick,
+            resolved_backend=backend,
+            system=system,
+        )

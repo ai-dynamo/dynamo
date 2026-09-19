@@ -36,7 +36,7 @@ use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
-use super::aic_callback::{create_aic_callback, create_aic_prefill_load_estimator};
+use super::ais_callback::{create_ais_callback, create_ais_prefill_load_estimator};
 use super::replay::MockEngineArgs as PyMockEngineArgs;
 use dynamo_mocker::common::protocols::MockEngineArgs as RsMockEngineArgs;
 use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
@@ -87,155 +87,44 @@ impl KvRouterConfig {
 
 #[pyclass]
 #[derive(Clone, Debug)]
-pub struct AicPerfConfig {
-    aic_backend: String,
-    aic_system: String,
-    aic_backend_version: Option<String>,
-    aic_tp_size: usize,
-    aic_model_path: String,
-    aic_moe_tp_size: Option<usize>,
-    aic_moe_ep_size: Option<usize>,
-    aic_attention_dp_size: Option<usize>,
-    aic_gemm_dtype: Option<String>,
-    aic_moe_dtype: Option<String>,
-    aic_fmha_dtype: Option<String>,
-    aic_kv_cache_dtype: Option<String>,
-    aic_comm_dtype: Option<String>,
-    aic_nextn: Option<usize>,
-    aic_nextn_accept_rates: Option<String>,
+pub struct AisPerfConfig {
+    config: serde_json::Value,
 }
 
-impl AicPerfConfig {
-    pub(crate) fn backend_name(&self) -> &str {
-        &self.aic_backend
+impl AisPerfConfig {
+    pub(crate) fn config(&self) -> &serde_json::Value {
+        &self.config
     }
+}
 
-    pub(crate) fn system(&self) -> &str {
-        &self.aic_system
-    }
-
-    pub(crate) fn backend_version(&self) -> Option<&str> {
-        self.aic_backend_version.as_deref()
-    }
-
-    pub(crate) fn tp_size(&self) -> usize {
-        self.aic_tp_size
-    }
-
-    pub(crate) fn model_path(&self) -> &str {
-        &self.aic_model_path
-    }
-
-    pub(crate) fn moe_tp_size(&self) -> Option<usize> {
-        self.aic_moe_tp_size
-    }
-
-    pub(crate) fn moe_ep_size(&self) -> Option<usize> {
-        self.aic_moe_ep_size
-    }
-
-    pub(crate) fn attention_dp_size(&self) -> Option<usize> {
-        self.aic_attention_dp_size
-    }
-
-    pub(crate) fn gemm_dtype(&self) -> Option<&str> {
-        self.aic_gemm_dtype.as_deref()
-    }
-
-    pub(crate) fn moe_dtype(&self) -> Option<&str> {
-        self.aic_moe_dtype.as_deref()
-    }
-
-    pub(crate) fn fmha_dtype(&self) -> Option<&str> {
-        self.aic_fmha_dtype.as_deref()
-    }
-
-    pub(crate) fn kv_cache_dtype(&self) -> Option<&str> {
-        self.aic_kv_cache_dtype.as_deref()
-    }
-
-    pub(crate) fn comm_dtype(&self) -> Option<&str> {
-        self.aic_comm_dtype.as_deref()
-    }
-
-    pub(crate) fn nextn(&self) -> Option<usize> {
-        self.aic_nextn
-    }
-
-    pub(crate) fn nextn_accept_rates(&self) -> Option<&str> {
-        self.aic_nextn_accept_rates.as_deref()
-    }
+pub(super) fn normalize_ais_perf_config(
+    py: Python<'_>,
+    config: &Bound<'_, PyAny>,
+) -> PyResult<serde_json::Value> {
+    let mapping = if config.hasattr("to_dict")? {
+        config.call_method0("to_dict")?
+    } else {
+        py.import("builtins")?.call_method1("dict", (config,))?
+    };
+    let canonical = py
+        .import("aisimulate_core.sdk")?
+        .getattr("ForwardPassPerfModelConfig")?
+        .call((), Some(mapping.downcast::<pyo3::types::PyDict>()?))?;
+    Ok(pythonize::depythonize(&canonical.call_method0("to_dict")?)?)
 }
 
 #[pymethods]
-impl AicPerfConfig {
+impl AisPerfConfig {
     #[new]
-    #[pyo3(signature = (aic_backend, aic_system, aic_model_path, aic_tp_size=1, aic_backend_version=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None))]
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        aic_backend: String,
-        aic_system: String,
-        aic_model_path: String,
-        aic_tp_size: usize,
-        aic_backend_version: Option<String>,
-        aic_moe_tp_size: Option<usize>,
-        aic_moe_ep_size: Option<usize>,
-        aic_attention_dp_size: Option<usize>,
-        aic_nextn: Option<usize>,
-        aic_nextn_accept_rates: Option<String>,
-        aic_gemm_dtype: Option<String>,
-        aic_moe_dtype: Option<String>,
-        aic_fmha_dtype: Option<String>,
-        aic_kv_cache_dtype: Option<String>,
-        aic_comm_dtype: Option<String>,
-    ) -> PyResult<Self> {
-        if aic_backend.is_empty() {
-            return Err(PyValueError::new_err("aic_backend must be non-empty"));
-        }
-        if aic_system.is_empty() {
-            return Err(PyValueError::new_err("aic_system must be non-empty"));
-        }
-        if aic_model_path.is_empty() {
-            return Err(PyValueError::new_err("aic_model_path must be non-empty"));
-        }
-        if aic_tp_size == 0 {
-            return Err(PyValueError::new_err("aic_tp_size must be >= 1"));
-        }
-        for (name, value) in [
-            ("aic_moe_tp_size", aic_moe_tp_size),
-            ("aic_moe_ep_size", aic_moe_ep_size),
-            ("aic_attention_dp_size", aic_attention_dp_size),
-        ] {
-            if matches!(value, Some(0)) {
-                return Err(PyValueError::new_err(format!("{name} must be >= 1")));
-            }
-        }
-        // AIC caps MTP draft tokens at 5; >5 would IndexError in calc_expectation.
-        if let Some(nextn) = aic_nextn
-            && !(1..=5).contains(&nextn)
-        {
-            return Err(PyValueError::new_err(
-                "aic_nextn must be 1..=5 when set (omit to disable spec dec)",
-            ));
-        }
-
+    fn new(py: Python<'_>, config: &Bound<'_, PyAny>) -> PyResult<Self> {
         Ok(Self {
-            aic_backend,
-            aic_system,
-            aic_backend_version,
-            aic_tp_size,
-            aic_model_path,
-            aic_moe_tp_size,
-            aic_moe_ep_size,
-            aic_attention_dp_size,
-            aic_gemm_dtype,
-            aic_moe_dtype,
-            aic_fmha_dtype,
-            aic_kv_cache_dtype,
-            aic_comm_dtype,
-            aic_nextn,
-            aic_nextn_accept_rates,
+            config: normalize_ais_perf_config(py, config)?,
         })
+    }
+
+    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let text = serde_json::to_string(&self.config).map_err(to_pyerr)?;
+        Ok(py.import("json")?.call_method1("loads", (text,))?.unbind())
     }
 }
 
@@ -592,14 +481,14 @@ pub(crate) struct EntrypointArgs {
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     chat_engine_factory: Option<PyEngineFactory>,
-    aic_perf_config: Option<AicPerfConfig>,
+    ais_perf_config: Option<AisPerfConfig>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, ais_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -624,7 +513,7 @@ impl EntrypointArgs {
         migration_limit: u32,
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
-        aic_perf_config: Option<AicPerfConfig>,
+        ais_perf_config: Option<AisPerfConfig>,
         tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
@@ -725,7 +614,7 @@ impl EntrypointArgs {
             migration_limit,
             migration_max_seq_len,
             chat_engine_factory,
-            aic_perf_config,
+            ais_perf_config,
         })
     }
 }
@@ -881,29 +770,10 @@ async fn select_engine(
             //  Convert Python chat engine factory to Rust callback
             let chat_engine_factory = args.chat_engine_factory.map(py_engine_factory_to_callback);
             let prefill_load_estimator = args
-                .aic_perf_config
+                .ais_perf_config
                 .as_ref()
                 .map(|config| {
-                    Python::with_gil(|py| {
-                        create_aic_prefill_load_estimator(
-                            py,
-                            config.backend_name(),
-                            config.system(),
-                            config.model_path(),
-                            config.tp_size(),
-                            config.backend_version(),
-                            config.moe_tp_size(),
-                            config.moe_ep_size(),
-                            config.attention_dp_size(),
-                            config.gemm_dtype(),
-                            config.moe_dtype(),
-                            config.fmha_dtype(),
-                            config.kv_cache_dtype(),
-                            config.comm_dtype(),
-                            config.nextn(),
-                            config.nextn_accept_rates(),
-                        )
-                    })
+                    Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
                 })
                 .transpose()?;
             RsEngineConfig::Dynamic {
@@ -916,13 +786,21 @@ async fn select_engine(
             let mut mocker_args = if let Some(mocker_engine_args) = args.mocker_engine_args {
                 mocker_engine_args.inner()
             } else if let Some(extra_args_path) = args.extra_engine_args {
-                RsMockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to load mocker args from {:?}: {}",
-                        extra_args_path,
-                        e
-                    )
-                })?
+                tokio::fs::read_to_string(&extra_args_path)
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|config_json| {
+                        Python::with_gil(|py| {
+                            Ok(PyMockEngineArgs::from_json(py, &config_json)?.inner())
+                        })
+                    })
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to load mocker args from {:?}: {}",
+                            extra_args_path,
+                            e
+                        )
+                    })?
             } else {
                 tracing::warn!(
                     "No extra_engine_args specified for mocker engine. Using default mocker args."
@@ -930,63 +808,9 @@ async fn select_engine(
                 RsMockEngineArgs::default()
             };
 
-            // If aic_backend is set, create Python AIC callback and override perf_model
-            if let Some(ref backend_name) = mocker_args.aic_backend {
-                let backend = backend_name.clone();
-                let system = mocker_args.aic_system.as_deref().unwrap_or("h200_sxm");
-                let model_name = mocker_args
-                    .aic_model_path
-                    .as_deref()
-                    .unwrap_or_else(|| local_model.card().source_path());
-                let backend_version = mocker_args.aic_backend_version.as_deref();
-                let tp_size = mocker_args.aic_tp_size.unwrap_or(1);
-                let moe_tp_size = mocker_args.aic_moe_tp_size;
-                let moe_ep_size = mocker_args.aic_moe_ep_size;
-                let attention_dp_size = mocker_args.aic_attention_dp_size;
-                let gemm_dtype = mocker_args.aic_gemm_dtype.as_deref();
-                let moe_dtype = mocker_args.aic_moe_dtype.as_deref();
-                let fmha_dtype = mocker_args.aic_fmha_dtype.as_deref();
-                let kv_cache_dtype = mocker_args.aic_kv_cache_dtype.as_deref();
-                let comm_dtype = mocker_args.aic_comm_dtype.as_deref();
-                let nextn = mocker_args.aic_nextn;
-                let undiscounted_accept_rates = mocker_args.undiscounted_aic_accept_rates();
-                match Python::with_gil(|py| {
-                    create_aic_callback(
-                        py,
-                        &backend,
-                        system,
-                        model_name,
-                        tp_size,
-                        backend_version,
-                        moe_tp_size,
-                        moe_ep_size,
-                        attention_dp_size,
-                        gemm_dtype,
-                        moe_dtype,
-                        fmha_dtype,
-                        kv_cache_dtype,
-                        comm_dtype,
-                        nextn,
-                        undiscounted_accept_rates.as_deref(),
-                    )
-                }) {
-                    Ok(callback) => {
-                        tracing::info!(
-                            "AIC perf model: backend={}, gpu={}, model={}, version={:?}",
-                            backend,
-                            system,
-                            model_name,
-                            backend_version
-                        );
-                        mocker_args.perf_model = Arc::new(PerfModel::from_aic_callback(callback));
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "Failed to create AIC callback (--aic-perf-model was requested): {}",
-                            e
-                        ));
-                    }
-                }
+            if let Some(config) = mocker_args.ais_perf_config.as_ref() {
+                let callback = Python::with_gil(|py| create_ais_callback(py, config))?;
+                mocker_args.perf_model = Arc::new(PerfModel::from_ais_callback(callback));
             }
 
             let endpoint = local_model.endpoint_id().clone();

@@ -56,8 +56,8 @@ use llm_rs::session_affinity::{
     MAX_SESSION_AFFINITY_TTL_SECS, SessionAffinityMode as RsSessionAffinityMode,
 };
 
-use super::aic_callback::create_aic_prefill_load_estimator;
-use super::entrypoint::AicPerfConfig;
+use super::ais_callback::create_ais_prefill_load_estimator;
+use super::entrypoint::AisPerfConfig;
 
 mod demand_driven;
 
@@ -2215,13 +2215,13 @@ impl KvRouter {
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, ais_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
         block_size: usize,
         kv_router_config: &super::entrypoint::KvRouterConfig,
-        aic_perf_config: Option<&AicPerfConfig>,
+        ais_perf_config: Option<&AisPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
         session_affinity_mode: &str,
@@ -2236,28 +2236,9 @@ impl KvRouter {
             .unwrap_or_default();
         let worker_selection_policy_factory =
             crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
-        let prefill_load_estimator = aic_perf_config
+        let prefill_load_estimator = ais_perf_config
             .map(|config| {
-                Python::with_gil(|py| {
-                    create_aic_prefill_load_estimator(
-                        py,
-                        config.backend_name(),
-                        config.system(),
-                        config.model_path(),
-                        config.tp_size(),
-                        config.backend_version(),
-                        config.moe_tp_size(),
-                        config.moe_ep_size(),
-                        config.attention_dp_size(),
-                        config.gemm_dtype(),
-                        config.moe_dtype(),
-                        config.fmha_dtype(),
-                        config.kv_cache_dtype(),
-                        config.comm_dtype(),
-                        config.nextn(),
-                        config.nextn_accept_rates(),
-                    )
-                })
+                Python::with_gil(|py| create_ais_prefill_load_estimator(py, config.config()))
             })
             .transpose()
             .map_err(to_pyerr)?;

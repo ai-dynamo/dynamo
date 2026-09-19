@@ -1152,7 +1152,7 @@ mod tests {
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }
     }
@@ -1191,6 +1191,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
@@ -1204,6 +1205,7 @@ mod tests {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
         request.replay_context = Some(ReplayRequestContext {
+            agentic: None,
             authored_id: "length-only".into(),
             session_id: None,
             turn_index: None,

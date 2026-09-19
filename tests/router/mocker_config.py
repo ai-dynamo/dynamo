@@ -23,10 +23,10 @@ class MockerConfig:
     preemption_mode: str | None = None
     dp_size: int | None = None
     planner_profile_data: str | Path | None = None
-    aic_perf_model: bool = False
-    aic_system: str | None = None
-    aic_backend_version: str | None = None
-    aic_tp_size: int | None = None
+    ais_perf_model: bool = False
+    ais_system: str | None = None
+    ais_backend_version: str | None = None
+    ais_tp_size: int | None = None
     bootstrap_ports: str | None = None
     zmq_kv_events_ports: str | None = None
     zmq_replay_ports: str | None = None
@@ -62,9 +62,9 @@ class MockerConfig:
             ("--preemption-mode", self.preemption_mode),
             ("--data-parallel-size", self.dp_size),
             ("--planner-profile-data", self.planner_profile_data),
-            ("--aic-system", self.aic_system),
-            ("--aic-backend-version", self.aic_backend_version),
-            ("--aic-tp-size", self.aic_tp_size),
+            ("--ais-system", self.ais_system),
+            ("--ais-backend-version", self.ais_backend_version),
+            ("--ais-tp-size", self.ais_tp_size),
             ("--bootstrap-ports", self.bootstrap_ports),
             ("--zmq-kv-events-ports", self.zmq_kv_events_ports),
             ("--zmq-replay-ports", self.zmq_replay_ports),
@@ -95,6 +95,6 @@ class MockerConfig:
             if enabled is not None:
                 args.append(positive_flag if enabled else negative_flag)
 
-        if self.aic_perf_model:
-            args.append("--aic-perf-model")
+        if self.ais_perf_model:
+            args.append("--ais-perf-model")
         return args

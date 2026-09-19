@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Planner AIC adapter for forward-pass performance modeling.
+"""Planner AIS adapter for forward-pass performance modeling.
 
-The AIC core wheel owns forward-pass estimates, tuning, and correction. The
+The AISimulate core wheel owns forward-pass estimates, tuning, and correction. The
 Planner-owned engine-query layer derives queue drain, TTFT/ITL, and sustainable
 engine capacity while this adapter keeps Planner policy local: next-request
 synthesis, prefix-cache discounts, and attention-DP grouping.
@@ -11,10 +11,14 @@ synthesis, prefix-cache discounts, and attention-DP grouping.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import asdict, dataclass
 from typing import Any, Optional
+
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -22,11 +26,10 @@ from dynamo.common.forward_pass_metrics import (
     QueuedRequestMetrics,
     ScheduledRequestMetrics,
 )
-from dynamo.planner.config.parallelization import PickedParallelConfig
-from dynamo.planner.config.planner_config import AICPerfModelSpec, PlannerConfig
+from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.perf_model.base import _clamp_kv_hit_rate
 from dynamo.planner.core.perf_model.engine_query import (
-    AicCoreEnginePerfModel,
+    AISCoreEnginePerfModel,
     EngineCapacityRequest,
     EnginePerfLimits,
     WorkerType,
@@ -36,7 +39,7 @@ from dynamo.planner.core.types import EngineCapabilities
 logger = logging.getLogger(__name__)
 
 _ENGINE_MODEL_EXCEPTIONS = (RuntimeError, ValueError, TypeError)
-_ENGINE_MODEL_INIT_EXCEPTIONS = (ImportError, *_ENGINE_MODEL_EXCEPTIONS)
+_ENGINE_MODEL_INIT_EXCEPTIONS = (ImportError, RuntimeError)
 
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
@@ -82,7 +85,7 @@ class _MovingAverage:
 
 
 class PlannerEnginePerfModel:
-    """Planner-facing wrapper around the AIC core engine-query layer.
+    """Planner-facing wrapper around the AISimulate core engine-query layer.
 
     ``worker_type`` is one of ``prefill``, ``decode``, or ``aggregated``.
     """
@@ -97,7 +100,7 @@ class PlannerEnginePerfModel:
         self._worker_type = worker_type
         self._config = config
         self._capabilities = capabilities
-        self._engine_model: Optional[AicCoreEnginePerfModel] = None
+        self._engine_model: Optional[AISCoreEnginePerfModel] = None
         self._engine_model_key: Optional[tuple[Any, ...]] = None
         # Retained history is canonical; pending marks that the active engine
         # model has not successfully consumed the complete history.
@@ -127,23 +130,22 @@ class PlannerEnginePerfModel:
         limits = self._build_limits()
         if limits is None:
             logger.debug(
-                "Engine limits are incomplete; delaying AIC perf model init for %s",
+                "Engine limits are incomplete; delaying AIS perf model init for %s",
                 self._worker_type,
             )
             return
 
         try:
-            options = self._build_options()
-            self._engine_model = AicCoreEnginePerfModel.best_available(
-                aic_config=self._build_aic_config(),
+            self._engine_model = AISCoreEnginePerfModel.best_available(
+                ais_config=self._build_ais_config(),
                 worker_type=self._worker_type,
                 limits=limits,
-                options=options,
+                max_observations=self._config.max_num_fpm_samples,
                 attention_dp_size=self._attention_dp_size() or 1,
             )
             diagnostics = self._engine_diagnostics()
             logger.info(
-                "Initialized AIC engine perf model for %s with source=%s readiness=%s",
+                "Initialized AIS engine perf model for %s with source=%s readiness=%s",
                 self._worker_type,
                 diagnostics.get("source", "unknown"),
                 diagnostics.get("readiness", "unknown"),
@@ -151,7 +153,7 @@ class PlannerEnginePerfModel:
             self._engine_model_key = model_key
         except _ENGINE_MODEL_INIT_EXCEPTIONS as e:
             logger.warning(
-                "Failed to initialize AIC engine perf model for %s; "
+                "Failed to initialize AIS engine perf model for %s; "
                 "perf model will stay unavailable until capabilities/config are fixed: %s",
                 self._worker_type,
                 e,
@@ -168,7 +170,7 @@ class PlannerEnginePerfModel:
             if not self._pending_iterations:
                 self._pending_iterations = list(self._retained_iterations)
             logger.warning(
-                "Initialized AIC engine perf model for %s, but replaying retained "
+                "Initialized AIS engine perf model for %s, but replaying retained "
                 "observations failed; keeping the model available: %s",
                 self._worker_type,
                 e,
@@ -181,7 +183,7 @@ class PlannerEnginePerfModel:
             diagnostics = self._engine_model.diagnostics()
             return diagnostics if isinstance(diagnostics, dict) else {}
         except _ENGINE_MODEL_EXCEPTIONS as e:
-            logger.warning("AIC perf model diagnostics failed: %s", e)
+            logger.warning("AIS perf model diagnostics failed: %s", e)
             return {}
 
     def _engine_ready(self) -> bool:
@@ -235,78 +237,71 @@ class PlannerEnginePerfModel:
             "max_kv_tokens": max_kv_tokens,
         }
 
-    def _build_aic_config(self) -> Optional[dict[str, Any]]:
-        spec = self._config.aic_perf_model
+    def _build_ais_config(self) -> dict[str, Any]:
+        spec = self._config.ais_perf_model
         if spec is None:
-            return None
-        pick = self._pick_for_worker(spec)
-        if pick is None:
-            return None
+            config = asdict(
+                ForwardPassPerfModelConfig(
+                    model=self._config.model_name
+                    or f"dynamo-planner:{self._config.namespace}",
+                    system="unprofiled",
+                    backend="vllm"
+                    if self._config.backend == "mocker"
+                    else self._config.backend,
+                    worker_type=self._worker_type,
+                    estimation_mode="fpm_regression",
+                )
+            )
+        else:
+            config = deepcopy(spec.roles[self._worker_type])
+        if self._capabilities is not None:
+            block_size = self._capabilities.kv_cache_block_size
+            if block_size is not None:
+                if config.get("kv_block_size") not in (None, block_size):
+                    raise ValueError(
+                        "AIS kv_block_size conflicts with worker capabilities"
+                    )
+                config["kv_block_size"] = block_size
         nextn = self._effective_speculative_nextn()
-        return {
-            "schema_version": 1,
-            "model_name": spec.hf_id,
-            "system_name": spec.system,
-            "backend": spec.backend,
-            "backend_version": spec.backend_version,
-            "kv_block_size": (
-                self._capabilities.kv_cache_block_size
-                if self._capabilities is not None
-                else None
-            ),
-            "tp_size": pick.tp,
-            "pp_size": pick.pp,
-            "moe_tp_size": pick.moe_tp,
-            "moe_ep_size": pick.moe_ep,
-            "attention_dp_size": pick.dp,
-            "cp_size": None,
-            "weight_dtype": spec.weight_dtype,
-            "moe_dtype": spec.moe_dtype,
-            "activation_dtype": spec.activation_dtype,
-            "kv_cache_dtype": spec.kv_cache_dtype,
-            "nextn": (nextn if self._worker_type != "prefill" and nextn > 0 else None),
-            "extra": {},
-        }
+        if self._worker_type != "prefill" and nextn > 0:
+            speculation = config.get("speculation")
+            if speculation is not None:
+                if speculation["params"]["num_speculative_tokens"] != nextn:
+                    raise ValueError(
+                        "AIS speculation depth conflicts with worker capabilities"
+                    )
+            else:
+                if config.get("nextn", 0) not in (0, nextn):
+                    raise ValueError("AIS nextn conflicts with worker capabilities")
+                config["nextn"] = nextn
+
+        # Reuse upstream's legacy-options migration, including bucket_count's
+        # square-root mapping (16 total buckets means a 4 by 4 grid).
+        defaults = ForwardPassPerfModelConfig.from_legacy_engine_config(
+            {
+                "schema_version": 1,
+                "model_name": config["model"],
+                "system_name": config["system"],
+                "backend": config["backend"],
+                "tp_size": config["tp"],
+                "pp_size": config["pp"],
+            },
+            self._worker_type,
+            self._build_options(),
+        ).estimator_config
+        config["estimator_config"] = _merge_estimator_controls(
+            defaults, config.get("estimator_config", {})
+        )
+        return config
 
     def _model_key(self) -> Optional[tuple[Any, ...]]:
         values = self._limit_values()
         if values is None:
             return None
-        spec = self._config.aic_perf_model
-        pick = self._pick_for_worker(spec) if spec is not None else None
-        aic_key = None
-        if spec is not None and pick is not None:
-            aic_extra: tuple[tuple[str, str], ...] = ()
-            nextn = self._effective_speculative_nextn()
-            if self._worker_type != "prefill" and nextn > 0:
-                aic_extra = (("nextn", str(nextn)),)
-            aic_key = (
-                spec.hf_id,
-                spec.backend,
-                spec.system,
-                spec.backend_version,
-                spec.model_arch,
-                spec.weight_dtype,
-                spec.moe_dtype,
-                spec.activation_dtype,
-                spec.kv_cache_dtype,
-                pick.tp,
-                pick.pp,
-                pick.moe_tp,
-                pick.moe_ep,
-                pick.dp,
-                self._capabilities.kv_cache_block_size
-                if self._capabilities is not None
-                else None,
-                aic_extra,
-            )
         return (
             self._worker_type,
             values,
-            self._config.max_num_fpm_samples,
-            self._config.load_min_observations,
-            self._config.fpm_sample_bucket_size,
-            aic_key,
+            json.dumps(self._build_ais_config(), sort_keys=True, separators=(",", ":")),
         )
 
     def _effective_speculative_nextn(self) -> int:
@@ -315,21 +310,11 @@ class PlannerEnginePerfModel:
             return int(caps.speculative_nextn)
         return max(0, int(self._config.speculative_nextn or 0))
 
-    def _pick_for_worker(
-        self, spec: AICPerfModelSpec
-    ) -> Optional[PickedParallelConfig]:
-        if self._worker_type == "prefill":
-            return spec.prefill_pick
-        return spec.decode_pick
-
     def _attention_dp_size(self) -> Optional[int]:
-        spec = self._config.aic_perf_model
+        spec = self._config.ais_perf_model
         if spec is None:
             return None
-        pick = self._pick_for_worker(spec)
-        if pick is None:
-            return None
-        return pick.dp
+        return spec.roles[self._worker_type]["attention_dp"]
 
     # ------------------------------------------------------------------
     # Observation and bootstrap
@@ -378,20 +363,31 @@ class PlannerEnginePerfModel:
                 # fresh model may replay retained history without duplication.
                 self._engine_model.tune_with_fpms(iterations)
             except _ENGINE_MODEL_EXCEPTIONS as e:
-                logger.warning("AIC perf model tuning failed: %s", e)
+                logger.warning("AIS perf model tuning failed: %s", e)
         else:
             self._pending_iterations.extend(iterations)
-            if len(self._pending_iterations) > self._config.max_num_fpm_samples:
-                self._pending_iterations = self._pending_iterations[
-                    -self._config.max_num_fpm_samples :
-                ]
+            self._pending_iterations = self._pending_iterations[
+                -self._observation_history_limit() :
+            ]
+
+    def _observation_history_limit(self) -> int:
+        default = self._config.max_num_fpm_samples
+        spec = self._config.ais_perf_model
+        if spec is None:
+            return default
+        controls = spec.roles[self._worker_type].get("estimator_config", {})
+        return max(
+            controls.get(estimator, {})
+            .get("sampling", {})
+            .get("max_observations", default)
+            for estimator in ("fpm_regression", "correction")
+        )
 
     def _remember_iterations(self, iterations: list[list[ForwardPassMetrics]]) -> None:
         self._retained_iterations.extend(iterations)
-        if len(self._retained_iterations) > self._config.max_num_fpm_samples:
-            self._retained_iterations = self._retained_iterations[
-                -self._config.max_num_fpm_samples :
-            ]
+        self._retained_iterations = self._retained_iterations[
+            -self._observation_history_limit() :
+        ]
 
     def _is_supported_fpm(self, fpm: ForwardPassMetrics) -> bool:
         if fpm.version != FPM_VERSION:
@@ -412,7 +408,7 @@ class PlannerEnginePerfModel:
     ) -> list[tuple[str, list[ForwardPassMetrics]]]:
         """Group live FPMs for query-time estimates.
 
-        Native AIC estimates require one FPM per attention-DP rank. When the
+        Native AIS estimates require one FPM per attention-DP rank. When the
         engine model is unavailable, preserve legacy rank-local behavior.
         """
         groups = self._iteration_groups(fpm_stats, for_query=True)
@@ -447,7 +443,7 @@ class PlannerEnginePerfModel:
     ) -> list[list[ForwardPassMetrics]]:
         # Bootstrap FPMs loaded from profiler/AIC interpolation are flat
         # historical samples. They do not encode which records belonged to the
-        # same attention-DP iteration. For ADP>1, skip AIC bootstrap tuning
+        # same attention-DP iteration. For ADP>1, skip AIS bootstrap tuning
         # instead of sending singleton-rank iterations to a model that requires
         # one FPM per rank.
         # TODO: consume grouped per-rank bootstrap data when profiling exports
@@ -455,7 +451,7 @@ class PlannerEnginePerfModel:
         dp_size = self._attention_dp_size()
         if dp_size is not None and dp_size > 1:
             logger.info(
-                "Skipping AIC bootstrap tuning for %s because flat bootstrap "
+                "Skipping AIS bootstrap tuning for %s because flat bootstrap "
                 "FPMs do not preserve attention-DP rank groups",
                 self._worker_type,
             )
@@ -492,7 +488,7 @@ class PlannerEnginePerfModel:
 
         FPM v1 queued prefill does not know KV reuse. The planner applies the
         router-provided prefix-cache discount before calling the engine model.
-        AIC query failures are treated as unavailable estimates so load
+        AIS query failures are treated as unavailable estimates so load
         scaling can skip the current tick.
         """
         if self._engine_model is None:
@@ -513,7 +509,7 @@ class PlannerEnginePerfModel:
         try:
             result = self._engine_model.get_queued_prefill_time(fpms)
         except _ENGINE_MODEL_EXCEPTIONS as e:
-            logger.warning("AIC queued prefill estimate failed: %s", e)
+            logger.warning("AIS queued prefill estimate failed: %s", e)
             return None
         return result
 
@@ -528,7 +524,7 @@ class PlannerEnginePerfModel:
     ) -> Optional[float]:
         """Estimate next-request ITL in seconds from scheduled decode work.
 
-        AIC query failures are treated as unavailable estimates so load
+        AIS query failures are treated as unavailable estimates so load
         scaling can skip the current tick.
         """
         if self._engine_model is None:
@@ -547,7 +543,7 @@ class PlannerEnginePerfModel:
         try:
             result = self._engine_model.get_scheduled_decode_itl(fpms)
         except _ENGINE_MODEL_EXCEPTIONS as e:
-            logger.warning("AIC scheduled decode estimate failed: %s", e)
+            logger.warning("AIS scheduled decode estimate failed: %s", e)
             return None
         return result
 
@@ -564,7 +560,7 @@ class PlannerEnginePerfModel:
     ) -> Optional[PlannerEngineCapacity]:
         """Estimate sustainable single-engine RPS for one request shape.
 
-        AIC query failures are treated as unavailable estimates so throughput
+        AIS query failures are treated as unavailable estimates so throughput
         scaling can skip the current decision.
         """
         if self._engine_model is None:
@@ -588,7 +584,7 @@ class PlannerEnginePerfModel:
             )
             result = self._engine_model.find_engine_capacity_rps(request)
         except _ENGINE_MODEL_EXCEPTIONS as e:
-            logger.warning("AIC capacity query failed: %s", e)
+            logger.warning("AIS capacity query failed: %s", e)
             return None
         if result is None:
             return None
@@ -753,3 +749,16 @@ def _seconds_to_ms(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
     return value * 1000.0
+
+
+def _merge_estimator_controls(
+    defaults: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply explicit canonical settings without dropping future SDK fields."""
+    result = deepcopy(defaults)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _merge_estimator_controls(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result

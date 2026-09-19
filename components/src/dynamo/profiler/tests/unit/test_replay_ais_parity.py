@@ -8,9 +8,9 @@ import pytest
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay import run_synthetic_trace_replay
 
-# run_synthetic_trace_replay constructs the Rust AIC callback, which imports
-# the AIC-core engine API. Skip when the core wheel is absent.
-pytest.importorskip("aiconfigurator_core.sdk.engine")
+# run_synthetic_trace_replay constructs the Rust AIS callback, which imports
+# the AISimulate engine API. Skip when the core wheel is absent.
+pytest.importorskip("aisimulate_core.sdk.engine")
 aic_backend_factory = pytest.importorskip("aiconfigurator_core.sdk.backends.factory")
 aic_config = pytest.importorskip("aiconfigurator_core.sdk.config")
 aic_models = pytest.importorskip("aiconfigurator_core.sdk.models")
@@ -36,7 +36,7 @@ pytestmark = [
 ]
 
 
-def _aic_replay_args(backend_name: str):
+def _ais_replay_args(backend_name: str):
     payload = {
         "block_size": 512,
         "enable_prefix_caching": True,
@@ -48,11 +48,15 @@ def _aic_replay_args(backend_name: str):
         "max_num_batched_tokens": 65536,
         "num_gpu_blocks": 100000,
         "speedup_ratio": 1.0,
-        "aic_backend": backend_name,
-        "aic_system": AIC_PARITY_SYSTEM,
-        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
-        "aic_tp_size": 1,
-        "aic_model_path": AIC_PARITY_MODEL,
+        "ais_perf_config": {
+            "backend": backend_name,
+            "system": AIC_PARITY_SYSTEM,
+            "backend_version": AIC_PARITY_VERSIONS[backend_name],
+            "tp": 1,
+            "model": AIC_PARITY_MODEL,
+            "worker_type": "aggregated",
+            "kv_block_size": 512,
+        },
     }
     if backend_name == "sglang":
         payload["engine_type"] = "sglang"
@@ -64,7 +68,7 @@ def _aic_replay_args(backend_name: str):
     return MockEngineArgs.from_json(json.dumps(payload))
 
 
-def _aic_disagg_replay_args(
+def _ais_disagg_replay_args(
     backend_name: str,
     *,
     tp_size: int,
@@ -82,11 +86,15 @@ def _aic_disagg_replay_args(
         "max_num_batched_tokens": max_num_batched_tokens,
         "num_gpu_blocks": 50000,
         "speedup_ratio": 1.0,
-        "aic_backend": backend_name,
-        "aic_system": AIC_PARITY_SYSTEM,
-        "aic_backend_version": AIC_PARITY_VERSIONS[backend_name],
-        "aic_tp_size": tp_size,
-        "aic_model_path": AIC_PARITY_MODEL,
+        "ais_perf_config": {
+            "backend": backend_name,
+            "system": AIC_PARITY_SYSTEM,
+            "backend_version": AIC_PARITY_VERSIONS[backend_name],
+            "tp": tp_size,
+            "model": AIC_PARITY_MODEL,
+            "worker_type": "prefill" if is_prefill else "decode",
+            "kv_block_size": 512,
+        },
         "is_prefill": is_prefill,
         "is_decode": not is_prefill,
     }
@@ -137,7 +145,7 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         isl,
         128,
         8,
-        extra_engine_args=_aic_replay_args(backend_name),
+        extra_engine_args=_ais_replay_args(backend_name),
         num_workers=1,
         replay_mode="offline",
         replay_concurrency=8,
@@ -149,7 +157,13 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         osl=128,
         batch_size=8,
     )
-    expected_ttft_ms = aic["context_latency"] + aic["tpot"]
+    # SGLang emits the first token in its prefill forward. Its simulator's
+    # simulate_prefill_first_tokens only records that token; it does not run
+    # or charge a decode iteration. The vLLM replay path still reports the
+    # first token after the first decode iteration.
+    expected_ttft_ms = aic["context_latency"]
+    if backend_name == "vllm":
+        expected_ttft_ms += aic["tpot"]
 
     assert report["mean_ttft_ms"] == pytest.approx(expected_ttft_ms, rel=0.05)
     assert report["mean_tpot_ms"] == pytest.approx(aic["tpot"], rel=0.05)
@@ -221,14 +235,14 @@ def test_run_synthetic_disagg_replay_preserves_aic_local_optimum(
     prefill_workers,
     decode_workers,
 ):
-    prefill_args = _aic_disagg_replay_args(
+    prefill_args = _ais_disagg_replay_args(
         backend_name,
         tp_size=prefill_tp,
         is_prefill=True,
         max_num_seqs=prefill_bs,
         max_num_batched_tokens=isl,
     )
-    decode_args = _aic_disagg_replay_args(
+    decode_args = _ais_disagg_replay_args(
         backend_name,
         tp_size=decode_tp,
         is_prefill=False,

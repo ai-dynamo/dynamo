@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
+import textwrap
 from importlib import metadata
 from pathlib import Path
 
@@ -33,6 +35,49 @@ CARGO_LOCKFILES = (
     ROOT / "lib/bindings/python/Cargo.lock",
     ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
+
+
+@pytest.mark.timeout(30)
+def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import runpy
+        import sys
+
+        class WithoutAIS(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core', 'aiconfigurator_core'}:
+                    raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
+
+        sys.meta_path.insert(0, WithoutAIS())
+        namespace = runpy.run_path(sys.argv[1], run_name='__main__')
+        try:
+            namespace['PlannerConfig'](
+                mode='decode',
+                ais_perf_model={'roles': {'decode': {
+                    'model': 'model', 'system': 'system', 'backend': 'vllm',
+                }}},
+            )
+        except ModuleNotFoundError as error:
+            assert error.name == 'aisimulate_core'
+        else:
+            raise AssertionError('Explicit AIS configuration requires its runtime')
+        """
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT / "deploy/operator/api/scripts/validate_pydantic_models.py"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _requirement_names(requirements: list[str]) -> set[str]:
@@ -91,9 +136,11 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["aic-forward-pass"] == ["dep:aisimulate-core"]
+    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
+    assert "aic-forward-pass" not in features
     assert dependencies["aisimulate-core"] == {
-        "version": "=0.12.0",
+        "git": "https://github.com/ai-dynamo/aisimulate.git",
+        "rev": "fbd465d9ac14d37a6e73371ba4736a9364371eb5",
         "optional": True,
         "features": ["python"],
     }

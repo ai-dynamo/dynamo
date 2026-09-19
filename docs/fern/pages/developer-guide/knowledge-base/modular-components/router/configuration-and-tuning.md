@@ -79,8 +79,8 @@ its configuration even if the endpoint is unchanged.
 - `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`.
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
-- `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
-- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
+- `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIS prefill load decay to reflect prompt work.
+- `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `ais` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
 - `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
 - `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
 - `--router-policy-config`: Startup-only YAML path for policy-class queues and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
@@ -327,41 +327,70 @@ Session affinity does not create a backend session or send lifecycle RPCs. There
 no explicit unbind; idle expiry removes only router-local state. The same session
 ID is available to tracing and other explicitly configured consumers.
 
-### AIC Prefill Load Model
+<a id="aic-prefill-load-model"></a>
 
-Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. For the cost-model behavior, see [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling).
+### AIS Prefill Load Model
+
+Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. For the cost-model behavior, see [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling).
 
 Enable it on the frontend like this:
 
 ```bash
 python -m dynamo.frontend \
     --router-mode kv \
-    --router-prefill-load-model aic \
-    --aic-backend vllm \
-    --aic-system h200_sxm \
-    --aic-model-path nvidia/Llama-3.1-8B-Instruct-FP8
+    --router-prefill-load-model ais \
+    --ais-backend vllm \
+    --ais-system h200_sxm \
+    --ais-model-path nvidia/Llama-3.1-8B-Instruct-FP8
 ```
 
-Required when `--router-prefill-load-model=aic` is enabled:
+Required when `--router-prefill-load-model=ais` is enabled:
 
 - `--router-mode kv` on the frontend
 - `--router-track-prefill-tokens`
-- `--aic-backend`
-- `--aic-system`
-- `--aic-model-path`
+- `--ais-backend`
+- `--ais-system`
+- `--ais-model-path`
 
-Optional AIC knobs:
+For full estimator settings, use `--ais-perf-config` with a JSON object or a JSON/YAML
+file. It accepts the AISimulate `ForwardPassPerfModelConfig` unchanged, including
+`worker_type`, ordered `systems_paths`, `estimation_mode`, `fallback_policy`, and
+nested `estimator_config`. The default selection is `auto` with `deny`; auto tries
+op-level data, FPM interpolation, then FPM regression. Router requires a ready
+model and rejects cold regression because it has no training observations.
 
-- `--aic-backend-version`: pinned AIC database version; if omitted, Dynamo uses a backend-specific default
-- `--aic-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
-- `--aic-moe-tp-size`: MoE tensor-parallel size for models that require AIC MoE parallelism
-- `--aic-moe-ep-size`: MoE expert-parallel size for models that require AIC MoE parallelism
-- `--aic-attention-dp-size`: attention data-parallel size for models that require AIC MoE parallelism
+```json
+{
+  "model": "Qwen/Qwen3-32B",
+  "system": "h200_sxm",
+  "backend": "vllm",
+  "backend_version": "current",
+  "worker_type": "aggregated",
+  "estimation_mode": "auto",
+  "fallback_policy": "deny"
+}
+```
 
-For MoE models, these values must satisfy AIC's parallelism constraint:
-`aic_tp_size * aic_attention_dp_size == aic_moe_tp_size * aic_moe_ep_size`.
-For Kimi-style TP-only MoE runs, use `--aic-moe-tp-size` equal to `--aic-tp-size`,
-`--aic-moe-ep-size 1`, and `--aic-attention-dp-size 1`.
+Set `worker_type` to the modeled deployment's role, even when Router only queries
+prefill work. Do not combine the full config with flat identity flags. The Python
+SDK accepts the same mapping as `dynamo.llm.AisPerfConfig(config=payload)`.
+
+Deprecated `--aic-*` flags remain accepted by the CLI parser. Use `DYN_AIS_*`
+environment variables and `AisPerfConfig` in the SDK. Supplying both CLI spellings
+of the same input is an error; configuration output uses `ais`.
+
+Optional AIS knobs:
+
+- `--ais-backend-version`: pinned AIS database version; if omitted, Dynamo uses a backend-specific default
+- `--ais-tp-size`: tensor-parallel size for the modeled backend; defaults to `1`
+- `--ais-moe-tp-size`: MoE tensor-parallel size for models that require AIS MoE parallelism
+- `--ais-moe-ep-size`: MoE expert-parallel size for models that require AIS MoE parallelism
+- `--ais-attention-dp-size`: attention data-parallel size for models that require AIS MoE parallelism
+
+For MoE models, these values must satisfy AIS's parallelism constraint:
+`ais_tp_size * ais_attention_dp_size == ais_moe_tp_size * ais_moe_ep_size`.
+For Kimi-style TP-only MoE runs, use `--ais-moe-tp-size` equal to `--ais-tp-size`,
+`--ais-moe-ep-size 1`, and `--ais-attention-dp-size 1`.
 
 ## KV Event Transport
 
@@ -480,7 +509,7 @@ Use `DYN_ROUTER_OVERLAP_REFRESH_AFTER_SECS` when queued requests may wait long e
 
 The threshold is applied as `active_tokens > threshold * max_num_batched_tokens`, so this fallback inflates the effective denominator and a threshold like `1.0` may effectively never queue. To get the originally intended "fraction of the per-step prefill window" semantics on SGLang, either set `--max-prefill-tokens` explicitly on the SGLang backend so the MDC value matches the prefill window, or use a much smaller `--router-queue-threshold` (for example `0.1`) to compensate for the inflated denominator.
 
-Use `--router-prefill-load-model aic` when you want prompt-side load tracking to decay the oldest active prefill request using an AIC-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--aic-*` config; see [AIC Prefill Load Model](#aic-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
+Use `--router-prefill-load-model ais` when you want prompt-side load tracking to decay the oldest active prefill request using an AIS-predicted duration instead of keeping prompt load static until first token. This requires `--router-track-prefill-tokens` and the shared `--ais-*` config; see [AIS Prefill Load Model](#ais-prefill-load-model) for the full flag set and [Prefill Load Modeling](routing-concepts.md#prefill-load-modeling) for the cost-model details.
 
 Use `--router-queue-policy wspt` when your workload has a mix of short and long requests and you want to minimize average TTFT. Use the default `fcfs` when you want to minimize tail TTFT.
 

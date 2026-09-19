@@ -13,7 +13,7 @@ from dynamo.common.configuration.utils import add_argument, add_negatable_bool_a
 from dynamo.router.args import (
     DynamoRouterArgGroup,
     DynamoRouterConfig,
-    build_aic_perf_config,
+    build_ais_perf_config,
     build_kv_router_config,
 )
 from dynamo.thunderagent_router.router import ThunderAgentConfig
@@ -79,7 +79,7 @@ class ThunderAgentArgGroup(ArgGroup):
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         # Inherit standard router options (--endpoint, --router-block-size, KV
-        # router knobs, AicPerf options).
+        # router knobs, AisPerf options).
         DynamoRouterArgGroup().add_arguments(parser)
 
         g = parser.add_argument_group("ThunderAgent Scheduler Options")
@@ -248,7 +248,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ThunderAgentRouterConfig:
 __all__ = [
     "ThunderAgentArgGroup",
     "ThunderAgentRouterConfig",
-    "build_aic_perf_config",
+    "build_ais_perf_config",
     "build_kv_router_config",
     "parse_args",
 ]

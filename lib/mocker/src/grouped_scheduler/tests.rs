@@ -7,7 +7,7 @@ use parking_lot::Mutex as ParkingLotMutex;
 use std::sync::Mutex as StdMutex;
 
 use crate::common::handoff::HandoffId;
-use crate::common::perf_model::{AicCallback, PerfModel};
+use crate::common::perf_model::{AisCallback, PerfModel};
 use crate::common::protocols::{FpmSink, KvCacheEventSink, WorkerType};
 use crate::live::{LiveEngine, LiveEngineOptions};
 
@@ -53,7 +53,7 @@ impl FpmSink for CapturedEffects {
 
 struct SlowDecode;
 
-impl AicCallback for SlowDecode {
+impl AisCallback for SlowDecode {
     fn predict_prefill(
         &self,
         _batch_size: usize,
@@ -366,7 +366,7 @@ async fn midpass_cancel_ack_precedes_completion_router_effects() {
     let effects = Arc::new(CapturedEffects::default());
     let mut slow_args = args(1);
     slow_args.speedup_ratio = 1.0;
-    slow_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(SlowDecode)));
+    slow_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(SlowDecode)));
     let (output_tx, mut output_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
     let GroupedSchedulers {
@@ -681,7 +681,7 @@ fn completion_metrics_override_the_midpass_command_snapshot() {
 async fn closed_output_receiver_cancels_request_and_releases_native_kv() {
     let mut slow_args = args(1);
     slow_args.speedup_ratio = 1.0;
-    slow_args.perf_model = Arc::new(PerfModel::from_aic_callback(Arc::new(SlowDecode)));
+    slow_args.perf_model = Arc::new(PerfModel::from_ais_callback(Arc::new(SlowDecode)));
     let effects = Arc::new(CapturedEffects::default());
     let (output_tx, output_rx) = mpsc::unbounded_channel();
     drop(output_rx);

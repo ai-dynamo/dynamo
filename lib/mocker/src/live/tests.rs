@@ -161,8 +161,8 @@ async fn sglang_live_metrics_retain_the_last_prefill_cache_observation() {
 
 async fn assert_mtp_lifecycle_drains_through_live_boundary(engine_type: EngineType) {
     let mut mtp_args = args(engine_type);
-    mtp_args.aic_nextn = Some(2);
-    mtp_args.aic_nextn_accept_rates = Some("1,1".to_string());
+    mtp_args.ais_nextn = Some(2);
+    mtp_args.ais_nextn_accept_rates = Some("1,1".to_string());
     let fpm = Arc::new(CountingFpmSink::default());
     let engine = LiveEngine::start_with_options(
         mtp_args,

@@ -94,13 +94,15 @@ PLANNER_PROFILE_DATA_DIR = (
     Path(__file__).resolve().parents[2]
     / "components/src/dynamo/planner/tests/data/profiling_results/H200_TP1P_TP1D"
 )
-ROUTER_AIC_CONFIG = {
-    "aic_backend": "vllm",
-    "aic_system": "h200_sxm",
-    "aic_backend_version": "current",
-    "aic_tp_size": 1,
-    "aic_model_path": "Qwen/Qwen3-32B",
+ROUTER_AIS_CONFIG = {
+    "backend": "vllm",
+    "system": "h200_sxm",
+    "backend_version": "current",
+    "tp": 1,
+    "model": "Qwen/Qwen3-32B",
+    "worker_type": "aggregated",
 }
+
 ROUTER_OVERLOAD_529_CASES = (
     pytest.param(
         {
@@ -210,17 +212,17 @@ COUNTER_TEST_PAYLOAD: Dict[str, Any] = {
 }
 
 
-def _require_router_aic() -> dict[str, Any]:
+def _require_router_ais() -> dict[str, Any]:
     pytest.importorskip(
-        "aiconfigurator_core",
-        reason="router AIC test requires aiconfigurator-core",
+        "aisimulate_core",
+        reason="router AIS test requires aisimulate-core",
     )
-    # Rust AIC callback imports aiconfigurator_core.sdk.engine.compile_engine.
+    # The native AIS callback requires the matching Python SDK.
     pytest.importorskip(
-        "aiconfigurator_core.sdk.engine",
-        reason="router AIC test requires aiconfigurator_core.sdk.engine",
+        "aisimulate_core.sdk.engine",
+        reason="router AIS test requires aisimulate_core.sdk.engine",
     )
-    return ROUTER_AIC_CONFIG.copy()
+    return ROUTER_AIS_CONFIG.copy()
 
 
 TEST_PAYLOAD = build_test_payload(MODEL_NAME)
@@ -462,8 +464,8 @@ def test_mocker_kv_event_publisher_disabled_diagnostic(
         ),
         pytest.param(
             "kv",
-            {"aic_perf_model": True, "aic_system": "h200_sxm"},
-            id="kv-aic",
+            {"ais_perf_model": True, "ais_system": "h200_sxm"},
+            id="kv-ais",
         ),
         pytest.param("round-robin", {}, id="roundrobin"),
         pytest.param("random", {}, id="random"),
@@ -960,7 +962,7 @@ def test_router_decisions(
 
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-def test_router_decisions_router_aic(
+def test_router_decisions_router_ais(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -969,7 +971,7 @@ def test_router_decisions_router_aic(
     """Validate aggregated KV-router decisions with router-side AIC enabled."""
     logger.info("Starting agg router decisions test with router-side AIC enabled")
 
-    router_aic_config = _require_router_aic()
+    router_ais_config = _require_router_ais()
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": 8,
@@ -994,7 +996,7 @@ def test_router_decisions_router_aic(
         },
         test_kwargs={
             "use_kv_events": True,
-            "router_aic_config": router_aic_config,
+            "router_ais_config": router_ais_config,
         },
     )
 
@@ -1519,7 +1521,7 @@ def test_disagg_per_role_session_affinity(
 
 
 @pytest.mark.timeout(180)
-def test_router_decisions_disagg_router_aic(
+def test_router_decisions_disagg_router_ais(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
@@ -1527,7 +1529,7 @@ def test_router_decisions_disagg_router_aic(
     """Validate disagg KV-router decisions with router-side AIC enabled on the default startup path."""
     logger.info("Starting disaggregated router prefix reuse test with router-side AIC")
 
-    router_aic_config = _require_router_aic()
+    router_ais_config = {**_require_router_ais(), "worker_type": "prefill"}
     mocker_args = {
         "speedup_ratio": SPEEDUP_RATIO,
         "block_size": BLOCK_SIZE,
@@ -1554,7 +1556,7 @@ def test_router_decisions_disagg_router_aic(
             enable_disagg_bootstrap=False,
         ),
         test_payload=TEST_PAYLOAD,
-        test_kwargs={"router_aic_config": router_aic_config},
+        test_kwargs={"router_ais_config": router_ais_config},
     )
 
 
@@ -1753,7 +1755,7 @@ def test_update_model_taints_replaces_worker_routing_constraints(
             assert read_count(workers.gpu_count_file) == baseline_b
 
             update_url = (
-                f"http://127.0.0.1:{system_ports[0]}" "/engine/update/model_taints"
+                f"http://127.0.0.1:{system_ports[0]}/engine/update/model_taints"
             )
             async with session.post(
                 update_url,

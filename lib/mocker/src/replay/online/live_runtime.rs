@@ -237,7 +237,7 @@ impl LiveRuntime {
             capture_per_request: replay_options.record_per_request,
             sla: replay_options.sla,
             num_workers,
-            gpus_per_worker: args.aic_gpus_per_worker(),
+            gpus_per_worker: args.ais_gpus_per_worker(),
         };
         let (admission_tx, admission_rx) = mpsc::unbounded_channel();
         let dp_size = usize::try_from(args.dp_size)

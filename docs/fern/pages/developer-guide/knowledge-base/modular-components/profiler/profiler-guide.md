@@ -65,7 +65,7 @@ flowchart TD
 
 4. **DGD Generation**: The picked configuration is rendered into a complete DGD YAML via AIC's generator pipeline, including correct parallelization, replica counts, container image, and PVC mounts.
 
-5. **Interpolation** (planner bootstrap/mocker): When mocker or planner bootstrap data is requested, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags, planner `aic_perf_model`, or in-process interpolation instead, so no profile-data ConfigMap is generated.
+5. **Interpolation** (planner bootstrap/mocker): When mocker or planner bootstrap data is requested, the profiler generates detailed performance interpolation curves — TTFT vs ISL for prefill, ITL vs KV-cache utilization for decode. In thorough sweeping, these are stored as NPZ files and later packaged into a ConfigMap during final assembly. In rapid sweeping, consumers use AIC performance-model flags, planner `ais_perf_model.roles`, or in-process interpolation instead, so no profile-data ConfigMap is generated.
 
 6. **Final Assembly** (3 composable layers):
    1. **Mocker base**: If mocker is enabled, the base DGD is swapped for the mocker DGD template (`generate_mocker_config`). Otherwise the AIC-picked DGD is kept.
@@ -128,7 +128,7 @@ Triggered when there is **no planner and no target load**. Maximizes throughput 
 
 ## Planner Integration
 
-When the Planner is enabled, the profiler emits the `aic_perf_model` identity used by the Planner's AIConfigurator compatibility integration in the `aisimulate` wheel whenever picked configs are available. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
+When the Planner is enabled, the profiler emits `ais_perf_model.roles` with complete AISimulate configurations for the selected deployment roles. It preserves model identity, backend version and parallel topology; new configurations use `auto` selection with `deny` fallback. Mocker arguments use `--ais-*` names. The `pre_deployment_sweeping_mode` field controls optional bootstrap data:
 
 ```yaml
 features:
@@ -140,12 +140,12 @@ features:
 
 `optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft_ms`/`itl_ms` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft_ms`/`itl_ms` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
-- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIC performance-model flags, planner `aic_perf_model`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
+- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIC performance-model flags, planner `ais_perf_model.roles`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h). When profile data is needed, the profiler packages it into `planner-profile-data-XXXX`.
 - **none**: Skips interpolation. Planner throughput scaling can still start from native AIC or live FPM regression warmup. Mocker still requires pre-deployment sweeping.
 
 The generated DGD can include these ConfigMaps:
-- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `aic_perf_model` when available and `profile_results_dir` pointing to the profiling data mount)
+- **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `ais_perf_model.roles` when available and `profile_results_dir` pointing to the profiling data mount)
 - **planner-profile-data-XXXX**: Prefill and decode interpolation data (JSON). Only emitted when `pre_deployment_sweeping_mode: thorough` and either `optimization_target: sla` is set alongside `enable_throughput_scaling: true`, or mocker is enabled. Rapid mode does not emit this ConfigMap.
 
 See the [Planner Guide](../planner/planner-guide.md) for the full `PlannerConfig` reference.

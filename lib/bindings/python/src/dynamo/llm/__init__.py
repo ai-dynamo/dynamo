@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
-from dynamo._core import AicPerfConfig as AicPerfConfig
+from dynamo._core import AisPerfConfig as AisPerfConfig
 from dynamo._core import EngineType
 from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import FpmDirectPublisher as FpmDirectPublisher

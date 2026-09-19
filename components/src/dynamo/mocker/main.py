@@ -172,7 +172,7 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
         args.bootstrap_ports_list
         or args.zmq_kv_events_ports_list
         or args.zmq_replay_ports_list
-        or base_engine_args.aic_nextn is not None
+        or base_engine_args.ais_nextn is not None
     )
 
     # An advertised router config rides in this worker set's model deployment
@@ -216,9 +216,9 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
                     if args.zmq_replay_ports_list
                     else None
                 ),
-                aic_mtp_seed=(
-                    (base_engine_args.aic_mtp_seed + worker_id) % (1 << 64)
-                    if base_engine_args.aic_nextn is not None
+                ais_mtp_seed=(
+                    (base_engine_args.ais_mtp_seed + worker_id) % (1 << 64)
+                    if base_engine_args.ais_nextn is not None
                     else None
                 ),
             )

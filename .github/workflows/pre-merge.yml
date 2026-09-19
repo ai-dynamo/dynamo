@@ -456,10 +456,10 @@ jobs:
           testdata/mooncake_trace_tiny.jsonl \
           --iterations 2 \
           --canonical-reports-jsonl "$RUNNER_TEMP/canonical-replay.jsonl"
-    - name: Run Python bindings AIC feature tests
+    - name: Run Python bindings AIS feature tests
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo test --locked --features aic-forward-pass -- --nocapture
+      run: cargo test --locked --features ais-forward-pass -- --nocapture
     - name: Compile feature-gated benchmark entrypoints
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -532,10 +532,10 @@ jobs:
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
-    - name: Run Python bindings AIC feature clippy
+    - name: Run Python bindings AIS feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}
-      run: cargo clippy --locked --no-deps --features aic-forward-pass --all-targets -- -D warnings
+      run: cargo clippy --locked --no-deps --features ais-forward-pass --all-targets -- -D warnings
     - name: Lint Python bindings worker-selection policy builds
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}

@@ -1130,7 +1130,7 @@ jobs:
           fi
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
-        run: python tests/frontend/router_aic_image_smoke.py
+        run: python tests/frontend/router_ais_image_smoke.py
 
   # ============================================================================
   # DYNAMO RUNTIME PIPELINE

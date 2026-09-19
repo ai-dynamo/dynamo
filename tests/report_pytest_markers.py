@@ -289,6 +289,12 @@ STUB_MODULES = [
     "aiconfigurator_core.sdk.models",
     "aiconfigurator_core.sdk.perf_database",
     "aiconfigurator_core.sdk.utils",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
+    "aisimulate_core.sdk.engine",
+    "aisimulate_core.sdk.memory",
+    "aisimulate_core.sdk.perf_database",
+    "aisimulate_core.sdk.rust_engine_step",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -309,6 +315,12 @@ FORCE_STUB_MODULES = {
     "aiconfigurator_core.sdk.models",
     "aiconfigurator_core.sdk.perf_database",
     "aiconfigurator_core.sdk.utils",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
+    "aisimulate_core.sdk.engine",
+    "aisimulate_core.sdk.memory",
+    "aisimulate_core.sdk.perf_database",
+    "aisimulate_core.sdk.rust_engine_step",
 }
 
 # Project paths for local imports
