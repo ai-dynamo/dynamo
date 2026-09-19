@@ -9,7 +9,10 @@ token layout the transferred KV depends on.
 import logging
 from typing import Any, Dict, Optional
 
-from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.cache_uuid import (
+    reject_unsupported_backend_multimodal_data,
+    reject_unsupported_multimodal_uuids,
+)
 from dynamo.llm.exceptions import InvalidArgument
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,7 @@ def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
     """Reject unsupported UUIDs or media not extracted by the frontend."""
 
     reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+    reject_unsupported_backend_multimodal_data(request.get("backend_multi_modal_data"))
     mm_data = _multi_modal_data(request)
     raw_types = _raw_multimodal_content_types(request)
     if not (mm_data or raw_types):

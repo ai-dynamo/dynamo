@@ -56,6 +56,7 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         prepared.request,
         prepared.multi_modal_data,
         prepared.mm_processor_kwargs,
+        backend_owned=prepared.backend_owned,
     )
     return SimpleNamespace(
         prompt=prompt,
@@ -63,6 +64,159 @@ async def _prepare_prompt(processor, request, request_id, context, mode):
         multi_modal_data=prepared.multi_modal_data,
         mm_processor_kwargs=prepared.mm_processor_kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_reaches_the_registered_processor():
+    processor = _processor()  # Qwen3-VL: the geometry gate is P/D-only
+    descriptor = {
+        "dtype": "float32-le",
+        "shape": [2, 4],
+        "data_base64": "AAAAAA==",
+    }
+    request = {
+        "token_ids": [1, 2, 3],
+        "backend_multi_modal_data": {"custom_input": descriptor},
+    }
+
+    prepared = await _prepare_prompt(
+        processor,
+        request,
+        "request-1",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert "backend_multi_modal_data" not in prepared.request
+    assert prepared.multi_modal_data == {"custom_input": descriptor}
+    assert prepared.prompt["multi_modal_data"] == {"custom_input": descriptor}
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_prefill_runs_the_processor():
+    """Prefill owns the modality processor; its handoff is expanded token ids."""
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    payload = {"custom_input": {"shape": [2, 4], "data_base64": "AAAAAA=="}}
+    request = {"token_ids": [1, 2, 3], "backend_multi_modal_data": payload}
+
+    prepared = await processor.prepare_input(
+        request, "request-1", None, DisaggregationMode.PREFILL
+    )
+
+    assert prepared.multi_modal_data == payload
+    assert "backend_multi_modal_data" not in prepared.request
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_decode_uses_expanded_token_ids():
+    """Decode never re-runs the processor; it continues from prefill's tokens."""
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    request = {
+        "token_ids": [1, 2, 3],
+        "backend_multi_modal_data": {"custom_input": {"payload": "x"}},
+        "prefill_result": {
+            "disaggregated_params": {
+                "embedding_params": {"expanded_prompt_token_ids": [1, 7, 7, 7, 2, 3]}
+            }
+        },
+    }
+
+    prepared = await processor.prepare_input(
+        request, "request-1", None, DisaggregationMode.DECODE
+    )
+
+    assert prepared.multi_modal_data is None
+    assert prepared.request["token_ids"] == [1, 7, 7, 7, 2, 3]
+    assert "backend_multi_modal_data" not in prepared.request
+    assert "multi_modal_data" not in prepared.request
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_decode_without_handoff_fails():
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    request = {
+        "token_ids": [1, 2, 3],
+        "backend_multi_modal_data": {"custom_input": {"payload": "x"}},
+    }
+
+    with pytest.raises(mod.MissingMultimodalHandoffError, match="expanded prompt"):
+        await processor.prepare_input(
+            request, "request-1", None, DisaggregationMode.DECODE
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.PREFILL, DisaggregationMode.DECODE]
+)
+async def test_backend_multimodal_data_rejects_geometry_handoff_family(mode):
+    """Qwen-VL rebuilds mRoPE from image_grid_thw, which an opaque payload
+    cannot supply, so P/D must refuse rather than generate wrong positions."""
+    processor = _processor()  # Qwen3-VL
+    request = {
+        "token_ids": [1, 2, 3],
+        "backend_multi_modal_data": {"custom_input": {"payload": "x"}},
+    }
+
+    with pytest.raises(ValueError, match="decode handoff"):
+        await processor.prepare_input(request, "request-1", None, mode)
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_rejects_empty_payload():
+    processor = _processor()
+    request = {"token_ids": [1, 2, 3], "backend_multi_modal_data": {}}
+
+    with pytest.raises(ValueError, match="non-empty object"):
+        await processor.prepare_input(
+            request, "request-1", None, DisaggregationMode.AGGREGATED
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("modality", ["image", "vision_chunk"])
+@pytest.mark.parametrize(
+    "mode", [DisaggregationMode.AGGREGATED, DisaggregationMode.PREFILL]
+)
+async def test_backend_multimodal_data_passes_frontend_modality_names_through(
+    modality, mode
+):
+    """Modality names belong to the engine's processor, not to Dynamo.
+
+    A backend payload never reaches frontend media handling, so a name the
+    frontend also uses for its own media must survive untouched rather than be
+    interpreted by UUID inference or structural pad expansion.
+    """
+    # A generic family, so the P/D leg is not refused for mRoPE geometry.
+    processor = _processor(model="meta-llama/Llama-3.2-1B")
+    payload = {modality: ["opaque"]}
+    request = {"token_ids": [1, 2, 3], "backend_multi_modal_data": payload}
+
+    prepared = await _prepare_prompt(processor, request, "request-1", None, mode)
+
+    assert prepared.multi_modal_data == payload
+    assert prepared.prompt["multi_modal_data"] == payload
+    assert "multi_modal_uuids" not in prepared.prompt
+    assert prepared.prompt["prompt_token_ids"] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_backend_multimodal_data_rejects_frontend_media_mix():
+    processor = _processor()
+    request = {
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+        "backend_multi_modal_data": {"custom_input": {"payload": "x"}},
+    }
+
+    processor.validate_multimodal_request(request)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        await processor.prepare_input(
+            request,
+            "request-1",
+            None,
+            DisaggregationMode.AGGREGATED,
+        )
 
 
 @pytest.mark.asyncio

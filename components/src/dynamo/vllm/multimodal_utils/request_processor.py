@@ -274,6 +274,22 @@ def compute_mm_uuids(
     return {modality: uuids}
 
 
+def _validate_backend_multimodal_data(request: dict[str, Any]) -> dict[str, Any]:
+    """Check the opaque backend payload and return it.
+
+    Values are validated by the engine's registered modality processor, not
+    here. Modality names are the processor's to choose, including names the
+    frontend also uses for its own media, because a backend-owned payload never
+    reaches frontend media handling.
+    """
+    backend_data = request["backend_multi_modal_data"]
+    if not isinstance(backend_data, dict) or not backend_data:
+        raise ValueError("multi_modal_data must be a non-empty object")
+    if request.get("multi_modal_data") is not None:
+        raise ValueError("multi_modal_data cannot be combined with frontend media data")
+    return backend_data
+
+
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
     """Read processor kwargs from the canonical or router-compatible location."""
     value = request.get("mm_processor_kwargs")
@@ -292,6 +308,10 @@ class PreparedMultimodalInput:
     multi_modal_data: Optional[dict[str, Any]]
     mm_processor_kwargs: Optional[dict[str, Any]]
     pre_rendered_prompt: Any = None
+    # The payload came from `backend_multi_modal_data`, so its modality names
+    # belong to the engine's processor and frontend media policy must not read
+    # them.
+    backend_owned: bool = False
 
 
 class MissingMultimodalHandoffError(ValueError):
@@ -476,6 +496,7 @@ class VllmMultimodalRequestProcessor:
         )
         if (
             request.get("multi_modal_data") is not None
+            or request.get("backend_multi_modal_data") is not None
             or request.get("multi_modal_uuids") is not None
             or has_transfer
         ) and not self.enable_multimodal:
@@ -780,8 +801,26 @@ class VllmMultimodalRequestProcessor:
         request: dict[str, Any],
         multi_modal_data: Optional[dict[str, Any]],
         mm_processor_kwargs: Optional[dict[str, Any]],
+        *,
+        backend_owned: bool = False,
     ) -> TokensPrompt:
-        """Create a TokensPrompt with stable multimodal UUIDs."""
+        """Create a TokensPrompt with stable multimodal UUIDs.
+
+        ``backend_owned`` marks a payload the frontend never interpreted. Its
+        modality names belong to the engine's registered processor, so neither
+        UUID inference nor structural pad expansion may read them: both are
+        frontend media policy and would either mis-hash the payload or reject a
+        value only the processor can validate.
+        """
+        if backend_owned:
+            prompt_kwargs: dict[str, Any] = {
+                "prompt_token_ids": request["token_ids"],
+                "multi_modal_data": multi_modal_data,
+            }
+            if mm_processor_kwargs is not None:
+                prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            return TokensPrompt(**prompt_kwargs)
+
         extra_args = request.get("extra_args") or {}
         raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
@@ -820,6 +859,63 @@ class VllmMultimodalRequestProcessor:
             prompt_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
         return TokensPrompt(**prompt_kwargs)
 
+    def _prepare_backend_multimodal_input(
+        self,
+        request: dict[str, Any],
+        mode: DisaggregationMode,
+    ) -> PreparedMultimodalInput:
+        """Route an opaque backend payload through the aggregated or P/D path.
+
+        Aggregated and prefill hand the payload to the engine's registered
+        modality processor. Decode never sees it: it continues from the expanded
+        prompt token ids prefill produced, the same generic handoff every model
+        without a family-specific decode contract already uses.
+        """
+        backend_data = _validate_backend_multimodal_data(request)
+        mm_processor_kwargs = get_mm_processor_kwargs(request)
+        request_for_prompt = dict(request)
+        request_for_prompt.pop("backend_multi_modal_data")
+
+        if (
+            mode is not DisaggregationMode.AGGREGATED
+            and self._model_family is ModelFamily.QWEN_VL
+        ):
+            # Qwen-VL rebuilds mRoPE position ids from image_grid_thw, which
+            # Dynamo cannot derive from a payload it does not interpret. Refuse
+            # rather than generate against wrong positions.
+            raise ValueError(
+                "multi_modal_data is not supported for disaggregated "
+                f"{self._model_family.value} serving: its decode handoff needs "
+                "modality geometry that only a media-aware path can produce"
+            )
+
+        if mode is DisaggregationMode.DECODE:
+            prefill_result = request.get("prefill_result") or {}
+            disaggregated_params = prefill_result.get("disaggregated_params") or {}
+            embedding_params = disaggregated_params.get("embedding_params") or {}
+            expanded_token_ids = embedding_params.get("expanded_prompt_token_ids")
+            if not expanded_token_ids:
+                raise MissingMultimodalHandoffError(
+                    "Prefill did not produce the expanded prompt token ids "
+                    "required by backend multimodal decode"
+                )
+            request_for_prompt["token_ids"] = expanded_token_ids
+            return PreparedMultimodalInput(
+                request=request_for_prompt,
+                multi_modal_data=None,
+                mm_processor_kwargs=mm_processor_kwargs,
+                pre_rendered_prompt=None,
+                backend_owned=True,
+            )
+
+        return PreparedMultimodalInput(
+            request=request_for_prompt,
+            multi_modal_data=backend_data,
+            mm_processor_kwargs=mm_processor_kwargs,
+            pre_rendered_prompt=None,
+            backend_owned=True,
+        )
+
     async def prepare_input(
         self,
         request: dict[str, Any],
@@ -833,6 +929,9 @@ class VllmMultimodalRequestProcessor:
         request before invoking this transformation. The handler validates at
         ``generate`` so text and token modes share the same security boundary.
         """
+        if request.get("backend_multi_modal_data") is not None:
+            return self._prepare_backend_multimodal_input(request, mode)
+
         mm_processor_kwargs = get_mm_processor_kwargs(request)
         request_for_prompt = dict(request)
         has_mm_data = request.get("multi_modal_data") is not None

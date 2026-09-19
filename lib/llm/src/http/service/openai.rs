@@ -8240,6 +8240,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
@@ -8265,6 +8266,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
@@ -8289,6 +8291,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
@@ -8313,6 +8316,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
@@ -8339,6 +8343,7 @@ mod tests {
                 .unwrap(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
@@ -8363,6 +8368,7 @@ mod tests {
             common: Default::default(),
             nvext: None,
             metadata: None,
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
@@ -8395,6 +8401,7 @@ mod tests {
                 "session": {"id": "session-1", "timestamp": 1640995200}
             })
             .into(),
+            multi_modal_data: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
         };
