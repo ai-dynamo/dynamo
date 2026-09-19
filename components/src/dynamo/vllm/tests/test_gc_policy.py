@@ -75,7 +75,11 @@ def test_gc_maintain_freezes_objects(monkeypatch):
     try:
         frozen = gc_policy.gc_maintain()
         assert frozen > 0
-        assert frozen == gc.get_freeze_count()
+        # gc.get_freeze_count() is process-global: a frozen object that loses
+        # its last reference after the maintain pass is deallocated and leaves
+        # the permanent generation, so a later re-read can only be lower.
+        # Assert the surviving bound rather than exact equality.
+        assert 0 < gc.get_freeze_count() <= frozen
     finally:
         gc.unfreeze()
 
