@@ -46,7 +46,8 @@ input_files:
   - benchmarks/multimodal/jsonl/1000req_1img_200pool_400word_http.jsonl
   - benchmarks/multimodal/jsonl/1000req_4img_200pool_400word_http.jsonl
 
-# Each config launches the workflow with its own extra_args
+# Each config launches the workflow with its own extra_args and optional env.
+# Per-arm env values expand variables from the harness process.
 configs:
   - label: cache-off
     workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
@@ -54,8 +55,32 @@ configs:
 
   - label: cache-on
     workflow: benchmarks/multimodal/sweep/workflows/vllm_serve.sh
+    env:
+      PYTHONPATH: "${VLLM_PATCHED_PYTHONPATH}"
     extra_args: [--no-enable-prefix-caching, --multimodal-embedding-cache-capacity-gb, "10"]
 ```
+
+### vLLM workflow environment
+
+| Variable | Purpose |
+|---|---|
+| `DYN_DISABLE_NSYS` | Set to `0` to profile the vLLM server; defaults to `1`. |
+| `DYN_NSYS_BIN` | Nsight Systems executable path. |
+| `DYN_NSYS_DIR` / `DYN_NSYS_TMPDIR` | Final report and temporary capture directories. |
+| `DYN_NSYS_TRACE` | Nsight trace domains; defaults to `cuda,nvtx`. |
+| `DYN_NSYS_OUTPUT_PREFIX` | Report prefix; the orchestrator appends the arm label. |
+| `DYN_SERVER_TERMINATE_TIMEOUT` | Orchestrator shutdown timeout; defaults to 300 seconds with profiling and 15 otherwise. |
+| `DYN_SERVER_SHUTDOWN_GRACE_SECONDS` | Wrapper grace period before SIGKILL; defaults to 150 seconds with profiling and 10 otherwise. |
+| `DYN_PYTHON` | Python executable used by the repetition wrapper. |
+| `DYN_BENCHMARK_ORDER_SEED` | Seed for randomized per-repetition arm order; defaults to 42. |
+| `VLLM_SOURCE_REVISION` | Required tested-vLLM revision recorded by the repetition wrapper. |
+| `VLLM_BASELINE_SOURCE_REVISION` | Required baseline vLLM revision for the native-EC comparison. |
+| `VLLM_BASELINE_PYTHONPATH` / `VLLM_PATCHED_PYTHONPATH` | Source trees selected by the baseline and overlap arms. |
+| `CONTAINER_IMAGE` | Required runtime image reference recorded by the repetition wrapper. |
+| `CONTAINER_IMAGE_DIGEST` | Required immutable runtime image digest. |
+| `CONTAINER_IMAGE_FILE` | Required imported image/squashfs path used by the GPU run. |
+| `HARNESS_REVISION` | Required Dynamo benchmark-harness commit. |
+
 
 ## CLI Overrides
 

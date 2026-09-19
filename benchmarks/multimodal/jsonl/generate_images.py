@@ -36,10 +36,11 @@ def generate_image_pool_base64(
 ) -> list[str]:
     """Generate pool_size random PNG files and return their paths."""
     image_dir.mkdir(parents=True, exist_ok=True)
+    width, height = image_size
     pool: list[str] = []
     for idx in range(pool_size):
         path = image_dir / f"img_{idx:04d}.png"
-        pixels = np_rng.integers(0, 256, (*image_size, 3), dtype=np.uint8)
+        pixels = np_rng.integers(0, 256, (height, width, 3), dtype=np.uint8)
         Image.fromarray(pixels).save(path)
         pool.append(str(path.resolve()))
     print(

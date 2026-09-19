@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import re
 from pathlib import Path
 from typing import List, Optional
 
@@ -43,6 +46,32 @@ def _print_banner(title: str, char: str = "=", width: int = 70) -> None:
     print(f"\n{char * width}")
     print(f"  {title}")
     print(f"{char * width}", flush=True)
+
+
+def _first_user_text(input_file: str) -> str:
+    with open(input_file, encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            value = json.loads(line).get("text")
+            if not isinstance(value, str):
+                raise ValueError(f"First row in {input_file} has no string text field")
+            return value
+    raise ValueError(f"Dataset is empty: {input_file}")
+
+
+def _expand_arm_env(env: dict[str, str]) -> dict[str, str]:
+    """Expand host variables in per-arm environment values."""
+    expanded = {key: os.path.expandvars(value) for key, value in env.items()}
+    unresolved = {
+        key: value
+        for key, value in expanded.items()
+        if re.search(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[^}]+\})", value)
+    }
+    if unresolved:
+        names = ", ".join(sorted(unresolved))
+        raise ValueError(f"Unresolved variables in benchmark arm env: {names}")
+    return expanded
 
 
 def run_sweep(
@@ -118,6 +147,12 @@ def _run_config(
 ) -> None:
     """Run all sweep values for a single benchmark config."""
     workflow_abs = _resolve_workflow(bench_cfg.workflow, repo_root)
+    arm_env_overrides = {
+        **env_overrides,
+        **_expand_arm_env(bench_cfg.env),
+        "DYN_BENCHMARK_ARM": bench_cfg.label,
+        "DYN_BENCHMARK_SWEEP": "multi",
+    }
     _print_banner(f"Config: {bench_cfg.label}", char="#")
 
     # Collect pending runs, skipping those with existing results.
@@ -151,7 +186,7 @@ def _run_config(
             workflow_script=workflow_abs,
             model=config.model,
             extra_args=bench_cfg.extra_args,
-            env_overrides=env_overrides,
+            env_overrides=arm_env_overrides,
         )
 
     try:
@@ -166,10 +201,20 @@ def _run_config(
                     workflow_script=workflow_abs,
                     model=config.model,
                     extra_args=bench_cfg.extra_args,
-                    env_overrides=env_overrides,
+                    env_overrides={
+                        **arm_env_overrides,
+                        "DYN_BENCHMARK_SWEEP": f"{sweep_mode}{value}",
+                    },
                 )
 
             try:
+                if config.prefix_cache_probe_min_cached_tokens is not None:
+                    server.validate_prefix_cache(
+                        model=config.model,
+                        user_text=_first_user_text(input_file),
+                        min_cached_tokens=(config.prefix_cache_probe_min_cached_tokens),
+                        output_path=artifact_dir / "prefix_cache_probe.json",
+                    )
                 run_aiperf_single(
                     model=config.model,
                     port=config.port,
