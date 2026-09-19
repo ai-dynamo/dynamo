@@ -8,18 +8,32 @@ SGLang ``TokenizerWorker``. Design notes: AGENTS.md, "Multi-process gateway".
 from __future__ import annotations
 
 import asyncio
-import copy
 import logging
 import os
 import subprocess
 import sys
 import tempfile
 import types
+from typing import Optional
 
 import sglang as sgl
 
+from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
+
 ENV_PARENT_PID = "DYN_SGLANG_GATEWAY_PARENT_PID"
 ENV_CHILD_INDEX = "DYN_SGLANG_GATEWAY_CHILD_INDEX"
+ENV_SYSTEM_PORT = "DYN_SYSTEM_PORT"
+ENV_SYSTEM_PORT_BASE = "DYN_SGLANG_GATEWAY_SYSTEM_PORT"
+
+DIRECT_ENGINE_WORKER_FLAGS = (
+    "image_diffusion_worker",
+    "video_generation_worker",
+    "rerank_worker",
+    "embedding_worker",
+    "multimodal_encode_worker",
+    "multimodal_worker",
+    "diffusion_worker",
+)
 
 
 class GatewayEngine:
@@ -54,36 +68,98 @@ def gateway_child_index() -> int:
 
 
 def owns_engine_metrics() -> bool:
-    """SGLang's schedulers push KV metrics to one PULL socket and publish forward-pass
-    metrics once, so exactly one gateway process may consume them: child 0 (or the
-    single worker when the mode is off)."""
+    """SGLang's schedulers push KV metrics to one PULL socket, so exactly one gateway
+    process may consume them: child 0 (or the single worker when the mode is off)."""
     return gateway_child_index() == 0
 
 
+def effective_gateway_workers(server_args, dynamo_args) -> int:
+    """Gateway count implied by ``--gateway-workers`` and ``--tokenizer-worker-num``.
+
+    The engine runs exactly one SGLang tokenizer worker per gateway process, so two
+    explicit, different values are an error rather than a silent choice."""
+    requested = getattr(dynamo_args, "gateway_workers", None)
+    tokenizer_workers = getattr(server_args, "tokenizer_worker_num", 1) or 1
+    if requested is None:
+        return tokenizer_workers
+    if tokenizer_workers > 1 and tokenizer_workers != requested:
+        raise ValueError(
+            f"--gateway-workers {requested} conflicts with --tokenizer-worker-num "
+            f"{tokenizer_workers}: each gateway process is one SGLang tokenizer "
+            "worker, so set only one of the two flags or give them the same value"
+        )
+    return requested
+
+
 def gateway_worker_count(server_args, dynamo_args) -> int:
-    """Number of gateway processes to run for this engine; 1 disables the mode."""
-    if getattr(server_args, "tokenizer_worker_num", 1) <= 1:
+    """Children this process must spawn; 1 on non-leader nodes and inside children."""
+    if (getattr(server_args, "node_rank", 0) or 0) != 0 or is_gateway_child():
         return 1
-    if (getattr(server_args, "node_rank", 0) or 0) != 0:
-        return 1
-    if is_gateway_child():
-        return 1
-    n = getattr(dynamo_args, "gateway_workers", None)
-    return n if n else server_args.tokenizer_worker_num
+    return effective_gateway_workers(server_args, dynamo_args)
 
 
-def _private_metrics_ipc(port_args):
-    # Only one process may bind the PULL socket the schedulers push KV metrics to;
-    # every other child gets an idle private one so its publisher can still start.
-    port_args = copy.copy(port_args)
-    port_args.metrics_ipc_name = (
-        f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
-    )
-    return port_args
+def validate_gateway_mode(server_args, dynamo_args, count: int) -> None:
+    if count <= 1:
+        return
+    direct = [f for f in DIRECT_ENGINE_WORKER_FLAGS if getattr(dynamo_args, f, False)]
+    if direct:
+        raise ValueError(
+            "gateway mode (--gateway-workers / --tokenizer-worker-num > 1) is only "
+            "supported by the decode and prefill LLM workers, not with "
+            f"--{direct[0].replace('_', '-')}"
+        )
+    if getattr(server_args, "enable_lora", False):
+        raise ValueError(
+            "gateway mode is not supported with --enable-lora: dynamic LoRA state "
+            "lives in each gateway process"
+        )
+    if getattr(server_args, "enable_forward_pass_metrics", False):
+        raise ValueError(
+            "gateway mode is not supported with --enable-forward-pass-metrics: the "
+            "schedulers stamp forward-pass metrics with the identity of the process "
+            "that created the engine, which serves no requests in gateway mode"
+        )
+    if os.environ.get(SNAPSHOT_CONTROL_DIR_ENV):
+        raise ValueError(
+            "gateway mode is not supported in snapshot mode "
+            f"({SNAPSHOT_CONTROL_DIR_ENV} is set): snapshot warmup needs a single "
+            "tokenizer manager"
+        )
 
 
-def _child_port_args(port_args):
-    return port_args if owns_engine_metrics() else _private_metrics_ipc(port_args)
+def reserve_system_port_for_children() -> None:
+    """Leader side, before the runtime starts. The leader serves no requests, so it
+    gives ``DYN_SYSTEM_PORT`` to the children: child 0 takes the configured port,
+    child i takes port + i, and the leader runs without a system status server."""
+    raw = os.environ.get(ENV_SYSTEM_PORT)
+    try:
+        port = int(raw) if raw is not None else -1
+    except ValueError:
+        return
+    if port <= 0:
+        return
+    os.environ[ENV_SYSTEM_PORT_BASE] = str(port)
+    os.environ[ENV_SYSTEM_PORT] = "-1"
+
+
+def child_environment(index: int) -> dict[str, str]:
+    env = {
+        **os.environ,
+        ENV_PARENT_PID: str(os.getpid()),
+        ENV_CHILD_INDEX: str(index),
+    }
+    base = env.pop(ENV_SYSTEM_PORT_BASE, None)
+    if base is not None:
+        env[ENV_SYSTEM_PORT] = str(int(base) + index)
+    return env
+
+
+def metrics_fanout_endpoint() -> Optional[str]:
+    """Where child 0 re-publishes the schedulers' KV metrics for its siblings."""
+    pid = os.environ.get(ENV_PARENT_PID)
+    if pid is None:
+        return None
+    return f"ipc://{tempfile.gettempdir()}/dynamo_sglang_gateway_metrics_{pid}"
 
 
 def build_gateway_engine():
@@ -92,7 +168,6 @@ def build_gateway_engine():
     attach = getattr(sgl.Engine, "attach_tokenizer_worker", None)
     if attach is not None:
         engine = attach(parent_pid)
-        engine.port_args = _child_port_args(engine.port_args)
         logging.info(
             "gateway child pid=%d attached via Engine.attach_tokenizer_worker",
             os.getpid(),
@@ -109,7 +184,6 @@ def build_gateway_engine():
         f"multi_tokenizer_args_{parent_pid}"
     )
     publish(server_args, role="tokenizer")
-    port_args = _child_port_args(port_args)
     port_args.tokenizer_ipc_name = (
         f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
     )
@@ -153,14 +227,10 @@ async def serve_via_gateway_children(
     procs: list[subprocess.Popen] = []
     try:
         for index in range(count):
-            env = {
-                **os.environ,
-                ENV_PARENT_PID: str(os.getpid()),
-                ENV_CHILD_INDEX: str(index),
-            }
             procs.append(
                 subprocess.Popen(
-                    [sys.executable, "-m", "dynamo.sglang", *argv], env=env
+                    [sys.executable, "-m", "dynamo.sglang", *argv],
+                    env=child_environment(index),
                 )
             )
         logging.info(
@@ -172,7 +242,7 @@ async def serve_via_gateway_children(
         while not shutdown_event.is_set():
             await asyncio.sleep(2)
             dead = [p for p in procs if p.poll() is not None]
-            if dead:
+            if dead and not shutdown_event.is_set():
                 raise RuntimeError(
                     f"gateway child pid={dead[0].pid} exited rc={dead[0].returncode}"
                 )

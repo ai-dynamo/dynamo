@@ -76,9 +76,11 @@ class DynamoSGLangArgGroup(ArgGroup):
             help="Run N gateway processes in front of this engine, each a Dynamo "
             "endpoint instance with its own SGLang request gateway (SGLang calls "
             "that process a tokenizer worker; it also handles request intake and "
-            "output relay, which is the work being spread). Implies SGLang's "
-            "--tokenizer-worker-num N unless that is set higher; setting only "
-            "--tokenizer-worker-num N runs N gateways as well.",
+            "output relay, which is the work being spread). Sets SGLang's "
+            "--tokenizer-worker-num to N; passing both flags with different values "
+            "is an error, and --tokenizer-worker-num N alone runs N gateways as "
+            "well. Decode and prefill LLM workers only; not with --enable-lora, "
+            "--enable-forward-pass-metrics or snapshot mode.",
         )
         add_negatable_bool_argument(
             g,

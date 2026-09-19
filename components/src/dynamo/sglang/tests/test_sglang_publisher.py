@@ -12,7 +12,7 @@ import dynamo.sglang.publisher as publisher_mod
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
-    _resolve_multinode_leader_worker_id,
+    _resolve_multinode_leader_worker_ids,
     get_local_dp_rank_range,
     handle_non_leader_node,
     set_forward_pass_metrics_worker_id,
@@ -156,9 +156,9 @@ async def test_resolve_multinode_leader_worker_id_uses_single_instance():
 
     server_args = SimpleNamespace(nnodes=2, node_rank=1)
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id == 1234
+    assert worker_ids == [1234]
 
 
 @pytest.mark.asyncio
@@ -185,9 +185,9 @@ async def test_resolve_multinode_leader_worker_id_uses_worker_group(monkeypatch)
         dist_timeout=5,
     )
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id == 1234
+    assert worker_ids == [1234]
     assert calls == [
         (
             SGLANG_WORKER_GROUP_ID_KEY,
@@ -220,9 +220,9 @@ async def test_resolve_multinode_leader_worker_id_has_no_default_timeout(monkeyp
         node_rank=1,
     )
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id == 1234
+    assert worker_ids == [1234]
     assert calls == [
         (
             SGLANG_WORKER_GROUP_ID_KEY,
@@ -230,6 +230,54 @@ async def test_resolve_multinode_leader_worker_id_has_no_default_timeout(monkeyp
             None,
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_multinode_leader_worker_ids_waits_for_every_gateway(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        async def wait_for_instances_by_runtime_data(
+            self, key, value, min_count, timeout_s=None
+        ):
+            calls.append((key, value, min_count, timeout_s))
+            return [7, 5, 6]
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    monkeypatch.setattr(
+        publisher_mod,
+        "get_sglang_worker_group_id",
+        lambda server_args: "dist_init:tcp://10.0.0.1:2345",
+    )
+    server_args = SimpleNamespace(nnodes=2, node_rank=1, dist_timeout=5)
+
+    worker_ids = await _resolve_multinode_leader_worker_ids(
+        FakeEndpoint(), server_args, expected=3
+    )
+
+    assert worker_ids == [7, 5, 6]
+    assert calls == [
+        (SGLANG_WORKER_GROUP_ID_KEY, "dist_init:tcp://10.0.0.1:2345", 3, 5.0)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resolve_multinode_leader_worker_ids_needs_group_id_for_gateways():
+    class FakeClient:
+        async def wait_for_instances(self):
+            return [1234]
+
+    class FakeEndpoint:
+        async def client(self):
+            return FakeClient()
+
+    with pytest.raises(RuntimeError, match="dist_init_addr"):
+        await _resolve_multinode_leader_worker_ids(
+            FakeEndpoint(), SimpleNamespace(nnodes=2, node_rank=1), expected=2
+        )
 
 
 @pytest.mark.asyncio
@@ -244,9 +292,9 @@ async def test_resolve_multinode_leader_worker_id_ignores_ambiguous_instances():
 
     server_args = SimpleNamespace(nnodes=2, node_rank=1)
 
-    worker_id = await _resolve_multinode_leader_worker_id(FakeEndpoint(), server_args)
+    worker_ids = await _resolve_multinode_leader_worker_ids(FakeEndpoint(), server_args)
 
-    assert worker_id is None
+    assert worker_ids == []
 
 
 @pytest.mark.asyncio
@@ -310,11 +358,11 @@ async def test_handle_non_leader_node_resolves_worker_before_kv_publish(monkeypa
 
 @pytest.mark.asyncio
 async def test_handle_non_leader_node_skips_tp_only_kv_event_setup(monkeypatch):
-    resolve_leader = AsyncMock(return_value=1234)
+    resolve_leader = AsyncMock(return_value=[1234])
     kv_event_publisher = Mock()
     monkeypatch.setattr(
         publisher_mod,
-        "_resolve_multinode_leader_worker_id",
+        "_resolve_multinode_leader_worker_ids",
         resolve_leader,
     )
     monkeypatch.setattr(publisher_mod, "KvEventPublisher", kv_event_publisher)
@@ -365,9 +413,9 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
     init_called = asyncio.Event()
     cleanup_called = asyncio.Event()
 
-    async def missing_resolution(generate_endpoint, server_args):
+    async def missing_resolution(generate_endpoint, server_args, expected=1):
         resolution_done.set()
-        return None
+        return []
 
     class FakePublisher:
         generate_endpoint = object()
@@ -383,7 +431,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
 
     monkeypatch.setattr(
         publisher_mod,
-        "_resolve_multinode_leader_worker_id",
+        "_resolve_multinode_leader_worker_ids",
         missing_resolution,
     )
     metrics_task = asyncio.create_task(asyncio.Event().wait())
@@ -412,7 +460,7 @@ async def test_handle_non_leader_node_skips_kv_publish_without_resolved_worker(
 async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatch):
     cleanup_called = asyncio.Event()
 
-    async def fail_resolution(generate_endpoint, server_args):
+    async def fail_resolution(generate_endpoint, server_args, expected=1):
         raise RuntimeError("resolution failed")
 
     class FakePublisher:
@@ -425,7 +473,7 @@ async def test_handle_non_leader_node_cleans_up_when_resolution_fails(monkeypatc
 
     monkeypatch.setattr(
         publisher_mod,
-        "_resolve_multinode_leader_worker_id",
+        "_resolve_multinode_leader_worker_ids",
         fail_resolution,
     )
     metrics_task = asyncio.create_task(asyncio.Event().wait())

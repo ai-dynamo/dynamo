@@ -33,7 +33,11 @@ from dynamo.sglang.capacity import (
     local_dp_rank_bounds,
     publishes_kv_events,
 )
-from dynamo.sglang.gateway import gateway_child_index, owns_engine_metrics
+from dynamo.sglang.gateway import (
+    effective_gateway_workers,
+    metrics_fanout_endpoint,
+    owns_engine_metrics,
+)
 
 
 def get_local_dp_rank_range(server_args) -> range:
@@ -60,15 +64,20 @@ def set_forward_pass_metrics_worker_id(
     )
 
 
-async def _resolve_multinode_leader_worker_id(
+async def _resolve_multinode_leader_worker_ids(
     generate_endpoint: Endpoint,
     server_args,
-) -> Optional[int]:
-    """Return the routable leader worker id for SGLang non-leader nodes."""
+    expected: int = 1,
+) -> list[int]:
+    """Return the routable leader worker ids for SGLang non-leader nodes.
+
+    In gateway mode the leader node registers ``expected`` endpoint instances for
+    the same engine (one per gateway child); remote-rank KV events must be
+    attributed to every one of them or the router only sees them on one."""
     node_rank = getattr(server_args, "node_rank", 0) or 0
     nnodes = getattr(server_args, "nnodes", 1) or 1
     if node_rank <= 0 or nnodes <= 1:
-        return None
+        return []
 
     worker_group_id = get_sglang_worker_group_id(server_args)
     client = await generate_endpoint.client()
@@ -76,11 +85,21 @@ async def _resolve_multinode_leader_worker_id(
         timeout_s = getattr(server_args, "dist_timeout", None)
         timeout_s = None if timeout_s is None else float(timeout_s)
         try:
-            worker_id = await client.wait_for_instance_by_runtime_data(
-                SGLANG_WORKER_GROUP_ID_KEY,
-                worker_group_id,
-                timeout_s=timeout_s,
-            )
+            if expected > 1:
+                worker_ids = await client.wait_for_instances_by_runtime_data(
+                    SGLANG_WORKER_GROUP_ID_KEY,
+                    worker_group_id,
+                    expected,
+                    timeout_s=timeout_s,
+                )
+            else:
+                worker_ids = [
+                    await client.wait_for_instance_by_runtime_data(
+                        SGLANG_WORKER_GROUP_ID_KEY,
+                        worker_group_id,
+                        timeout_s=timeout_s,
+                    )
+                ]
         except Exception as e:
             raise RuntimeError(
                 "Failed to resolve SGLang leader worker_id for non-leader "
@@ -89,13 +108,18 @@ async def _resolve_multinode_leader_worker_id(
             ) from e
 
         logging.info(
-            "Using SGLang leader worker_id=%s for non-leader KV event "
+            "Using SGLang leader worker_ids=%s for non-leader KV event "
             "publishing via worker_group_id=%s",
-            worker_id,
+            worker_ids,
             worker_group_id,
         )
-        return int(worker_id)
+        return [int(w) for w in worker_ids]
 
+    if expected > 1:
+        raise RuntimeError(
+            "gateway mode on a multi-node engine needs dist_init_addr so the "
+            "non-leader nodes can find every gateway instance of their engine"
+        )
     instances = await client.wait_for_instances()
     if len(instances) == 1:
         worker_id = int(instances[0])
@@ -103,14 +127,14 @@ async def _resolve_multinode_leader_worker_id(
             "Using SGLang leader worker_id=%s for non-leader KV event publishing",
             worker_id,
         )
-        return worker_id
+        return [worker_id]
 
     logging.warning(
         "Expected exactly one SGLang leader endpoint instance for non-leader "
         "KV event attribution, got %d; skipping non-leader KV event publishing",
         len(instances),
     )
-    return None
+    return []
 
 
 def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
@@ -190,14 +214,24 @@ class DynamoSglangPublisher:
         # need KV event publishing which is set up separately in init_kv_event_publish()
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
         self._ctx: zmq.asyncio.Context | None = None
+        self._fanout: zmq.asyncio.Socket | None = None
         if node_rank == 0:
             self._ctx = zmq.asyncio.Context()
-            self._sock = get_zmq_socket(
-                self._ctx,
-                zmq.PULL,
-                self.engine.port_args.metrics_ipc_name,
-                True,
-            )
+            fanout = metrics_fanout_endpoint()
+            if owns_engine_metrics():
+                self._sock = get_zmq_socket(
+                    self._ctx,
+                    zmq.PULL,
+                    self.engine.port_args.metrics_ipc_name,
+                    True,
+                )
+                if fanout is not None:
+                    self._fanout = get_zmq_socket(self._ctx, zmq.PUB, fanout, True)
+            else:
+                # Sibling gateway: the schedulers push to child 0 only, which
+                # re-publishes every KvMetrics so this instance reports real usage.
+                self._sock = get_zmq_socket(self._ctx, zmq.SUB, fanout, False)
+                self._sock.setsockopt(zmq.SUBSCRIBE, b"")
         else:
             self._ctx = None
             self._sock = None
@@ -224,6 +258,8 @@ class DynamoSglangPublisher:
                 # Receive KvMetrics object from SGLang scheduler via ZMQ
                 # KvMetrics class: sglang/srt/observability/scheduler_metrics_mixin.py
                 kv_metrics = await self._sock.recv_pyobj()
+                if self._fanout is not None:
+                    await self._fanout.send_pyobj(kv_metrics)
                 dp_rank = (
                     kv_metrics.data_parallel_rank
                     if kv_metrics.data_parallel_rank is not None
@@ -255,9 +291,11 @@ class DynamoSglangPublisher:
         self._running = False
 
         # Close ZMQ socket and context
-        if self._sock is not None:
+        for sock in (self._sock, self._fanout):
+            if sock is None:
+                continue
             try:
-                self._sock.close(linger=0)
+                sock.close(linger=0)
             except Exception as e:
                 logging.warning(f"Failed to close ZMQ socket: {e}")
 
@@ -564,13 +602,7 @@ async def setup_sgl_metrics(
     # and forward-pass metrics are consumed once, by the process that owns them.
     if node_rank <= 0 and config.dynamo_args.use_kv_events:
         publisher.init_kv_event_publish()
-    if owns_engine_metrics():
-        publisher.init_fpm_relay()
-    else:
-        logging.info(
-            "gateway child %d: scheduler and forward-pass metrics are relayed by child 0",
-            gateway_child_index(),
-        )
+    publisher.init_fpm_relay()
 
     task = asyncio.create_task(publisher.run())
     logging.info("SGLang metrics loop started")
@@ -600,11 +632,12 @@ async def handle_non_leader_node(
         if publisher.dynamo_args.use_kv_events and publishes_kv_events(
             publisher.server_args
         ):
-            kv_worker_id = await _resolve_multinode_leader_worker_id(
+            kv_worker_ids = await _resolve_multinode_leader_worker_ids(
                 publisher.generate_endpoint,
                 publisher.server_args,
+                effective_gateway_workers(publisher.server_args, publisher.dynamo_args),
             )
-            if kv_worker_id is not None:
+            for kv_worker_id in kv_worker_ids:
                 publisher.kv_worker_id = kv_worker_id
                 publisher.init_kv_event_publish()
 

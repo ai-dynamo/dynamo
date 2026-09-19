@@ -21,45 +21,106 @@ pytestmark = [
 ]
 
 
-def _server_args(tokenizer_worker_num=1, node_rank=0):
+def _server_args(tokenizer_worker_num=1, node_rank=0, **kw):
     return SimpleNamespace(
-        tokenizer_worker_num=tokenizer_worker_num, node_rank=node_rank
+        tokenizer_worker_num=tokenizer_worker_num, node_rank=node_rank, **kw
     )
 
 
-def test_gateway_worker_count_defaults_to_tokenizer_worker_num(monkeypatch):
+def _dyn(gateway_workers=None, **kw):
+    return SimpleNamespace(gateway_workers=gateway_workers, **kw)
+
+
+@pytest.fixture
+def not_a_child(monkeypatch):
     monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
-    dyn = SimpleNamespace(gateway_workers=None)
-    assert gateway.gateway_worker_count(_server_args(1), dyn) == 1
-    assert gateway.gateway_worker_count(_server_args(8), dyn) == 8
+    monkeypatch.delenv(gateway.ENV_CHILD_INDEX, raising=False)
 
 
-def test_gateway_worker_count_knob_overrides(monkeypatch):
-    monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
-    dyn = SimpleNamespace(gateway_workers=3)
-    assert gateway.gateway_worker_count(_server_args(8), dyn) == 3
-    # The knob alone does not enable the mode: SGLang must run its router.
-    assert gateway.gateway_worker_count(_server_args(1), dyn) == 1
+def test_effective_count_from_either_flag(not_a_child):
+    assert gateway.effective_gateway_workers(_server_args(1), _dyn()) == 1
+    assert gateway.effective_gateway_workers(_server_args(8), _dyn()) == 8
+    assert gateway.effective_gateway_workers(_server_args(1), _dyn(3)) == 3
+    assert gateway.effective_gateway_workers(_server_args(3), _dyn(3)) == 3
 
 
-def test_gateway_worker_count_only_on_leader_and_not_in_children(monkeypatch):
-    dyn = SimpleNamespace(gateway_workers=None)
-    monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
-    assert gateway.gateway_worker_count(_server_args(8, node_rank=1), dyn) == 1
+@pytest.mark.parametrize("tokenizer_workers,requested", [(8, 3), (2, 1)])
+def test_conflicting_explicit_counts_are_rejected(
+    not_a_child, tokenizer_workers, requested
+):
+    with pytest.raises(ValueError, match="conflicts"):
+        gateway.effective_gateway_workers(
+            _server_args(tokenizer_workers), _dyn(requested)
+        )
+
+
+def test_gateway_worker_count_only_on_leader_and_not_in_children(
+    not_a_child, monkeypatch
+):
+    assert gateway.gateway_worker_count(_server_args(8), _dyn()) == 8
+    assert gateway.gateway_worker_count(_server_args(8, node_rank=1), _dyn()) == 1
     monkeypatch.setenv(gateway.ENV_PARENT_PID, "123")
     assert gateway.is_gateway_child()
-    assert gateway.gateway_worker_count(_server_args(8), dyn) == 1
+    assert gateway.gateway_worker_count(_server_args(8), _dyn()) == 1
 
 
-def test_child_index_decides_metrics_ownership(monkeypatch):
+def test_validate_rejects_unsupported_modes(not_a_child, monkeypatch):
+    monkeypatch.delenv("DYN_SNAPSHOT_CONTROL_DIR", raising=False)
+    gateway.validate_gateway_mode(_server_args(4), _dyn(), 4)
+    gateway.validate_gateway_mode(_server_args(1), _dyn(embedding_worker=True), 1)
+    with pytest.raises(ValueError, match="embedding-worker"):
+        gateway.validate_gateway_mode(_server_args(4), _dyn(embedding_worker=True), 4)
+    with pytest.raises(ValueError, match="enable-lora"):
+        gateway.validate_gateway_mode(_server_args(4, enable_lora=True), _dyn(), 4)
+    with pytest.raises(ValueError, match="forward-pass-metrics"):
+        gateway.validate_gateway_mode(
+            _server_args(4, enable_forward_pass_metrics=True), _dyn(), 4
+        )
+    monkeypatch.setenv("DYN_SNAPSHOT_CONTROL_DIR", "/snapshot-control")
+    with pytest.raises(ValueError, match="snapshot"):
+        gateway.validate_gateway_mode(_server_args(4), _dyn(), 4)
+
+
+def test_child_index_decides_metrics_ownership_and_fanout(monkeypatch):
+    monkeypatch.delenv(gateway.ENV_PARENT_PID, raising=False)
     monkeypatch.delenv(gateway.ENV_CHILD_INDEX, raising=False)
     assert gateway.gateway_child_index() == 0
     assert gateway.owns_engine_metrics()
-    parent = SimpleNamespace(metrics_ipc_name="ipc:///parent")
-    assert gateway._child_port_args(parent) is parent
+    assert gateway.metrics_fanout_endpoint() is None
+    monkeypatch.setenv(gateway.ENV_PARENT_PID, "4242")
     monkeypatch.setenv(gateway.ENV_CHILD_INDEX, "2")
     assert not gateway.owns_engine_metrics()
-    assert gateway._child_port_args(parent).metrics_ipc_name != "ipc:///parent"
+    assert gateway.metrics_fanout_endpoint().endswith("_4242")
+
+
+def test_system_port_is_handed_to_children(not_a_child, monkeypatch):
+    monkeypatch.setenv(gateway.ENV_SYSTEM_PORT, "8081")
+    monkeypatch.delenv(gateway.ENV_SYSTEM_PORT_BASE, raising=False)
+    gateway.reserve_system_port_for_children()
+    import os
+
+    assert os.environ[gateway.ENV_SYSTEM_PORT] == "-1"
+    env0, env2 = gateway.child_environment(0), gateway.child_environment(2)
+    assert env0[gateway.ENV_SYSTEM_PORT] == "8081"
+    assert env2[gateway.ENV_SYSTEM_PORT] == "8083"
+    assert gateway.ENV_SYSTEM_PORT_BASE not in env2
+    assert env2[gateway.ENV_CHILD_INDEX] == "2"
+    assert env2[gateway.ENV_PARENT_PID] == str(os.getpid())
+
+
+@pytest.mark.parametrize("value", [None, "-1", "0", "not-a-port"])
+def test_system_port_untouched_when_disabled(not_a_child, monkeypatch, value):
+    import os
+
+    monkeypatch.delenv(gateway.ENV_SYSTEM_PORT_BASE, raising=False)
+    if value is None:
+        monkeypatch.delenv(gateway.ENV_SYSTEM_PORT, raising=False)
+    else:
+        monkeypatch.setenv(gateway.ENV_SYSTEM_PORT, value)
+    gateway.reserve_system_port_for_children()
+    assert os.environ.get(gateway.ENV_SYSTEM_PORT) == value
+    assert gateway.ENV_SYSTEM_PORT not in gateway.child_environment(1) or value
+    assert gateway.ENV_SYSTEM_PORT_BASE not in os.environ
 
 
 def test_gateway_engine_facade_generates_through_tokenizer_manager():
@@ -87,46 +148,53 @@ def test_gateway_engine_facade_generates_through_tokenizer_manager():
     facade.shutdown()  # no-op: the parent owns the engine
 
 
-def test_private_metrics_ipc_does_not_alias_parent(tmp_path):
-    parent = SimpleNamespace(metrics_ipc_name="ipc:///parent", other="keep")
-    child = gateway._private_metrics_ipc(parent)
-    assert child is not parent
-    assert child.other == "keep"
-    assert child.metrics_ipc_name != parent.metrics_ipc_name
-    assert parent.metrics_ipc_name == "ipc:///parent"
+class FakeProc:
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = None
+        self.terminated = False
+        self.waited = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = -15
+
+    def wait(self, timeout=None):
+        self.waited = True
+        return self.returncode
 
 
-def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(monkeypatch):
+class FakeShm:
+    unlinked = False
+
+    def unlink(self):
+        self.unlinked = True
+
+
+def _engine():
+    return SimpleNamespace(
+        port_args=SimpleNamespace(),
+        server_args=SimpleNamespace(),
+        tokenizer_manager=SimpleNamespace(startup_time={"t": 0}),
+        _scheduler_init_result=SimpleNamespace(
+            scheduler_infos=[{"max_req_input_len": 8}]
+        ),
+    )
+
+
+def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(
+    not_a_child, monkeypatch
+):
     spawned = []
 
-    class FakeProc:
-        def __init__(self, cmd, env):
-            self.cmd, self.env, self.pid = cmd, env, 4000 + len(spawned)
-            self.returncode = None
-            self.terminated = False
-            self.waited = False
-
-        def poll(self):
-            return self.returncode
-
-        def terminate(self):
-            self.terminated = True
-            self.returncode = -15
-
-        def wait(self, timeout=None):
-            self.waited = True
-            return self.returncode
-
     def fake_popen(cmd, env):
-        p = FakeProc(cmd, env)
+        p = FakeProc(4000 + len(spawned))
+        p.cmd, p.env = cmd, env
         spawned.append(p)
         return p
-
-    class FakeShm:
-        unlinked = False
-
-        def unlink(self):
-            self.unlinked = True
 
     shm = FakeShm()
     monkeypatch.setattr(gateway.subprocess, "Popen", fake_popen)
@@ -142,59 +210,56 @@ def test_serve_via_gateway_children_spawns_and_fails_on_dead_child(monkeypatch):
 
     monkeypatch.setattr(gateway.asyncio, "sleep", fast_sleep)
 
-    engine = SimpleNamespace(
-        port_args=SimpleNamespace(),
-        server_args=SimpleNamespace(),
-        tokenizer_manager=SimpleNamespace(startup_time={"t": 0}),
-        _scheduler_init_result=SimpleNamespace(
-            scheduler_infos=[{"max_req_input_len": 8}]
-        ),
-    )
-
     with pytest.raises(RuntimeError, match="exited rc=1"):
-        asyncio.run(gateway.serve_via_gateway_children(engine, 3, asyncio.Event()))
+        asyncio.run(gateway.serve_via_gateway_children(_engine(), 3, asyncio.Event()))
 
     assert len(spawned) == 3
     assert all(p.cmd[1:3] == ["-m", "dynamo.sglang"] for p in spawned)
     assert all(p.cmd[3:] == ["--model-path", "/m"] for p in spawned)
-    assert all(gateway.ENV_PARENT_PID in p.env for p in spawned)
     assert [p.env[gateway.ENV_CHILD_INDEX] for p in spawned] == ["0", "1", "2"]
+    assert all(gateway.ENV_PARENT_PID in p.env for p in spawned)
     assert all(p.terminated for p in spawned if p.pid != spawned[1].pid)
     assert all(p.waited for p in spawned)
     assert shm.unlinked
 
 
-def test_serve_via_gateway_children_cleans_up_when_spawn_fails(monkeypatch):
+def test_serve_via_gateway_children_tolerates_child_exit_during_shutdown(
+    not_a_child, monkeypatch
+):
     spawned = []
+    stop = asyncio.Event()
 
-    class FakeProc:
-        def __init__(self):
-            self.pid = 5000 + len(spawned)
-            self.returncode = None
-            self.terminated = False
+    def fake_popen(cmd, env):
+        p = FakeProc(4100 + len(spawned))
+        spawned.append(p)
+        return p
 
-        def poll(self):
-            return self.returncode
+    monkeypatch.setattr(gateway.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        "sglang.srt.managers.multi_tokenizer_mixin.write_data_for_multi_tokenizer",
+        lambda port_args, server_args, info: FakeShm(),
+    )
 
-        def terminate(self):
-            self.terminated = True
-            self.returncode = -15
+    async def fast_sleep(_):
+        stop.set()
+        spawned[0].returncode = 0
 
-        def wait(self, timeout=None):
-            return self.returncode
+    monkeypatch.setattr(gateway.asyncio, "sleep", fast_sleep)
+    asyncio.run(gateway.serve_via_gateway_children(_engine(), 2, stop))
+    assert spawned[1].terminated and all(p.waited for p in spawned)
+
+
+def test_serve_via_gateway_children_cleans_up_when_spawn_fails(
+    not_a_child, monkeypatch
+):
+    spawned = []
 
     def fake_popen(cmd, env):
         if len(spawned) == 1:
             raise OSError("no more pids")
-        p = FakeProc()
+        p = FakeProc(5000 + len(spawned))
         spawned.append(p)
         return p
-
-    class FakeShm:
-        unlinked = False
-
-        def unlink(self):
-            self.unlinked = True
 
     shm = FakeShm()
     monkeypatch.setattr(gateway.subprocess, "Popen", fake_popen)
@@ -202,19 +267,15 @@ def test_serve_via_gateway_children_cleans_up_when_spawn_fails(monkeypatch):
         "sglang.srt.managers.multi_tokenizer_mixin.write_data_for_multi_tokenizer",
         lambda port_args, server_args, info: shm,
     )
-    engine = SimpleNamespace(
-        port_args=SimpleNamespace(),
-        server_args=SimpleNamespace(),
-        tokenizer_manager=SimpleNamespace(startup_time={}),
-        _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
-    )
     with pytest.raises(OSError, match="no more pids"):
-        asyncio.run(gateway.serve_via_gateway_children(engine, 3, asyncio.Event()))
-    assert len(spawned) == 1 and spawned[0].terminated
+        asyncio.run(gateway.serve_via_gateway_children(_engine(), 3, asyncio.Event()))
+    assert len(spawned) == 1 and spawned[0].terminated and spawned[0].waited
     assert shm.unlinked
 
 
-def test_serve_via_gateway_children_reuses_engine_published_shm(monkeypatch):
+def test_serve_via_gateway_children_reuses_engine_published_shm(
+    not_a_child, monkeypatch
+):
     """An SGLang Engine that already published its args (tokenizer_router set) owns
     the shared memory; the gateway must not publish or unlink it."""
     calls = []
@@ -222,28 +283,14 @@ def test_serve_via_gateway_children_reuses_engine_published_shm(monkeypatch):
         "sglang.srt.managers.multi_tokenizer_mixin.write_data_for_multi_tokenizer",
         lambda *a: calls.append(a),
     )
-    monkeypatch.setattr(
-        gateway.subprocess,
-        "Popen",
-        lambda cmd, env: SimpleNamespace(
-            pid=1,
-            poll=lambda: None,
-            terminate=lambda: None,
-            wait=lambda timeout=None: 0,
-        ),
-    )
+    monkeypatch.setattr(gateway.subprocess, "Popen", lambda cmd, env: FakeProc(1))
 
     class OwnedShm:
         def unlink(self):
             raise AssertionError("gateway must not unlink the engine's shm")
 
-    engine = SimpleNamespace(
-        port_args=SimpleNamespace(),
-        server_args=SimpleNamespace(),
-        tokenizer_manager=SimpleNamespace(startup_time={}),
-        _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
-        _multi_tokenizer_shm=OwnedShm(),
-    )
+    engine = _engine()
+    engine._multi_tokenizer_shm = OwnedShm()
     stop = asyncio.Event()
 
     async def run():

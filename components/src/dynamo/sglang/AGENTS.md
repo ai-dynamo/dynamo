@@ -33,31 +33,39 @@ more reliable since SGLang's internal layout doesn't always match the version st
 ## Multi-process gateway (`--gateway-workers N`)
 
 `gateway.py`. One `dynamo.sglang` process fronts every DP rank of its engine: SGLang's
-`TokenizerManager` intake and the Dynamo handler's token relay run on one GIL. `--gateway-workers N` raises SGLang's `--tokenizer-worker-num` to N (that flag names the
-same process after only one of its jobs); with N > 1 SGLang puts a `MultiTokenizerRouter` in
-the engine process; it has no `generate_request`, so the leader (node rank 0) does not serve.
-Instead it publishes the launch data with SGLang's shared-memory contract
-(`write_data_for_multi_tokenizer`) and spawns N children (`--gateway-workers`, or `--tokenizer-worker-num` if only that is set),
-`python -m dynamo.sglang <same argv>` with `DYN_SGLANG_GATEWAY_PARENT_PID` set. A child
-builds a `TokenizerWorker` registered with the router (`build_gateway_engine`), wraps it
-in `GatewayEngine` (what the handlers use of an `sgl.Engine`: `tokenizer_manager`,
-`server_args`, `port_args`, `async_generate`, scheduler info) and runs the ordinary
-`init_decode`/`init_prefill` path as its own endpoint instance, so the router sees N
-instances per engine. `--gateway-workers` sets `tokenizer_worker_num` to exactly N so
-the router and child counts match; it is rejected for the direct-engine workers
-(embedding, rerank, multimodal, diffusion) and with `--enable-lora`, whose dynamic LoRA
-state would live in one child only.
+`TokenizerManager` intake and the Dynamo handler's token relay run on one GIL. With
+`--tokenizer-worker-num N > 1` SGLang puts a `MultiTokenizerRouter` in the engine process; it
+has no `generate_request`, so the leader (node rank 0) does not serve. Instead it publishes
+the launch data with SGLang's shared-memory contract (`write_data_for_multi_tokenizer`) and
+spawns N children, `python -m dynamo.sglang <same argv>` with `DYN_SGLANG_GATEWAY_PARENT_PID`
+and `DYN_SGLANG_GATEWAY_CHILD_INDEX` set. A child builds a `TokenizerWorker` registered with
+the router (`build_gateway_engine`), wraps it in `GatewayEngine` (what the handlers use of an
+`sgl.Engine`: `tokenizer_manager`, `server_args`, `port_args`, `async_generate`, scheduler
+info) and runs the ordinary `init_decode`/`init_prefill` path as its own endpoint instance
+(`attached_engine=`, distinct from `snapshot_engine=`), so the router sees N instances per
+engine. If SGLang exposes `Engine.attach_tokenizer_worker`, children use it instead of the
+facade.
 
-Metrics: the schedulers push KV metrics to one PULL socket and publish forward-pass
-metrics once, so child 0 (`DYN_SGLANG_GATEWAY_CHILD_INDEX=0`, `owns_engine_metrics()`)
-keeps the engine's `metrics_ipc_name` and the FPM relay; other children bind an idle
-private socket and advertise only the bootstrap zeros for their own instance. Every
-child republishes KV events under its own worker id, otherwise the router would see
-prefixes on instance 0 only and send it all traffic; the cost is N copies of each KV
-event on the event plane. The parent owns the engine subprocesses and the shared
-memory, runs the deferred shutdown handlers, and terminates and reaps the children.
-Snapshot mode and non-leader nodes are untouched. If SGLang exposes
-`Engine.attach_tokenizer_worker`, children use it instead of the facade.
+Configuration (`effective_gateway_workers`, `validate_gateway_mode`, applied in `main.py`
+before snapshot preparation and runtime creation): `--gateway-workers N` sets
+`tokenizer_worker_num` to N; `--tokenizer-worker-num N` alone means N gateways; two explicit,
+different values are an error. Gateway mode is rejected for the direct-engine workers
+(embedding, rerank, multimodal, diffusion), with `--enable-lora` (dynamic LoRA state would
+live in one child), with `--enable-forward-pass-metrics` (the schedulers stamp FPM with the
+non-serving leader's identity) and in snapshot mode.
+
+Ports and metrics: the leader gives `DYN_SYSTEM_PORT` to the children (child 0 keeps the
+configured port, child i gets port + i, the leader runs without a system status server).
+The schedulers push KV metrics to one PULL socket: child 0 (`owns_engine_metrics()`) binds it
+and re-publishes every `KvMetrics` on an ipc PUB (`metrics_fanout_endpoint()`) that the other
+children subscribe to, so every gateway identity reports the engine's real KV usage. Every
+child republishes KV events under its own worker id, otherwise the router would see prefixes
+on instance 0 only; the cost is N copies of each KV event. On multi-node engines the
+non-leader nodes resolve all N leader instances by worker group id
+(`Client.wait_for_instances_by_runtime_data`) and attribute their remote-rank KV events to
+each. The leader owns the engine subprocesses and the shared memory, runs the deferred
+shutdown handlers, and terminates and reaps the children; a child exiting during shutdown is
+not an error.
 
 ## Entry Point
 

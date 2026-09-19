@@ -49,6 +49,7 @@ async def init_decode(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
+    attached_engine: Optional[object] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -71,6 +72,11 @@ async def init_decode(
                 "Snapshot ServerArgs must disable forward-pass metrics before "
                 "engine creation"
             )
+    elif attached_engine is not None:
+        # Gateway child: the parent owns the engine, this process only holds a
+        # TokenizerWorker registered with its router.
+        engine = attached_engine
+        load_time = 0.0
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -79,7 +85,7 @@ async def init_decode(
 
     server_args = config.use_resolved_server_args(engine.server_args)
     gateway_count = gateway_worker_count(server_args, dynamo_args)
-    if snapshot_engine is None and gateway_count > 1:
+    if gateway_count > 1:
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
@@ -218,6 +224,7 @@ async def init_prefill(
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
     snapshot_engine: Optional[sgl.Engine] = None,
+    attached_engine: Optional[object] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
@@ -240,6 +247,11 @@ async def init_prefill(
                 "Snapshot ServerArgs must disable forward-pass metrics before "
                 "engine creation"
             )
+    elif attached_engine is not None:
+        # Gateway child: the parent owns the engine, this process only holds a
+        # TokenizerWorker registered with its router.
+        engine = attached_engine
+        load_time = 0.0
     else:
         set_forward_pass_metrics_worker_id(server_args, generate_endpoint)
         start_time = time.time()
@@ -248,7 +260,7 @@ async def init_prefill(
 
     server_args = config.use_resolved_server_args(engine.server_args)
     gateway_count = gateway_worker_count(server_args, dynamo_args)
-    if snapshot_engine is None and gateway_count > 1:
+    if gateway_count > 1:
         # engine.tokenizer_manager is SGLang's MultiTokenizerRouter here and cannot
         # serve requests; gateway children do, this process keeps the engine alive.
         try:
