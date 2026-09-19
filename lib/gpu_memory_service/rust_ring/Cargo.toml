@@ -17,6 +17,7 @@ name = "gms_rust_ring"
 crate-type = ["cdylib"]
 
 [dependencies]
+libc = "0.2"
 # The ring uses PyBuffer, which PyO3 cannot expose through Python's limited
 # API before 3.11. The wheel already contains a CPython-specific C++
 # extension, so an abi3 Rust artifact would not make the wheel portable.

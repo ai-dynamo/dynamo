@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import os
 import shlex
@@ -54,6 +55,14 @@ def gms_mps_provider_enabled(backend_name: str) -> bool:
     return provider.strip().lower() == "gms-mps"
 
 
+def gpu_crash_interlock_enabled(backend_name: str) -> bool:
+    raw = os.environ.get(
+        _backend_env(backend_name, "GPU_CRASH_INTERLOCK"),
+        os.environ.get("DYN_GMS_GPU_CRASH_INTERLOCK", "0"),
+    )
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _socket_path(backend_name: str, device: int) -> str:
     backend = backend_name.upper().replace("-", "_")
     explicit = os.environ.get(f"GMS_{backend}_VMM_IPC_SOCKET") or os.environ.get(
@@ -76,7 +85,7 @@ def _process_start_time(pid: int) -> str:
 
 def register_gpu_client(
     *, backend_name: str, device: int, cohort: str, rank: int = 0
-) -> None:
+) -> int | None:
     """Register this CUDA writer with its persistent GMS daemon.
 
     Registration is required only for the GMS-MPS provider and happens before
@@ -84,7 +93,9 @@ def register_gpu_client(
     short RPC session disconnects so a successor can identify a crashed cohort.
     """
     if not gms_mps_provider_enabled(backend_name):
-        return
+        if gpu_crash_interlock_enabled(backend_name):
+            raise RuntimeError("GPU crash interlock requires the GMS MPS provider")
+        return None
     from gpu_memory_service.client.session import _GMSClientSession
     from gpu_memory_service.common.locks import RequestedLockType
 
@@ -92,14 +103,53 @@ def register_gpu_client(
     with _GMSClientSession(
         _socket_path(backend_name, device), RequestedLockType.RW_PERSISTENT, 1_000
     ) as session:
-        if not session.register_gpu_client(
-            backend=backend_name,
-            cohort=cohort,
-            client_pid=pid,
-            process_start_time=_process_start_time(pid),
-            rank=rank,
-        ):
+        arguments = {
+            "backend": backend_name,
+            "cohort": cohort,
+            "client_pid": pid,
+            "process_start_time": _process_start_time(pid),
+            "rank": rank,
+        }
+        if gpu_crash_interlock_enabled(backend_name):
+            return session.register_gpu_client_with_crash_interlock(**arguments)
+        if not session.register_gpu_client(**arguments):
             raise RuntimeError("GMS rejected CUDA worker registration")
+    return None
+
+
+def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -> None:
+    """Install the native one-shot handler after CUDA/MPS initialization.
+
+    Ownership of the notification FD transfers to the native extension. The
+    handler performs only async-signal-safe syscalls: one fixed-size pipe write,
+    SIGSTOP, and pause. GMS proves MPS client termination before it SIGKILLs
+    the stopped host process.
+    """
+    if notification_fd is None:
+        return
+    try:
+        import signal
+
+        from gpu_memory_service import gms_rust_ring
+
+        signals = [
+            getattr(signal, name)
+            for name in (
+                "SIGSEGV",
+                "SIGABRT",
+                "SIGBUS",
+                "SIGILL",
+                "SIGFPE",
+                "SIGTERM",
+            )
+            if hasattr(signal, name)
+        ]
+        gms_rust_ring.install_gpu_crash_interlock(notification_fd, signals)
+        atexit.register(gms_rust_ring.trigger_gpu_crash_interlock, 0)
+        logger.info("Armed native GMS GPU crash interlock for %s", backend_name)
+    except Exception:
+        os.close(notification_fd)
+        raise
 
 
 def _timeout_s(backend_name: str) -> float:

@@ -205,12 +205,13 @@ class GMSWorker(_BaseWorker):
             torch.device(f"{get_vmm_device_type().value}:{device}")
         )
         cohort = os.environ.get("GMS_VLLM_WRITER_COHORT_PATH")
+        crash_interlock_fd = None
         if cohort:
             from gpu_memory_service.integrations.common.gpu_quiescence import (
                 register_gpu_client,
             )
 
-            register_gpu_client(
+            crash_interlock_fd = register_gpu_client(
                 backend_name="vllm",
                 device=device,
                 cohort=cohort,
@@ -246,6 +247,15 @@ class GMSWorker(_BaseWorker):
 
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
+        if crash_interlock_fd is not None:
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                arm_gpu_crash_interlock,
+            )
+
+            arm_gpu_crash_interlock(
+                crash_interlock_fd,
+                backend_name="vllm",
+            )
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

@@ -9,11 +9,17 @@ import asyncio
 import logging
 import os
 import re
+import signal
+import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_CRASH_MAGIC = 0x47534D43  # "GSMC": GMS crash notification.
+_CRASH_VERSION = 1
+_CRASH_RECORD = struct.Struct("=IIii")
 
 
 def process_start_time(pid: int) -> str | None:
@@ -59,6 +65,8 @@ class GPUQuiescenceManager:
         self._proofs: dict[tuple[str, str], QuiescenceResult] = {}
         self._retired: set[tuple[str, str]] = set()
         self._terminated_clients: set[tuple[str, str, int, str]] = set()
+        self._crash_tasks: dict[tuple[str, str, int], asyncio.Task[None]] = {}
+        self._crash_read_fds: dict[tuple[str, str, int], int] = {}
         self._lock = asyncio.Lock()
 
     def register(
@@ -69,7 +77,8 @@ class GPUQuiescenceManager:
         pid: int,
         process_start_time_value: str,
         rank: int,
-    ) -> None:
+        crash_interlock: bool = False,
+    ) -> int:
         backend = backend.strip().lower()
         cohort = cohort.strip()
         if not backend or not cohort:
@@ -109,11 +118,157 @@ class GPUQuiescenceManager:
             raise ValueError(
                 "GPU client PID was already registered with other metadata"
             )
+        if crash_interlock and not self.configured(backend):
+            raise ValueError(
+                "GPU crash interlock requires DYN_GMS_GPU_QUIESCENCE_PROVIDER=gms-mps"
+            )
+        if crash_interlock and key in self._crash_tasks:
+            raise ValueError("GPU client crash interlock is already armed")
         self._clients[key] = client
         # A late registration invalidates a cached proof. The writer-cohort flock
         # prevents this once takeover fencing has completed, but invalidation keeps
         # this component independently fail-closed.
         self._proofs.pop((backend, cohort), None)
+        if not crash_interlock:
+            return -1
+
+        read_fd, write_fd = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        task = asyncio.create_task(
+            self._watch_crash_interlock(client, read_fd),
+            name=f"gms-crash-interlock-{backend}-{rank}-{pid}",
+        )
+        self._crash_tasks[key] = task
+        self._crash_read_fds[key] = read_fd
+
+        def finish(completed: asyncio.Task[None]) -> None:
+            self._crash_tasks.pop(key, None)
+            self._crash_read_fds.pop(key, None)
+            try:
+                completed.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception(
+                    "GPU crash interlock task failed backend=%s cohort=%s pid=%d",
+                    backend,
+                    cohort,
+                    pid,
+                )
+
+        task.add_done_callback(finish)
+        return write_fd
+
+    async def _watch_crash_interlock(self, client: GPUClient, read_fd: int) -> None:
+        """Quiesce a cohort when its native handler reports a catchable crash.
+
+        EOF is also actionable: it means the registered process closed its last
+        write descriptor. MPS may still know the exiting client, so the daemon
+        makes one strict termination attempt. Failure never becomes proof.
+        """
+        loop = asyncio.get_running_loop()
+        readable: asyncio.Future[bytes] = loop.create_future()
+
+        def read_record() -> None:
+            try:
+                data = os.read(read_fd, _CRASH_RECORD.size)
+            except BlockingIOError:
+                return
+            except OSError as exc:
+                if not readable.done():
+                    readable.set_exception(exc)
+                return
+            if not readable.done():
+                readable.set_result(data)
+
+        loop.add_reader(read_fd, read_record)
+        try:
+            data = await readable
+        finally:
+            loop.remove_reader(read_fd)
+            os.close(read_fd)
+
+        signal_number: int | None = None
+        source = "pipe-eof"
+        if data:
+            if len(data) != _CRASH_RECORD.size:
+                logger.error(
+                    "Ignoring malformed GPU crash interlock record pid=%d bytes=%d",
+                    client.pid,
+                    len(data),
+                )
+                return
+            magic, version, signal_number, reporting_pid = _CRASH_RECORD.unpack(data)
+            if (
+                magic != _CRASH_MAGIC
+                or version != _CRASH_VERSION
+                or reporting_pid != client.pid
+            ):
+                logger.error(
+                    "Ignoring invalid GPU crash interlock record expected_pid=%d "
+                    "reported_pid=%d magic=%#x version=%d",
+                    client.pid,
+                    reporting_pid,
+                    magic,
+                    version,
+                )
+                return
+            source = f"signal-{signal_number}" if signal_number else "process-exit"
+
+        clients = [
+            registered
+            for registered in self._clients.values()
+            if registered.backend == client.backend
+            and registered.cohort == client.cohort
+        ]
+        logger.critical(
+            "GPU crash interlock fired backend=%s cohort=%s rank=%d pid=%d source=%s",
+            client.backend,
+            client.cohort,
+            client.rank,
+            client.pid,
+            source,
+        )
+        async with self._lock:
+            result = await self._quiesce_locked(
+                backend=client.backend,
+                predecessor_cohort=client.cohort,
+            )
+        if not result.quiesced:
+            logger.critical(
+                "GPU crash interlock failed closed backend=%s cohort=%s pid=%d "
+                "detail=%s; process remains stopped when the native handler fired",
+                client.backend,
+                client.cohort,
+                client.pid,
+                result.detail,
+            )
+            return
+
+        # MPS CUDA_SUCCESS is the authorization to finish host teardown. Guard
+        # every signal with the birth identity so PID reuse cannot kill a new
+        # process after a slow control operation.
+        for registered in clients:
+            observed = process_start_time(registered.pid)
+            if observed is None:
+                continue
+            if observed != registered.process_start_time:
+                logger.error(
+                    "Refusing post-quiescence SIGKILL of reused pid=%d",
+                    registered.pid,
+                )
+                continue
+            try:
+                os.kill(registered.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        logger.info(
+            "GPU crash interlock completed backend=%s cohort=%s clients=%d "
+            "elapsed_ms=%.2f",
+            client.backend,
+            client.cohort,
+            result.client_count,
+            result.elapsed_ms,
+        )
 
     @staticmethod
     def configured(backend: str) -> bool:
