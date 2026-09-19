@@ -359,10 +359,8 @@ def test_request_cancellation_sglang_decode_cancel(
                     frontend.frontend_port, "chat_completion_stream"
                 )
 
-                # Every poll below waits on a log line produced by another process and
-                # relayed through that process's stderr to the file being read, so each
-                # one needs a budget sized for the slowest runner, not the helper's
-                # 500 ms default.
+                # Each poll below waits on another process's log line reaching the
+                # file through stderr; 500 ms, the helper's default, is too short.
 
                 # Poll for "New Request ID" pattern in decode worker (Dynamo context ID)
                 request_id, decode_log_offset = poll_for_pattern(
@@ -395,10 +393,8 @@ def test_request_cancellation_sglang_decode_cancel(
                 cancellable_req.cancel()
                 logger.info(f"Cancelled request ID: {request_id}")
 
-                # Poll for "Aborted Request ID" in decode worker. This budget covers the
-                # whole cancellation chain: the client closes the socket, the frontend
-                # notices and issues a Kill, the Kill crosses the request plane, and the
-                # decode worker's cancellation monitor wakes up and logs.
+                # Poll for "Aborted Request ID" in decode worker. The budget covers the
+                # whole chain: socket close, frontend Kill, request plane, monitor wake-up.
                 _, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
                     pattern=f"Aborted Request ID: {request_id}",
