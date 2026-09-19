@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 import uvloop
 
+from dynamo.common.token_budget import TOKEN_BUDGET_RUNTIME_KEY
 from dynamo.llm import (
     KvRouter,
     ModelInput,
@@ -40,6 +41,11 @@ from dynamo.thunderagent_router.args import (
 )
 from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
 from dynamo.thunderagent_router.program_state import ReplicaKey
+from dynamo.thunderagent_router.proxy_card import (
+    kv_cache_block_size_from_card_json,
+    runtime_config_from_card_json,
+    wait_for_backend_card,
+)
 from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
@@ -53,6 +59,52 @@ def _publish_sglang_generate_capability(
     from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
 
     runtime_config.set_engine_specific(SGLANG_GENERATE_CAPABILITY, "true")
+
+
+async def _proxy_runtime_config(
+    capacity: Optional[WorkerCapacityProvider],
+    config: ThunderAgentRouterConfig,
+) -> tuple[ModelRuntimeConfig, Optional[int]]:
+    """Build the public proxy card from the wrapped worker's runtime contract."""
+    card_json = None
+    if capacity is not None:
+        card_json = await wait_for_backend_card(capacity.get_model_cards)
+
+    kv_cache_block_size: Optional[int] = None
+    if card_json is None:
+        logger.warning(
+            "ThunderAgent registering %s without a backend model card; "
+            "frontend admission will not see engine runtime policy "
+            "such as token_budget",
+            config.model_name,
+        )
+        runtime_cfg = ModelRuntimeConfig()
+    else:
+        kv_cache_block_size = kv_cache_block_size_from_card_json(card_json)
+        try:
+            runtime_cfg = runtime_config_from_card_json(card_json, ModelRuntimeConfig)
+        except Exception as exc:
+            logger.warning(
+                "Failed to inherit backend runtime_config for %s: %s",
+                config.model_name,
+                exc,
+            )
+            runtime_cfg = ModelRuntimeConfig()
+        else:
+            logger.info(
+                "Inherited backend runtime_config for proxy model %s (token_budget=%s)",
+                config.model_name,
+                runtime_cfg.get_engine_specific(TOKEN_BUDGET_RUNTIME_KEY) is not None,
+            )
+
+    if config.tool_call_parser:
+        runtime_cfg.tool_call_parser = config.tool_call_parser
+    if config.reasoning_parser:
+        runtime_cfg.reasoning_parser = config.reasoning_parser
+    if config.publish_sglang_generate:
+        _publish_sglang_generate_capability(runtime_cfg)
+        logger.info("Published SGLang engine-native generate capability")
+    return runtime_cfg, kv_cache_block_size
 
 
 def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
@@ -500,14 +552,14 @@ async def worker(runtime: DistributedRuntime) -> None:
         # the same --dyn-tool-call-parser / --dyn-reasoning-parser flag names
         # (and DYN_TOOL_CALL_PARSER / DYN_REASONING_PARSER env vars) as the
         # standalone dynamo.vllm worker.
-        runtime_cfg = ModelRuntimeConfig()
-        if config.tool_call_parser:
-            runtime_cfg.tool_call_parser = config.tool_call_parser
-        if config.reasoning_parser:
-            runtime_cfg.reasoning_parser = config.reasoning_parser
-        if config.publish_sglang_generate:
-            _publish_sglang_generate_capability(runtime_cfg)
-            logger.info("Published SGLang engine-native generate capability")
+        #
+        # Inherit the wrapped worker's runtime_config so frontend admission
+        # sees engine policy (token_budget, context_length, capabilities).
+        # ThunderAgent is a proxy; it cannot reconstruct that contract from
+        # model files. CLI parser flags still overlay the inherited card.
+        runtime_cfg, kv_cache_block_size = await _proxy_runtime_config(
+            handler._capacity, config
+        )
         await register_model(
             model_input=ModelInput.Tokens,
             model_type=ModelType.Chat | ModelType.Completions,
@@ -515,6 +567,7 @@ async def worker(runtime: DistributedRuntime) -> None:
             model_path=model_path,
             model_name=config.model_name,
             runtime_config=runtime_cfg,
+            kv_cache_block_size=kv_cache_block_size,
             # The router is the serving entry point (front door) exposing the
             # OpenAI surface; it has no mandatory peer-role dependency.
             worker_type=WorkerType.Aggregated,
