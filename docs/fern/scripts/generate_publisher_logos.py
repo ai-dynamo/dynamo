@@ -32,7 +32,8 @@ path tried. Anything missing here falls back to the publisher's initials in
 the component, so partial coverage renders correctly.
 
 Adding a publisher: add it to SOURCES (or ICON_OVERRIDES if the site's
-<link rel="icon"> is unusable), then run this and commit the result.
+<link rel="icon"> is unusable, or LOCAL_SOURCES to use a committed source
+file instead of the site's own icon), then run this and commit the result.
 
 Usage: python3 generate_publisher_logos.py [--check]
   --check  exit 1 if the committed file is out of date
@@ -86,6 +87,7 @@ SOURCES: dict[str, str] = {
     "Microsoft Azure / AKS": "azure.microsoft.com",
     "OpenNebula": "opennebula.io",
     "Photoroom": "www.photoroom.com",
+    "Pinterest": "www.pinterest.com",
     "Prime Intellect": "www.primeintellect.ai",
     "Rafay": "rafay.co",
     "SemiAnalysis / InferenceX": "semianalysis.com",
@@ -101,7 +103,14 @@ SOURCES: dict[str, str] = {
 
 # Sites whose <link rel="icon"> is missing or unusable; fetch these directly.
 ICON_OVERRIDES: dict[str, str] = {
-    "SkyPilot": "https://avatars.githubusercontent.com/u/109387420?v=4"
+    "SkyPilot": "https://avatars.githubusercontent.com/u/109387420?v=4",
+}
+
+# Organisations whose mark is supplied as a committed source file instead of
+# fetched over the network -- e.g. a brand mark pulled from a source other
+# than the org's own site icon. Path is relative to this script.
+LOCAL_SOURCES: dict[str, str] = {
+    "Pinterest": "publisher-logo-sources/pinterest-logo.png",
 }
 
 
@@ -156,6 +165,14 @@ def collect() -> tuple[dict[str, str], list[str]]:
     logos: dict[str, str] = {}
     missing: list[str] = []
     for name, domain in sorted(SOURCES.items()):
+        if name in LOCAL_SOURCES:
+            raw = (ROOT / "scripts" / LOCAL_SOURCES[name]).read_bytes()
+            data = encode(raw)
+            if data:
+                logos[name] = data
+            else:
+                missing.append(name)
+            continue
         if name in ICON_OVERRIDES:
             urls = [ICON_OVERRIDES[name]]
         else:
