@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -255,3 +257,223 @@ def test_dyn_port_accepts_high_non_system_port() -> None:
 
     assert result.returncode == 0
     assert result.stdout.strip() == "40000"
+
+
+# Launch-script background contract.
+#
+# ``wait_any_exit`` (examples/common/launch_utils.sh) watches background jobs
+# only. A service left in the foreground blocks the script, so a crash in any
+# other service stays unnoticed until the foreground one exits, and the script
+# never reaches the TERM/INT trap that normalizes teardown signals. A launch
+# command can span continuations, quotes and pipelines, so the check below
+# parses the scripts rather than matching lines.
+
+_EXAMPLES_DIR = Path(__file__).parents[2] / "examples"
+_WAIT_ANY_EXIT = re.compile(r"^[ \t]*wait_any_exit[ \t]*$", re.MULTILINE)
+_HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1")
+# `python -m dynamo.vllm`, `python3 -m dynamo.frontend`, `python -m "$WORKER_MODULE"`.
+_SERVICE = re.compile(
+    r"(?<![\w./-])python3?\s+(?:-\S+\s+)*-m\s+(?:dynamo\.\S*|\$\{?\w+\}?)"
+)
+
+
+class _Command(NamedTuple):
+    line: int
+    text: str  # quotes dropped, continuations joined, pipelines kept together
+    quoted: str  # per-character mask of text: "q" came from inside quotes
+    terminator: str  # operator that ended the command; "&" backgrounds it
+
+
+def _read_quoted(script: str, index: int) -> tuple[int, str]:
+    """Return the index past a quoted span and the text inside it."""
+    if script[index] == "'":
+        end = script.find("'", index + 1)
+        end = len(script) if end < 0 else end
+        return end + 1, script[index + 1 : end]
+    chunk: list[str] = []
+    cursor = index + 1
+    while cursor < len(script) and script[cursor] != '"':
+        if script[cursor] == "\\" and cursor + 1 < len(script):
+            chunk.append(script[cursor + 1])
+            cursor += 2
+            continue
+        chunk.append(script[cursor])
+        cursor += 1
+    return cursor + 1, "".join(chunk)
+
+
+def _split_commands(script: str) -> list[_Command]:
+    """Split a bash script on the separators bash itself honours."""
+    commands: list[_Command] = []
+    parts: list[str] = []
+    mask: list[str] = []
+    heredocs: list[str] = []
+    prev = ""  # last character added, for comment detection
+    prev_code = ""  # last non-blank character added, for redirection detection
+    line = 1
+    start = 1
+    index = 0
+    size = len(script)
+
+    def add(chunk: str, quoted: bool) -> None:
+        nonlocal prev, prev_code
+        if not chunk:
+            return
+        parts.append(chunk)
+        mask.append(("q" if quoted else ".") * len(chunk))
+        prev = chunk[-1]
+        trimmed = chunk.rstrip()
+        if trimmed:
+            prev_code = trimmed[-1]
+
+    def flush(terminator: str) -> None:
+        nonlocal prev, prev_code, start
+        text = "".join(parts)
+        lead = len(text) - len(text.lstrip())
+        stripped = text.strip()
+        if stripped:
+            commands.append(
+                _Command(
+                    start,
+                    stripped,
+                    "".join(mask)[lead : lead + len(stripped)],
+                    terminator,
+                )
+            )
+        parts.clear()
+        mask.clear()
+        prev = ""
+        prev_code = ""
+        start = line
+
+    while index < size:
+        char = script[index]
+        if char == "\\":
+            if script.startswith("\\\n", index):
+                add(" ", False)
+                line += 1
+                index += 2
+                continue
+            add(script[index + 1 : index + 2], True)
+            index += 2
+            continue
+        if char in "'\"":
+            end, chunk = _read_quoted(script, index)
+            line += script[index:end].count("\n")
+            add(chunk, True)
+            index = end
+            continue
+        if char == "#" and prev in ("", " ", "\t"):
+            end = script.find("\n", index)
+            index = size if end < 0 else end
+            continue
+        if script.startswith("<<", index) and not script.startswith("<<<", index):
+            match = _HEREDOC.match(script, index)
+            if match is not None:
+                heredocs.append(match.group(2))
+                index = match.end()
+                continue
+        if char == "\n":
+            flush("\n")
+            line += 1
+            index += 1
+            while heredocs:
+                delimiter = heredocs.pop(0)
+                while index < size:
+                    end = script.find("\n", index)
+                    end = size if end < 0 else end
+                    done = script[index:end].strip() == delimiter
+                    index = end + 1
+                    line += 1
+                    if done:
+                        break
+            start = line
+            continue
+        if char == ";":
+            flush(";")
+            index += 1
+            continue
+        if script.startswith("&&", index) or script.startswith("||", index):
+            flush(script[index : index + 2])
+            index += 2
+            continue
+        if char == "&":
+            if prev_code in "<>" or script.startswith("&>", index):  # a redirection
+                add(char, False)
+                index += 1
+                continue
+            flush("&")
+            index += 1
+            continue
+        if char == "|":
+            add(" ", False)  # a pipeline is backgrounded as a whole
+            index += 1
+            continue
+        add(char, False)
+        index += 1
+    flush("\n")
+    return commands
+
+
+def _service_launches(script: str) -> list[tuple[int, str, bool]]:
+    """Return (line, command, is_background) for each Dynamo service launched."""
+    launches = []
+    for command in _split_commands(script):
+        match = _SERVICE.search(command.text)
+        if match is None or command.quoted[match.start()] == "q":
+            continue  # a quoted match builds a command string, it does not run one
+        launches.append((command.line, match.group(0), command.terminator == "&"))
+    return launches
+
+
+_FOREGROUND_SAMPLE = """\
+#!/bin/bash
+source launch_utils.sh
+DYN_LOG=debug python -m dynamo.frontend 2>&1 | tee frontend.log &
+CUDA_VISIBLE_DEVICES=0 \\
+    python -m "$WORKER_MODULE" --model "$MODEL" \\
+    --config '{"speculative": true}'
+wait_any_exit
+"""
+
+
+def test_foreground_service_detector_reads_bash_separators() -> None:
+    """Flag a service that is not a background job, whatever its command shape."""
+    backgrounded = _FOREGROUND_SAMPLE.replace(
+        "--config '{\"speculative\": true}'",
+        "--config '{\"speculative\": true}' &",
+    )
+
+    assert _service_launches(_FOREGROUND_SAMPLE) == [
+        (3, "python -m dynamo.frontend", True),
+        (4, "python -m $WORKER_MODULE", False),
+    ]
+    assert [
+        line
+        for line, _, is_background in _service_launches(backgrounded)
+        if not is_background
+    ] == []
+
+
+def test_launch_scripts_background_the_services_wait_any_exit_watches() -> None:
+    """Run every Dynamo service as a background job in wait_any_exit scripts."""
+    scripts = sorted(
+        path
+        for path in _EXAMPLES_DIR.rglob("*.sh")
+        if _WAIT_ANY_EXIT.search(path.read_text())
+    )
+    launched = 0
+    foreground = []
+    for path in scripts:
+        for line, command, is_background in _service_launches(path.read_text()):
+            launched += 1
+            if not is_background:
+                relative = path.relative_to(_EXAMPLES_DIR.parent)
+                foreground.append(f"{relative}:{line}: {command}")
+
+    assert scripts, "no launch script calls wait_any_exit"
+    assert launched, "no service launch parsed; the scan lost its subject"
+    assert foreground == [], (
+        "wait_any_exit waits on background jobs, so a foreground service hides "
+        "every other service's failure until it exits:\n" + "\n".join(foreground)
+    )
