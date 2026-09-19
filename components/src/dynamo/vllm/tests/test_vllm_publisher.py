@@ -15,11 +15,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from prometheus_client import CollectorRegistry, generate_latest
 
 import dynamo.vllm.publisher as publisher_mod
 from dynamo.vllm.publisher import (
     DynamoStatLoggerPublisher,
     NoopStatLogger,
+    PrometheusDecodeRemotePrefillAdmissionMetrics,
     StatLoggerFactory,
 )
 
@@ -192,3 +194,44 @@ async def test_deferred_logger_starts_with_fresh_metrics_state(monkeypatch):
     publishers[0].publish.assert_called_once_with(dp_rank=0, kv_used_blocks=7)
     publishers[0].create_endpoint.assert_not_called()
     publishers[1].create_endpoint.assert_awaited_once_with(endpoint)
+
+
+def test_decode_remote_prefill_admission_metrics_expose_lifecycle():
+    registry = CollectorRegistry()
+    metrics = PrometheusDecodeRemotePrefillAdmissionMetrics(
+        registry=registry,
+        model_name="test-model",
+        component_name="decode",
+    )
+
+    metrics.set_state(dp_rank=0, limit=4, active=4, waiting=3)
+    metrics.observe_wait(dp_rank=0, wait_seconds=0.25, limit_hit=True)
+    metrics.record_cancelled(dp_rank=0)
+    metrics.record_release(dp_rank=0, reason="first_output")
+
+    output = generate_latest(registry).decode()
+    assert (
+        "dynamo_component_decode_remote_prefill_admission_limit{"
+        'dp_rank="0",dynamo_component="decode",model="test-model"} 4.0'
+    ) in output
+    assert (
+        "dynamo_component_decode_remote_prefill_admission_active{"
+        'dp_rank="0",dynamo_component="decode",model="test-model"} 4.0'
+    ) in output
+    assert (
+        "dynamo_component_decode_remote_prefill_admission_waiting{"
+        'dp_rank="0",dynamo_component="decode",model="test-model"} 3.0'
+    ) in output
+    assert (
+        "dynamo_component_decode_remote_prefill_admission_limit_hits_total{"
+        'dp_rank="0",dynamo_component="decode",model="test-model"} 1.0'
+    ) in output
+    assert (
+        "dynamo_component_decode_remote_prefill_admission_cancelled_waiters_total{"
+        'dp_rank="0",dynamo_component="decode",model="test-model"} 1.0'
+    ) in output
+    assert (
+        "dynamo_component_decode_remote_prefill_admission_releases_total{"
+        'dp_rank="0",dynamo_component="decode",model="test-model",'
+        'reason="first_output"} 1.0'
+    ) in output

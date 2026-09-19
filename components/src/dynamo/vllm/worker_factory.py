@@ -50,7 +50,11 @@ from .health_check import (
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
-from .publisher import StatLoggerFactory
+from .publisher import (
+    DYNAMO_COMPONENT_REGISTRY,
+    PrometheusDecodeRemotePrefillAdmissionMetrics,
+    StatLoggerFactory,
+)
 from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
 
@@ -1297,6 +1301,18 @@ class WorkerFactory:
         encode_worker_client = await self._maybe_get_encode_worker_client(
             runtime, config
         )
+        decode_remote_prefill_admission_metrics = None
+        if (
+            config.decode_max_remote_prefill_inflight > 0
+            and config.engine_args.disable_log_stats is False
+        ):
+            decode_remote_prefill_admission_metrics = (
+                PrometheusDecodeRemotePrefillAdmissionMetrics(
+                    registry=DYNAMO_COMPONENT_REGISTRY,
+                    model_name=config.served_model_name or config.model,
+                    component_name=config.component,
+                )
+            )
 
         handler = DecodeWorkerHandler(
             runtime,
@@ -1311,6 +1327,9 @@ class WorkerFactory:
             shutdown_event=shutdown_event,
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
+            decode_remote_prefill_admission_metrics=(
+                decode_remote_prefill_admission_metrics
+            ),
         )
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)

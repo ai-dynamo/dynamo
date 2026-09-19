@@ -44,6 +44,7 @@ def create_config() -> DynamoVllmConfig:
     """
     config = DynamoVllmConfig()
     config.disaggregation_mode = None
+    config.decode_max_remote_prefill_inflight = 0
     config.enable_multimodal = False
     config.embedding_worker = False
     config.embedding_frontend_tokenization = False
@@ -173,6 +174,48 @@ class TestResolveDisaggregationMode:
         config._resolve_disaggregation_mode()
 
         assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+
+
+class TestDecodeRemotePrefillAdmission:
+    @pytest.mark.parametrize(
+        ("args", "env_value", "expected"),
+        [
+            ([], None, 0),
+            (["--decode-max-remote-prefill-inflight", "7"], None, 7),
+            ([], "7", 7),
+            (["--decode-max-remote-prefill-inflight", "3"], "7", 3),
+        ],
+    )
+    def test_argument_and_environment_parsing(
+        self,
+        monkeypatch,
+        args,
+        env_value,
+        expected,
+    ):
+        if env_value is None:
+            monkeypatch.delenv(
+                "DYN_DECODE_MAX_REMOTE_PREFILL_INFLIGHT",
+                raising=False,
+            )
+        else:
+            monkeypatch.setenv(
+                "DYN_DECODE_MAX_REMOTE_PREFILL_INFLIGHT",
+                env_value,
+            )
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+
+        parsed = parser.parse_args(args)
+
+        assert parsed.decode_max_remote_prefill_inflight == expected
+
+    def test_negative_limit_is_rejected(self):
+        config = create_config()
+        config.decode_max_remote_prefill_inflight = -1
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            config._validate_decode_remote_prefill_admission()
 
 
 class TestEmbeddingWorkerExclusivity:

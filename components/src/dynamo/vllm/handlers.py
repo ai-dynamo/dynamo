@@ -94,6 +94,11 @@ from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
+from .decode_admission import (
+    DecodeRemotePrefillAdmission,
+    DecodeRemotePrefillAdmissionMetrics,
+    DecodeRemotePrefillLease,
+)
 from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -130,6 +135,23 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
+
+
+def _has_remote_prefill_kv_transfer(request: Mapping[str, Any]) -> bool:
+    """Return whether a decode request carries remote-prefill KV metadata."""
+    if BYPASS_REMOTE_PREFILL_ANNOTATION in (request.get("annotations") or []):
+        return False
+
+    prefill_result = request.get("prefill_result")
+    if not isinstance(prefill_result, Mapping):
+        return False
+    disaggregated_params = prefill_result.get("disaggregated_params")
+    if not isinstance(disaggregated_params, Mapping):
+        return False
+    kv_transfer_params = disaggregated_params.get("kv_transfer_params")
+    return isinstance(kv_transfer_params, Mapping) and (
+        kv_transfer_params.get("do_remote_prefill") is True
+    )
 
 
 def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
@@ -3445,6 +3467,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         enable_frontend_decoding: bool = False,
         encode_worker_client: Client | None = None,
         first_token_source: Any | None = None,
+        decode_remote_prefill_admission_metrics: (
+            DecodeRemotePrefillAdmissionMetrics | None
+        ) = None,
     ):
         super().__init__(
             runtime,
@@ -3461,6 +3486,74 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             encode_worker_client=encode_worker_client,
         )
         self._first_token_source = first_token_source
+        self._decode_remote_prefill_admission = DecodeRemotePrefillAdmission(
+            config.decode_max_remote_prefill_inflight,
+            metrics=decode_remote_prefill_admission_metrics,
+        )
+
+    def _resolve_decode_remote_prefill_admission_dp_rank(
+        self,
+        routed_dp_rank: int | None,
+    ) -> int:
+        """Resolve the concrete local DP rank used by the admission gate."""
+        local_dp_rank = self._to_local_dp_rank(routed_dp_rank)
+        if local_dp_rank is not None:
+            return local_dp_rank
+        if self.dp_range[1] == 1:
+            return 0
+        raise InvalidArgument(
+            "Remote-prefill admission requires a valid routing.dp_rank when "
+            "a decode worker serves multiple data-parallel ranks."
+        )
+
+    async def _acquire_decode_remote_prefill_admission(
+        self,
+        context: Context,
+        local_dp_rank: int,
+    ) -> DecodeRemotePrefillLease | None:
+        """Wait for admission while observing request and engine termination."""
+        stopped = context.async_killed_or_stopped()
+        acquire_task = asyncio.create_task(
+            self._decode_remote_prefill_admission.acquire(local_dp_rank)
+        )
+        shutdown_task = None
+        waiters = [acquire_task, stopped]
+        if self.shutdown_event is not None:
+            shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+            waiters.append(shutdown_task)
+
+        lease_returned = False
+        try:
+            done, _ = await asyncio.wait(
+                waiters,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if shutdown_task is not None and shutdown_task in done:
+                raise EngineShutdown(
+                    "Engine was shut down while waiting for decode admission."
+                )
+            if stopped in done:
+                raise asyncio.CancelledError()
+
+            lease = acquire_task.result()
+            lease_returned = True
+            return lease
+        finally:
+            pending = [waiter for waiter in waiters if not waiter.done()]
+            for waiter in pending:
+                waiter.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            if (
+                not lease_returned
+                and acquire_task.done()
+                and not acquire_task.cancelled()
+                and acquire_task.exception() is None
+            ):
+                lease = acquire_task.result()
+                if lease is not None:
+                    lease.release("terminal_before_first_output")
 
     async def generate(self, request, context):
         # Use context ID for request tracking and correlation
@@ -3470,28 +3563,49 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self._first_token_source is not None:
             self._first_token_source.bind(context, routing.get("dp_rank"))
         self._multimodal_request_processor.validate_multimodal_request(request)
+        admission_lease = None
+        if (
+            self._decode_remote_prefill_admission.limit > 0
+            and not self.use_vllm_tokenizer
+            and self.config.disaggregation_mode == DisaggregationMode.DECODE
+            and _has_remote_prefill_kv_transfer(request)
+        ):
+            local_dp_rank = self._resolve_decode_remote_prefill_admission_dp_rank(
+                routing.get("dp_rank")
+            )
+            admission_lease = await self._acquire_decode_remote_prefill_admission(
+                context,
+                local_dp_rank,
+            )
+
         first_token = True
         first_token_output_seen = False
-        with time_and_log_code_section(
-            f"[DECODE] request: {request_id} generate"
-        ) as decode_timer:
-            if self.use_vllm_tokenizer:
-                # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
-                generator = self._generate_text_mode(request, context, request_id)
-            else:
-                # Token-in-token-out mode: internal protocol format
-                generator = self._generate_token_mode(request, context, request_id)
+        try:
+            with time_and_log_code_section(
+                f"[DECODE] request: {request_id} generate"
+            ) as decode_timer:
+                if self.use_vllm_tokenizer:
+                    # Text-in-text-out mode: use InputParamManager and OpenAI-compatible format
+                    generator = self._generate_text_mode(request, context, request_id)
+                else:
+                    # Token-in-token-out mode: internal protocol format
+                    generator = self._generate_token_mode(request, context, request_id)
 
-            async for chunk in _translate_vllm_client_errors(generator):
-                if first_token:
-                    decode_timer.stop_interval()
-                    first_token = False
-                if not self.use_vllm_tokenizer and not first_token_output_seen:
-                    token_ids = chunk.get("token_ids") or []
-                    if token_ids:
-                        first_token_output_seen = True
-                        context.notify_first_token()
-                yield chunk
+                async for chunk in _translate_vllm_client_errors(generator):
+                    if first_token:
+                        decode_timer.stop_interval()
+                        first_token = False
+                        if admission_lease is not None:
+                            admission_lease.release("first_output")
+                    if not self.use_vllm_tokenizer and not first_token_output_seen:
+                        token_ids = chunk.get("token_ids") or []
+                        if token_ids:
+                            first_token_output_seen = True
+                            context.notify_first_token()
+                    yield chunk
+        finally:
+            if admission_lease is not None:
+                admission_lease.release("terminal_before_first_output")
 
     async def _assemble_custom_encoder_prompt(
         self,

@@ -241,6 +241,36 @@ Emitted by backend workers (`python -m dynamo.vllm`, `python -m dynamo.sglang`, 
   Total requests cancelled by the work handler. Carries the hierarchy labels. Records cancellation *signals* received by the worker, not whether the engine actually aborted — deduplicated so a control message plus a socket close for the same request counts once. See [Request Cancellation Architecture](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-cancellation-architecture.md).
 </ParamField>
 
+The following vLLM decode metrics appear only when `--decode-max-remote-prefill-inflight` is positive and vLLM statistics are enabled. They carry `model`, `dynamo_component`, and `dp_rank` labels.
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_limit" type="gauge">
+  Configured remote-prefill admission limit for each local data-parallel rank.
+</ParamField>
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_active" type="gauge">
+  Remote-prefill decode requests admitted before first output.
+</ParamField>
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_waiting" type="gauge">
+  Remote-prefill decode requests waiting for admission.
+</ParamField>
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_wait_seconds" type="histogram">
+  Time spent waiting for remote-prefill decode admission.
+</ParamField>
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_limit_hits_total" type="counter">
+  Remote-prefill requests that found their local data-parallel limit full.
+</ParamField>
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_cancelled_waiters_total" type="counter">
+  Remote-prefill requests cancelled while waiting for admission.
+</ParamField>
+
+<ParamField path="dynamo_component_decode_remote_prefill_admission_releases_total" type="counter">
+  Admission permits released by terminal reason. This metric also carries the `reason` label.
+</ParamField>
+
 The following worker-side gauges and counter appear only when a hard concurrency cap is set with `--engine-request-limit`; see [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission).
 
 <ParamField path="dynamo_rejection_request_total" type="counter">
