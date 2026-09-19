@@ -10,14 +10,10 @@ use super::{
     MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 
-use crate::protocols::{
-    WorkerConfigLike, WorkerId, WorkerSelectionResult,
-};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
-use crate::scheduling::types::{
-    KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError,
-};
+use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputs,
@@ -369,6 +365,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
+    use crate::plugins::worker_selection::WorkerInputView;
+    use crate::protocols::WorkerWithDpRank;
+    use crate::scheduling::SessionContext;
     use std::{
         cell::Cell,
         collections::{HashMap, HashSet},

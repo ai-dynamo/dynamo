@@ -3,9 +3,9 @@
 
 //! Cache and load cost calculation. The host owns snapshots and validates finite scores.
 
-use dynamo_kv_router::{
-    KvRouterConfig, WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicyError,
+use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to

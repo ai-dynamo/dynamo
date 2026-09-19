@@ -21,7 +21,10 @@ pub fn install_router_plugin_registry(registry: RouterPluginRegistry) -> bool {
 
 /// The installed catalog, or the required builtin default policy.
 pub fn router_plugin_registry() -> RouterPluginRegistry {
-    INSTALLED_PLUGINS.get().cloned().unwrap_or_else(dynamo_custom_policy_builtin::default_registry)
+    INSTALLED_PLUGINS
+        .get()
+        .cloned()
+        .unwrap_or_else(dynamo_custom_policy_builtin::default_registry)
 }
 
 /// Carries configured plugins through the host's shared router construction.

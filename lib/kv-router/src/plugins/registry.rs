@@ -118,7 +118,11 @@ impl RouterPluginRegistry {
         Ok(super::RouterPlugins {
             // The builtin default does not opt a frontend into custom-plugin restrictions.
             // Embedded routers still obtain it from the registry when constructing a pool.
-            worker_selection: if config.selected_worker_selection_policy_instance()?.is_some() {
+            worker_selection: if config
+                .selected_worker_selection_policy_instance()
+                .map_err(WorkerSelectionPolicyRegistryError::from)?
+                .is_some()
+            {
                 self.resolve(config)?
             } else {
                 None

@@ -11,7 +11,10 @@ mod selector;
 pub(super) use parameters::register;
 pub use selector::DefaultWorkerSelector;
 
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicy, WorkerSelectionPolicyFactory};
+use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::worker_selection::{
+    WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+};
 use parking_lot::Mutex;
 use std::sync::Arc;
 

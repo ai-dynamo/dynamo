@@ -4,6 +4,9 @@
 //! Startup parameters and provider registration for the default policy.
 
 use dynamo_kv_router::KvRouterConfig;
+use dynamo_kv_router::plugins::{
+    RouterPluginRegistry, WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
+};
 use std::sync::Arc;
 
 use super::policy_for_role;
@@ -22,10 +25,9 @@ struct Parameters {
 }
 
 pub(crate) fn register(
-    registry: &mut dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry,
-) -> Result<(), dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistryError> {
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
-    registry.register(
+    registry: &mut RouterPluginRegistry,
+) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    registry.register_worker_selection(
         "dynamo-default-cost-fn",
         Arc::new(|parameters| {
             let parameters: Parameters = parameters.deserialize()?;

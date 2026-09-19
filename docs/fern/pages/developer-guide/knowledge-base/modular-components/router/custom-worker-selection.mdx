@@ -628,6 +628,8 @@ The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/rout
 
 The default worker selector lives in `dynamo-custom-policy-builtin`, beside the two-tier policy. Routing hosts install `default_registry()` even when they do not link a custom catalog. An omitted policy or the reserved `default` selection uses that factory. A Rust embedding that constructs `SelectionServiceBuilder` must supply a registry with a default factory or an explicit policy factory.
 
+The default uses the same `RouterPluginRegistry` as custom worker policies and request classifiers. Installing it preserves the other registered providers. Resolving a classifier-only configuration still leaves worker selection on the builtin default; installing the default alone does not enable custom-plugin frontend restrictions.
+
 To configure a separate default-policy instance, use the named provider:
 
 ```yaml

@@ -1143,12 +1143,13 @@ mod tests {
             .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(
-            scheduler.get_potential_loads(None, 0, HashMap::new(), false)[0].active_requests,
+            scheduler.get_potential_loads(None, 0, FxHashMap::default(), false)[0].active_requests,
             1
         );
         drop(booking.expect("admission must return an armed booking"));
         tokio::time::timeout(Duration::from_secs(1), async {
-            while scheduler.get_potential_loads(None, 0, HashMap::new(), false)[0].active_requests
+            while scheduler.get_potential_loads(None, 0, FxHashMap::default(), false)[0]
+                .active_requests
                 != 0
             {
                 tokio::task::yield_now().await;
@@ -1193,7 +1194,7 @@ mod tests {
             .await;
         assert!(matches!(result, Err(KvSchedulerError::DeadlineExceeded)));
         assert_eq!(
-            scheduler.get_potential_loads(None, 0, HashMap::new(), false)[0].active_requests,
+            scheduler.get_potential_loads(None, 0, FxHashMap::default(), false)[0].active_requests,
             0
         );
         cancel_token.cancel();

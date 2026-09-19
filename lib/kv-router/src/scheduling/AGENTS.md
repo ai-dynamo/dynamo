@@ -122,7 +122,7 @@ PolicyClassQueue("agents")
 
 ## Public Worker-Selection API
 
-The `selector` module contains the public Rust contract for custom worker filters, scorers, and pickers. Treat each public item as a versioned external API.
+The `plugins::worker_selection` module contains the public Rust contract for custom worker filters, scorers, and pickers. Treat each public item as a versioned external API.
 
 - Do not add a public field, accessor, input group, type, or re-export unless the task explicitly requires a new external policy capability.
 - An internal need in the default scorer, logging, tests, or SelectionService does not justify a public API addition.

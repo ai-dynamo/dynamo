@@ -165,9 +165,7 @@ impl SelectionServiceBuilder {
         };
         #[cfg(not(test))]
         if worker_selection_policy_factory.is_none() {
-            return Err(
-                super::policy_registry::WorkerSelectionPolicyRegistryError::MissingDefault.into(),
-            );
+            return Err(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault.into());
         }
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
