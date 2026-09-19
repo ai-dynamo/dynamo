@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -153,7 +153,7 @@ class AudioLoader:
             return waveform, sr
         except FileNotFoundError:
             raise
-        except (UrlValidationError, HttpStatusError):
+        except (UrlValidationError, HttpStatusError, HttpConfigurationError):
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.
