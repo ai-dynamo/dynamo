@@ -319,6 +319,33 @@ async def test_scheme_and_host_case_still_share_cache_entry(
     assert first is second
 
 
+async def test_fragment_is_excluded_from_cache_key(loader: ImageLoader) -> None:
+    mock_fetch = _mock_fetch_bytes()
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.com/img.png#A")
+        second = await loader.load_image("https://example.com/img.png#a")
+
+    assert mock_fetch.call_count == 1
+    assert first is second
+
+
+async def test_leading_whitespace_does_not_collide_with_other_host(
+    loader: ImageLoader,
+) -> None:
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "example.comm" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.comm/A")
+        second = await loader.load_image("\nhttps://example.com/A")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
 def _make_svg_bytes() -> bytes:
     return b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>"
 
