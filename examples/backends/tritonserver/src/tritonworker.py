@@ -49,33 +49,62 @@ class RequestHandler:
         inference_request = self.model.create_request()
         for tensor in request["tensors"]:
             logger.debug(f"Tensor: {tensor}")
-            # Convert Triton dtype string ("INT32") to NumPy dtype (np.int32) for array construction
-            np_dtype = triton_to_np_dtype(tensor["metadata"]["data_type"].upper())
-            arr = np.array(tensor["data"]["values"], dtype=np_dtype).reshape(
-                tensor["metadata"]["shape"]
-            )
-            inference_request.inputs[tensor["metadata"]["name"]] = arr
+            data_type = tensor["metadata"]["data_type"].upper()
+            values = tensor["data"]["values"]
+            shape = tensor["metadata"]["shape"]
+            if data_type == "BYTES":
+                # BYTES/string tensor values arrive as a list of byte-integer
+                # lists (one per element), not a flat numeric array. Decode
+                # each element into real bytes before handing the tensor to
+                # tritonserver, which has its own accessor for string tensors
+                # rather than the raw-buffer path numeric dtypes use.
+                elements = np.array(
+                    [bytes(value) for value in values], dtype=object
+                ).reshape(shape)
+                inference_request.inputs[tensor["metadata"]["name"]] = (
+                    tritonserver.Tensor.from_bytes_array(elements)
+                )
+            else:
+                # Convert Triton dtype string ("INT32") to NumPy dtype (np.int32) for array construction
+                np_dtype = triton_to_np_dtype(data_type)
+                arr = np.array(values, dtype=np_dtype).reshape(shape)
+                inference_request.inputs[tensor["metadata"]["name"]] = arr
 
         inference_responses = self.model.async_infer(inference_request)
         async for inference_response in inference_responses:
             response_tensors = []
             for output in self.model.metadata()["outputs"]:
-                output_data = np.from_dlpack(inference_response.outputs[output["name"]])
-                response_arr = output_data
+                out_tensor = inference_response.outputs[output["name"]]
                 # Convert Triton dtype (e.g., "INT32") to Dynamo dtype (e.g., "Int32")
                 dtype_str = TRITON_TO_DYNAMO_DTYPE.get(
                     output["datatype"], output["datatype"]
                 )
+                if output["datatype"] == "BYTES":
+                    # DLPack has no string/object dtype support, so BYTES
+                    # outputs need tritonserver's dedicated string accessor
+                    # instead of np.from_dlpack. Re-encode each string back
+                    # into a byte-integer list to match the wire format the
+                    # BYTES branch above decodes on the request side.
+                    string_arr = out_tensor.to_string_array()
+                    response_shape = list(string_arr.shape)
+                    response_values = [
+                        list(value.encode("utf-8"))
+                        for value in string_arr.flatten().tolist()
+                    ]
+                else:
+                    output_data = np.from_dlpack(out_tensor)
+                    response_shape = list(output_data.shape)
+                    response_values = output_data.flatten().tolist()
                 response_tensors.append(
                     {
                         "metadata": {
                             "name": output["name"],
-                            "shape": list(response_arr.shape),
+                            "shape": response_shape,
                             "data_type": dtype_str,
                         },
                         "data": {
                             "data_type": dtype_str,
-                            "values": response_arr.flatten().tolist(),
+                            "values": response_values,
                         },
                     }
                 )
