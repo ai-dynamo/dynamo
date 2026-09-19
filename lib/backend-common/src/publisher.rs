@@ -72,13 +72,14 @@ fn setup_kv_publishers(
         let dp_rank = source.dp_rank();
         let (source_config, on_ready) = match source {
             KvEventSource::Zmq {
-                endpoint, topic, ..
+                endpoint, topic, heartbeat_timeout, ..
             } => (
                 Some(KvEventSourceConfig::Zmq {
                     endpoint,
                     topic,
                     image_token_id: None,
                     video_token_id: None,
+                    liveness: heartbeat_timeout.map(|timeout| (dp_rank, timeout)),
                 }),
                 None,
             ),

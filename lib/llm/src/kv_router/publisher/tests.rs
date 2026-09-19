@@ -1301,6 +1301,7 @@ mod tests_startup_helpers {
                 next_event_id,
                 None,
                 None,
+                Some((1, std::time::Duration::from_millis(500))),
             )
         });
 
@@ -1389,6 +1390,28 @@ mod tests_startup_helpers {
         };
         assert_eq!(removed.block_hashes, vec![ExternalSequenceBlockHash(42)]);
 
+        // A transport gap may have dropped a removal. The listener must fence
+        // all previously learned residency before applying the later batch.
+        let gap_frames = vec![
+            Bytes::from("").to_vec(),
+            Bytes::from((seq + 2).to_be_bytes().to_vec()).to_vec(),
+            payload.to_vec(),
+        ];
+        send_multipart(&pub_socket, gap_frames)
+            .await
+            .expect("failed to send gapped ZMQ test event");
+        let recovery = tokio::time::timeout(tokio::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for gap recovery")
+            .expect("listener channel closed");
+        assert!(matches!(recovery[0].event.data, KvCacheEventData::Cleared));
+
+        let expired = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("heartbeat expiry must clear residency")
+            .expect("listener channel closed");
+        assert!(matches!(expired[0].event.data, KvCacheEventData::Cleared));
+
         // Stop the listener
         token.cancel();
         let _ = listener_handle.await;
@@ -1430,6 +1453,7 @@ mod tests_startup_helpers {
                 token,
                 4,
                 Arc::new(AtomicU64::new(0)),
+                None,
                 None,
                 None,
             )
@@ -1531,6 +1555,7 @@ mod tests_startup_helpers {
                 Arc::new(AtomicU64::new(0)),
                 None,
                 None,
+                None,
             )
         });
 
@@ -1613,7 +1638,18 @@ mod tests_startup_helpers {
         let listener_handle = tokio::spawn({
             let token = token.clone();
             let endpoint = endpoint.clone();
-            start_zmq_listener(endpoint, topic, 1, tx, token, 4, next_event_id, None, None)
+            start_zmq_listener(
+                endpoint,
+                topic,
+                1,
+                tx,
+                token,
+                4,
+                next_event_id,
+                None,
+                None,
+                None,
+            )
         });
 
         tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;

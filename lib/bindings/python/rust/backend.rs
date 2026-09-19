@@ -1613,6 +1613,7 @@ fn depythonize_kv_source(item: &Bound<'_, PyAny>) -> PyResult<RsKvEventSource> {
     let dp_rank: u32 = item.getattr("dp_rank")?.extract()?;
     match cls.as_str() {
         "ZmqSource" => Ok(RsKvEventSource::Zmq {
+            heartbeat_timeout: None,
             endpoint: item.getattr("endpoint")?.extract()?,
             topic: item.getattr("topic")?.extract()?,
             dp_rank,

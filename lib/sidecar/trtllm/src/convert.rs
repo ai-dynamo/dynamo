@@ -28,6 +28,7 @@ use crate::proto as pb;
 /// per-token top-k alternatives, all aligned with each other.
 type MappedTokens = (Vec<u32>, Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
 
+#[cfg(test)]
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
     request_id: &str,
@@ -35,7 +36,18 @@ pub(crate) fn build_generate_request(
     limits: Option<ModelLimits>,
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
-    validate_request(request, mode)?;
+    build_generate_request_with_routing(request, request_id, model, limits, mode, false)
+}
+
+pub(crate) fn build_generate_request_with_routing(
+    request: &PreprocessedRequest,
+    request_id: &str,
+    model: &str,
+    limits: Option<ModelLimits>,
+    mode: DisaggregationMode,
+    allow_dp_rank: bool,
+) -> Result<pb::GenerateRequest, DynamoError> {
+    validate_request(request, mode, allow_dp_rank)?;
 
     let sampling = &request.sampling_options;
     let stop = &request.stop_conditions;
@@ -299,6 +311,7 @@ fn json_guide(value: &serde_json::Value) -> String {
 fn validate_request(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
+    allow_dp_rank: bool,
 ) -> Result<(), DynamoError> {
     if request.token_ids.is_empty() {
         return Err(client::invalid_argument("token_ids must not be empty"));
@@ -384,21 +397,14 @@ fn validate_request(
             "request priority is not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request
-        .routing
-        .as_ref()
-        .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
+    if !allow_dp_rank
+        && request
+            .routing
+            .as_ref()
+            .is_some_and(|routing| routing.dp_rank.is_some() || routing.prefill_dp_rank.is_some())
     {
-        // The same server branch that rejects `openengine-priority` also rejects
-        // `openengine-target-dp-rank` (`grpc/openengine/request_mapping.py`,
-        // `_trace_headers`), and the servicer turns that into UNIMPLEMENTED --
-        // measured against TensorRT-LLM main at 8bbaf66bd5, rank 0 included.
-        // Sending it anyway failed the whole request with a non-migratable
-        // 5xx; rejecting here names the unsupported feature in a 4xx instead.
-        // `nvext.dp_rank` and the `x-dynamo-dp-rank` header both reach this
-        // field, so it is reachable without a KV router.
         return Err(client::invalid_argument(
-            "data-parallel rank targeting is not supported by the TensorRT-LLM sidecar",
+            "data-parallel rank targeting was not advertised by the OpenEngine server",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {

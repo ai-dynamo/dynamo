@@ -125,6 +125,125 @@ async fn a_data_parallel_rank_hint_is_rejected_before_dispatch() {
     );
 }
 
+#[tokio::test]
+async fn kv_routing_discovers_contract_and_forwards_selected_rank() {
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    service.dp_size.store(2, Ordering::SeqCst);
+    let server = FakeServer::start(service).await;
+    let engine = engine_with_kv_routing(&server.endpoint);
+
+    let config = engine.start(0).await.expect("start with KV routing");
+    let registration = config.llm.expect("LLM registration");
+    assert_eq!(registration.kv_cache_block_size, Some(32));
+    assert_eq!(registration.total_kv_blocks, Some(50));
+
+    let sources = engine.kv_event_sources().await.expect("KV event sources");
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[1].dp_rank(), 1);
+
+    let mut req = request();
+    req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+        dp_rank: Some(1),
+        ..Default::default()
+    });
+    let _ = collect(&engine, req).await;
+    assert_eq!(
+        server.service.target_dp_ranks.lock().await.as_slice(),
+        [Some("1".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn cleanup_cancels_a_hung_load_poll() {
+    use std::collections::HashMap;
+
+    use dynamo_backend_common::metrics::{ComponentGauges, EngineMetrics, TestHierarchy};
+    use dynamo_backend_common::{MetricsCtx, SnapshotPublisher};
+
+    let service = FakeTrtllm::default();
+    service.kv_routing.store(true, Ordering::SeqCst);
+    let server = FakeServer::start(service.clone()).await;
+    let engine = engine_with_kv_routing(&server.endpoint);
+    engine.start(0).await.expect("start with KV routing");
+
+    let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+    let mut bindings = engine
+        .setup_metrics(MetricsCtx {
+            model: "test-model",
+            component: "test-component",
+            model_load_time_seconds: 0.0,
+            metrics: &metrics,
+        })
+        .await
+        .expect("set up metrics");
+    let gauges = Arc::new(ComponentGauges::new(&metrics, &[0]).expect("component gauges"));
+    let publisher = Arc::new(SnapshotPublisher::new(gauges, HashMap::new()));
+    service.hang_load.store(true, Ordering::SeqCst);
+    bindings
+        .on_publisher_ready
+        .take()
+        .expect("metrics publisher callback")(publisher)
+    .expect("start metrics publisher");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    tokio::time::timeout(Duration::from_millis(500), engine.cleanup())
+        .await
+        .expect("cleanup must cancel the in-flight GetLoad")
+        .expect("cleanup succeeds");
+}
+
+#[tokio::test]
+async fn discovery_keeps_events_load_and_dp_targeting_independent() {
+    use dynamo_backend_common::MetricsCtx;
+    use dynamo_backend_common::metrics::{EngineMetrics, TestHierarchy};
+
+    for events in [false, true] {
+        for load in [false, true] {
+            let service = FakeTrtllm::default();
+            service.kv_routing.store(true, Ordering::SeqCst);
+            service.dp_size.store(2, Ordering::SeqCst);
+            service.disable_events.store(!events, Ordering::SeqCst);
+            service.disable_load.store(!load, Ordering::SeqCst);
+            let server = FakeServer::start(service).await;
+            let engine = engine_with_kv_routing(&server.endpoint);
+            engine
+                .start(0)
+                .await
+                .expect("discover independently enabled capabilities");
+            assert_eq!(
+                engine.kv_event_sources().await.unwrap().len(),
+                if events { 2 } else { 0 }
+            );
+
+            let metrics = EngineMetrics::from_hierarchy(TestHierarchy::new());
+            let bindings = engine
+                .setup_metrics(MetricsCtx {
+                    model: "test-model",
+                    component: "test-component",
+                    model_load_time_seconds: 0.0,
+                    metrics: &metrics,
+                })
+                .await
+                .unwrap();
+            assert_eq!(bindings.on_publisher_ready.is_some(), load);
+            assert_eq!(bindings.dp_ranks.len(), if load { 2 } else { 0 });
+
+            let mut req = request();
+            req.routing = Some(dynamo_backend_common::engine::RoutingHints {
+                dp_rank: Some(1),
+                ..Default::default()
+            });
+            collect(&engine, req).await;
+            assert_eq!(
+                server.service.target_dp_ranks.lock().await.as_slice(),
+                [Some("1".to_string())]
+            );
+            engine.cleanup().await.unwrap();
+        }
+    }
+}
+
 /// A decode request holding transferred KV blocks must outlive its client until
 /// the first token proves the transfer landed -- dropping the stream earlier
 /// strands the prefill worker's blocks. It must not outlive it any longer than
@@ -223,14 +342,17 @@ async fn pool_uses_each_configured_connection() {
 
     for index in 0..4 {
         let mut stream = client
-            .generate(pb::GenerateRequest {
-                request_id: format!("request-{index}"),
-                model: "model-source".to_string(),
-                input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
-                    ids: vec![1, 2],
-                })),
-                ..Default::default()
-            })
+            .generate(
+                pb::GenerateRequest {
+                    request_id: format!("request-{index}"),
+                    model: "model-source".to_string(),
+                    input: Some(pb::generate_request::Input::TokenIds(pb::TokenIds {
+                        ids: vec![1, 2],
+                    })),
+                    ..Default::default()
+                },
+                None,
+            )
             .await
             .expect("start stream");
         while stream.message().await.expect("message").is_some() {}
@@ -475,8 +597,8 @@ fn parsed_arguments_map_onto_the_worker_registration() {
     assert_eq!(aggregated.disaggregation_mode, AGG);
     assert_eq!(aggregated.model_name, "model-source");
     assert!(
-        !aggregated.enable_kv_routing,
-        "the sidecar has no KV events"
+        aggregated.enable_kv_routing,
+        "source discovery controls whether publishers start"
     );
 
     for (mode, expected) in [

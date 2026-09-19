@@ -503,6 +503,8 @@ pub enum KvEventSource {
         endpoint: String,
         topic: String,
         dp_rank: u32,
+        /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
+        heartbeat_timeout: Option<std::time::Duration>,
     },
     Push {
         on_ready: OnPublisherReady,

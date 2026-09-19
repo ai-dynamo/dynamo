@@ -3,6 +3,7 @@
 
 //! Thin client for TensorRT-LLM's OpenEngine gRPC services (`openengine.v1`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::{Instant, sleep_until, timeout_at};
@@ -26,6 +27,7 @@ use crate::proto::inference_client::InferenceClient;
 /// server cannot hang cancellation. Startup is bounded by the operator's
 /// `--grpc-startup-deadline-secs` instead.
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const LOAD_RPC_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The engine's limits, resolved at startup from `--context-length` and
 /// `Control.GetModelInfo`.
@@ -40,8 +42,11 @@ pub(crate) struct ModelLimits {
     pub(crate) max_output_tokens: Option<u32>,
 }
 
+const TARGET_DP_RANK_METADATA_KEY: &str = "openengine-target-dp-rank";
+
+#[derive(Clone)]
 pub(crate) struct TrtllmClient {
-    pool: GrpcChannelPool,
+    pool: Arc<GrpcChannelPool>,
 }
 
 impl TrtllmClient {
@@ -50,7 +55,9 @@ impl TrtllmClient {
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
         let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport).await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool: Arc::new(pool),
+        })
     }
 
     pub(crate) fn connection_count(&self) -> usize {
@@ -69,17 +76,20 @@ impl TrtllmClient {
             .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
-    /// No routing metadata is attached: the server rejects both
-    /// `openengine-target-dp-rank` and `openengine-priority` with UNIMPLEMENTED,
-    /// so `convert::validate_request` refuses those requests up front rather
-    /// than letting the engine fail them. `KvSessionRef.dp_rank` still carries a
-    /// disaggregated session's KV affinity, inside the request body.
     pub(crate) async fn generate(
         &self,
         request: pb::GenerateRequest,
+        target_dp_rank: Option<u32>,
     ) -> Result<tonic::Streaming<pb::GenerateResponse>, DynamoError> {
+        let mut request = tonic::Request::new(request);
+        if let Some(rank) = target_dp_rank {
+            request.metadata_mut().insert(
+                TARGET_DP_RANK_METADATA_KEY,
+                tonic::metadata::MetadataValue::from(rank),
+            );
+        }
         self.inference()
-            .generate(tonic::Request::new(request))
+            .generate(request)
             .await
             .map(tonic::Response::into_inner)
             .map_err(|status| status_to_dynamo("Generate", status))
@@ -117,6 +127,76 @@ impl TrtllmClient {
                 ))
             })?
             .map_err(|status| status_to_dynamo("GetModelInfo", status))
+    }
+
+    pub(crate) async fn server_info(&self) -> Result<Option<pb::ServerInfo>, DynamoError> {
+        let response = tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.control().get_server_info(pb::GetServerInfoRequest {}),
+        )
+        .await
+        .map_err(|_| {
+            connection_timeout(format!(
+                "GetServerInfo did not respond within {RPC_TIMEOUT:?}"
+            ))
+        })?;
+        match response {
+            Ok(response) => Ok(Some(response.into_inner())),
+            Err(status) if status.code() == tonic::Code::Unimplemented => Ok(None),
+            Err(status) => Err(status_to_dynamo("GetServerInfo", status)),
+        }
+    }
+
+    pub(crate) async fn kv_event_sources(&self) -> Result<Vec<pb::KvEventSource>, DynamoError> {
+        tokio::time::timeout(
+            RPC_TIMEOUT,
+            self.control()
+                .get_kv_event_sources(pb::GetKvEventSourcesRequest {
+                    data_parallel_ranks: Vec::new(),
+                }),
+        )
+        .await
+        .map_err(|_| {
+            connection_timeout(format!(
+                "GetKvEventSources did not respond within {RPC_TIMEOUT:?}"
+            ))
+        })?
+        .map(tonic::Response::into_inner)
+        .map(|response| response.sources)
+        .or_else(|status| {
+            if status.code() == tonic::Code::Unimplemented {
+                Ok(Vec::new())
+            } else {
+                Err(status)
+            }
+        })
+        .map_err(|status| status_to_dynamo("GetKvEventSources", status))
+    }
+
+    pub(crate) async fn get_load(
+        &self,
+        include_per_rank: bool,
+    ) -> Result<pb::LoadInfo, DynamoError> {
+        tokio::time::timeout(
+            LOAD_RPC_TIMEOUT,
+            self.control()
+                .get_load(pb::GetLoadRequest { include_per_rank }),
+        )
+        .await
+        .map_err(|_| {
+            connection_timeout(format!(
+                "GetLoad did not respond within {LOAD_RPC_TIMEOUT:?}"
+            ))
+        })?
+        .map(tonic::Response::into_inner)
+        .or_else(|status| {
+            if status.code() == tonic::Code::Unimplemented {
+                Ok(pb::LoadInfo::default())
+            } else {
+                Err(status)
+            }
+        })
+        .map_err(|status| status_to_dynamo("GetLoad", status))
     }
 
     /// Polls `GetModelInfo` until the engine reports a usable context length or

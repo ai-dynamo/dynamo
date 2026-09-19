@@ -27,15 +27,12 @@ registration, request conversion, transport, cancellation, and abort.
   structural tag), and logprobs
 - Streaming delta tokens with a terminal usage/finish summary
 - Cancellation via `Control.Abort` and by closing the gRPC stream
+- Opt-in KV-aware routing from native TensorRT-LLM ZMQ events plus per-rank `Control.GetLoad` snapshots
 
 The integration does **not** support multimodal input, LoRA, encode workers,
 beam search, or `n > 1`.
 
-Data-parallel rank targeting is rejected: the server answers
-`openengine-target-dp-rank` with `UNIMPLEMENTED`, so a request carrying a rank
-hint is refused up front instead of failing in the engine.
-`KvSessionRef.dp_rank` still carries a disaggregated session's KV affinity,
-inside the request body.
+KV events and KV occupancy are discovered independently from the existing `GetKvEventSources` and `GetLoad` responses. There is no sidecar enable switch or OpenEngine schema change. Optional TensorRT-LLM metadata in `ServerInfo.extra` enables DP-rank hints and heartbeat expiry; absent metadata leaves these optimizations off, and the server always validates rank hints.
 
 > [!NOTE]
 > `Control.GetModelInfo` supplies the registered context length (and the default
@@ -43,10 +40,7 @@ inside the request body.
 > instead. `Control.Abort` cancels an in-flight request; closing the `Generate`
 > stream also aborts it, so cancellation is covered either way.
 >
-> `Control`'s LoRA RPCs (`LoadLora`, `UnloadLora`, `ListLoras`) and KV-event
-> RPCs (`GetKvEventSources`, `SubscribeKvEvents`) return `UNIMPLEMENTED`: the
-> LLM API has no runtime adapter load/unload entry point, and KV events are
-> published out of band. The sidecar uses neither.
+> `Control`'s LoRA RPCs (`LoadLora`, `UnloadLora`, `ListLoras`) remain `UNIMPLEMENTED`. KV routing discovers the engine's native ZMQ publishers with `GetKvEventSources`; it does not use the protobuf `SubscribeKvEvents` bridge.
 
 ## Protocol
 
@@ -107,6 +101,33 @@ dynamo-trtllm-sidecar \
   --grpc-endpoint 127.0.0.1:50051 \
   --model-path <model>
 ```
+
+For full KV-aware routing, enable native events and routing-load sampling on every OpenEngine server:
+
+**KV-routing image prerequisite:** build and install TensorRT-LLM from the matching KV-routing checkout, including its native C++ library and Python bindings, using that checkout's source-build instructions. Install `requirements-openengine.txt` from the same checkout and publish the resulting image under your own tag (for example, `tensorrt-llm-openengine:kv-routing`). The stock `1.3.0rc27.dev202609170000` image supports basic OpenEngine inference but does not provide `--openengine-enable-load-metrics` or the native changes required here; adding only OpenEngine protocol bindings does not enable this feature. A Python-only overlay is not a substitute for the native build.
+
+```yaml
+kv_cache_config:
+  use_kv_cache_manager_v2: true
+  enable_block_reuse: true
+  kv_cache_event_hash_algo: v1_block_key
+  kv_events_config:
+    enable_kv_cache_events: true
+    endpoint: tcp://*:5557
+```
+
+```bash
+trtllm-serve <model> --grpc --grpc-protocol openengine \
+  --openengine-enable-load-metrics --config <config.yaml> --port 50051
+dynamo-trtllm-sidecar \
+  --grpc-endpoint 127.0.0.1:50051 --model-path <model>
+```
+
+Run the frontend with `--router-mode kv`. Event discovery validates one msgpack ZMQ source per DP rank; load discovery validates one fresh snapshot per rank. Either feature can be disabled independently on the server. Only enabled occupancy starts the 100 ms load poller, with one `GetLoad` in flight. TensorRT-LLM samples CPU-side counters without iteration statistics or GPU synchronization. Disabling occupancy does not enlarge the attention-DP all-gather payload. DP targeting remains available with both telemetry features disabled.
+
+Negotiated heartbeat loss clears stale event residency after three heartbeat intervals; other backends without this capability retain their behavior. Load RPC failures are logged and do not reject inference. Last published load can remain stale during an outage; removing stale load from routing requires a separate framework health/expiry policy.
+
+The existing pinned OpenEngine Python bindings work without regeneration. Empty sources and absent occupancy fields disable their respective consumers. `UNIMPLEMENTED` is a legacy-server fallback; other discovery failures fail startup rather than silently disabling telemetry.
 
 The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)
 when it is supplied, and from `Control.GetModelInfo` otherwise; a disagreement
@@ -181,11 +202,7 @@ as the container command.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
-- A TensorRT-LLM engine image with OpenEngine gRPC support, layered on
-  `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc27.dev202609170000` or newer. The
-  release ships the servicer but not the OpenEngine Python bindings, which both
-  the servicer and the health probes below import, so add the pinned packages
-  from [Run](#run) on top of it and push the result.
+- A TensorRT-LLM engine image built from the matching KV-routing checkout, including native C++ bindings and the dependencies in its `requirements-openengine.txt`. Follow the KV-routing image prerequisite in [Run](#run); the stock rc27 image with only protocol bindings added cannot run this manifest. Replace the manifest's `tensorrt-llm-openengine:kv-routing` placeholder with the image you built and pushed.
 
 ### 1. Build and push the sidecar image
 

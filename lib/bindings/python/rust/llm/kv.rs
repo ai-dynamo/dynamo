@@ -1265,6 +1265,7 @@ impl KvEventPublisher {
         video_token_id: Option<u32>,
     ) -> PyResult<Self> {
         let source_config = zmq_endpoint.map(|ep| KvEventSourceConfig::Zmq {
+            liveness: None,
             endpoint: ep,
             topic: zmq_topic.unwrap_or_default(),
             image_token_id,

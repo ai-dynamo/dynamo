@@ -588,6 +588,7 @@ impl LLMEngine for VllmSidecarEngine {
                 ));
             }
             sources.push(KvEventSource::Zmq {
+                heartbeat_timeout: None,
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
