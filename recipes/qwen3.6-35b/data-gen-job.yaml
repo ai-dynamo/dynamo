@@ -33,7 +33,7 @@ spec:
         fsGroup: 0
       containers:
         - name: generate-datasets
-          image: ${VLLM_IMAGE}
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0
           imagePullPolicy: IfNotPresent
           # No privilege escalation, drop all Linux caps, default seccomp.
           # runAsUser:0 is set at the pod level for PVC fsGroup writes —
@@ -47,10 +47,10 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            # vllm-runtime-nightly:latest includes a recent generator, but the
+            # vllm-runtime:1.3.0 has git/python/numpy/pillow baked in. The
             # --shared-user-text and --uuid flags live on this benchmark
-            # branch. Shallow fetch the branch so the Job uses the exact same
-            # generator code the recipe was validated with.
+            # branch, so we shallow fetch the branch and run the generator
+            # from the clone rather than the image's older baked copy.
             - name: DYNAMO_REF
               value: "qiwa/vllm-ec-uuid-benchmark"
           command:
