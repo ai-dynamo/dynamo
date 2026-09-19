@@ -218,7 +218,15 @@ class ImageLoader:
         parsed_url = urlparse(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
-            key = normalized_url.lower()
+            # Scheme and host are case-insensitive (RFC 3986); userinfo, path,
+            # and query are not, so lowercase only the host and port. The
+            # fragment never reaches the origin, so it is dropped from the key.
+            # Rebuild from parsed components rather than slicing the raw string
+            # so that whitespace stripped by the parser cannot skew offsets.
+            userinfo, at, hostport = parsed_url.netloc.rpartition("@")
+            key = parsed_url._replace(
+                netloc=f"{userinfo}{at}{hostport.lower()}", fragment=""
+            ).geturl()
 
             if key in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
