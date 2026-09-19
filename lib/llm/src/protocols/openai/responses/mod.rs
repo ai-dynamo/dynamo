@@ -129,12 +129,24 @@ pub(crate) fn patch_response_for_spec(
     obj.insert("store".into(), serde_json::json!(store));
 }
 
+fn patch_response_usage_for_spec(usage: &mut serde_json::Map<String, serde_json::Value>) {
+    if let Some(serde_json::Value::Object(input_details)) = usage.get_mut("input_tokens_details") {
+        input_details
+            .entry("cache_write_tokens")
+            .or_insert(serde_json::json!(0));
+    }
+}
+
 impl Serialize for NvResponse {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut value = serde_json::to_value(&self.inner).map_err(serde::ser::Error::custom)?;
         let serde_json::Value::Object(obj) = &mut value else {
             return value.serialize(serializer);
         };
+
+        if let Some(serde_json::Value::Object(usage)) = obj.get_mut("usage") {
+            patch_response_usage_for_spec(usage);
+        }
 
         patch_response_for_spec(
             obj,
@@ -3896,6 +3908,24 @@ mod tests {
             Some(PromptCacheRetention::InMemory)
         );
         assert_eq!(resp.inner.safety_identifier.as_deref(), Some("user-abc"));
+    }
+
+    #[test]
+    fn test_usage_compatibility_patch_defaults_and_preserves_cache_write_tokens() {
+        let mut missing = serde_json::json!({
+            "input_tokens_details": {"cached_tokens": 3}
+        });
+        patch_response_usage_for_spec(missing.as_object_mut().unwrap());
+        assert_eq!(missing["input_tokens_details"]["cache_write_tokens"], 0);
+
+        let mut populated = serde_json::json!({
+            "input_tokens_details": {
+                "cached_tokens": 3,
+                "cache_write_tokens": 7
+            }
+        });
+        patch_response_usage_for_spec(populated.as_object_mut().unwrap());
+        assert_eq!(populated["input_tokens_details"]["cache_write_tokens"], 7);
     }
 
     /// Validate the JSON wire shape of NvResponse matches the OpenResponses

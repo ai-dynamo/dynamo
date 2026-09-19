@@ -1127,12 +1127,28 @@ impl Serialize for ResponseForSpec<'_> {
         serialize_optional_entry(&mut map, "top_logprobs", &response.top_logprobs)?;
         serialize_optional_entry(&mut map, "top_p", &response.top_p)?;
         serialize_optional_entry(&mut map, "truncation", &response.truncation)?;
-        map.serialize_entry("usage", &response.usage)?;
+        let usage = response.usage.as_ref().map(ResponseUsageForSpec);
+        map.serialize_entry("usage", &usage)?;
         map.serialize_entry("presence_penalty", &self.spec.presence_penalty)?;
         map.serialize_entry("frequency_penalty", &self.spec.frequency_penalty)?;
         map.serialize_entry("store", &self.spec.store)?;
 
         map.end()
+    }
+}
+
+/// Serialize the upstream usage model through the shared Responses
+/// compatibility patch. Restricting the temporary JSON value to the small
+/// usage subtree keeps the optimized streaming serializer intact.
+struct ResponseUsageForSpec<'a>(&'a ResponseUsage);
+
+impl Serialize for ResponseUsageForSpec<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut value = serde_json::to_value(self.0).map_err(serde::ser::Error::custom)?;
+        if let serde_json::Value::Object(usage) = &mut value {
+            super::patch_response_usage_for_spec(usage);
+        }
+        value.serialize(serializer)
     }
 }
 

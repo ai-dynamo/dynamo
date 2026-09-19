@@ -228,6 +228,60 @@ fn event_position(events: &[http_harness::JsonSseEvent], event_type: &str) -> us
         .unwrap_or_else(|| panic!("missing {event_type} event"))
 }
 
+fn assert_response_usage_has_cache_write_tokens(response: &Value) {
+    assert_eq!(
+        response.pointer("/usage/input_tokens_details"),
+        Some(&json!({
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+        }))
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn response_usage_includes_cache_write_tokens_for_unary_and_streaming() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+
+        let unary = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": false,
+            }),
+        )
+        .await;
+        assert_eq!(unary.status(), reqwest::StatusCode::OK);
+        assert_response_usage_has_cache_write_tokens(&unary.json().await.unwrap());
+
+        let streaming = post_responses(
+            &svc,
+            &json!({
+                "model": MODEL,
+                "input": "ping",
+                "stream": true,
+            }),
+        )
+        .await;
+        assert_eq!(streaming.status(), reqwest::StatusCode::OK);
+        let events = parse_json_sse(&streaming.text().await.unwrap())
+            .await
+            .unwrap();
+        let completed = events
+            .iter()
+            .find(|event| event.event == "response.completed")
+            .expect("missing response.completed event");
+        assert_response_usage_has_cache_write_tokens(&completed.data["response"]);
+
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn unary_text_baseline() {
