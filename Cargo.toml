@@ -56,7 +56,8 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.12.0" }
+# GeneratedRequests is post-0.12.0; this pin also preserves cancellation retirement.
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "830b3d33a39f0837d7a911034bfc0208f3b3510a" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }

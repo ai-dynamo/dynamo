@@ -7,7 +7,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import sys
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -178,7 +182,6 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
             "trace_paths": ["first.jsonl", "second.jsonl"],
             "trace_format": "dynamo",
             "arrival_speedup_ratio": 2.0,
-            "agentic_lanes": 4,
         },
         goal={"target": "throughput"},
     )
@@ -187,8 +190,40 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
     assert seen["arrival_speedup_ratio"] == 2.0
-    assert seen["agentic_lanes"] == 4
+    assert seen["agentic_lanes"] is None
     assert report.metrics["completed_requests"] == 2.0
+
+
+def test_trace_adapter_forwards_agentic_lanes_without_qualifying_runner(monkeypatch):
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 2})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_paths": ["first.jsonl", "second.jsonl"],
+            "trace_format": "dynamo",
+            "agentic_lanes": 4,
+        },
+        goal={"target": "throughput"},
+    )
+    runner = simulation.DynamoReplayRunnerFactory().create(0)
+
+    # Verify adapter plumbing separately from the public capability contract.
+    # Older optional AISimulate packages predate the explicit lane capability.
+    if hasattr(runner.capabilities, "supports_agentic_lanes"):
+        with pytest.raises(ValueError, match="runner does not support agentic_lanes"):
+            runner.run(spec)
+        assert not seen
+
+    runner._run_trace(spec, {})
+    assert seen["trace_files"] == ["first.jsonl", "second.jsonl"]
+    assert seen["agentic_lanes"] == 4
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
@@ -282,7 +317,11 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["num_decode_workers"] == 4
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics["output_throughput_tok_s"] == 99.0
+    # Newer AISimulate reports include nullable power metrics; older versions
+    # omit them. Neither case supplies measured power for this synthetic report.
+    assert report.metrics.get("power_w") is None
+    assert report.metrics.get("power_coverage") is None
 
 
 def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
@@ -316,7 +355,11 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
     assert seen["request_count"] == 200
     assert seen["replay_concurrency"] is None
     assert seen["arrival_interval_ms"] == 50.0
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics["output_throughput_tok_s"] == 99.0
+    # Newer AISimulate reports include nullable power metrics; older versions
+    # omit them. Neither case supplies measured power for this synthetic report.
+    assert report.metrics.get("power_w") is None
+    assert report.metrics.get("power_coverage") is None
 
 
 @pytest.mark.parametrize("request_rate", [0.0, -1.0])
@@ -453,3 +496,155 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
 
     with pytest.raises(RuntimeError, match="did not emit goodput"):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+@pytest.fixture
+def resource_api(monkeypatch):
+    """Exercise the adapter contract even with a pre-resource-API wheel."""
+
+    @dataclass(frozen=True)
+    class Estimate:
+        allocation_model: str
+        request_count: int
+        input_token_bytes: int
+        lower_bound_bytes: int
+        estimated_peak_bytes: int
+
+    def estimate_workload(workload, *, stack, concurrency):
+        assert stack == "dynamo"
+        return Estimate("dynamo-eager-u32-v1", workload["request_count"], 100, 100, 200)
+
+    api = SimpleNamespace(
+        ResourceEstimate=Estimate,
+        WORKER_BASELINE_BYTES=512 * 1024**2,
+        estimate_workload=estimate_workload,
+    )
+    monkeypatch.setattr(simulation, "_resources", api)
+    return api
+
+
+def test_resource_estimate_requires_native_generated_capability(
+    monkeypatch, resource_api
+):
+    core = simulation._core
+
+    factory = simulation.DynamoReplayRunnerFactory()
+    workload = {
+        "isl": 10240,
+        "osl": 1024,
+        "request_count": 6451200,
+        "concurrency": 64512,
+    }
+    monkeypatch.delattr(
+        core, "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL", raising=False
+    )
+    assert (
+        factory.estimate_host_resources(workload).allocation_model
+        == "dynamo-eager-u32-v1"
+    )
+    monkeypatch.setattr(
+        core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    estimate = factory.estimate_host_resources(workload)
+    assert isinstance(estimate, resource_api.ResourceEstimate)
+    assert estimate.allocation_model == "dynamo-generated-u32-v1"
+    assert estimate.input_token_bytes == 64512 * 10240 * 4
+    assert estimate.estimated_peak_bytes == (
+        512 * 1024**2 + 2 * 64512 * 10240 * 4 + 6451200 * (4096 + 16 * 1024)
+    )
+
+
+def test_resource_estimate_caps_prompt_storage_at_request_count(
+    monkeypatch, resource_api
+):
+    monkeypatch.setattr(
+        simulation._core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    estimate = simulation.DynamoReplayRunnerFactory().estimate_host_resources(
+        {"isl": 16, "osl": 4, "request_count": 2}, concurrency=8
+    )
+    assert estimate.input_token_bytes == 2 * 16 * 4
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"request_rate": 1.0},
+        {"arrival_interval_ms": 1.0},
+        {"turns_per_session": 2},
+        {"shared_prefix_ratio": 0.5},
+        {"num_prefix_groups": 1},
+        {"inter_turn_delay_ms": 1},
+    ],
+)
+def test_resource_estimate_keeps_conservative_fallback_for_other_paths(
+    monkeypatch, resource_api, extra
+):
+    monkeypatch.setattr(
+        simulation._core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    workload = {"isl": 16, "osl": 4, "request_count": 128, "concurrency": 8, **extra}
+    estimate = simulation.DynamoReplayRunnerFactory().estimate_host_resources(workload)
+    assert estimate.allocation_model != "dynamo-generated-u32-v1"
+
+
+def test_resource_estimate_preserves_unqualified_consumer_estimate(
+    monkeypatch, resource_api
+):
+    fallback = resource_api.ResourceEstimate("runner-unqualified-v1", 128, 0, 0, 0)
+    monkeypatch.setattr(
+        resource_api, "estimate_workload", lambda *args, **kwargs: fallback
+    )
+    monkeypatch.setattr(
+        simulation._core,
+        "OFFLINE_SYNTHETIC_CONCURRENCY_ALLOCATION_MODEL",
+        "generated-u32-v1",
+        raising=False,
+    )
+    workload = {"request_count": 128, "concurrency": 8, "turns_per_session": 2}
+    assert (
+        simulation.DynamoReplayRunnerFactory().estimate_host_resources(workload)
+        is fallback
+    )
+
+
+def test_resource_estimate_with_published_package_without_resources(monkeypatch):
+    # Load the real adapter with the optional module absent, even in development
+    # environments that happen to have a newer AISimulate source checkout.
+    monkeypatch.setitem(sys.modules, "aisimulate.resources", None)
+    name = "dynamo.replay._simulation_without_resources"
+    spec = importlib.util.spec_from_file_location(name, simulation.__file__)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, name, module)
+    spec.loader.exec_module(module)
+    assert (
+        module.DynamoReplayRunnerFactory().estimate_host_resources(
+            {"request_count": 128, "concurrency": 8}
+        )
+        is None
+    )
+
+    failure = MemoryError("native replay allocation failed")
+
+    def fail_replay(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(module, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(module.DynamoReplayRunner, "_run_synthetic", fail_replay)
+    replay_spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"isl": 16, "osl": 4, "request_count": 128, "concurrency": 8},
+        goal={"target": "throughput"},
+    )
+    with pytest.raises(MemoryError) as caught:
+        module.DynamoReplayRunnerFactory().create(0).run(replay_spec)
+    assert caught.value is failure
