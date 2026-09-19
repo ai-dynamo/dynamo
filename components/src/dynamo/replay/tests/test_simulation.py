@@ -577,6 +577,7 @@ def test_resource_estimate_caps_prompt_storage_at_request_count(
     [
         {"request_rate": 1.0},
         {"arrival_interval_ms": 1.0},
+        {"turns_per_session": 2},
         {"shared_prefix_ratio": 0.5},
         {"num_prefix_groups": 1},
         {"inter_turn_delay_ms": 1},

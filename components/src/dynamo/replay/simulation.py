@@ -88,6 +88,7 @@ class DynamoReplayRunnerFactory:
             or not active
             or workload.get("request_rate") is not None
             or workload.get("arrival_interval_ms") is not None
+            or workload.get("turns_per_session", 1) != 1
             or workload.get("shared_prefix_ratio", 0)
             or workload.get("num_prefix_groups", 0)
             or workload.get("inter_turn_delay_ms", 0)
