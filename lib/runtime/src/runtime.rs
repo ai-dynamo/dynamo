@@ -88,6 +88,8 @@ impl Runtime {
             }
         };
 
+        bound_global_rayon_pool();
+
         // Initialize compute pool with default config
         // This will be properly configured when created from RuntimeConfig
         let compute_pool = None;
@@ -377,6 +379,33 @@ impl Runtime {
             main_token.cancel();
         });
     }
+}
+
+/// Rayon's global pool defaults to one worker per core. In the frontend that
+/// pool only ever sees small tokenizer jobs, so on a many-core host most of
+/// those workers spend their time in the work-stealing loop, and the
+/// crossbeam-epoch bookkeeping behind it grows with the number of participants.
+/// Bound it once, before anything can lazily create the full-size pool.
+/// `RAYON_NUM_THREADS` still wins when set.
+fn bound_global_rayon_pool() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+            return;
+        }
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(8);
+        match rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .thread_name(|i| format!("dyn-rayon-{i}"))
+            .build_global()
+        {
+            Ok(()) => tracing::debug!("Bounded global rayon pool to {threads} threads"),
+            Err(e) => tracing::debug!("Global rayon pool already initialized: {e}"),
+        }
+    });
 }
 
 impl RuntimeType {
