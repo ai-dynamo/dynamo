@@ -604,23 +604,69 @@ mod tests {
 
     #[test]
     fn request_maps_native_fields_and_full_width_room() {
-        let mut request = request();
-        request.bootstrap_info = Some(BootstrapInfo {
-            bootstrap_host: "prefill".to_string(),
-            bootstrap_port: 5000,
-            bootstrap_room: i64::MAX as u64,
-            handoff_id: None,
-        });
-        let mapped =
-            build_generate_request(&request, "rid-1", DisaggregationMode::Decode, None, None)
-                .unwrap();
-        assert_eq!(mapped.input_ids, vec![1, 2, 3]);
-        assert_eq!(mapped.rid.as_deref(), Some("rid-1"));
-        assert_eq!(mapped.sampling_params.unwrap().max_new_tokens, Some(8));
-        assert_eq!(
-            mapped.disaggregated_params.unwrap().bootstrap_room,
-            i64::MAX
-        );
+        for flag in [None, Some(false), Some(true)] {
+            let count = |value| flag.map(|nonzero| if nonzero { value } else { 0 });
+            let scalar = |value| flag.map(|nonzero| if nonzero { value } else { 0.0 });
+            let mut request = request();
+            request.bootstrap_info = Some(BootstrapInfo {
+                bootstrap_host: "prefill".to_string(),
+                bootstrap_port: 5000,
+                bootstrap_room: i64::MAX as u64,
+                handoff_id: None,
+            });
+            request.sampling_options = SamplingOptions {
+                temperature: scalar(0.2),
+                top_p: scalar(0.9),
+                min_p: scalar(0.1),
+                top_k: count(7).map(|value| value as i32),
+                presence_penalty: scalar(0.3),
+                frequency_penalty: scalar(0.4),
+                repetition_penalty: scalar(1.1),
+                ..Default::default()
+            };
+            request.stop_conditions = StopConditions {
+                max_tokens: count(8),
+                min_tokens: count(2),
+                ignore_eos: flag,
+                stop: Some(vec!["done".to_string()]),
+                stop_token_ids: Some(vec![2, 3, 2]),
+                stop_token_ids_hidden: Some(vec![3, 4]),
+                ..Default::default()
+            };
+            request.output_options.logprobs = count(3);
+            request.output_options.prompt_logprobs = count(4);
+
+            let mapped =
+                build_generate_request(&request, "rid-1", DisaggregationMode::Decode, None, None)
+                    .unwrap();
+            assert_eq!(mapped.input_ids, vec![1, 2, 3]);
+            assert_eq!(mapped.rid.as_deref(), Some("rid-1"));
+            assert_eq!(mapped.stream, Some(true));
+            let sampling = mapped.sampling_params.unwrap();
+            let expected = &request.sampling_options;
+            assert_eq!(sampling.temperature, expected.temperature);
+            assert_eq!(sampling.top_p, expected.top_p);
+            assert_eq!(sampling.min_p, expected.min_p);
+            assert_eq!(sampling.top_k, expected.top_k);
+            assert_eq!(sampling.presence_penalty, expected.presence_penalty);
+            assert_eq!(sampling.frequency_penalty, expected.frequency_penalty);
+            assert_eq!(sampling.repetition_penalty, expected.repetition_penalty);
+            assert_eq!(sampling.max_new_tokens, count(8).map(|value| value as i32));
+            assert_eq!(sampling.min_new_tokens, count(2).map(|value| value as i32));
+            assert_eq!(sampling.ignore_eos, flag);
+            assert_eq!(sampling.stop, ["done"]);
+            assert_eq!(sampling.stop_token_ids, [2, 3, 4]);
+            assert_eq!(mapped.return_logprob, Some(flag.is_some()));
+            assert_eq!(mapped.top_logprobs_num, Some(count(4).unwrap_or(0) as i32));
+            assert_eq!(
+                mapped.logprob_start_len,
+                Some(if flag.is_some() { 0 } else { -1 })
+            );
+            assert_eq!(
+                mapped.disaggregated_params.unwrap().bootstrap_room,
+                i64::MAX
+            );
+        }
     }
 
     #[test]

@@ -34,6 +34,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+dynamo-sidecar-testkit = { path = "../../../sidecar/testkit" }
 dynamo-llm = { path = "../../../llm", default-features = false }
 dynamo-kv-router = { workspace = true }
 dynamo-runtime = { workspace = true }
