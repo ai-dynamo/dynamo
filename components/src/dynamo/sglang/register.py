@@ -37,10 +37,12 @@ from dynamo.sglang.capacity import (
     get_hicache_native_offloading_capacity,
     get_spec_decode_runtime_data,
     kv_event_block_size,
+    local_dp_rank_bounds,
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
 from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+from dynamo.sglang.kv_hints import parse_kvcr_extra_config, publish_kv_hint_capabilities
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -496,6 +498,18 @@ async def get_runtime_config(
             logging.warning(
                 f"Failed to attach SGLang spec decode runtime metadata: {e}"
             )
+
+    # KVCR (direct linker or HiCache backend): advertise this worker as a KV
+    # hint source. Local bounds, not model-card bounds: the control channel is
+    # per scheduler process, so only the DP ranks this node runs are dialable.
+    publish_kv_hint_capabilities(
+        runtime_config=runtime_config,
+        server_args=server_args,
+        extra_config=parse_kvcr_extra_config(
+            getattr(server_args, "hicache_storage_backend_extra_config", None)
+        ),
+        dp_bounds=local_dp_rank_bounds(server_args),
+    )
 
     mooncake_runtime_data = _get_mooncake_runtime_data(server_args)
     if mooncake_runtime_data is not None:

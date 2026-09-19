@@ -23,6 +23,7 @@ from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang._compat import (
     filter_supported_async_generate_kwargs,
+    kv_hints_kwargs,
     require_reasoning_kwargs,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -549,6 +550,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
+                **kv_hints_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
@@ -635,6 +637,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
+                **kv_hints_kwargs(self.engine, request),
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
