@@ -19694,6 +19694,9 @@ spec:
                       name:
                         description: Name references a PVC name defined in the top-level PVCs map
                         type: string
+                      subPath:
+                        description: Only used when UseAsCompilationCache is true
+                        type: string
                       useAsCompilationCache:
                         default: false
                         description: |-
@@ -19959,6 +19962,9 @@ spec:
                         pvcName references a user-created PVC by name. The PVC must exist in
                         the same namespace as the DynamoGraphDeployment.
                       minLength: 1
+                      type: string
+                    subPath:
+                      description: subPath override for the complication cache volume mount.
                       type: string
                   required:
                     - pvcName

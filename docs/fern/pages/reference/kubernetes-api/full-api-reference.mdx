@@ -2125,6 +2125,10 @@ Name references a PVC name defined in the top-level PVCs map
 MountPoint specifies where to mount the volume. If useAsCompilationCache is true and mountPoint is not specified, a backend-specific default will be used.
 </ParamField>
 
+<ParamField path="subPath" type="string">
+Only used when UseAsCompilationCache is true
+</ParamField>
+
 <ParamField path="useAsCompilationCache" type="boolean" default="false">
 UseAsCompilationCache indicates this volume should be used as a compilation cache. When true, backend-specific environment variables will be set and default mount points may be used.
 </ParamField>
@@ -2226,6 +2230,11 @@ pvcName references a user-created PVC by name. The PVC must exist in the same na
 
 <ParamField path="mountPath" type="string">
 mountPath overrides the backend-specific default mount path. When empty, the operator selects a default appropriate for the backend framework.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="subPath" type="string">
+subPath override for the complication cache volume mount.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
