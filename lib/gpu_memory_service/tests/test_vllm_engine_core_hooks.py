@@ -605,6 +605,94 @@ def test_bulk_hydration_invalidates_directory_if_native_install_fails():
     assert directory.released == []
 
 
+def test_read_pinned_hbm_adoption_remains_retryable(monkeypatch):
+    import gpu_memory_service.integrations.vllm.install_kv_leases as leases_mod
+    from gpu_memory_service.integrations.common.kv_lease_client import KVLease
+    from vllm.v1.core import kv_cache_utils
+
+    native_key = b"n" * 36
+    content_hash = leases_mod._directory_key(native_key)
+    old_entry = {
+        "tier": "hbm",
+        "state": "ready",
+        "slot_ids": [1],
+        "generations": [7],
+        "engine_id": "primary",
+        "local_key": native_key,
+    }
+
+    class Directory:
+        enabled = True
+        authoritative = True
+        read_view_is_current_writer = True
+
+        def __init__(self):
+            self.published = []
+
+        def lookup_and_claim(self, keys):
+            assert keys == [content_hash]
+            return [dict(old_entry)], "claim"
+
+        def adopt_claim(self, token, items):
+            assert token == "claim"
+            assert items == [{"content_hash": content_hash, "generations": [8]}]
+            return 1
+
+        def publish(self, items):
+            self.published.extend(items)
+            return len(items)
+
+        def release_claim(self, _token):
+            raise AssertionError("adopt_claim consumed the directory token")
+
+    class Client:
+        def __init__(self):
+            self.unpinned = []
+
+        def adopt(self, leases):
+            assert leases == [KVLease(1, 7)]
+            return []
+
+        def pin_read(self, leases):
+            assert leases == [KVLease(1, 7)]
+            return tuple(leases)
+
+        def unpin_read(self, claim):
+            self.unpinned.append(claim)
+
+    directory = Directory()
+    client = Client()
+    pool = SimpleNamespace(
+        _gms_hydrate_hbm=True,
+        _gms_kv_directory=directory,
+        _gms_kv_lease_client=client,
+        _gms_kv_leases_by_block={},
+        _gms_kv_directory_slot_by_hash={},
+    )
+    monkeypatch.setattr(leases_mod, "_hydrate_hbm_directory", lambda *_args: 0)
+    monkeypatch.setattr(
+        kv_cache_utils,
+        "make_block_hash_with_group_id",
+        lambda *_args: native_key,
+    )
+
+    assert leases_mod._get_cached_block(pool, lambda *_args: None, b"hash", [0]) is None
+    assert client.unpinned == [(KVLease(1, 7),)]
+    assert directory.published == [
+        {
+            "content_hash": content_hash,
+            "engine_id": "primary",
+            "slot_ids": [1],
+            "generations": [7],
+            "tier": "hbm",
+            "sealed": True,
+            "active": False,
+            "local_key": native_key,
+        }
+    ]
+    assert pool._gms_hydrate_hbm is True
+
+
 @pytest.mark.parametrize(
     ("engine_id", "expected"),
     [("0", False), ("1", True), ("shadow-a", True)],
