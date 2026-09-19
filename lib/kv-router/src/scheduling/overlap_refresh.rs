@@ -226,6 +226,7 @@ mod tests {
     use crate::indexer::{KvRouterError, MatchDetails, TieredMatchDetails};
     use crate::protocols::{OverlapScores, WorkerWithDpRank};
     use crate::scheduling::OverlapSignals;
+    use rustc_hash::FxHashMap;
     use std::{
         collections::HashMap,
         sync::{
@@ -277,8 +278,8 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             Some(RefreshedOverlap::from_overlap(OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::new(),
-                effective_cached_tokens: HashMap::new(),
+                effective_overlap_blocks: FxHashMap::default(),
+                effective_cached_tokens: FxHashMap::default(),
             }))
         }
     }
