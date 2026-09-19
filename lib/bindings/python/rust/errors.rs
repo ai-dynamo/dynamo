@@ -134,6 +134,18 @@ define_dynamo_exceptions!(
     (StreamIncomplete, BackendError::StreamIncomplete),
 );
 
+/// Convert a known Python Dynamo exception while keeping diagnostic text private.
+pub(crate) fn py_exception_to_dynamo_error(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
+    let (backend, message) = py_exception_to_backend_error(py, err)?;
+    let mut builder = DynamoError::builder()
+        .error_type(ErrorClass::Backend(backend))
+        .message(message);
+    if backend == BackendError::InvalidArgument {
+        builder = builder.public_message("Invalid request");
+    }
+    Some(builder.build())
+}
+
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
 /// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
 /// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.

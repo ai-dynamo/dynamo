@@ -52,12 +52,16 @@ fn new_failure_counter(metrics_prefix: Option<&str>) -> IntCounterVec {
 
 /// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
 static FAILURE_METRICS_PREFIX: OnceLock<String> = OnceLock::new();
+
+fn configured_failure_metrics_prefix(storage: &OnceLock<String>, requested: String) -> &String {
+    storage.get_or_init(|| requested)
+}
+
 pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
-    let prefix = FAILURE_METRICS_PREFIX.get_or_init(|| {
-        let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
-            .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
-        sanitize_frontend_prometheus_prefix(&raw)
-    });
+    let raw = std::env::var(env_metrics::DYN_METRICS_PREFIX)
+        .unwrap_or_else(|_| name_prefix::FRONTEND.to_string());
+    let requested = sanitize_frontend_prometheus_prefix(&raw);
+    let prefix = configured_failure_metrics_prefix(&FAILURE_METRICS_PREFIX, requested);
     new_failure_counter(Some(prefix.as_str()))
 });
 
@@ -904,9 +908,9 @@ impl Metrics {
         // needed — hardcode name_prefix::FRONTEND and drop the sanitize function.
         let raw_prefix = metrics_prefix.unwrap_or_else(|| name_prefix::FRONTEND.to_string());
         let prefix = sanitize_frontend_prometheus_prefix(&raw_prefix);
-        if let Err(configured_prefix) = FAILURE_METRICS_PREFIX.set(prefix.clone())
-            && configured_prefix != prefix
-        {
+        let configured_prefix =
+            configured_failure_metrics_prefix(&FAILURE_METRICS_PREFIX, prefix.clone());
+        if configured_prefix != &prefix {
             tracing::warn!(
                 configured=%configured_prefix,
                 requested=%prefix,
@@ -4343,6 +4347,15 @@ mod tests {
                 .iter()
                 .any(|family| family.name() == "nv_llm_http_service_failures_total")
         );
+    }
+
+    #[test]
+    fn semantic_failure_metric_prefix_keeps_first_process_value() {
+        let storage = OnceLock::new();
+        let first = configured_failure_metrics_prefix(&storage, "first_frontend".to_string());
+        let second = configured_failure_metrics_prefix(&storage, "second_frontend".to_string());
+
+        assert_eq!(second, first);
     }
 
     #[test]
