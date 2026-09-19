@@ -144,6 +144,7 @@ ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
 ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
+EPHEMERAL_PORT_RANGE_PATH = "/proc/sys/net/ipv4/ip_local_port_range"
 
 
 def _utc_now_rfc3339() -> str:
@@ -210,7 +211,7 @@ def _json_safe(value: Any) -> Any:
         try:
             return _json_safe(to_scalar())
         except Exception:
-            pass
+            logger.debug("Could not convert value via .item()", exc_info=True)
     return str(value).removeprefix("torch.")
 
 
@@ -476,6 +477,60 @@ def _bench_capture_engine(
         logger.warning("Engine provenance capture failed: %s", error, exc_info=True)
         engine["capture_error"] = str(error)
     return engine
+
+
+def _ephemeral_port_range(
+    path: str = EPHEMERAL_PORT_RANGE_PATH,
+) -> tuple[int, int] | None:
+    """The kernel's ephemeral port range, or None when it cannot be read.
+
+    Absent on non-Linux hosts, where there is nothing to warn about.
+    """
+    try:
+        with open(path) as f:
+            low_text, high_text = f.read().split()[:2]
+        low, high = int(low_text), int(high_text)
+    except Exception:
+        logger.debug("Could not read the ephemeral port range", exc_info=True)
+        return None
+    return (low, high) if low <= high else None
+
+
+def _warn_if_fpm_ports_ephemeral(
+    base_port: int, dp_size: int, path: str = EPHEMERAL_PORT_RANGE_PATH
+) -> str | None:
+    """Warn once when the FPM port block sits inside the ephemeral range.
+
+    Each DP rank binds ``base_port + dp_rank``; when ``dp_size > 1`` the
+    benchmark synchronizer also binds ``base_port + dp_size``. At
+    ``dp_size <= 1`` no synchronizer is ever constructed (see
+    ``_bench_init``'s ``if self._bench_dp_size > 1:`` gate), so the only
+    bound port is ``base_port`` itself. If the bound block overlaps the
+    range the kernel hands out for outbound connections, an unrelated
+    connection can take one of those ports first and the bind fails with
+    "Address already in use" -- intermittently, and only under load.
+    """
+    port_range = _ephemeral_port_range(path)
+    if port_range is None:
+        return None
+    try:
+        low, high = port_range
+        dp_size = int(dp_size)
+        first = base_port
+        last = base_port + dp_size if dp_size > 1 else base_port
+        if last < low or first > high:
+            return None
+        message = (
+            f"FPM ports {first}-{last} overlap this host's ephemeral port range "
+            f"{low}-{high}; an outbound connection can take one of them first and "
+            f"the publisher bind then fails intermittently. Set "
+            f"{ENV_FPM_PORT} to a base below {low}."
+        )
+        logger.warning(message)
+        return message
+    except Exception:
+        logger.debug("Could not evaluate the FPM port block", exc_info=True)
+        return None
 
 
 def recurrent_shadow_range(
@@ -2104,6 +2159,10 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_synchronizer: _BenchmarkSynchronizer | None = None
 
         base_port = int(os.environ.get(ENV_FPM_PORT, str(DEFAULT_FPM_PORT)))
+        _warn_if_fpm_ports_ephemeral(
+            base_port,
+            int(getattr(vllm_config.parallel_config, "data_parallel_size", 1) or 1),
+        )
         self._bench_init(vllm_config)
 
         port = base_port + dp_rank

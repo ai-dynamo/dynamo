@@ -6888,3 +6888,136 @@ def test_bench_init_wires_engine_capture_into_written_results(tmp_path):
         output = json.load(f)
     assert output["engine"]["parallel"]["data_parallel_rank"] == 7
     assert output["engine"]["parallel"]["data_parallel_rank"] == output["dp"]["rank"]
+
+
+# ---------------------------------------------------------------------------
+# FPM port block vs. the kernel's ephemeral port range
+# ---------------------------------------------------------------------------
+
+
+def _capture_scheduler_warnings(monkeypatch) -> list:
+    """Collect logger.warning calls without depending on logging config."""
+    warnings: list = []
+    monkeypatch.setattr(
+        instrumented_scheduler_module.logger,
+        "warning",
+        lambda message, *args, **kwargs: warnings.append(str(message)),
+    )
+    return warnings
+
+
+def test_fpm_port_warning_fires_once_when_the_block_overlaps(tmp_path, monkeypatch):
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        32760, 16, path=str(range_file)
+    )
+
+    assert message is not None
+    assert "32768" in message and "60999" in message
+    assert "DYN_FORWARDPASS_METRIC_PORT" in message
+    assert warnings == [message]
+
+
+def test_fpm_port_warning_silent_below_the_range(tmp_path, monkeypatch):
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768 60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        instrumented_scheduler_module.DEFAULT_FPM_PORT, 16, path=str(range_file)
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_fpm_port_warning_silent_without_the_proc_file(tmp_path, monkeypatch):
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        40000, 16, path=str(tmp_path / "absent")
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_fpm_port_warning_silent_on_garbage_proc_content(tmp_path, monkeypatch):
+    """A readable but unparseable file (corrupt mount, wrong file) must not
+    raise and must not warn -- same "cannot check" treatment as a missing
+    file."""
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("not-a-port\tnumber\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        40000, 16, path=str(range_file)
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_fpm_port_warning_scales_block_width_with_dp_size(tmp_path, monkeypatch):
+    """At dp_size <= 1 no _BenchmarkSynchronizer is ever constructed (see
+    _bench_init's ``if self._bench_dp_size > 1:`` gate), so the checked
+    block at dp_size=1 is just the lone publisher port [base_port,
+    base_port] -- not [base_port, base_port + 1]. A base_port one below the
+    ephemeral range's start must not warn at dp_size=1 (an off-by-one here
+    would warn at exactly this boundary), but the same base_port does warn
+    once dp_size is large enough for the real synchronizer port to reach
+    the range."""
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    silent = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        32767, 1, path=str(range_file)
+    )
+
+    assert silent is None
+    assert warnings == []
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        32767, 16, path=str(range_file)
+    )
+
+    assert message is not None
+    assert "32767-32783" in message
+    assert warnings == [message]
+
+
+def test_fpm_port_warning_survives_a_non_int_dp_size(tmp_path, monkeypatch):
+    """A malformed dp_size must not propagate past this function. Uses a
+    real, parseable range file so the failure is reached inside the
+    dp_size/block-arithmetic try (not short-circuited earlier by
+    _ephemeral_port_range returning None for a missing/garbage file) --
+    caught, debug-logged, and treated as "cannot evaluate": silent, not a
+    raise."""
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+    warnings = _capture_scheduler_warnings(monkeypatch)
+
+    message = instrumented_scheduler_module._warn_if_fpm_ports_ephemeral(
+        20380, "not-an-int", path=str(range_file)
+    )
+
+    assert message is None
+    assert warnings == []
+
+
+def test_ephemeral_port_range_reads_the_kernel_pair(tmp_path):
+    range_file = tmp_path / "ip_local_port_range"
+    range_file.write_text("32768\t60999\n")
+
+    assert instrumented_scheduler_module._ephemeral_port_range(str(range_file)) == (
+        32768,
+        60999,
+    )
+    assert (
+        instrumented_scheduler_module._ephemeral_port_range(str(tmp_path / "absent"))
+        is None
+    )
