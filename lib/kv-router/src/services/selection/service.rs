@@ -163,6 +163,10 @@ impl SelectionServiceBuilder {
                 .plugin_registry
                 .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
         };
+        #[cfg(not(test))]
+        if worker_selection_policy_factory.is_none() {
+            return Err(crate::plugins::WorkerSelectionPolicyRegistryError::MissingDefault.into());
+        }
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
         let recover_from_peers = !self.indexer_peers.is_empty();
@@ -317,6 +321,12 @@ impl SelectionService {
                     indexer_threads,
                     cancel_token.clone(),
                     SelectionCacheConfig::default(),
+                    std::sync::Arc::new(|config, role, _| {
+                        crate::WorkerSelectionPolicy::default(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    }),
                 )
                 .expect("valid test config"),
             ),

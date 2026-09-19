@@ -31,7 +31,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
-The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap, computes the least-loaded surviving worker in `WorkerScorer::prepare`, and scores active requests above that minimum. Preparation uses the same request snapshot as scoring and resets the minimum for every selection. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 
@@ -110,7 +110,7 @@ fn provider(
             config.clone(),
             worker_type.as_str(),
             filters,
-            vec![Box::new(ActiveRequestsScorer)],
+            vec![Box::new(ActiveRequestsScorer::default())],
             Box::new(RequestAwarePicker),
         )
     }))
@@ -372,3 +372,9 @@ python3 -m dynamo.mocker \
 ```
 
 Send the same `curl` request from a fourth terminal. The frontend log records separate prefill and decode selections. Each worker set runs its own filter, scorer, and picker.
+
+## Exact Prompt Length
+
+Filters, scorers, and pickers can read `context.prompt_tokens()` for the exact input token count. This returns the existing request value without a prompt copy or allocation. Use `context.request_blocks()` when the policy needs rounded KV blocks instead. For example, at 16 tokens per block, a 17-token prompt has 2 blocks.
+
+The builtin default now uses the public policy API too. Rust hosts install `dynamo_custom_policy_builtin::default_registry()` before adding custom providers. This supplies default selection for roles that the custom configuration does not replace.

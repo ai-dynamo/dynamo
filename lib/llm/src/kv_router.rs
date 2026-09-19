@@ -9,10 +9,12 @@ use std::{
 };
 
 use anyhow::Result;
+#[cfg(test)]
+use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    TrackingHashScope, WorkerSelectionPolicyFactory,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -123,7 +125,7 @@ impl SelectionPolicySource {
                 {
                     Some(factory) => factory,
                     None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-                        WorkerSelectionPolicy::default(config.clone(), label)
+                        dynamo_custom_policy_builtin::default_policy(config.clone(), label)
                     }),
                 },
             ),
@@ -1777,7 +1779,7 @@ impl KvRouter {
         Ok(self.selection.scheduler().get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            cache_hit_estimates.cached_tokens.into_iter().collect(),
+            cache_hit_estimates.cached_tokens,
             track_prefill_tokens,
         ))
     }
@@ -3231,7 +3233,7 @@ mod tests {
             let constructions = Arc::clone(&constructions);
             Arc::new(move |config: &KvRouterConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                WorkerSelectionPolicy::default(config.clone(), "decode")
+                dynamo_custom_policy_builtin::default_policy(config.clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();

@@ -110,7 +110,7 @@ fn legacy_plugins_resolve_through_the_common_registry() {
         .unwrap();
     let registry: RouterPluginRegistry = registry;
     let policy = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(policy.path(), "worker_selection:\n  aggregated: legacy\n  instances:\n    - name: legacy\n      type: legacy\n").unwrap();
+    std::fs::write(policy.path(), "worker_selection:\n  aggregated: legacy\n  prefill: legacy\n  decode: legacy\n  encode: legacy\n  instances:\n    - name: legacy\n      type: legacy\n").unwrap();
     let config = KvRouterConfig {
         router_policy_config: Some(policy.path().display().to_string()),
         ..Default::default()

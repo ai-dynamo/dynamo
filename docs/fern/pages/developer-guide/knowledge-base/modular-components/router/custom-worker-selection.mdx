@@ -11,13 +11,14 @@ subtitle: Build Rust filters, scorers, and pickers for the Dynamo frontend or EP
 
 ## How It Works
 
-This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `WorkerFilter` can exclude a host-eligible worker, a `WorkerScorer` assigns a finite cost to each remaining worker, Dynamo adds costs from all configured scorers, and a `WorkerPicker` chooses one row from the scored candidates. Filters run in declaration order before scoring, and rejecting every worker returns an error. Lower costs rank first by convention, but the picker can implement deterministic selection, sampling, tie-breaking, or policy-local state. Dynamo continues to own discovery, eligibility, score validation, accounting, and reservation.
+This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `WorkerFilter` can exclude a host-eligible worker, a `WorkerScorer` assigns a finite cost to each remaining worker, Dynamo adds costs from all configured scorers, and a `WorkerPicker` chooses one row from the scored candidates. Filters run in declaration order. Each scorer can then prepare an aggregate from all surviving workers before scoring each worker. Rejecting every worker returns an error. Lower costs rank first by convention, but the picker can implement deterministic selection, sampling, tie-breaking, or policy-local state. Dynamo continues to own discovery, eligibility, score validation, accounting, and reservation.
 
 ```mermaid
 flowchart LR
     Request["Incoming request"] --> Eligibility["Dynamo eligibility filters"]
     Eligibility --> Filters["WorkerFilter(s)<br/>keep or reject each worker"]
-    Filters --> Scorers["WorkerScorer(s)<br/>one cost per worker"]
+    Filters --> Prepare["WorkerScorer.prepare<br/>all surviving workers"]
+    Prepare --> Scorers["WorkerScorer.score<br/>one cost per worker"]
     Scorers --> Sum["Dynamo sums scorer costs"]
     Sum --> Picker["WorkerPicker<br/>one candidate row"]
     Picker --> Validate["Dynamo validates the row"]
@@ -37,11 +38,11 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 | Stage | Input | Output | Use this stage for |
 |---|---|---|---|
 | `WorkerFilter` | Request context and one host-eligible worker | Keep or reject | The rule is a hard requirement, not a ranking preference |
-| `WorkerScorer` | Request context and one eligible worker | One finite cost | The rule ranks workers or adds a penalty |
+| `WorkerScorer` | Request context; all surviving workers in `prepare`, one worker in `score` | One finite cost per worker | The rule ranks workers or adds a penalty |
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
 | Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
-An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
+An external policy owns its filters, scorers, and picker. The default scorer and picker are private components of `dynamo-custom-policy-builtin`. They implement the same public traits as external policies.
 
 ## Public Plugin API and Compatibility
 
@@ -143,7 +144,7 @@ Pass filters to `WorkerSelectionPolicy::new_with_filters`. If the policy has no 
 
 A scorer expresses a preference without excluding a worker. It returns one finite cost for one worker. Lower total cost is better by convention.
 
-This scorer uses the current number of active requests as its cost:
+This scorer first finds the lowest active-request count among surviving workers, then scores each worker by the number of requests above that minimum. Subtracting the same minimum from each cost preserves the ranking:
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
@@ -151,13 +152,34 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyError,
 };
 
-struct ActiveRequestsScorer;
+#[derive(Default)]
+struct ActiveRequestsScorer {
+    minimum: usize,
+}
 
 impl WorkerScorer for ActiveRequestsScorer {
+    /// Requests load inputs for the active-request count.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
 
+    /// Prepare a request-local minimum after all filters have run.
+    fn prepare(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidates: &[WorkerCandidate],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        self.minimum = usize::MAX;
+        for candidate in candidates {
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            self.minimum = self.minimum.min(load.active_requests());
+        }
+        Ok(())
+    }
+
+    /// Return a relative load cost. Subtracting the minimum preserves the ranking.
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
@@ -166,10 +188,12 @@ impl WorkerScorer for ActiveRequestsScorer {
         let load = candidate
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        Ok(load.active_requests() as f64)
+        Ok((load.active_requests() - self.minimum) as f64)
     }
 }
 ```
+
+`prepare` is optional and defaults to no work. Dynamo calls it once per scorer after filtering, before any `score` call. It receives a borrowed slice with the same declared inputs and snapshot used for scoring. Recompute request-local aggregates on each call. The slice order is unspecified, and the slice cannot be retained. Dynamo skips preparation when no candidates survive; a preparation error stops selection before picking or booking.
 
 A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
 
@@ -241,7 +265,7 @@ fn provider(
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
         ];
-        let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
+        let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer::default())];
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type.as_str(),
@@ -408,7 +432,10 @@ Request context and worker identity are always available. Dynamo calculates opti
 
 | Accessor | Meaning |
 |---|---|
-| `request_blocks()` | Incoming prompt size in KV blocks |
+| `prompt_tokens()` | Exact incoming prompt token count, borrowed from the request without allocation |
+| `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
+| `has_tier_matches()` | Whether the current request lookup contains any tier-specific matches, before policy filters |
+| `shared_cache_hits()` | Optional unweighted shared-cache ranges from the current lookup |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
@@ -590,9 +617,39 @@ Holding a classification future pauses admission before dispatch; it does not in
 - Return a valid picker row.
 - Treat candidate order as unspecified.
 - Request only the signal groups that the component reads.
-- Keep blocking I/O and panics out of `keep`, `score`, and `pick`.
+- Keep blocking I/O and panics out of `keep`, `prepare`, `score`, and `pick`.
 - Keep policy state local to the factory-created policy unless cross-partition sharing is a deliberate requirement.
 - Build the policy against the same Dynamo revision as the frontend or EPP.
 - If a signal adds work, storage, allocation, or another scan, run the worker-selection benchmark.
 
 The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) contains the in-tree package names and build-check commands. For the built-in cost model, see [Routing Concepts](routing-concepts.md). For the standalone selection lifecycle, see [Standalone Selection Service](standalone-selection.md).
+
+## Default Policy Plugin
+
+The default worker selector lives in `dynamo-custom-policy-builtin`, beside the two-tier policy. Routing hosts install `default_registry()` even when they do not link a custom catalog. An omitted policy or the reserved `default` selection uses that factory. A Rust embedding that constructs `SelectionServiceBuilder` must supply a registry with a default factory or an explicit policy factory.
+
+The default uses the same `RouterPluginRegistry` as custom worker policies and request classifiers. Installing it preserves the other registered providers. Resolving a classifier-only configuration still leaves worker selection on the builtin default; installing the default alone does not enable custom-plugin frontend restrictions.
+
+To configure a separate default-policy instance, use the named provider:
+
+```yaml
+worker_selection:
+  aggregated: tuned-default
+  instances:
+    - name: tuned-default
+      type: dynamo-default-cost-fn
+      parameters:
+        overlap_score_credit: 1.0
+        prefill_load_scale: 1.0
+        router_temperature: 0.0
+```
+
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. The default plugin uses configured parameters and does not apply per-request score or temperature overrides. Plain disaggregated decode remains load-only when prefill tracking is off and conditional disaggregation is disabled.
+
+`WorkerCacheInput::accounting_cache_estimate()` returns the host's weighted block estimate and rounded token estimate. Missing estimates are zero. These estimates are not clamped to prompt length and do not measure physical GPU residency. The plugin can use them without changing the load that the host records. `WorkerLoadInput::is_available()` distinguishes a missing load observation from an observed idle worker. Both values describe the current selection snapshot.
+
+The default scorer owns the cache and load formula, including preferred-taint costs. Its `prepare` method finds the minimum prefill load used to reduce cache credit on busier workers. The picker reads only the final costs and owns temperature sampling and tie-breaking. The host checks scorer costs and the selected row before booking; diagnostics use the selected row's summed scorer cost. `with_exclusive_affinity(true)` asks the host to constrain candidates to an eligible session-affinity target; explicit request pins remain mandatory for every policy.
+
+Direct Rust callers and replay import `DefaultWorkerSelector` from `dynamo_custom_policy_builtin`. Scheduler actors use `default_policy()` directly. The core's old selector is available only as a test and benchmark reference, not in production builds.
+
+The builtin crate keeps composition in `default/mod.rs`, the cost formula in `default/scorer.rs`, selection in `default/picker.rs`, startup parameters in `default/parameters.rs`, and the synchronous adapter in `default/selector.rs`. The two-tier policy remains in its own module. Preparation reads the existing snapshot; it adds no tracker synchronization. The routing core still projects load, selects and books serially, and processes request lifecycle updates.
