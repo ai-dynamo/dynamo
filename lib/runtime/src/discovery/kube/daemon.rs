@@ -14,6 +14,7 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::task::JoinHandle;
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
@@ -113,10 +114,11 @@ impl DiscoverySource {
         pod_info: &PodInfo,
         kube_client: KubeClient,
         events: mpsc::Sender<ReadinessEvent>,
-    ) -> Self {
-        let labels = Config::default()
-            .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
-            .labels("nvidia.com/dynamo-discovery-enabled=true");
+        token: CancellationToken,
+    ) -> (Self, JoinHandle<()>) {
+        let labels = Config::default().labels(
+            "nvidia.com/dynamo-discovery-backend=kubernetes,nvidia.com/dynamo-discovery-enabled=true",
+        );
 
         match pod_info.mode {
             KubeDiscoveryMode::Pod => {
@@ -125,25 +127,41 @@ impl DiscoverySource {
                 tracing::info!("Daemon watching EndpointSlices (pod mode)");
 
                 let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = endpoint_slice_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
-                                }
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                tracing::debug!(
+                                    "EndpointSlice reflector stopping on daemon shutdown"
+                                );
+                                break;
                             }
-                            Err(e) => {
-                                tracing::warn!("EndpointSlice reflector error: {e}");
+                            res = stream.next() => {
+                                let Some(res) = res else {
+                                    tracing::warn!(
+                                        "EndpointSlice reflector stream ended before daemon shutdown; store is now stale"
+                                    );
+                                    break;
+                                };
+                                match res {
+                                    Ok(event) => {
+                                        if let Some(event) = endpoint_slice_event(event)
+                                            && events.send(event).await.is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("EndpointSlice reflector error: {e}");
+                                    }
+                                }
                             }
                         }
                     }
                 });
 
-                Self::EndpointSlice(reader)
+                (Self::EndpointSlice(reader), task)
             }
             KubeDiscoveryMode::Container => {
                 let api: Api<Pod> = Api::namespaced(kube_client, &pod_info.pod_namespace);
@@ -151,25 +169,39 @@ impl DiscoverySource {
                 tracing::info!("Daemon watching Pods (container mode)");
 
                 let stream = reflector(writer, watcher(api, labels)).default_backoff();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = pod_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
-                                }
+                    loop {
+                        tokio::select! {
+                            _ = token.cancelled() => {
+                                tracing::debug!("Pod reflector stopping on daemon shutdown");
+                                break;
                             }
-                            Err(e) => {
-                                tracing::warn!("Pod reflector error: {e}");
+                            res = stream.next() => {
+                                let Some(res) = res else {
+                                    tracing::warn!(
+                                        "Pod reflector stream ended before daemon shutdown; store is now stale"
+                                    );
+                                    break;
+                                };
+                                match res {
+                                    Ok(event) => {
+                                        if let Some(event) = pod_event(event)
+                                            && events.send(event).await.is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Pod reflector error: {e}");
+                                    }
+                                }
                             }
                         }
                     }
                 });
 
-                Self::Pod(reader)
+                (Self::Pod(reader), task)
             }
         }
     }
@@ -225,7 +257,13 @@ impl DiscoveryDaemon {
         tracing::info!("Discovery daemon starting");
 
         let (readiness_tx, mut readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
-        let source = DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
+        let reflector_token = self.cancel_token.child_token();
+        let (source, readiness_task) = DiscoverySource::new(
+            &self.pod_info,
+            self.kube_client.clone(),
+            readiness_tx,
+            reflector_token.clone(),
+        );
 
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
@@ -239,19 +277,36 @@ impl DiscoveryDaemon {
 
         let cr_reflector_stream =
             reflector(cr_writer, watcher(metadata_crs, Config::default())).default_backoff();
-        tokio::spawn(async move {
+        let cr_token = reflector_token.clone();
+        let cr_task = tokio::spawn(async move {
             tokio::pin!(cr_reflector_stream);
-            while let Some(res) = cr_reflector_stream.next().await {
-                match res {
-                    Ok(event) => {
-                        if let Some(event) = cr_event(event)
-                            && cr_tx.send(event).await.is_err()
-                        {
-                            break;
+            loop {
+                tokio::select! {
+                _ = cr_token.cancelled() => {
+                    tracing::debug!(
+                        "DynamoWorkerMetadata reflector stopping on daemon shutdown"
+                    );
+                    break;
+                }
+                res = cr_reflector_stream.next() => {
+                    let Some(res) = res else {
+                        tracing::warn!(
+                            "DynamoWorkerMetadata reflector stream ended before daemon shutdown; store is now stale"
+                        );
+                        break;
+                    };
+                        match res {
+                            Ok(event) => {
+                                if let Some(event) = cr_event(event)
+                                    && cr_tx.send(event).await.is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
                     }
                 }
             }
@@ -261,17 +316,17 @@ impl DiscoveryDaemon {
         let mut readiness_index = ReadinessIndex::default();
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
-        loop {
+        let result = loop {
             let mut changes = BatchChanges::default();
 
             tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     tracing::info!("Discovery daemon received cancellation");
-                    break;
+                    break Ok(());
                 }
                 event = readiness_rx.recv() => {
                     let Some(event) = event else {
-                        anyhow::bail!("Readiness reflector stream stopped");
+                        break Err(anyhow::anyhow!("Readiness reflector stream stopped"));
                     };
                     apply_readiness_event(
                         event,
@@ -283,7 +338,7 @@ impl DiscoveryDaemon {
                 }
                 event = cr_rx.recv() => {
                     let Some(event) = event else {
-                        anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
+                        break Err(anyhow::anyhow!("DynamoWorkerMetadata reflector stream stopped"));
                     };
                     apply_cr_event(
                         event,
@@ -312,10 +367,26 @@ impl DiscoveryDaemon {
                     event_tx.send(event).ok();
                 }
             }
+        };
+
+        reflector_token.cancel();
+        drop(readiness_rx);
+        drop(cr_rx);
+        for (kind, task) in [
+            ("readiness", readiness_task),
+            ("DynamoWorkerMetadata", cr_task),
+        ] {
+            if let Err(error) = task.await {
+                if error.is_panic() {
+                    tracing::warn!(kind, "Reflector task panicked: {error}");
+                } else {
+                    tracing::debug!(kind, "Reflector task did not exit cleanly: {error}");
+                }
+            }
         }
 
         tracing::info!("Discovery daemon stopped");
-        Ok(())
+        result
     }
 }
 
