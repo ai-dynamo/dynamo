@@ -218,7 +218,12 @@ class ImageLoader:
         parsed_url = urlparse(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
-            key = normalized_url.lower()
+            # Scheme and host are case-insensitive (RFC 3986); the path, query,
+            # and fragment are not. Lowercase only the prefix so that URLs
+            # differing in path case, which point at distinct resources on
+            # case-sensitive stores, do not collide on one cache entry.
+            prefix_len = len(parsed_url.scheme) + 3 + len(parsed_url.netloc)
+            key = normalized_url[:prefix_len].lower() + normalized_url[prefix_len:]
 
             if key in self._image_cache:
                 logger.debug(f"Image found in cache for URL: {image_url}")
