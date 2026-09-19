@@ -43,7 +43,7 @@ use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
 use llm_rs::kv_router::SelectionPolicySource;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
-use tracing;
+use tracing::{self, Instrument};
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
@@ -2114,13 +2114,17 @@ impl KvRouter {
     fn process_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_size: usize,
+        dispatch_span: Option<tracing::Span>,
     ) -> PyResult<Bound<'p, PyAny>> {
         crate::future_into_py(py, async move {
-            let single_in = SingleIn::new(request);
-            let stream = inner.generate(single_in).await.map_err(to_pyerr)?;
+            let stream = match dispatch_span {
+                Some(span) => inner.generate(request).instrument(span).await,
+                None => inner.generate(request).await,
+            }
+            .map_err(to_pyerr)?;
             let (tx, rx) =
                 tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(response_buffer_size);
 
@@ -2188,17 +2192,23 @@ impl KvRouter {
     fn dispatch_request_to_stream<'p>(
         py: Python<'p>,
         inner: Arc<RsRoutingHost>,
-        request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        request: SingleIn<llm_rs::protocols::common::preprocessor::PreprocessedRequest>,
         tracker: Option<Arc<RequestTracker>>,
         response_buffer_mode: ResponseBufferMode,
+        dispatch_span: Option<tracing::Span>,
     ) -> PyResult<Bound<'p, PyAny>> {
         match response_buffer_mode {
             ResponseBufferMode::Rendezvous => {
-                demand_driven::process_request_to_stream(py, inner, request, tracker)
+                demand_driven::process_request_to_stream(py, inner, request, tracker, dispatch_span)
             }
-            ResponseBufferMode::Buffered(capacity) => {
-                Self::process_request_to_stream(py, inner, request, tracker, capacity)
-            }
+            ResponseBufferMode::Buffered(capacity) => Self::process_request_to_stream(
+                py,
+                inner,
+                request,
+                tracker,
+                capacity,
+                dispatch_span,
+            ),
         }
     }
 }
@@ -2422,18 +2432,22 @@ impl KvRouter {
         Self::dispatch_request_to_stream(
             py,
             self.inner.clone(),
-            request,
+            SingleIn::new(request),
             Some(tracker),
             response_buffer_size,
+            None,
         )
     }
 
-    #[pyo3(signature = (request, response_buffer_size=100))]
+    /// Generate from a preprocessed request while optionally preserving its
+    /// parent Python context across the PyO3 task boundary.
+    #[pyo3(signature = (request, response_buffer_size=100, context=None))]
     fn generate_from_request<'p>(
         &self,
         py: Python<'p>,
         request: PyObject,
         response_buffer_size: isize,
+        context: Option<crate::context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let response_buffer_size = validate_response_buffer_size(response_buffer_size)?;
         // Depythonize the request directly into PreprocessedRequest
@@ -2449,6 +2463,10 @@ impl KvRouter {
                 t
             }
         };
+        let request = crate::create_request_context(request, &context);
+        let dispatch_span = context
+            .as_ref()
+            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"));
 
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
@@ -2457,6 +2475,7 @@ impl KvRouter {
             request,
             Some(tracker),
             response_buffer_size,
+            dispatch_span,
         )
     }
 

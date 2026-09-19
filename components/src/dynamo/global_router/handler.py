@@ -79,12 +79,15 @@ class GlobalRouterHandler:
         namespaces: List[str],
         clients: Dict[str, Client],
         pool_priorities: List[int],
+        context=None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Forward a request to the selected pool and retry faster pools on failure.
 
         Retry order is controlled by pool priorities: lower priority numbers are
-        faster, so retries walk from the selected pool toward faster pools.
+        faster, so retries walk from the selected pool toward faster pools. The
+        inbound context is reused on every attempt so cancellation, request
+        metadata, and distributed trace identity cross the router boundary.
         """
         pool_order = get_priority_retry_order(
             selected_pool=initial_pool_idx,
@@ -98,13 +101,21 @@ class GlobalRouterHandler:
             yielded_output = False
 
             try:
-                stream = await client.generate(request)
+                stream = await client.generate(request, context=context)
                 async for output in stream:
                     yielded_output = True
                     data = output.data() if hasattr(output, "data") else output
                     yield data
                 return
             except Exception as e:
+                if context is not None and (
+                    context.is_stopped() or context.is_killed()
+                ):
+                    logger.debug(
+                        "Request context was cancelled; skipping priority retry"
+                    )
+                    raise
+
                 is_last_attempt = attempt_idx == len(pool_order) - 1
                 if yielded_output:
                     logger.error(
@@ -206,7 +217,7 @@ class GlobalRouterHandler:
         logger.info(f"Global Router initialized (agg): {len(self.agg_clients)} pools")
 
     async def handle_prefill(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context=None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle prefill requests from the frontend (disagg mode).
@@ -260,11 +271,12 @@ class GlobalRouterHandler:
             namespaces=self.config.prefill_pool_dynamo_namespaces,
             clients=self.prefill_clients,
             pool_priorities=self.config.prefill_pool_priorities,
+            context=context,
         ):
             yield data
 
     async def handle_decode(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context=None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle decode requests from the frontend (disagg mode).
@@ -318,11 +330,12 @@ class GlobalRouterHandler:
             namespaces=self.config.decode_pool_dynamo_namespaces,
             clients=self.decode_clients,
             pool_priorities=self.config.decode_pool_priorities,
+            context=context,
         ):
             yield data
 
     async def handle_generate(
-        self, request: Dict[str, Any]
+        self, request: Dict[str, Any], context=None
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Handle generate requests (agg mode).
@@ -388,6 +401,7 @@ class GlobalRouterHandler:
             namespaces=self.config.agg_pool_dynamo_namespaces,
             clients=self.agg_clients,
             pool_priorities=self.config.agg_pool_priorities,
+            context=context,
         ):
             yield data
 
