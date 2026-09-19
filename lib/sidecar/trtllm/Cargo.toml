@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
+build = "api/build.rs"
 name = "dynamo-trtllm-sidecar"
 version.workspace = true
 edition.workspace = true
@@ -15,9 +16,12 @@ description = "Dynamo TensorRT-LLM sidecar backend — drives an out-of-process 
 # Referenced by the protobuf client generated into OUT_DIR at build time.
 ignored = ["prost"]
 
+[lib]
+path = "api/lib.rs"
+
 [[bin]]
 name = "dynamo-trtllm-sidecar"
-path = "src/main.rs"
+path = "api/main.rs"
 
 [dependencies]
 dynamo-backend-common = { workspace = true }

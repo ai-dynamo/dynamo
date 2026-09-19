@@ -5,7 +5,9 @@
 
 mod args;
 mod endpoint;
+#[path = "../src/error.rs"]
 mod error;
+#[path = "../src/transport.rs"]
 mod transport;
 
 #[cfg(feature = "tonic-v14")]
@@ -15,13 +17,16 @@ pub mod v14 {
     pub use crate::error::status_to_dynamo_v14 as status_to_dynamo;
 
     // Keep connection policy identical across Tonic versions.
-    include!("transport.rs");
+    include!("../src/transport.rs");
 }
 
 pub use args::{GrpcTransportArgs, GrpcTransportConfig, SidecarArgs};
 pub use endpoint::{GrpcEndpoint, HttpEndpoint};
 pub use error::{
-    SidecarStartupError, cannot_connect, connection_timeout, engine_shutdown, invalid_argument,
-    protocol_error, status_to_dynamo,
+    cannot_connect, connection_timeout, engine_shutdown, invalid_argument, protocol_error,
+    status_to_dynamo,
 };
 pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain};
+
+mod startup;
+pub use startup::SidecarStartupError;

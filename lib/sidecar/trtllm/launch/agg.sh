@@ -90,7 +90,7 @@ if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
 fi
 
 # `--grpc` needs `smg-grpc-proto`. Pinned to the exact version
-# lib/sidecar/trtllm/proto/trtllm_service.proto was vendored from (see
+# lib/sidecar/trtllm/api/proto/trtllm_service.proto was vendored from (see
 # proto/README.md's checksum) -- 0.4.2 lacks the include_stop_token_in_output
 # field (added by 0.4.14) our proto and Rust code both expect, which makes
 # every request fail with "'GenerateRequest' object has no attribute
