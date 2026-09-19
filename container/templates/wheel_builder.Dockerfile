@@ -90,6 +90,13 @@ RUN apt-get update && \
     fi && \
     rm -f /tmp/xpu-smi.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# _sycl_vmm requires DPC++ for its -fsycl compilation.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        intel-oneapi-compiler-dpcpp-cpp-2025.3 && \
+    ln -s "$(find /opt/intel/oneapi/compiler -type f -name icpx -print -quit)" /usr/local/bin/icpx && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 {% if device == "xpu" or device == "cpu" %}
@@ -235,7 +242,9 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # imports yaml at module scope); the system python3 doesn't ship it.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
+    uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed{% if framework == "vllm" and device == "xpu" %} && \
+    echo "/opt/venv/lib/python${PYTHON_VERSION}/site-packages" > \
+        "${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/vllm-xpu-base.pth"{% endif %} && \
     uv pip install --upgrade auditwheel meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
 
 ARG NIXL_UCX_REF
@@ -726,14 +735,21 @@ RUN mkdir -p /opt/dynamo/dist ${CARGO_TARGET_DIR} && \
 COPY lib/gpu_memory_service/ /opt/dynamo/lib/gpu_memory_service/
 {% endif %}
 
-# Build gpu-memory-service wheel → /opt/dynamo/dist/gpu_memory_service*.whl (small C++ extension, fast build -- all targets, all frameworks)
-{% if device == "cuda" %}
-# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+{% if device in ("cuda", "xpu") %}
+# Build gpu_memory_service wheel with the device-specific native extension.
 ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
         export UV_CACHE_DIR=/root/.cache/uv && \
         source ${VIRTUAL_ENV}/bin/activate && \
+{% if framework == "vllm" and device == "xpu" %}
+        cmake -S /opt/dynamo/lib/gpu_memory_service/common/vmm/_sycl_vmm \
+            -B /tmp/gpu_memory_service_sycl_vmm \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=icpx && \
+        cmake --build /tmp/gpu_memory_service_sycl_vmm --parallel && \
+        cmake --install /tmp/gpu_memory_service_sycl_vmm --prefix /opt/dynamo/lib && \
+{% endif %}
         uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
     fi
 {% endif %}
