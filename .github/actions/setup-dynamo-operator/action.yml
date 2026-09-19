@@ -597,11 +597,14 @@ runs:
         # propagation can lag in either direction. The READY column confirms
         # container readiness reported by each webhook-aware probe; the
         # admission smoke tests below are the authoritative end-to-end gate.
+        # Evicted and completed Pods can remain after their replacements are
+        # ready. Count only active Pods so those stale objects cannot block setup.
         end=$((SECONDS + 1800))
         while true; do
           POD_STATUSES=()
           mapfile -t POD_STATUSES < <(
-            kubectl get pods -n "${NAMESPACE}" --no-headers 2>/dev/null \
+            kubectl get pods -n "${NAMESPACE}" --no-headers \
+              --field-selector=status.phase!=Failed,status.phase!=Succeeded 2>/dev/null \
               | awk '
                   $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
                   $1 ~ /^grove-operator-/ {
