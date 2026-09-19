@@ -197,8 +197,10 @@ would mis-address the KV cache groups.
 | pre-flight | unsupported variant (`n != 1`) | 400 | `unsupported_pd_variant` |
 | pre-flight | client-injected handoff | 400 | `invalid_pd_request` |
 | pre-flight | body over cap | 413 | `pd_request_too_large` |
+| pre-flight | request body did not arrive in time | 408 | `pd_request_timeout` |
 | prefill | connect failure | 502 | `prefill_upstream_unavailable` |
-| prefill | read timeout | 504 | `prefill_upstream_timeout` |
+| prefill | read timeout (one gap between reads) | 504 | `prefill_upstream_timeout` |
+| prefill | prefill leg exceeded its total deadline | 504 | `prefill_deadline_exceeded` |
 | prefill | HTTP error status | upstream status | `prefill_upstream_error` |
 | prefill | response over cap | 502 | `prefill_response_too_large` |
 | prefill | non-JSON / truncated / SSE | 502 | `invalid_prefill_handoff` |
