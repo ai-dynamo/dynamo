@@ -1563,6 +1563,27 @@
         }
       ]
     },
+    "nvidia.com.v1alpha1.LPXGraphDeployment": {
+      "properties": {
+        "apiVersion": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "x-kubernetes-group-version-kind": [
+        {
+          "group": "nvidia.com",
+          "kind": "LPXGraphDeployment",
+          "version": "v1alpha1"
+        }
+      ]
+    },
     "nvidia.com.v1beta1.DynamoComponentDeployment": {
       "properties": {
         "apiVersion": {

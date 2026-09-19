@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 166 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">69 types</Card>
-<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">73 types</Card>
+<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
 <div id="nvidia-com-v1alpha1" />
@@ -161,7 +161,7 @@ See [ProviderOverride](#provideroverride).
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-PodTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. No component type supports it in this release.
+PodTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -471,7 +471,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. All LPX components in a DGD must declare exactly one conductor role in total. Every LPX role requires its own podTemplate.
 See [ComponentRoleSpec](#componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -491,6 +491,12 @@ See [EPPConfig](#eppconfig).
 <ParamField path="frontendSidecar" type="FrontendSidecarSpec">
 FrontendSidecar configures an auto-generated frontend sidecar container. When specified, the operator injects a fully configured frontend container with all standard Dynamo environment variables, health probes, and ports. This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
 See [FrontendSidecarSpec](#frontendsidecarspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lpx" type="LPXConfig">
+LPX holds LPX integration configuration. Only meaningful when ComponentType is "lpx".
+See [LPXConfig](#lpxconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -638,7 +644,7 @@ See [MultinodeSpec](#multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
+Roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. All LPX components in a DGD must declare exactly one conductor role in total. Every LPX role requires its own podTemplate. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -982,6 +988,12 @@ See [ProviderOverride](#provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="scheduling" type="SchedulingSpec">
+Scheduling configures attempts for LPX components. Omission means no deadline.
+See [SchedulingSpec](#schedulingspec).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="annotations" type="object (keys:string, values:string)">
 Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates). Service-level annotations take precedence over these values.
 **Validation:** Optional: \&#123;\&#125;
@@ -1089,6 +1101,12 @@ See [RollingUpdateStatus](#rollingupdatestatus).
 <ParamField path="placement" type="PlacementStatus">
 Placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
 See [PlacementStatus](#placementstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
+LPX contains the status of the graph's LPX workload, when present.
+See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2016,6 +2034,11 @@ GPUsPerReplica is the unique GPU allocation added when this service scales by on
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="ready" type="boolean">
+Ready is the binary determination of whether the correct number of replicas are scheduled and available.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 Replicas is the total number of non-terminated replicas. Required for all component kinds.
 **Validation:** Minimum: 0
@@ -2380,6 +2403,11 @@ gpusPerReplica is the unique GPU allocation added when this component scales by 
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
+<ParamField path="ready" type="boolean">
+ready is the binary determination of whether the correct number of replicas are scheduled and available.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
 <ParamField path="replicas" type="integer">
 replicas is the total number of non-terminated replicas.
 **Validation:** Minimum: 0
@@ -2431,7 +2459,7 @@ See [ProviderOverride](#v1beta1-provideroverride).
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates. No component type supports it in this release.
+podTemplate defines the Pod configuration for this role. Admission permits it only when the enclosing component type explicitly supports role-specific Pod templates.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2447,7 +2475,7 @@ are first-class values: users can set them directly and downstream consumers
 
 **Kind:** `enum`
 **Underlying type:** `string`
-**Validation:** Enum: [frontend worker prefill decode planner epp]
+**Validation:** Enum: [frontend worker prefill decode planner epp lpx]
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
 
 **Allowed values**
@@ -2458,6 +2486,7 @@ are first-class values: users can set them directly and downstream consumers
 - <Badge intent="note" minimal>decode</Badge>
 - <Badge intent="note" minimal>planner</Badge>
 - <Badge intent="note" minimal>epp</Badge>
+- <Badge intent="note" minimal>lpx</Badge>
 </Accordion>
 
 <Accordion id="dgdrphase" title="DGDRPhase">
@@ -2593,7 +2622,7 @@ See [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec).
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamocomponentdeploymentsharedspec" title="DynamoComponentDeploymentSharedSpec">
+<Accordion id="v1beta1-dynamocomponentdeploymentsharedspec" title="v1beta1 DynamoComponentDeploymentSharedSpec">
 DynamoComponentDeploymentSharedSpec is the shared configuration used by both
 standalone DCDs and by the components embedded in a DynamoGraphDeployment.
 
@@ -2602,9 +2631,9 @@ v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
 volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 replaced with a single `podTemplate` field holding a native
 `corev1.PodTemplateSpec`. The operator injects its defaults into the
-container named `"main"` and merges user overrides using strategic-merge-by-name
-semantics. Users can add sidecars, init containers, and pod-level configuration
-directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+container named `"main"` and merges user overrides. Users can add sidecars,
+init containers, and pod-level configuration directly in `podTemplate`
+without any `extraPodSpec`-style escape hatch.
 
 
 **Kind:** `type`
@@ -2624,7 +2653,7 @@ name is the stable logical identifier for this component within its DynamoGraphD
 <ParamField path="type" type="ComponentType">
 type indicates the role of this component within a Dynamo graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are first-class values, users can set them directly.
 See [ComponentType](#componenttype).
-**Validation:** Enum: [frontend worker prefill decode planner epp]  Optional: \&#123;\&#125;
+**Validation:** Enum: [frontend worker prefill decode planner epp lpx]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -2660,7 +2689,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="ComponentRoleSpec array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. All LPX components in a DGD must declare exactly one conductor role in total. Every LPX role requires its own podTemplate.
 See [ComponentRoleSpec](#v1beta1-componentrolespec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2686,6 +2715,12 @@ See [ScalingAdapter](#v1beta1-scalingadapter).
 <ParamField path="eppConfig" type="EPPConfig">
 eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin components. Only meaningful when `type` is `epp`. Deprecated: omit this field for the native Rust EPP. Presence of `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config mount) so existing DGDs keep running across operator upgrades until migration is started by clearing this field.
 See [EPPConfig](#v1beta1-eppconfig).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lpx" type="LPXConfig">
+lpx holds LPX integration configuration. Only meaningful when `type` is `lpx`.
+See [LPXConfig](#lpxconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2733,7 +2768,7 @@ name is the stable logical identifier for this component within its DynamoGraphD
 <ParamField path="type" type="ComponentType">
 type indicates the role of this component within a Dynamo graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are first-class values, users can set them directly.
 See [ComponentType](#componenttype).
-**Validation:** Enum: [frontend worker prefill decode planner epp]  Optional: \&#123;\&#125;
+**Validation:** Enum: [frontend worker prefill decode planner epp lpx]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
@@ -2769,7 +2804,7 @@ See [MultinodeSpec](#v1beta1-multinodespec).
 </ParamField>
 
 <ParamField path="roles" type="object array">
-roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
+roles expose the named Pod-producing parts inside a compound component. When set for a multinode component, this list must contain exactly one leader and one worker role. Admission defaults omitted replicas to 1 for leader and multinode.nodeCount minus 1 for worker. Omitting the roles list preserves the implicit multinode role layout. LPX components each require an agent role. All LPX components in a DGD must declare exactly one conductor role in total. Every LPX role requires its own podTemplate. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2889,6 +2924,27 @@ v1beta1 releases. Component-level experimental features live under
 <ParamField path="kvTransferPolicy" type="KvTransferPolicy">
 kvTransferPolicy configures topology-aware routing for KV-cache transfers between prefill and decode workers.
 See [KvTransferPolicy](#v1beta1-kvtransferpolicy).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="dynamographdeploymentlpxstatus" title="DynamoGraphDeploymentLPXStatus">
+DynamoGraphDeploymentLPXStatus contains the public status of a graph's LPX workload.
+Both served DGD versions use this type, so conversion preserves its live fields natively.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus), [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
+
+<ParamField path="modelDownload" type="ModelDownloadStatus">
+modelDownload contains the model download status for remote builds.
+See [ModelDownloadStatus](#modeldownloadstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="placement" type="PlacementStatus">
+placement contains LPX scheduling progress and placement signals.
+See [PlacementStatus](#v1beta1-placementstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3146,7 +3202,7 @@ See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamographdeploymentspec" title="DynamoGraphDeploymentSpec">
+<Accordion id="v1beta1-dynamographdeploymentspec" title="v1beta1 DynamoGraphDeploymentSpec">
 DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 
 
@@ -3156,6 +3212,12 @@ DynamoGraphDeploymentSpec defines the desired state of a DynamoGraphDeployment.
 <ParamField path="providerOverride" type="ProviderOverride">
 providerOverride configures the root resource generated by the selected graph-level workload provider. For Grove it uses apiVersion `grove.io/v1alpha1`, target `PodCliqueSet`, and may set only `spec.template.topologyConstraint`. It cannot select or change the provider.
 See [ProviderOverride](#v1beta1-provideroverride).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="scheduling" type="SchedulingSpec">
+scheduling configures attempts for LPX components. Omission means no deadline.
+See [SchedulingSpec](#schedulingspec).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3210,7 +3272,7 @@ See [DynamoGraphDeploymentExperimentalSpec](#v1beta1-dynamographdeploymentexperi
 </ParamField>
 </Accordion>
 
-<Accordion id="v1beta1-dynamographdeploymentstatus" title="DynamoGraphDeploymentStatus">
+<Accordion id="v1beta1-dynamographdeploymentstatus" title="v1beta1 DynamoGraphDeploymentStatus">
 DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.
 Unchanged between v1alpha1 and v1beta1.
 
@@ -3262,6 +3324,12 @@ See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
 <ParamField path="placement" type="PlacementStatus">
 placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
 See [PlacementStatus](#v1beta1-placementstatus).
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
+lpx contains the status of the graph's LPX workload, when present.
+See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3598,6 +3666,19 @@ preferredWeight is required and used only when enforcement is "preferred". Highe
 </ParamField>
 </Accordion>
 
+<Accordion id="lpxconfig" title="LPXConfig">
+LPXConfig identifies the component's compiled model.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+
+<ParamField path="buildId" type="string">
+buildId references the immutable model build.
+**Validation:** MinLength: 1
+</ParamField>
+</Accordion>
+
 <Accordion id="mockerspec" title="MockerSpec">
 MockerSpec configures the simulated (mocker) backend.
 
@@ -3630,6 +3711,25 @@ PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. 
 
 <ParamField path="pvcMountPath" type="string" default="/opt/model-cache">
 PVCMountPath is the mount path for the PVC inside the container.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+</Accordion>
+
+<Accordion id="modeldownloadstatus" title="ModelDownloadStatus">
+ModelDownloadStatus contains the status of remote LPU model downloads.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
+
+<ParamField path="builds" type="string array">
+builds is the sorted set of resolved remote LPU build URLs whose artifacts were successfully downloaded into model-storage.
+**Validation:** Optional: \&#123;\&#125;
+</ParamField>
+
+<ParamField path="lastCheckedAt" type="Time">
+lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3753,14 +3853,14 @@ PlacementStatus groups DGD-level scheduler placement fields under a single
 status object so future placement signals (e.g. scheduler contract version,
 last-report timestamp, per-unit reports) can be added without a schema break.
 
-The score source is an open question in DEP #10064 (Grove mirror, typed Grove
-scheduler API, or unstructured provider). Until a source is selected and
-implemented, the DGD controller does not write this field; the schema and
-conversion are landed here so downstream consumers can rely on the shape.
+The generic score source is an open question in DEP #10064 (Grove mirror,
+typed Grove scheduler API, or unstructured provider). Until one is selected,
+the DGD controller writes this field only as a compatibility projection of
+current LPX placement.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
+**Appears in:** [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus), [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 <ParamField path="score" type="float">
 score is the DGD-level scheduler placement score aggregated from relevant scheduler placement units. Normalized to [0.0, 1.0] where higher is better and 1.0 represents the best possible placement. Aggregation uses the minimum across placement units so the value is a worst-placement signal for the graph. Scores are only comparable across DGDs that share the same scheduler scoring contract and version.
@@ -4027,6 +4127,19 @@ Omit the field to opt out.
 
 **Kind:** `type`
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#v1beta1-dynamocomponentdeploymentspec)
+</Accordion>
+
+<Accordion id="schedulingspec" title="SchedulingSpec">
+SchedulingSpec configures LPX scheduling attempts.
+
+
+**Kind:** `type`
+**Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+
+<ParamField path="attemptDeadlineSeconds" type="integer">
+attemptDeadlineSeconds limits how long each LPR may remain pending. Omission means unlimited; the value is not a solver budget.
+**Validation:** Maximum: 9.223372036e+09  Minimum: 1  Optional: \&#123;\&#125;
+</ParamField>
 </Accordion>
 
 <Accordion id="searchstrategy" title="SearchStrategy">
@@ -4389,6 +4502,22 @@ Enabled overrides auto-detection. nil = auto-detect.
 </ParamField>
 </Accordion>
 
+<Accordion id="lpxconfiguration" title="LPXConfiguration">
+LPXConfiguration holds LPX scheduler integration and model-registry settings.
+
+
+**Kind:** `type`
+**Appears in:** [OperatorConfiguration](#operatorconfiguration)
+
+<ParamField path="enabled" type="boolean" default="false">
+Enabled opts the operator into LPX request production. When true, startup requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to be installed separately.
+</ParamField>
+
+<ParamField path="modelRegistryURL" type="string">
+ModelRegistryURL configures the location of the LPU model registry used by LPX. Supported values are an absolute local path (or file:// URL) and gs:// URLs.
+</ParamField>
+</Accordion>
+
 <Accordion id="lwsconfiguration" title="LWSConfiguration">
 LWSConfiguration holds LWS orchestrator settings.
 
@@ -4595,6 +4724,11 @@ See [LoggingConfiguration](#loggingconfiguration).
 <ParamField path="security" type="SecurityConfiguration">
 HTTP/2 and TLS settings
 See [SecurityConfiguration](#securityconfiguration).
+</ParamField>
+
+<ParamField path="lpx" type="LPXConfiguration">
+LPX scheduler integration and model-registry configuration.
+See [LPXConfiguration](#lpxconfiguration).
 </ParamField>
 </Accordion>
 

@@ -18,6 +18,7 @@
 #   frontend         @ai-dynamo/dynamo-frontend-codeowners
 #   gms              @ai-dynamo/dynamo-gms-codeowners
 #   kv-memory        @ai-dynamo/dynamo-kv-memory-codeowners
+#   lpx              @ai-dynamo/dynamo-lpx-codeowners
 #   multimodal       @ai-dynamo/dynamo-multimodal-codeowners
 #   observability    @ai-dynamo/dynamo-observability-codeowners
 #   operator         @ai-dynamo/dynamo-operator-codeowners
@@ -45,6 +46,7 @@
 #   @ai-dynamo/dynamo-frontend-codeowners
 #   @ai-dynamo/dynamo-gms-codeowners
 #   @ai-dynamo/dynamo-kv-memory-codeowners
+#   @ai-dynamo/dynamo-lpx-codeowners
 #   @ai-dynamo/dynamo-multimodal-codeowners
 #   @ai-dynamo/dynamo-observability-codeowners
 #   @ai-dynamo/dynamo-operator-codeowners
@@ -539,6 +541,7 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/layout.rs                                                                    @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/fault_tolerance/cancellation/                                                                    @ai-dynamo/dynamo-fault-tolerance-codeowners
 /deploy/operator/internal/checkpoint/                                                                   @ai-dynamo/dynamo-gms-codeowners
+/deploy/operator/internal/dynamo/lpx/                                                                   @ai-dynamo/dynamo-lpx-codeowners
 /dev/observability/prometheus-xpu.yml                                                                   @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/block_manager/connector/                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/offload.rs                                                                   @ai-dynamo/dynamo-kv-memory-codeowners
@@ -556,6 +559,7 @@ requirements.txt                                                                
 /lib/llm/src/block_manager/controller.rs                                                                @ai-dynamo/dynamo-kv-memory-codeowners
 /components/src/dynamo/common/multimodal/                                                               @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/trtllm/multimodal/                                                               @ai-dynamo/dynamo-multimodal-codeowners
+/deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-lpx-codeowners
 /lib/llm/src/block_manager/distributed.rs                                                               @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/kv_consolidator/                                                             @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/serve/multimodal_profiles/vllm_xpu.py                                                            @ai-dynamo/dynamo-xpu-codeowners
@@ -576,10 +580,11 @@ requirements.txt                                                                
 /.codex/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /agents/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
-/CODEOWNERS                                                                                             @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-rl-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/CODEOWNERS                                                                                             @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-lpx-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-rl-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /agent-docs/                                                                                            @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
+/deploy/**/*lpx*                                                                                        @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /benchmarks/router/                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-router-codeowners
 /recipes/**/vllm/**                                                                                     @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /.devcontainer/vllm/                                                                                    @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
@@ -646,6 +651,7 @@ requirements.txt                                                                
 /lib/llm/src/http/service/metrics.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-observability-codeowners
 /container/deps/requirements.vllm.txt                                                                   @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /deploy/operator/internal/checkpoint/                                                                   @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-operator-codeowners
+/deploy/operator/internal/dynamo/lpx/                                                                   @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /lib/llm/src/preprocessor/mm_routing/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/protocols/openai/audios/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/llm/src/protocols/openai/images/                                                                   @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-diffusion-codeowners
@@ -680,6 +686,7 @@ requirements.txt                                                                
 /components/src/dynamo/trtllm/snapshot.py                                                               @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-gms-codeowners
 /components/src/dynamo/vllm/cache_info.py                                                               @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /container/deps/requirements.frontend.txt                                                               @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-frontend-codeowners
+/deploy/operator/internal/controller/lpx/                                                               @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-lpx-codeowners
 /lib/kv-router/src/services/shared_cache/                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/kv-router/src/zmq_wire/extra_keys.rs                                                               @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
 /lib/runtime/src/metrics/frontend_perf.rs                                                               @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-frontend-codeowners

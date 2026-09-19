@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,6 +39,7 @@ const (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx')",message="standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment"
 type DynamoComponentDeploymentSpec struct {
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
@@ -51,6 +53,10 @@ type DynamoComponentDeploymentSpec struct {
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)",message="componentType is immutable after it is set"
+// +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.componentType) && self.componentType == 'lpx')",message="lpx may only be set when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx') || has(self.lpx)",message="lpx is required when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.replicas) && self.replicas < 1)",message="replicas must be positive when componentType is lpx"
+// +kubebuilder:validation:XValidation:rule="!(has(self.componentType) && self.componentType == 'lpx' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)",message="scalingAdapter is not supported when componentType is lpx"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
@@ -168,6 +174,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Admission defaults omitted replicas to 1 for
 	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
 	// preserves the implicit multinode role layout.
+	// LPX components each require an agent role. All LPX components in a DGD
+	// must declare exactly one conductor role in total. Every LPX role requires
+	// its own podTemplate.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -194,6 +203,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE)
 	// +optional
 	FrontendSidecar *FrontendSidecarSpec `json:"frontendSidecar,omitempty"`
+
+	// LPX holds LPX integration configuration. Only meaningful when
+	// ComponentType is "lpx".
+	// +optional
+	LPX *v1beta1.LPXConfig `json:"lpx,omitempty"`
 
 	// Checkpoint configures container checkpointing for this service.
 	// When enabled, pods can be restored from a checkpoint files for faster cold start.
@@ -381,7 +395,7 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 }
 
 func (s *DynamoComponentDeployment) IsMultinode() bool {
-	return s.GetNumberOfNodes() > 1
+	return s.Spec.IsMultinode()
 }
 
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {

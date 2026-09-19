@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -100,7 +101,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		patchData, err := yaml.Marshal(crd)
+		// Compact JSON avoids expanding large CRD schemas into oversized YAML requests.
+		patchData, err := json.Marshal(crd)
 		if err != nil {
 			log.Error(err, "unable to marshal CRD for patch", "crd", crd.Name)
 			os.Exit(1)

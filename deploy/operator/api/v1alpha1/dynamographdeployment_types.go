@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -91,6 +92,10 @@ type DynamoGraphDeploymentSpec struct {
 	// `spec.template.topologyConstraint`. It cannot select or change the provider.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// Scheduling configures attempts for LPX components. Omission means no deadline.
+	// +optional
+	Scheduling *v1beta1.SchedulingSpec `json:"scheduling,omitempty"`
 
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
 	// Service-level annotations take precedence over these values.
@@ -208,6 +213,9 @@ type DynamoGraphDeploymentStatus struct {
 	// state, and any future placement fields).
 	// +optional
 	Placement *PlacementStatus `json:"placement,omitempty"`
+	// LPX contains the status of the graph's LPX workload, when present.
+	// +optional
+	LPX *v1beta1.DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.
@@ -323,6 +331,11 @@ type ServiceReplicaStatus struct {
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
+
+	// Ready is the binary determination of whether the correct number of replicas
+	// are scheduled and available.
+	// +optional
+	Ready bool `json:"ready"`
 
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.

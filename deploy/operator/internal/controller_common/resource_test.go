@@ -29,10 +29,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/events"
 
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -522,8 +522,9 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 		name                       string
 		currentGeneration          int64
 		lastAppliedGeneration      string // empty string means annotation not set
-		lastAppliedHash            string // empty string means annotation not set, "match" means compute from current
-		desiredReplicas            int64  // different from current (2) means hash will differ
+		lastAppliedHash            string // empty string means annotation not set, "match" means compute from current, "desired" means compute from desired
+		currentReplicas            int64  // zero means 2
+		desiredReplicas            int64
 		expectNeedsUpdate          bool
 		expectSpecNeedsUpdate      bool
 		expectManualChangeDetected bool
@@ -546,6 +547,18 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			expectNeedsUpdate:          true,
 			expectManualChangeDetected: false,
 			expectNewGeneration:        7,
+		},
+		{
+			name:                       "manual content change detected - generation increased",
+			currentGeneration:          7,
+			lastAppliedGeneration:      "5",
+			lastAppliedHash:            "desired",
+			currentReplicas:            3,
+			desiredReplicas:            2,
+			expectNeedsUpdate:          true,
+			expectSpecNeedsUpdate:      true,
+			expectManualChangeDetected: true,
+			expectNewGeneration:        8,
 		},
 		{
 			// Upgrade scenario: hash matches but no generation annotation yet.
@@ -621,6 +634,10 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
+			currentReplicas := tt.currentReplicas
+			if currentReplicas == 0 {
+				currentReplicas = 2
+			}
 
 			// Create current resource
 			current := &unstructured.Unstructured{
@@ -634,7 +651,7 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 						"annotations": map[string]interface{}{},
 					},
 					"spec": map[string]interface{}{
-						"replicas": int64(2),
+						"replicas": currentReplicas,
 					},
 				},
 			}
@@ -655,11 +672,16 @@ func TestGetSpecChangeResult_GenerationTracking(t *testing.T) {
 			}
 
 			// Set annotations based on test case
-			// "match" means the lastAppliedHash should match the CURRENT spec's hash
-			// (simulating that operator last applied what's currently in the cluster)
+			// "match" means the operator last applied the current content.
+			// "desired" means the operator last applied the desired content before
+			// the current object drifted.
 			annotations := make(map[string]string)
 			if tt.lastAppliedHash == "match" {
 				hash, err := GetSpecHash(current)
+				g.Expect(err).To(gomega.BeNil())
+				annotations[NvidiaAnnotationHashKey] = hash
+			} else if tt.lastAppliedHash == "desired" {
+				hash, err := GetSpecHash(desired)
 				g.Expect(err).To(gomega.BeNil())
 				annotations[NvidiaAnnotationHashKey] = hash
 			} else if tt.lastAppliedHash != "" {

@@ -46,34 +46,38 @@ const (
 
 const sglangBackendFramework = "sglang"
 
+// dgdAdmissionTestCase keeps the native admission and post-admission expectations together.
+type dgdAdmissionTestCase struct {
+	name               string
+	deployment         runtime.Object
+	oldDeployment      runtime.Object
+	oldBeforeUpdate    runtime.Object
+	mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
+	groveDisabled      bool                             // disables the configured Grove pathway
+	lpxDisabled        bool                             // disables the LPX integration
+	checkpointOff      bool                             // disables checkpoint creation and restore
+	seedWithoutWebhook bool                             // seeds oldDeployment without validating it
+	terminating        bool                             // deletes the seeded object so the update runs while it terminates
+	username           string                           // supplies the admission request identity
+
+	wantSchemaErr      string
+	wantCELErr         string
+	wantAdmissionErrs  []string
+	wantWebhookErrs    []string
+	wantWarnings       []string
+	notWantErr         string
+	wantPodAnnotations map[string]string
+	wantProvider       string
+	wantRoleReplicas   map[string]int32
+	wantReplicas       map[string]*int32
+}
+
 func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
 
-	tests := []struct {
-		name               string
-		deployment         runtime.Object
-		oldDeployment      runtime.Object
-		oldBeforeUpdate    runtime.Object
-		mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
-		withoutTopology    bool                             // omits the default cluster topology fixture
-		groveDisabled      bool                             // disables the configured Grove pathway
-		checkpointOff      bool                             // disables checkpoint creation and restore
-		seedWithoutWebhook bool                             // seeds oldDeployment without validating it
-		terminating        bool                             // deletes the seeded object so the update runs while it terminates
-		username           string                           // supplies the admission request identity
-
-		wantSchemaErr      string
-		wantCELErr         string
-		wantAdmissionErrs  []string
-		wantWebhookErrs    []string
-		wantWarnings       []string
-		notWantErr         string
-		wantPodAnnotations map[string]string
-		wantProvider       string
-		wantRoleReplicas   map[string]int32
-	}{
+	tests := []dgdAdmissionTestCase{
 		// Baseline create-path rules.
 		{
 			name:       "valid deployment with components",
@@ -1099,7 +1103,17 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					{Name: nvidiacomv1beta1.ComponentRoleLeader},
 				}
 			}),
-			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode components"},
+			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode and LPX components"},
+		},
+		{
+			name: "ordinary multinode roles accept matching replicas but reject role PodTemplates",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoles(worker, 4)
+				worker.Roles[0].Replicas = k8sptr.To(int32(1))
+				worker.Roles[1].PodTemplate = worker.PodTemplate.DeepCopy()
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles[1].podTemplate: Forbidden: is not supported for this component role"},
 		},
 		{
 			name: "explicit multinode roles require the complete role set",
@@ -1362,8 +1376,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:            "KV-transfer cluster topology policy rejects missing topology",
-			withoutTopology: true,
+			name: "KV-transfer cluster topology policy rejects missing topology",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "missing-topology", Domain: "rack"},
@@ -1872,9 +1885,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).ComponentName = tooLongComponentName
 			}),
 			wantWebhookErrs: []string{fmt.Sprintf(
-				"spec.components[1].name: Invalid value: %q: combined resource name length 46 exceeds the 45-character pod-name limit (PCS name + component name); shorten DynamoGraphDeployment name %q or component name %q",
-				tooLongComponentName,
-				longDGDName,
+				"spec.components[1].name: Invalid value: %q: combined Grove resource name length 46 exceeds the 45-character limit; shorten the deployment or component name",
 				tooLongComponentName,
 			)},
 		},
@@ -1953,8 +1964,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name:            "missing cluster topology is rejected",
-			withoutTopology: true,
+			name: "missing cluster topology is rejected",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
 					ClusterTopologyName: "missing-topology",
@@ -1964,8 +1974,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.topologyConstraint.clusterTopologyName: Invalid value: "missing-topology": references a ClusterTopologyBinding resource that was not found`},
 		},
 		{
-			name:            "independent topology errors aggregate",
-			withoutTopology: true,
+			name: "independent topology errors aggregate",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "missing-topology"}
 			}),
@@ -3028,17 +3037,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		},
 	}
 
+	t.Log("Add the LPX scenarios to the same DGD admission table")
+	tests = append(tests, lpxDGDAdmissionCases()...)
+
+	t.Log("Own one topology fixture for all DGD admission scenarios")
+	createTestClusterTopology(t, admissionEnv.ForTest(t))
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Assemble the admission scenario from the table entry")
-			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
+			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled, LPX: !tt.lpxDisabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
 				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				mutateObject:       tt.mutateRequest,
 				gates:              gates,
-				withoutTopology:    tt.withoutTopology,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				terminating:        tt.terminating,
 				username:           tt.username,
@@ -3061,9 +3075,21 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil {
+			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil || tt.wantReplicas != nil {
 				t.Log("Convert the admitted DGD for result assertions")
 				actualDGD := admittedBetaDGD(t, actual)
+
+				t.Log("Verify admission preserved component replica intent")
+				for name, want := range tt.wantReplicas {
+					component := actualDGD.GetComponentByName(name)
+					if component == nil {
+						t.Fatalf("admitted DGD has no component %q", name)
+					}
+					if !k8sptr.Equal(component.Replicas, want) {
+						t.Fatalf("component %q: replicas = %v, want %v", name, component.Replicas, want)
+					}
+				}
+
 				if tt.wantProvider != "" {
 					t.Log("Verify creation-time routing intent determined the admitted workload provider")
 					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {

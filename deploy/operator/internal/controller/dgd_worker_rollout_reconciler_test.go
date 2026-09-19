@@ -262,12 +262,23 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				"worker": {ComponentType: consts.ComponentTypeWorker},
 			})
+			lpxSource := newLPXHandoffSource(t, "node-local-v2-hybrid")
+			dgd.Spec.Components = append(dgd.Spec.Components, lpxSource.Spec.Components[0], nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "frontend", ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
+				PodTemplate: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"test": "original"}}},
+			})
+			before := dgd.DeepCopy()
 
 			t.Log("Render the Grove deployment")
-			rendered, err := groveRenderDeployment(dgd, nil, tt.workerHashSuffix)
+			rendered, err := groveRenderDeployment(projectOrdinaryGroveDeployment(dgd), dgd, nil, tt.workerHashSuffix)
 			require.NoError(t, err)
 			worker := rendered.GetComponentByName("worker")
 			require.NotNil(t, worker)
+			require.Len(t, rendered.Spec.Components, 2)
+			require.Nil(t, rendered.GetComponentByName("lpx"))
+			require.Equal(t, "worker", rendered.Spec.Components[0].ComponentName)
+			require.Equal(t, "frontend", rendered.Spec.Components[1].ComponentName)
+			rendered.Spec.Components[1].PodTemplate.Labels["test"] = "rendered"
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.workerHashSuffix {
@@ -279,6 +290,7 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 				assert.Nil(t, worker.PodTemplate)
 			}
 			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
+			assert.Equal(t, before, dgd)
 		})
 	}
 }

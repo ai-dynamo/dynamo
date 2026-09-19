@@ -71,12 +71,13 @@ func newGroveWorkloadRenderer(
 
 func (r *groveWorkloadRenderer) Render(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	source *nvidiacomv1beta1.DynamoGraphDeployment,
+	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 	workerGenerationChanged bool,
 ) (*grovePodCliqueSetRender, error) {
-	if dgd == nil {
+	if source == nil || ordinary == nil {
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
 	}
 	if r.reader == nil {
@@ -84,8 +85,8 @@ func (r *groveWorkloadRenderer) Render(
 	}
 	existingPodCliqueSet := &grovev1alpha1.PodCliqueSet{}
 	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
-		Namespace: dgd.Namespace,
+		Name:      dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),
+		Namespace: ordinary.Namespace,
 	}
 	if err := r.reader.Get(ctx, key, existingPodCliqueSet); err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -94,17 +95,37 @@ func (r *groveWorkloadRenderer) Render(
 		existingPodCliqueSet = nil
 	}
 
-	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(dgd, existingPodCliqueSet, workerGenerationChanged)
-	renderDeployment, err := groveRenderDeployment(dgd, existingPodCliqueSet, workerHashSuffixNeeded)
+	// Represent an empty ordinary projection as no desired PodCliqueSet.
+	if len(ordinary.Spec.Components) == 0 {
+		return &grovePodCliqueSetRender{
+			existing:         existingPodCliqueSet,
+			renderDeployment: ordinary,
+		}, nil
+	}
+
+	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(ordinary, existingPodCliqueSet, workerGenerationChanged)
+	renderDeployment, err := groveRenderDeployment(ordinary, source, existingPodCliqueSet, workerHashSuffixNeeded)
 	if err != nil {
 		return nil, err
 	}
-	desired, err := r.renderPodCliqueSet(
-		ctx, renderDeployment, existingPodCliqueSet, restartState, checkpointInfos,
+	// Render ordinary workloads and retain the observed server-owned fields.
+	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
+	desired, err := dynamo.GenerateGrovePodCliqueSet(
+		ctx, renderDeployment, r.config, r.runtimeConfig, r.reader,
+		r.dockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos,
 	)
 	if err != nil {
 		return nil, err
 	}
+	prepareGroveTopologyConstraintUpgrade(desired, existingPodCliqueSet)
+	preserveGrovePodCliqueSetOrder(desired, existingPodCliqueSet)
+	preserveGrovePodCliqueSetReplicas(
+		desired,
+		existingPodCliqueSet,
+		checkpointInfos,
+	)
+
+	// Resolve capacity from the same rendered ordinary workload.
 	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, renderDeployment, desired)
 	if err != nil {
 		return nil, err
@@ -117,46 +138,20 @@ func (r *groveWorkloadRenderer) Render(
 	}, nil
 }
 
-func (r *groveWorkloadRenderer) renderPodCliqueSet(
-	ctx context.Context,
-	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
-	existing *grovev1alpha1.PodCliqueSet,
-	restartState *dynamo.RestartState,
-	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-) (*grovev1alpha1.PodCliqueSet, error) {
-	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existing)
-	desired, err := dynamo.GenerateGrovePodCliqueSet(
-		ctx,
-		renderDeployment,
-		r.config,
-		r.runtimeConfig,
-		r.reader,
-		r.dockerSecretRetriever,
-		restartState,
-		existingRestartAnnotations,
-		checkpointInfos,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	prepareGroveTopologyConstraintUpgrade(desired, existing)
-	preserveGrovePodCliqueSetOrder(desired, existing)
-	preserveGrovePodCliqueSetReplicas(desired, existing, checkpointInfos)
-	return desired, nil
-}
-
 func groveRenderDeployment(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
+	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	workerHashSuffix bool,
 ) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
-	renderDeployment := dgd.DeepCopy()
+	renderDeployment := ordinary.DeepCopy()
+
+	// Compatibility and worker labels mutate only the independently owned copy.
 	applyGroveCompatibility(renderDeployment, pcs)
 	if !workerHashSuffix {
 		return renderDeployment, nil
 	}
-	if err := applyGroveWorkerHashSuffix(renderDeployment, dgd); err != nil {
+	if err := applyGroveWorkerHashSuffix(renderDeployment, hashSource); err != nil {
 		return nil, err
 	}
 	return renderDeployment, nil
@@ -407,26 +402,27 @@ func prepareLegacyGroveTopologyConstraintRepair(
 	desired.Pack = &pack
 }
 
-// Grove horizontal replicas are driven through scale subresources after
-// creation; keep existing template values so DGD replica changes do not update
-// the PodCliqueSet spec.
+// Keep Grove-owned scaling state stable across parent PCS reconciliation.
+// Horizontal replicas are driven through scale subresources.
+//
+//nolint:gocyclo // Grove scale fields share one ordered snapshot traversal.
 func preserveGrovePodCliqueSetReplicas(
 	desired *grovev1alpha1.PodCliqueSet,
 	existing *grovev1alpha1.PodCliqueSet,
-	checkpointInfoByComponent ...map[string]*checkpoint.CheckpointInfo,
+	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) {
 	if desired == nil || existing == nil {
 		return
 	}
+
+	// Let checkpoint-gated components retain their generated zero replicas.
 	replicaPreserveSkips := map[string]struct{}{}
-	if len(checkpointInfoByComponent) > 0 {
-		for componentName, info := range checkpointInfoByComponent[0] {
-			if info != nil &&
-				info.Enabled &&
-				info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-				!info.Ready {
-				replicaPreserveSkips[strings.ToLower(componentName)] = struct{}{}
-			}
+	for componentName, info := range checkpointInfoByComponent {
+		if info != nil &&
+			info.Enabled &&
+			info.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
+			!info.Ready {
+			replicaPreserveSkips[strings.ToLower(componentName)] = struct{}{}
 		}
 	}
 
@@ -461,17 +457,15 @@ func preserveGrovePodCliqueSetReplicas(
 		}
 	}
 
-	scalingGroupReplicasByName := make(
-		map[string]*int32,
-		len(existing.Spec.Template.PodCliqueScalingGroupConfigs),
-	)
+	// Index existing scaling-group replicas by name.
+	scalingGroupReplicasByName := make(map[string]*int32, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
 	for _, config := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
-		if config.Name == "" {
-			// Defensive only; generated PCSG configs always have names.
-			continue
+		if config.Name != "" {
+			scalingGroupReplicasByName[config.Name] = config.Replicas
 		}
-		scalingGroupReplicasByName[config.Name] = config.Replicas
 	}
+
+	// Preserve scale-owned fields in generated configuration order.
 	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
 		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
 		if _, skip := replicaPreserveSkips[strings.ToLower(config.Name)]; skip {

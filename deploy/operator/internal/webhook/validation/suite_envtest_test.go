@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -23,13 +24,16 @@ import (
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -57,6 +61,9 @@ func alphaGroveProviderOverride(target, value string) *nvidiacomv1alpha1.Provide
 }
 
 var (
+	// Fixture barriers observe the same cache used by webhook validation.
+	admissionReader client.Reader
+
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
 	admissionGate = &mutableFeatureGate{}
 	admissionEnv  = operatorenv.New(operatorenv.Options{
@@ -76,6 +83,7 @@ func TestMain(m *testing.M) {
 }
 
 func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptions) error {
+	admissionReader = mgr.GetClient()
 	return webhooksetup.Setup(mgr, webhooksetup.Options{
 		Config:            opts.OperatorConfig,
 		RuntimeConfig:     opts.RuntimeConfig,
@@ -87,7 +95,7 @@ func setupAdmissionWebhooks(mgr ctrl.Manager, opts operatorenv.WebhookSetupOptio
 
 type mutableFeatureGate struct {
 	mu    sync.RWMutex
-	gates features.Gates
+	gates features.Gate
 }
 
 func (g *mutableFeatureGate) Enabled(name features.Name) bool {
@@ -96,7 +104,7 @@ func (g *mutableFeatureGate) Enabled(name features.Name) bool {
 	return g.gates.Enabled(name)
 }
 
-func (g *mutableFeatureGate) set(gates features.Gates) {
+func (g *mutableFeatureGate) set(gates features.Gate) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.gates = gates
@@ -107,10 +115,9 @@ type admissionTestCase struct {
 	oldObject          runtime.Object
 	oldBeforeUpdate    runtime.Object
 	mutateObject       func(*testing.T, map[string]any)
-	gates              features.Gates
+	gates              features.Gate
 	seedGates          *features.Gates
 	seedWithoutWebhook bool
-	withoutTopology    bool
 	terminating        bool
 	username           string
 
@@ -129,11 +136,6 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 	env := admissionEnv.ForTest(t)
 	warnings := &warningRecorder{}
 	resourceClient := newAdmissionResourceClient(t, env, test.object, test.username, warnings)
-
-	if !test.withoutTopology {
-		t.Log("Install the test-owned cluster topology used by DGD validation")
-		createTestClusterTopology(t, env)
-	}
 
 	admissionGate.set(test.gates)
 	current, originalNamespace := admissionObject(t, test.object, env.Namespace(), test.mutateObject)
@@ -455,15 +457,9 @@ func mustUnstructured(t *testing.T, object runtime.Object) map[string]any {
 
 func createTestClusterTopology(t *testing.T, env *operatorenv.TestEnv) {
 	t.Helper()
-	client, err := dynamic.NewForConfig(env.RESTConfig())
-	if err != nil {
-		t.Fatalf("create topology client: %v", err)
-	}
-	resource := client.Resource(schema.GroupVersionResource{
-		Group: "grove.io", Version: "v1alpha1", Resource: "clustertopologybindings",
-	})
+
+	t.Log("Create the DGD table's immutable cluster topology")
 	topology := &grovev1alpha1.ClusterTopologyBinding{
-		TypeMeta:   metav1.TypeMeta{APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "ClusterTopologyBinding"},
 		ObjectMeta: metav1.ObjectMeta{Name: "grove-topology"},
 		Spec: grovev1alpha1.ClusterTopologyBindingSpec{
 			Levels: []grovev1alpha1.TopologyLevel{
@@ -472,18 +468,36 @@ func createTestClusterTopology(t *testing.T, env *operatorenv.TestEnv) {
 			},
 		},
 	}
-	value, err := runtime.DefaultUnstructuredConverter.ToUnstructured(topology)
-	if err != nil {
-		t.Fatalf("convert cluster topology: %v", err)
-	}
-	if _, err := resource.Create(t.Context(), &unstructured.Unstructured{Object: value}, metav1.CreateOptions{}); err != nil {
+	if err := env.Client().Create(t.Context(), topology); err != nil {
 		t.Fatalf("create cluster topology: %v", err)
 	}
+	key := client.ObjectKeyFromObject(topology)
+
+	// Observe deletion before another test invocation can reuse this cluster-scoped name.
 	t.Cleanup(func() {
-		if err := resource.Delete(context.Background(), topology.Name, metav1.DeleteOptions{}); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := env.Client().Delete(ctx, topology); err != nil {
 			t.Errorf("delete cluster topology: %v", err)
+			return
+		}
+		if err := wait.PollUntilContextCancel(ctx, 10*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+			err := admissionReader.Get(ctx, key, &grovev1alpha1.ClusterTopologyBinding{})
+			return apierrors.IsNotFound(err), client.IgnoreNotFound(err)
+		}); err != nil {
+			t.Errorf("wait for deleted cluster topology to leave webhook cache: %v", err)
 		}
 	})
+
+	t.Log("Wait for the webhook cache to observe this exact topology incarnation")
+	if err := wait.PollUntilContextTimeout(t.Context(), 10*time.Millisecond, 10*time.Second, true,
+		func(ctx context.Context) (bool, error) {
+			observed := &grovev1alpha1.ClusterTopologyBinding{}
+			err := admissionReader.Get(ctx, key, observed)
+			return err == nil && observed.UID == topology.UID, client.IgnoreNotFound(err)
+		}); err != nil {
+		t.Fatalf("wait for created cluster topology in webhook cache: %v", err)
+	}
 }
 
 func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {

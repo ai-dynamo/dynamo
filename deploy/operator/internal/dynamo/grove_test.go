@@ -6,19 +6,23 @@ import (
 	"strings"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
@@ -662,8 +666,7 @@ func TestCheckPodCliqueReady(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+			ready, reason, serviceStatus, classification, checkErr := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, log.FromContext(ctx))
 
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 			g.Expect(ready).To(gomega.Equal(tt.wantReady))
@@ -678,297 +681,100 @@ func TestCheckPodCliqueReady(t *testing.T) {
 	}
 }
 
-func TestCheckPCSGReady(t *testing.T) {
-	ctx := context.Background()
-
+func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 	tests := []struct {
-		name               string
-		resourceName       string
-		namespace          string
-		existingPCSG       *grovev1alpha1.PodCliqueScalingGroup
-		wantReady          bool
-		wantReasonContains string
-		wantClassification string
-		wantServiceStatus  v1beta1.ComponentReplicaStatus
+		name       string
+		nodes      int32
+		gms        bool
+		undeclared bool
 	}{
-		{
-			name:               "PCSG not found",
-			resourceName:       "missing-pcsg",
-			namespace:          "default",
-			wantReady:          false,
-			wantReasonContains: "resource not found",
-			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames: []string{"missing-pcsg"},
-			},
-		},
-		{
-			name:         "PCSG fully ready",
-			resourceName: "ready-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "ready-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 3,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           3,
-					AvailableReplicas:  3,
-					UpdatedReplicas:    3,
-					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
-				},
-			},
-			wantReady:          true,
-			wantClassification: "",
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"ready-pcsg"},
-				Replicas:          3,
-				UpdatedReplicas:   3,
-				AvailableReplicas: ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(3)),
-			},
-		},
-		{
-			name:         "PCSG with zero replicas desired",
-			resourceName: "zero-replicas-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "zero-replicas-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 0,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           0,
-					AvailableReplicas:  0,
-					UpdatedReplicas:    0,
-					ObservedGeneration: ptr.To(int64(1)),
-				},
-			},
-			wantReady:          true,
-			wantClassification: "",
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"zero-replicas-pcsg"},
-				Replicas:          0,
-				UpdatedReplicas:   0,
-				AvailableReplicas: ptr.To(int32(0)),
-				ScheduledReplicas: ptr.To(int32(0)),
-			},
-		},
-		{
-			name:         "PCSG spec not yet processed - observedGeneration < generation",
-			resourceName: "stale-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "stale-pcsg",
-					Namespace:  "default",
-					Generation: 3,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 2,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           2,
-					AvailableReplicas:  2,
-					UpdatedReplicas:    2,
-					ObservedGeneration: ptr.To(int64(2)),
-				},
-			},
-			wantReady:          false,
-			wantReasonContains: "spec not yet processed",
-			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"stale-pcsg"},
-				Replicas:          2,
-				UpdatedReplicas:   2,
-				AvailableReplicas: ptr.To(int32(2)),
-			},
-		},
-		{
-			name:         "PCSG not ready - available replicas less than desired",
-			resourceName: "not-ready-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "not-ready-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 3,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           3,
-					AvailableReplicas:  1,
-					UpdatedReplicas:    3,
-					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
-				},
-			},
-			wantReady:          false,
-			wantReasonContains: "scheduled but available=1/3",
-			wantClassification: v1beta1.DGDReadyReasonPodsNotReady,
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"not-ready-pcsg"},
-				Replicas:          3,
-				UpdatedReplicas:   3,
-				AvailableReplicas: ptr.To(int32(1)),
-				ScheduledReplicas: ptr.To(int32(3)),
-			},
-		},
-		{
-			name:         "PCSG not fully updated - updated replicas less than desired",
-			resourceName: "not-updated-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "not-updated-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 3,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           3,
-					AvailableReplicas:  3,
-					UpdatedReplicas:    2,
-					ScheduledReplicas:  3,
-					ObservedGeneration: ptr.To(int64(1)),
-				},
-			},
-			wantReady:          false,
-			wantReasonContains: "desired=3, updated=2",
-			wantClassification: v1beta1.DGDReadyReasonUpdating,
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"not-updated-pcsg"},
-				Replicas:          3,
-				UpdatedReplicas:   2,
-				AvailableReplicas: ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(3)),
-			},
-		},
-		{
-			name:         "PCSG performing rolling update - replicas != desired",
-			resourceName: "rolling-update-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "rolling-update-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 3,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           4,
-					AvailableReplicas:  3,
-					UpdatedReplicas:    3,
-					ScheduledReplicas:  4,
-					ObservedGeneration: ptr.To(int64(1)),
-				},
-			},
-			wantReady:          false,
-			wantReasonContains: "performing rolling update",
-			wantClassification: v1beta1.DGDReadyReasonUpdating,
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"rolling-update-pcsg"},
-				Replicas:          4,
-				UpdatedReplicas:   3,
-				AvailableReplicas: ptr.To(int32(3)),
-				ScheduledReplicas: ptr.To(int32(4)),
-			},
-		},
-		{
-			name:         "PCSG with nil observedGeneration",
-			resourceName: "nil-observed-gen-pcsg",
-			namespace:    "default",
-			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       "nil-observed-gen-pcsg",
-					Namespace:  "default",
-					Generation: 1,
-				},
-				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
-					Replicas: 2,
-				},
-				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-					Replicas:           2,
-					AvailableReplicas:  2,
-					UpdatedReplicas:    2,
-					ObservedGeneration: nil,
-				},
-			},
-			wantReady:          false,
-			wantReasonContains: "observedGeneration is nil",
-			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
-			wantServiceStatus: v1beta1.ComponentReplicaStatus{
-				ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
-				ComponentNames:    []string{"nil-observed-gen-pcsg"},
-				Replicas:          2,
-				UpdatedReplicas:   2,
-				AvailableReplicas: ptr.To(int32(2)),
-			},
-		},
+		{name: "standalone", nodes: 1},
+		{name: "multinode", nodes: 4},
+		{name: "inter-pod GMS", nodes: 1, gms: true},
+		{name: "multinode GMS", nodes: 4, gms: true},
+		{name: "undeclared standalone group", nodes: 1, undeclared: true},
+		{name: "undeclared multinode group", nodes: 4, undeclared: true},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewGomegaWithT(t)
-
-			s := scheme.Scheme
-			err := v1alpha1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-			err = grovev1alpha1.AddToScheme(s)
-			g.Expect(err).NotTo(gomega.HaveOccurred())
-
-			var objects []client.Object
-			if tt.existingPCSG != nil {
-				objects = append(objects, tt.existingPCSG)
+			g := gomega.NewWithT(t)
+			t.Log("Render the declared ordinary layout through the production renderer")
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{BackendFramework: "vllm", Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+					ComponentName: "Worker", ComponentType: v1beta1.ComponentTypeWorker, Replicas: ptr.To(int32(2)),
+					Multinode: &v1beta1.MultinodeSpec{NodeCount: tt.nodes},
+					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+						Name: commonconsts.MainContainerName, Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}},
+					}}}},
+				}}},
 			}
+			if tt.gms {
+				dgd.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+					GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeInterPod},
+				}
+			}
+			reader := newFakeGroveClient(g)
+			pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, &configv1alpha1.OperatorConfiguration{},
+				&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, reader, &mockSecretsRetriever{}, nil, nil, nil)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			fakeKubeClient := fake.NewClientBuilder().
-				WithScheme(s).
-				WithObjects(objects...).
-				WithStatusSubresource(objects...).
-				Build()
-
-			logger := log.FromContext(ctx)
-			ready, reason, serviceStatus, classification, checkErr := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
-
-			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
-			g.Expect(ready).To(gomega.Equal(tt.wantReady))
-			if tt.wantReasonContains != "" {
-				g.Expect(reason).To(gomega.ContainSubstring(tt.wantReasonContains))
+			t.Log("Prove emitted scaling groups use the component identity")
+			wantName, wantKind := pcs.Name+"-0-worker", v1beta1.ComponentKindPodClique
+			if dgd.Spec.Components[0].UsesPCSG() {
+				wantKind = v1beta1.ComponentKindPodCliqueScalingGroup
+				g.Expect(pcs.Spec.Template.PodCliqueScalingGroupConfigs).To(gomega.HaveLen(1))
+				g.Expect(pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Name).To(gomega.Equal("worker"))
 			} else {
-				g.Expect(reason).To(gomega.Equal(""))
+				g.Expect(pcs.Spec.Template.PodCliqueScalingGroupConfigs).To(gomega.BeEmpty())
 			}
-			g.Expect(classification).To(gomega.Equal(tt.wantClassification))
-			g.Expect(serviceStatus).To(gomega.Equal(tt.wantServiceStatus))
+
+			t.Log("An undeclared runtime group in an observed PCS must not redirect ordinary readiness")
+			if tt.undeclared {
+				var names []string
+				for _, clique := range pcs.Spec.Template.Cliques {
+					names = append(names, clique.Name)
+				}
+				pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{{Name: "undeclared", CliqueNames: names}}
+			}
+			readiness, err := EvaluateGroveReadiness(t.Context(), reader, dgd, pcs)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(readiness.Ready).To(gomega.BeFalse())
+			g.Expect(readiness.ComponentStatuses).To(gomega.HaveLen(1))
+			g.Expect(readiness.ComponentStatuses["Worker"].ComponentKind).To(gomega.Equal(wantKind))
+			g.Expect(readiness.ComponentStatuses["Worker"].ComponentNames).To(gomega.Equal([]string{wantName}))
 		})
 	}
 }
 
 func TestEvaluateGroveReadiness(t *testing.T) {
 	ctx := context.Background()
-
+	newPCSGPodClique := func(name, pcsg, component string, groupReplica, replicas, readyReplicas int32) *grovev1alpha1.PodClique {
+		return &grovev1alpha1.PodClique{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					grovecommon.LabelPartOfKey:                         "test-dgd",
+					grovecommon.LabelPodCliqueScalingGroup:             pcsg,
+					grovecommon.LabelPodCliqueScalingGroupReplicaIndex: fmt.Sprint(groupReplica),
+					commonconsts.KubeLabelDynamoComponent:              component,
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: grovev1alpha1.SchemeGroupVersion.String(), Kind: "PodCliqueScalingGroup",
+					Name: pcsg, UID: types.UID(pcsg), Controller: ptr.To(true),
+				}},
+			},
+			Spec: grovev1alpha1.PodCliqueSpec{Replicas: replicas},
+			Status: grovev1alpha1.PodCliqueStatus{
+				Replicas:           replicas,
+				UpdatedReplicas:    replicas,
+				ReadyReplicas:      readyReplicas,
+				ScheduledReplicas:  replicas,
+				ObservedGeneration: ptr.To(int64(1)),
+			},
+		}
+	}
 	tests := []struct {
 		name                   string
 		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
@@ -1045,6 +851,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				},
 			},
 			existingGroveResources: []client.Object{
+				newReadyPCS("test-dgd"),
 				&grovev1alpha1.PodCliqueScalingGroup{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-0-decode",
@@ -1054,11 +861,12 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           2,
-						UpdatedReplicas:    2,
-						AvailableReplicas:  2,
-						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          2,
+						UpdatedReplicas:                   2,
+						AvailableReplicas:                 2,
+						ScheduledReplicas:                 2,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -1070,13 +878,19 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						Replicas: 3,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           3,
-						UpdatedReplicas:    3,
-						AvailableReplicas:  3,
-						ScheduledReplicas:  3,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          3,
+						UpdatedReplicas:                   3,
+						AvailableReplicas:                 3,
+						ScheduledReplicas:                 3,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
+				newPCSGPodClique("test-dgd-0-decode-0", "test-dgd-0-decode", "decode", 0, 1, 1),
+				newPCSGPodClique("test-dgd-0-decode-1", "test-dgd-0-decode", "decode", 1, 1, 1),
+				newPCSGPodClique("test-dgd-0-prefill-0", "test-dgd-0-prefill", "prefill", 0, 1, 1),
+				newPCSGPodClique("test-dgd-0-prefill-1", "test-dgd-0-prefill", "prefill", 1, 1, 1),
+				newPCSGPodClique("test-dgd-0-prefill-2", "test-dgd-0-prefill", "prefill", 2, 1, 1),
 			},
 			wantReady:  true,
 			wantReason: "",
@@ -1084,6 +898,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"decode": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-decode"},
+					Ready:             true,
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(2)),
@@ -1092,6 +907,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"prefill": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
+					Ready:             true,
 					Replicas:          3,
 					UpdatedReplicas:   3,
 					AvailableReplicas: ptr.To(int32(3)),
@@ -1100,7 +916,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 			},
 		},
 		{
-			name: "multinode service not ready - PCSG not ready",
+			name: "multinode service checks child PodClique readiness",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"worker": {
@@ -1115,6 +931,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				},
 			},
 			existingGroveResources: []client.Object{
+				newReadyPCS("test-dgd"),
 				&grovev1alpha1.PodCliqueScalingGroup{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-0-worker",
@@ -1124,23 +941,26 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           2,
-						UpdatedReplicas:    2,
-						AvailableReplicas:  1,
-						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          2,
+						UpdatedReplicas:                   2,
+						AvailableReplicas:                 2,
+						ScheduledReplicas:                 2,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
+				newPCSGPodClique("test-dgd-0-worker-0", "test-dgd-0-worker", "worker", 0, 1, 1),
+				newPCSGPodClique("test-dgd-0-worker-1", "test-dgd-0-worker", "worker", 1, 1, 0),
 			},
 			wantReady:  false,
-			wantReason: "worker: scheduled but available=1/2",
+			wantReason: "worker: test-dgd-0-worker: scheduled but ready=0/1",
 			wantServiceStatuses: map[string]v1beta1.ComponentReplicaStatus{
 				"worker": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-worker"},
 					Replicas:          2,
 					UpdatedReplicas:   2,
-					AvailableReplicas: ptr.To(int32(1)),
+					AvailableReplicas: ptr.To(int32(2)),
 					ScheduledReplicas: ptr.To(int32(2)),
 				},
 			},
@@ -1176,6 +996,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				},
 			},
 			existingGroveResources: []client.Object{
+				newReadyPCS("test-dgd"),
 				&grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-dgd-0-frontend",
@@ -1201,11 +1022,12 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           2,
-						UpdatedReplicas:    2,
-						AvailableReplicas:  1,
-						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          2,
+						UpdatedReplicas:                   2,
+						AvailableReplicas:                 1,
+						ScheduledReplicas:                 2,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -1217,13 +1039,18 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:           2,
-						UpdatedReplicas:    2,
-						AvailableReplicas:  2,
-						ScheduledReplicas:  2,
-						ObservedGeneration: ptr.To(int64(1)),
+						Replicas:                          2,
+						UpdatedReplicas:                   2,
+						AvailableReplicas:                 2,
+						ScheduledReplicas:                 2,
+						ObservedGeneration:                ptr.To(int64(1)),
+						CurrentPodCliqueSetGenerationHash: ptr.To("current"),
 					},
 				},
+				newPCSGPodClique("test-dgd-0-decode-0", "test-dgd-0-decode", "decode", 0, 1, 1),
+				newPCSGPodClique("test-dgd-0-decode-1", "test-dgd-0-decode", "decode", 1, 1, 1),
+				newPCSGPodClique("test-dgd-0-prefill-0", "test-dgd-0-prefill", "prefill", 0, 1, 1),
+				newPCSGPodClique("test-dgd-0-prefill-1", "test-dgd-0-prefill", "prefill", 1, 1, 1),
 			},
 			wantReady:  false,
 			wantReason: "decode: scheduled but available=1/2",
@@ -1231,6 +1058,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"frontend": {
 					ComponentKind:     v1beta1.ComponentKindPodClique,
 					ComponentNames:    []string{"test-dgd-0-frontend"},
+					Ready:             true,
 					Replicas:          1,
 					UpdatedReplicas:   1,
 					ReadyReplicas:     ptr.To(int32(1)),
@@ -1247,6 +1075,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"prefill": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
+					Ready:             true,
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(2)),
@@ -1300,6 +1129,41 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 			var objects []client.Object
 			objects = append(objects, betaDGD)
 			objects = append(objects, tt.existingGroveResources...)
+			var observedPCS *grovev1alpha1.PodCliqueSet
+			for _, object := range tt.existingGroveResources {
+				if pcs, ok := object.(*grovev1alpha1.PodCliqueSet); ok {
+					observedPCS = pcs.DeepCopy()
+					break
+				}
+			}
+			if observedPCS != nil {
+				t.Log("Give each scaling group the current PCS controller identity")
+				for _, object := range tt.existingGroveResources {
+					if group, ok := object.(*grovev1alpha1.PodCliqueScalingGroup); ok {
+						group.UID = types.UID(group.Name)
+						group.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(observedPCS, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
+					}
+				}
+
+				if betaDGD.Status.Components == nil {
+					betaDGD.Status.Components = make(map[string]v1beta1.ComponentReplicaStatus)
+				}
+				for i := range betaDGD.Spec.Components {
+					component := &betaDGD.Spec.Components[i]
+					if !IsWorkerComponent(string(component.ComponentType)) {
+						continue
+					}
+					observedPCS.Spec.Template.Cliques = append(
+						observedPCS.Spec.Template.Cliques,
+						&grovev1alpha1.PodCliqueTemplateSpec{Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: component.ComponentName,
+						}},
+					)
+					status := betaDGD.Status.Components[component.ComponentName]
+					status.RuntimeNamespace = betaDGD.GetDynamoNamespaceForComponent(component)
+					betaDGD.Status.Components[component.ComponentName] = status
+				}
+			}
 
 			fakeKubeClient := fake.NewClientBuilder().
 				WithScheme(s).
@@ -1307,7 +1171,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			readiness, err := EvaluateGroveReadiness(ctx, fakeKubeClient, betaDGD, nil)
+			readiness, err := EvaluateGroveReadiness(ctx, fakeKubeClient, betaDGD, observedPCS)
 
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(readiness.Ready).To(gomega.Equal(tt.wantReady))
@@ -1320,9 +1184,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				if component == nil {
 					continue
 				}
-				if !IsWorkerComponent(string(component.ComponentType)) {
-					wantStatus.RuntimeNamespace = betaDGD.GetDynamoNamespaceForComponent(component)
-				}
+				wantStatus.RuntimeNamespace = betaDGD.GetDynamoNamespaceForComponent(component)
 				wantServiceStatuses[componentName] = wantStatus
 			}
 			g.Expect(readiness.ComponentStatuses).To(gomega.Equal(wantServiceStatuses))
@@ -1350,6 +1212,8 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		legacyPCS                  bool
 		pcsObservedGenerationAhead bool
 		childGenerationStale       bool
+		desiredReplicas            *int32
+		childReplicas              *int32
 		wantReady                  bool
 		wantNamespace              string
 	}{
@@ -1362,6 +1226,13 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 		{name: "accepted PCS revision publishes its rendered hash instead of the desired DGD hash", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: acceptedHash},
 		{name: "PCS observation ahead of its generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, pcsObservedGenerationAhead: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted PCS with a stale child generation preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, childReady: true, childGenerationStale: true, wantNamespace: "active"},
+		{name: "cached pre-scale-up spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(2)), wantNamespace: "active"},
+		{name: "cached pre-scale-down spec cannot publish readiness or the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(1)), childReplicas: ptr.To(int32(2)), wantNamespace: "active"},
+		{name: "cached zero replicas cannot complete scale-up", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(1)), childReplicas: ptr.To(int32(0)), wantNamespace: "active"},
+		{name: "scale-to-zero waits for the cached spec", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(0)), wantNamespace: "active"},
+		{name: "observed scale-up publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(2)), childReplicas: ptr.To(int32(2)), wantReady: true, wantNamespace: acceptedHash},
+		{name: "observed scale-to-zero publishes readiness and the new namespace", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, desiredReplicas: ptr.To(int32(0)), childReplicas: ptr.To(int32(0)), wantReady: true, wantNamespace: acceptedHash},
+		{name: "omitted replicas preserve externally managed capacity", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, childReady: true, childReplicas: ptr.To(int32(2)), wantReady: true, wantNamespace: acceptedHash},
 		{name: "accepted completed PCS revision remains published after worker health loss", activeNamespace: true, pcsAccepted: true, childRevision: targetRevision, updateEnded: true, wantNamespace: acceptedHash},
 		{name: "accepted legacy PCS with an unfinished child preserves the active worker namespace", activeNamespace: true, pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateInProgress: true, childReady: true, wantReady: true, wantNamespace: "active"},
 		{name: "accepted legacy PCS publishes the base namespace", pcsAccepted: true, legacyPCS: true, childRevision: targetRevision, updateEnded: true, childReady: true, wantReady: true, wantNamespace: "base"},
@@ -1377,6 +1248,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 					Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 						ComponentName: componentName,
 						ComponentType: v1beta1.ComponentTypePrefill,
+						Replicas:      tt.desiredReplicas,
 					}},
 				},
 			}
@@ -1424,14 +1296,15 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			if tt.childGenerationStale {
 				childGeneration = 2
 			}
+			replicas := ptr.Deref(tt.childReplicas, int32(1))
 			podClique := &grovev1alpha1.PodClique{
 				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, componentName), Namespace: dgd.Namespace, Generation: childGeneration},
-				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: replicas},
 				Status: grovev1alpha1.PodCliqueStatus{
-					Replicas:                          1,
-					ReadyReplicas:                     1,
-					UpdatedReplicas:                   1,
-					ScheduledReplicas:                 1,
+					Replicas:                          replicas,
+					ReadyReplicas:                     replicas,
+					UpdatedReplicas:                   replicas,
+					ScheduledReplicas:                 replicas,
 					ObservedGeneration:                ptr.To(int64(1)),
 					CurrentPodCliqueSetGenerationHash: ptr.To(tt.childRevision),
 				},
@@ -1772,6 +1645,8 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 						CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision),
 					},
 				}
+				podCliqueSet.UID = "current-pcs"
+				child.SetOwnerReferences([]metav1.OwnerReference{*metav1.NewControllerRef(podCliqueSet, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))})
 			} else {
 				child = &grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1931,7 +1806,7 @@ func TestGroveComponentRevisionStateHasCompletedAcceptedPCSRevision(t *testing.T
 
 // Ready-reason classification tests (merged from classification_test.go).
 // These exercise the DGD-level Ready reason returned as the 4th value of
-// CheckPodCliqueReady / CheckPCSGReady, focusing on the capacity-before-
+// the PodClique and PCSG-backed component evaluators, focusing on the capacity-before-
 // readiness branches (schedule-gated, scheduling condition, partial scheduled
 // count) that the readiness/serviceStatus tables above do not isolate.
 // ---------------------------------------------------------------------------
@@ -1939,9 +1814,8 @@ func TestGroveComponentRevisionStateHasCompletedAcceptedPCSRevision(t *testing.T
 // The Check*Ready classification tests below exercise the full Grove-status
 // reading path (client.Get + field/condition inspection) and assert the
 // DGD Ready reason string returned as the 4th value. They complement the
-// existing TestCheckPodCliqueReady / TestCheckPCSGReady tables (which assert
-// ready/reason/serviceStatus) by focusing on capacity-before-readiness
-// classification ordering.
+// readiness tables by focusing on capacity-before-readiness classification
+// ordering.
 
 func TestCheckPodCliqueReadyClassification(t *testing.T) {
 	ctx := context.Background()
@@ -2086,12 +1960,17 @@ func TestCheckPodCliqueReadyClassification(t *testing.T) {
 	}
 }
 
-func TestCheckPCSGReadyClassification(t *testing.T) {
+func TestPCSGBackedComponentReadyClassification(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
 		name               string
 		pcsg               *grovev1alpha1.PodCliqueScalingGroup
+		dgdReplicas        *int32
+		pcsgReplicas       *int32
+		oldPCS             bool
+		oldPCSG            bool
+		foreignClique      bool
 		wantReady          bool
 		wantClassification string
 		wantReasonContains string
@@ -2102,8 +1981,63 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
 				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
 			}),
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          true,
 			wantClassification: "",
+		},
+		{
+			name: "omitted DGD replicas defer to the externally scaled PCSG",
+			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
+				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+			}),
+			wantReady: true,
+		},
+		{
+			name: "ready scaling group belongs to the previous same-name PCS",
+			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
+				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+			}),
+			oldPCS:             true,
+			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
+		},
+		{
+			name: "zero-replica scaling group belongs to the previous same-name PCS",
+			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
+				ObservedGeneration: ptr.To(int64(1)),
+			}),
+			pcsgReplicas:       ptr.To(int32(0)),
+			oldPCS:             true,
+			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
+		},
+		{
+			name: "ready cliques belong to the previous same-name scaling group",
+			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
+				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+			}),
+			oldPCSG:            true,
+			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
+		},
+		{
+			name: "foreign clique with a malformed replica label does not affect readiness",
+			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
+				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+			}),
+			foreignClique: true,
+			wantReady:     true,
+		},
+		{
+			name: "pinned DGD replicas take precedence over PCSG replicas",
+			pcsg: newPCSG(grovev1alpha1.PodCliqueScalingGroupStatus{
+				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2,
+				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
+			}),
+			dgdReplicas:        ptr.To(int32(3)),
+			wantClassification: v1beta1.DGDReadyReasonUpdating,
+			wantReasonContains: "desired replicas=3",
 		},
 		{
 			name: "available below desired, fully scheduled -> PodsNotReady",
@@ -2111,6 +2045,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				Replicas: 2, AvailableReplicas: 0, UpdatedReplicas: 2,
 				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
 			}),
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonPodsNotReady,
 			wantReasonContains: "available=0/2",
@@ -2121,6 +2056,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				Replicas: 2, AvailableReplicas: 0, UpdatedReplicas: 2,
 				ScheduledReplicas: 1, ObservedGeneration: ptr.To(int64(1)),
 			}),
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonInsufficientCapacity,
 			wantReasonContains: "scheduled=1/2",
@@ -2135,10 +2071,11 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 					// Status=False (Status=True is the availability reason).
 					Type:               groveconstants.ConditionTypeMinAvailableBreached,
 					Status:             metav1.ConditionFalse,
-					Reason:             "InsufficientScheduledPodCliqueScalingGroupReplicas",
+					Reason:             legacyConditionReasonInsufficientScheduledPCSGReplicas,
 					LastTransitionTime: metav1.Now(),
 				}},
 			}),
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonInsufficientCapacity,
 			wantReasonContains: "min-available breached",
@@ -2149,6 +2086,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 1,
 				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
 			}),
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonUpdating,
 			wantReasonContains: "updated=1",
@@ -2159,6 +2097,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 				Replicas: 2, AvailableReplicas: 1, UpdatedReplicas: 2,
 				ScheduledReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
 			}),
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonPodsNotReady,
 			wantReasonContains: "available=1/2",
@@ -2166,6 +2105,7 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 		{
 			name:               "not found -> Unclassified",
 			pcsg:               nil,
+			dgdReplicas:        ptr.To(int32(2)),
 			wantReady:          false,
 			wantClassification: v1beta1.DGDReadyReasonSomeResourcesNotReady,
 			wantReasonContains: "resource not found",
@@ -2176,18 +2116,71 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			var objs []client.Object
+			t.Log("Build the observed PCS, scaling group, and owned ready cliques")
+			pcs := newReadyPCS("pcs")
+			objs := []client.Object{pcs}
 			if tt.pcsg != nil {
+				tt.pcsg.UID = "current-pcsg"
+				tt.pcsg.Spec.Replicas = ptr.Deref(tt.pcsgReplicas, tt.pcsg.Spec.Replicas)
+				tt.pcsg.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
+				if tt.oldPCS {
+					tt.pcsg.OwnerReferences[0].UID = "previous-pcs"
+				}
+				tt.pcsg.Status.CurrentPodCliqueSetGenerationHash = ptr.To("current")
 				objs = append(objs, tt.pcsg)
+				cliqueOwner := *metav1.NewControllerRef(tt.pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))
+				if tt.oldPCSG {
+					cliqueOwner.UID = "previous-pcsg"
+				}
+				for replica := range testPCSGReplicas {
+					objs = append(objs, &grovev1alpha1.PodClique{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:       fmt.Sprintf("pcsg-%d-component", replica),
+							Namespace:  "default",
+							Generation: 1,
+							Labels: map[string]string{
+								grovecommon.LabelPodCliqueScalingGroup:             testPCSGName,
+								grovecommon.LabelPodCliqueScalingGroupReplicaIndex: fmt.Sprint(replica),
+								commonconsts.KubeLabelDynamoComponent:              "component",
+							},
+							OwnerReferences: []metav1.OwnerReference{cliqueOwner},
+						},
+						Spec: grovev1alpha1.PodCliqueSpec{Replicas: 1},
+						Status: grovev1alpha1.PodCliqueStatus{
+							Replicas:           1,
+							UpdatedReplicas:    1,
+							ReadyReplicas:      1,
+							ScheduledReplicas:  1,
+							ObservedGeneration: ptr.To(int64(1)),
+						},
+					})
+				}
+				if tt.foreignClique {
+					foreign := objs[len(objs)-1].(*grovev1alpha1.PodClique).DeepCopy()
+					foreign.Name = "foreign-clique"
+					foreign.OwnerReferences[0].UID = "previous-pcsg"
+					foreign.Labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex] = "invalid"
+					objs = append(objs, foreign)
+				}
 			}
+
+			t.Log("Evaluate readiness against the current controller identities")
 			c := newFakeGroveClient(g, objs...)
-			ready, reason, _, classification, checkErr := CheckPCSGReady(ctx, c, testPCSGName, "default", log.FromContext(ctx))
+			readiness, checkErr := observeComponentPCSGReadiness(
+				ctx, c, pcs, testPCSGName, "default", "component", tt.dgdReplicas,
+			)
 			g.Expect(checkErr).NotTo(gomega.HaveOccurred())
 
-			g.Expect(ready).To(gomega.Equal(tt.wantReady))
-			g.Expect(classification).To(gomega.Equal(tt.wantClassification))
+			t.Log("Verify foreign resources cannot contribute readiness or replica status")
+			g.Expect(readiness.ready).To(gomega.Equal(tt.wantReady))
+			g.Expect(readiness.classification).To(gomega.Equal(tt.wantClassification))
+			if tt.oldPCS {
+				g.Expect(readiness.status).To(gomega.Equal(v1beta1.ComponentReplicaStatus{
+					ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup, ComponentNames: []string{testPCSGName},
+				}))
+			}
 			if tt.wantReasonContains != "" {
-				g.Expect(reason).To(gomega.ContainSubstring(tt.wantReasonContains))
+				g.Expect(readiness.reason).To(gomega.ContainSubstring(tt.wantReasonContains))
 			}
 		})
 	}
@@ -2196,8 +2189,8 @@ func TestCheckPCSGReadyClassification(t *testing.T) {
 // --- test helpers ---
 
 // Fixed resource identity used by the classification tests. The helpers below
-// hardcode these so the name passed to CheckPodCliqueReady / CheckPCSGReady
-// stays in sync with the object created in the fake client, and so the spec
+// hardcode these so the names passed to the readiness evaluators stay in sync
+// with the object created in the fake client, and so the spec
 // replica count (which every case shares) is defined in one place. Only the
 // status varies per test case.
 const (
@@ -2223,6 +2216,16 @@ func newPCSG(status grovev1alpha1.PodCliqueScalingGroupStatus) *grovev1alpha1.Po
 	}
 }
 
+func newReadyPCS(name string) *grovev1alpha1.PodCliqueSet {
+	return &grovev1alpha1.PodCliqueSet{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Generation: 1, UID: types.UID(name)},
+		Status: grovev1alpha1.PodCliqueSetStatus{
+			ObservedGeneration:    ptr.To(int64(1)),
+			CurrentGenerationHash: ptr.To("current"),
+		},
+	}
+}
+
 func newFakeGroveClient(g *gomega.WithT, objects ...client.Object) client.Client {
 	s := scheme.Scheme
 	g.Expect(grovev1alpha1.AddToScheme(s)).To(gomega.Succeed())
@@ -2236,11 +2239,9 @@ func newFakeGroveClient(g *gomega.WithT, objects ...client.Object) client.Client
 // TestGroveReadinessTransientErrorsPropagate verifies that a non-NotFound Get
 // error from a Grove child is returned as an error (so the reconcile retries and
 // does not advance ObservedGeneration), rather than folded into a normal
-// not-ready result. NotFound remains a legitimate not-ready state (covered by
-// the "not found" cases in TestCheckPodCliqueReady / TestCheckPCSGReady).
+// not-ready result. NotFound remains a legitimate not-ready state.
 func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	ctx := context.Background()
-	logger := log.FromContext(ctx)
 	transientErr := fmt.Errorf("transient API error")
 
 	newClient := func(g *gomega.WithT) client.Client {
@@ -2265,7 +2266,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 	t.Run("CheckPodCliqueReady returns error on non-NotFound get failure", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		c := newClient(g)
-		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", logger)
+		ready, _, _, classification, err := CheckPodCliqueReady(ctx, c, "test-pc", "default", log.FromContext(ctx))
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
 		g.Expect(ready).To(gomega.BeFalse())
@@ -2273,14 +2274,16 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 		g.Expect(classification).To(gomega.BeEmpty())
 	})
 
-	t.Run("CheckPCSGReady returns error on non-NotFound get failure", func(t *testing.T) {
+	t.Run("PCSG-backed component returns error on non-NotFound get failure", func(t *testing.T) {
 		g := gomega.NewGomegaWithT(t)
 		c := newClient(g)
-		ready, _, _, classification, err := CheckPCSGReady(ctx, c, "test-pcsg", "default", logger)
+		readiness, err := observeComponentPCSGReadiness(
+			ctx, c, newReadyPCS("pcs"), "test-pcsg", "default", "component", ptr.To(int32(1)),
+		)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
-		g.Expect(ready).To(gomega.BeFalse())
-		g.Expect(classification).To(gomega.BeEmpty())
+		g.Expect(readiness.ready).To(gomega.BeFalse())
+		g.Expect(readiness.classification).To(gomega.BeEmpty())
 	})
 
 	t.Run("EvaluateGroveReadiness propagates a child read error", func(t *testing.T) {

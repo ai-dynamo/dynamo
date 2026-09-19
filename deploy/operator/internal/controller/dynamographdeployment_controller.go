@@ -184,7 +184,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Dispatch exclusively through the persisted provider.
 	program, err := r.selectWorkloadProgram(provider)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -236,6 +235,11 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
+	// Wait for the LPX child's cleanup before deleting graph-owned checkpoints.
+	if err := (&dgdLPXHandoff{client: r.Client}).Finalize(ctx, dynamoDeployment); err != nil {
+		return err
+	}
+
 	syncer := newDGDResourceSyncer(r.Client, r.Recorder)
 	return newDGDCheckpointsReconciler(
 		syncer,
@@ -270,9 +274,10 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			generationOrDeletionChangedPredicate(),
+			dgdPrimaryPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
+		Owns(&nvidiacomv1alpha1.LPXGraphDeployment{}).
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),

@@ -142,7 +142,7 @@ func countResourcesByState[T any, PT StateProvider](
 }
 
 func updateDynamoGraphDeploymentCounts(ctx context.Context, c client.Client, excludedNamespaces ExcludedNamespaces, logger logr.Logger) {
-	dgdList := &v1alpha1.DynamoGraphDeploymentList{}
+	dgdList := &v1beta1.DynamoGraphDeploymentList{}
 	if err := c.List(ctx, dgdList); err != nil {
 		logger.Error(err, "failed to list DynamoGraphDeployments")
 		return
@@ -151,12 +151,12 @@ func updateDynamoGraphDeploymentCounts(ctx context.Context, c client.Client, exc
 		dgdList.Items,
 		excludedNamespaces,
 		consts.ResourceTypeDynamoGraphDeployment,
-		func(d *v1alpha1.DynamoGraphDeployment) *v1alpha1.DynamoGraphDeployment { return d },
+		func(d *v1beta1.DynamoGraphDeployment) *v1beta1.DynamoGraphDeployment { return d },
 	)
 }
 
 func updateDynamoComponentDeploymentCounts(ctx context.Context, c client.Client, excludedNamespaces ExcludedNamespaces, logger logr.Logger) {
-	dcdList := &v1alpha1.DynamoComponentDeploymentList{}
+	dcdList := &v1beta1.DynamoComponentDeploymentList{}
 	if err := c.List(ctx, dcdList); err != nil {
 		logger.Error(err, "failed to list DynamoComponentDeployments")
 		return
@@ -165,7 +165,7 @@ func updateDynamoComponentDeploymentCounts(ctx context.Context, c client.Client,
 		dcdList.Items,
 		excludedNamespaces,
 		consts.ResourceTypeDynamoComponentDeployment,
-		func(d *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeployment { return d },
+		func(d *v1beta1.DynamoComponentDeployment) *v1beta1.DynamoComponentDeployment { return d },
 	)
 }
 

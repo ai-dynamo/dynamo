@@ -24,9 +24,37 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 )
+
+func TestDGDPlacementStatusSurvivesConversionAlongsideLPX(t *testing.T) {
+	t.Log("Define distinct public and LPX-owned placement values on the hub")
+	src := &v1beta1.DynamoGraphDeployment{
+		Status: v1beta1.DynamoGraphDeploymentStatus{
+			Placement: &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported},
+			LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
+				Placement: &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStatePartial},
+			},
+		},
+	}
+
+	t.Log("Convert through the served alpha version and back")
+	alpha := &DynamoGraphDeployment{}
+	if err := alpha.ConvertFrom(src); err != nil {
+		t.Fatal(err)
+	}
+	got := &v1beta1.DynamoGraphDeployment{}
+	if err := alpha.ConvertTo(got); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log("Preserve both paths independently without dropping or conflating the public field")
+	if diff := cmp.Diff(src.Status, got.Status); diff != "" {
+		t.Fatalf("status round-trip mismatch (-want +got):\n%s", diff)
+	}
+}
 
 func TestBugDGD_IntermediateHubAddsMainOnlyPodTemplateRoundTrips(t *testing.T) {
 	alpha := &DynamoGraphDeployment{

@@ -83,6 +83,9 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 	return corev1.PodSpec{
 		// Topology and snapshot controllers require the assigned node.
 		NodeName: in.NodeName,
+		// Node-local LPX disruption recovery distinguishes Agent Pods scheduled
+		// through LPX from unrelated Pods.
+		SchedulerName: in.SchedulerName,
 		// Model endpoint classification requires the main container's command
 		// and arguments.
 		Containers: projectContainers(in.Containers),
@@ -165,8 +168,9 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
 		// lifecycle phase.
 		Phase: in.Phase,
-		// Model endpoint classification requires Ready; Snapshot-aware GMS
-		// replacement requires the public restore outcome.
+		// Model endpoint classification requires Ready; Snapshot-aware GMS replacement
+		// requires the public restore outcome; node-local LPX disruption recovery
+		// requires DisruptionTarget and its Kubernetes reason.
 		Conditions: projectConditions(in.Conditions),
 		// DGDR diagnostics inspect container failures.
 		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
@@ -178,16 +182,16 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	out := make([]corev1.PodCondition, 0, len(in))
 	for i := range in {
-		if in[i].Type != corev1.PodReady &&
-			in[i].Type != corev1.PodConditionType(podcontract.RestoredCondition) {
-			continue
-		}
 		condition := corev1.PodCondition{
 			Type:   in[i].Type,
 			Status: in[i].Status,
 		}
-		if in[i].Type == corev1.PodConditionType(podcontract.RestoredCondition) {
+		switch in[i].Type {
+		case corev1.PodReady:
+		case corev1.PodConditionType(podcontract.RestoredCondition), corev1.DisruptionTarget:
 			condition.Reason = in[i].Reason
+		default:
+			continue
 		}
 		out = append(out, condition)
 	}

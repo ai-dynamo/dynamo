@@ -425,6 +425,11 @@ areas:
   - deploy/utils/tests/
   - examples/deployments/
   - tests/deploy/
+- label: lpx
+  github_team: '@ai-dynamo/dynamo-lpx-codeowners'
+  path_globs:
+  - deploy/operator/internal/controller/lpx/
+  - deploy/operator/internal/dynamo/lpx/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
   path_globs:
@@ -575,6 +580,7 @@ shared:
   - frontend
   - gms
   - kv-memory
+  - lpx
   - multimodal
   - observability
   - operator
@@ -980,6 +986,16 @@ shared:
   owners:
   - operator
   - observability
+- glob: deploy/operator/internal/controller/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/operator/internal/dynamo/lpx/
+  owners:
+  - operator
+  - lpx
+- glob: deploy/**/*lpx*
+  owners: [operator, lpx]
 - glob: deploy/operator/internal/controller/*checkpoint*
   owners:
   - operator

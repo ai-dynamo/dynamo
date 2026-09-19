@@ -33,6 +33,10 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
+	// scheduling configures attempts for LPX components. Omission means no deadline.
+	// +optional
+	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
+
 	// annotations to propagate to all child resources (PCS, DCD, Deployments,
 	// and pod templates). Component-level (`podTemplate`) values take precedence
 	// on conflict.
@@ -138,6 +142,10 @@ type DynamoGraphDeploymentStatus struct {
 	// state, and any future placement fields).
 	// +optional
 	Placement *PlacementStatus `json:"placement,omitempty"`
+
+	// lpx contains the status of the graph's LPX workload, when present.
+	// +optional
+	LPX *DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`
 }
 
 // DGD Ready condition reasons used to classify Grove-backed not-ready

@@ -1,0 +1,195 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: node-local-v2-lpu-only
+  namespace: test
+  uid: 11111111-1111-4111-8111-111111111111
+  generation: 1
+  annotations:
+    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
+spec:
+  components:
+    - name: lpu
+      type: lpx
+      replicas: 1
+      lpx:
+        buildId: node-local-v2-connected
+      roles:
+      - name: conductor
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              command:
+              - /opt/dynamo-lpu
+              args:
+              - serve
+              - --mpirun-path
+              - /bin/mpirun
+              - --mpi-ssh-cmd
+              - ssh -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i /tmp/dynamo-lpu-ssh/private.key
+              - --agent-wd
+              - /tmp
+              - --conductor-bind-host
+              - 0.0.0.0
+              - --conductor-hostname
+              - $(POD_IP)
+              - --control-server-addr
+              - $(POD_IP):51045
+              - --json-logs
+              - --disable-tracing
+              - --mpi-use-tcp
+              - --agent-disable-auto-restart
+              - --agent-server-max-retries
+              - '60'
+              - --agent-server-retry-sleep-dur
+              - 2s
+              - --graceful-shutdown-timeout
+              - 0s
+              - --response-timeout
+              - 120s
+              - --frontend-type
+              - dynamo
+              - --endpoint-id
+              - dyn://$(DYN_NAMESPACE).backend.generate
+              - --store-backend
+              - kubernetes
+              - --allocation
+              - $(LPX_ALLOCATION)
+              env:
+              - name: NOVA_MODEL_PATH
+                value: '$(LPX_MODEL_PATH)'
+              - name: NOVA_RESOLVED_PARTITIONS_DIR
+                value: '/configs'
+              - name: NOVA_MODEL_BASE_PATHS
+                value: /nfs
+              - name: NOVA_NODE_NAME_TEMPLATE
+                value: ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-{rack}-{node}.${GROVE_HEADLESS_SERVICE}
+              - name: OMPI_ALLOW_RUN_AS_ROOT
+                value: '1'
+              - name: OMPI_ALLOW_RUN_AS_ROOT_CONFIRM
+                value: '1'
+              - name: OMPI_MCA_plm_rsh_args
+                value: -p 2222 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o IdentityFile=/tmp/dynamo-lpu-ssh/private.key
+              readinessProbe:
+                httpGet:
+                  path: /readyz
+                  port: 51045
+                  scheme: HTTP
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                successThreshold: 1
+                timeoutSeconds: 1
+              volumeMounts:
+              - name: model-storage
+                mountPath: /nfs
+              - name: config
+                mountPath: /configs
+              - name: single-v2-ssh-key
+                mountPath: /tmp/dynamo-lpu-ssh
+            initContainers:
+            - args:
+              - -m
+              - '0600'
+              - /ssh-pk/private.key
+              - /tmp/dynamo-lpu-ssh/private.key
+              command:
+              - /bin/install
+              image: example.invalid/lpu-runtime:test
+              name: prepare-ssh-key
+              volumeMounts:
+              - mountPath: /tmp/dynamo-lpu-ssh
+                name: single-v2-ssh-key
+              - mountPath: /ssh-pk
+                name: ssh-secret
+                readOnly: true
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 384
+            - name: single-v2-ssh-key
+              emptyDir: {}
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+      - name: agent
+        podTemplate:
+          spec:
+            containers:
+            - name: main
+              image: example.invalid/lpu-runtime:test
+              command:
+              - /opt/dynamo-lpu
+              args:
+              - serve
+              resources:
+                limits:
+                  lpu.nvidia.com/devices: '1'
+                  hugepages-2Mi: 4Gi
+                requests:
+                  cpu: '62'
+                  hugepages-2Mi: 4Gi
+              readinessProbe:
+                failureThreshold: 3
+                initialDelaySeconds: 10
+                periodSeconds: 5
+                successThreshold: 1
+                tcpSocket:
+                  port: 2222
+                timeoutSeconds: 1
+              env:
+              - name: LPU_RUN_SYSTEM_INIT
+                value: 'true'
+              volumeMounts:
+              - mountPath: /nfs
+                name: model-storage
+              - name: config
+                mountPath: /configs
+              - name: host-dev
+                mountPath: /dev
+              - name: host-sys
+                mountPath: /sys
+              - name: ssh-secret
+                mountPath: /ssh-pk
+                readOnly: true
+              - name: hugepages
+                mountPath: /dev/hugepages
+              securityContext:
+                privileged: true
+            volumes:
+            - name: model-storage
+              persistentVolumeClaim:
+                claimName: model-storage
+            - name: host-dev
+              hostPath:
+                path: /dev
+                type: Directory
+            - name: host-sys
+              hostPath:
+                path: /sys
+                type: Directory
+            - name: hugepages
+              emptyDir:
+                medium: HugePages
+            - name: ssh-secret
+              secret:
+                secretName: ssh-secret
+                defaultMode: 420
+            dnsPolicy: ClusterFirstWithHostNet
+            hostIPC: true
+            hostNetwork: true
+            securityContext:
+              fsGroup: 1000
+              fsGroupChangePolicy: OnRootMismatch
+            tolerations:
+            - key: lpu.nvidia.com/node
+              operator: Exists

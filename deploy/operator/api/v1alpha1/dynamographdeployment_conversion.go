@@ -107,6 +107,7 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 // v1beta1.
 func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
+	dst.Scheduling = src.Scheduling
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
 	dst.PriorityClassName = src.PriorityClassName
@@ -420,6 +421,7 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 // v1alpha1.
 func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
+	dst.Scheduling = src.Scheduling
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
 	dst.PriorityClassName = src.PriorityClassName
@@ -653,15 +655,12 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
 	if src.Placement != nil {
-		dst.Placement = &v1beta1.PlacementStatus{
-			State: v1beta1.PlacementScoreState(src.Placement.State),
-		}
-		if src.Placement.Score != nil {
-			dst.Placement.Score = ptr.To(*src.Placement.Score)
-		}
+		dst.Placement = &v1beta1.PlacementStatus{}
+		ConvertFromPlacementStatus(src.Placement, dst.Placement)
 	} else {
 		dst.Placement = nil
 	}
+	dst.LPX = src.LPX
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -700,15 +699,12 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
 	if src.Placement != nil {
-		dst.Placement = &PlacementStatus{
-			State: PlacementScoreState(src.Placement.State),
-		}
-		if src.Placement.Score != nil {
-			dst.Placement.Score = ptr.To(*src.Placement.Score)
-		}
+		dst.Placement = &PlacementStatus{}
+		ConvertToPlacementStatus(src.Placement, dst.Placement)
 	} else {
 		dst.Placement = nil
 	}
+	dst.LPX = src.LPX
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -738,6 +734,22 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 	if src.RollingUpdate != nil {
 		dst.RollingUpdate = &RollingUpdateStatus{}
 		ConvertToRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
+	}
+}
+
+// ConvertFromPlacementStatus converts placement status from v1alpha1 to v1beta1.
+func ConvertFromPlacementStatus(src *PlacementStatus, dst *v1beta1.PlacementStatus) {
+	*dst = v1beta1.PlacementStatus{State: v1beta1.PlacementScoreState(src.State)}
+	if src.Score != nil {
+		dst.Score = ptr.To(*src.Score)
+	}
+}
+
+// ConvertToPlacementStatus converts placement status from v1beta1 to v1alpha1.
+func ConvertToPlacementStatus(src *v1beta1.PlacementStatus, dst *PlacementStatus) {
+	*dst = PlacementStatus{State: PlacementScoreState(src.State)}
+	if src.Score != nil {
+		dst.Score = ptr.To(*src.Score)
 	}
 }
 
@@ -810,6 +822,7 @@ func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.Com
 		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
 		ComponentNames:   componentNamesToHub(src),
 		RuntimeNamespace: src.RuntimeNamespace,
+		Ready:            src.Ready,
 		Replicas:         src.Replicas,
 		UpdatedReplicas:  src.UpdatedReplicas,
 	}
@@ -839,6 +852,7 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 		ComponentKind:    ComponentKind(src.ComponentKind),
 		ComponentNames:   componentNames,
 		RuntimeNamespace: src.RuntimeNamespace,
+		Ready:            src.Ready,
 		Replicas:         src.Replicas,
 		UpdatedReplicas:  src.UpdatedReplicas,
 	}

@@ -41,7 +41,12 @@ func TestProjectConsumerContract(t *testing.T) {
 			ManagedFields:     []metav1.ManagedFieldsEntry{{Manager: "large-manager"}},
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-a",
+			NodeName:      "node-a",
+			SchedulerName: "lpx-scheduler",
+			ResourceClaims: []corev1.PodResourceClaim{{
+				Name:              "lpu-partition",
+				ResourceClaimName: ptr.To("lpu-partition-0"),
+			}},
 			Containers: []corev1.Container{{
 				Name:    "main",
 				Image:   "large-image",
@@ -102,6 +107,7 @@ func TestProjectConsumerContract(t *testing.T) {
 					Reason:  podcontract.RestoreReasonFailed,
 					Message: "discard-me",
 				},
+				{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "EvictionByEvictionAPI", Message: "discard-me"},
 			},
 			ContainerStatuses: []corev1.ContainerStatus{
 				{
@@ -155,6 +161,9 @@ func TestProjectConsumerContract(t *testing.T) {
 	t.Run("model retains Ready identity command and arguments", func(t *testing.T) {
 		require.Len(t, got.Spec.Containers, 1)
 		assert.Equal(t, corev1.Container{Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"}}, got.Spec.Containers[0])
+	})
+	t.Run("snapshot and LPX retain restore and disruption state", func(t *testing.T) {
+		assert.Equal(t, "lpx-scheduler", got.Spec.SchedulerName)
 		assert.Equal(t, []corev1.PodCondition{
 			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 			{
@@ -162,6 +171,7 @@ func TestProjectConsumerContract(t *testing.T) {
 				Status: corev1.ConditionFalse,
 				Reason: podcontract.RestoreReasonFailed,
 			},
+			{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "EvictionByEvictionAPI"},
 		}, got.Status.Conditions)
 	})
 	t.Run("failover DGDR GMS replacement and Recreate retain status state", func(t *testing.T) {

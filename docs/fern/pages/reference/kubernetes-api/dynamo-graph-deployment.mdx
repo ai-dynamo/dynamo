@@ -45,7 +45,7 @@ spec:
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  Backend framework for the graph. Sets backend-specific defaults the operator injects into each component's `main` container.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
@@ -67,6 +67,17 @@ spec:
 <ParamField path="priorityClassName" type="string">
   Name of the `PriorityClass` to use for Grove `PodCliqueSet`s. Requires the Grove pathway. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
+
+<ParamField path="scheduling" type="SchedulingSpec">
+  Configures scheduling attempts for `type: lpx` components. Omit this object for attempts without a deadline.
+</ParamField>
+
+<Indent>
+  <ParamField path="attemptDeadlineSeconds" type="int64">
+    Wall-clock limit for each pending LPU pipeline request, measured from the scheduler-published start of its current scheduling cycle until it reports `Bound`, `NoFit`, or `Unsupported`. The deadline is not armed until the scheduler publishes `status.schedulingStartedAt`, and a later scheduling cycle resets that timestamp. Valid values are `1` through `9,223,372,036`; omission means unlimited.
+    Expiry reports `LPXSchedulingDeadlineExceeded` and deletes the expired request. When `replicas` is explicit, it also lowers the Grove replica count to the surviving prefix; externally managed capacity is left unchanged. A later LPX input revision authorizes another publication. This field is not a solver budget.
+  </ParamField>
+</Indent>
 
 <ParamField path="restart" type="Restart">
   Restart policy for the graph. Change `restart.id` to trigger a restart.
@@ -156,6 +167,23 @@ The operator maintains observed state under `status`.
 <ParamField path="status.observedGeneration" type="integer">
   Most recent `metadata.generation` observed by the controller.
 </ParamField>
+
+<ParamField path="status.placement" type="PlacementStatus">
+  Public deployment-level placement summary. For LPX workloads, this field mirrors `status.lpx.placement` for compatibility with existing clients.
+</ParamField>
+
+<ParamField path="status.lpx" type="DynamoGraphDeploymentLPXStatus">
+  LPX download and placement observations for the current configuration. Omitted when no current LPX result exists, including ordinary-only deployments. LPX component entries and aggregate readiness remain under `status.components`, `status.state`, and `status.conditions`.
+</ParamField>
+
+<Indent>
+  <ParamField path="modelDownload" type="ModelDownloadStatus">
+    Downloaded builds and the time they were last checked.
+  </ParamField>
+  <ParamField path="placement" type="PlacementStatus">
+    Placement progress and scheduling-attempt details. The attempt's `observedGeneration` refers to this DGD's generation.
+  </ParamField>
+</Indent>
 
 <ParamField path="status.restart" type="RestartStatus">
   Status of a graph-level restart in progress.

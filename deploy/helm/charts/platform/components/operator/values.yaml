@@ -22,6 +22,14 @@
 # the cluster-wide operator.
 upgradeCRD: true
 
+# The LPX scheduler and its CRDs must be installed separately.
+lpx:
+  # -- Enable the Dynamo operator's LPX integration. Startup requires the
+  # externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API.
+  enabled: false
+  # -- Configure the LPU model registry used by the LPX integration.
+  modelRegistryURL: ""
+
 # Environment variables to pass to operator Deployment.
 env: []
 
@@ -90,6 +98,8 @@ controllerManager:
       requests:
         cpu: 512m
         memory: 1Gi
+    volumeMounts: []
+    volumes: []
   replicas: 1
   serviceAccount:
     annotations: {}

@@ -398,6 +398,18 @@ spec:
                   required:
                     - id
                   type: object
+                scheduling:
+                  description: Scheduling configures attempts for LPX components. Omission means no deadline.
+                  properties:
+                    attemptDeadlineSeconds:
+                      description: |-
+                        attemptDeadlineSeconds limits how long each LPR may remain pending.
+                        Omission means unlimited; the value is not a solver budget.
+                      format: int64
+                      maximum: 9223372036
+                      minimum: 1
+                      type: integer
+                  type: object
                 services:
                   additionalProperties:
                     properties:
@@ -11508,6 +11520,18 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      lpx:
+                        description: |-
+                          LPX holds LPX integration configuration. Only meaningful when
+                          ComponentType is "lpx".
+                        properties:
+                          buildId:
+                            description: buildId references the immutable model build.
+                            minLength: 1
+                            type: string
+                        required:
+                          - buildId
+                        type: object
                       minAvailable:
                         description: |-
                           MinAvailable maps to Grove PodClique minAvailable for single-node and
@@ -11828,6 +11852,9 @@ spec:
                           leader and one worker role. Admission defaults omitted replicas to 1 for
                           leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                           preserves the implicit multinode role layout.
+                          LPX components each require an agent role. All LPX components in a DGD
+                          must declare exactly one conductor role in total. Every LPX role requires
+                          its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -11845,7 +11872,7 @@ spec:
                               description: |-
                                 PodTemplate defines the Pod configuration for this role. Admission permits
                                 it only when the enclosing component type explicitly supports role-specific
-                                Pod templates. No component type supports it in this release.
+                                Pod templates.
                               properties:
                                 metadata:
                                   description: |-
@@ -20104,6 +20131,14 @@ spec:
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                       - message: componentType is immutable after it is set
                         rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
+                      - message: lpx may only be set when componentType is lpx
+                        rule: '!has(self.lpx) || (has(self.componentType) && self.componentType == ''lpx'')'
+                      - message: lpx is required when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'') || has(self.lpx)'
+                      - message: replicas must be positive when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
+                      - message: scalingAdapter is not supported when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
@@ -20220,6 +20255,50 @@ spec:
                       - type
                     type: object
                   type: array
+                lpx:
+                  description: LPX contains the status of the graph's LPX workload, when present.
+                  properties:
+                    modelDownload:
+                      description: modelDownload contains the model download status for remote builds.
+                      properties:
+                        builds:
+                          description: |-
+                            builds is the sorted set of resolved remote LPU build URLs whose artifacts
+                            were successfully downloaded into model-storage.
+                          items:
+                            type: string
+                          type: array
+                        lastCheckedAt:
+                          description: lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+                          format: date-time
+                          type: string
+                      type: object
+                    placement:
+                      description: placement contains LPX scheduling progress and placement signals.
+                      properties:
+                        score:
+                          description: |-
+                            score is the DGD-level scheduler placement score aggregated from
+                            relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+                            is better and 1.0 represents the best possible placement. Aggregation
+                            uses the minimum across placement units so the value is a worst-placement
+                            signal for the graph. Scores are only comparable across DGDs that share
+                            the same scheduler scoring contract and version.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                        state:
+                          description: |-
+                            state indicates placement score reporting state. See PlacementScoreState
+                            for the semantics of each value.
+                          enum:
+                            - Reported
+                            - Partial
+                            - Unsupported
+                            - Unknown
+                          type: string
+                      type: object
+                  type: object
                 observedGeneration:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
@@ -20349,6 +20428,11 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      ready:
+                        description: |-
+                          Ready is the binary determination of whether the correct number of replicas
+                          are scheduled and available.
+                        type: boolean
                       readyReplicas:
                         description: |-
                           ReadyReplicas is the number of ready replicas.
@@ -20488,9 +20572,9 @@ spec:
                       volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
                       replaced with a single `podTemplate` field holding a native
                       `corev1.PodTemplateSpec`. The operator injects its defaults into the
-                      container named `"main"` and merges user overrides using strategic-merge-by-name
-                      semantics. Users can add sidecars, init containers, and pod-level configuration
-                      directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
+                      container named `"main"` and merges user overrides. Users can add sidecars,
+                      init containers, and pod-level configuration directly in `podTemplate`
+                      without any `extraPodSpec`-style escape hatch.
                     properties:
                       compilationCache:
                         description: |-
@@ -20974,6 +21058,18 @@ spec:
                           namespace rather than the per-deployment namespace derived from the
                           DGD name.
                         type: boolean
+                      lpx:
+                        description: |-
+                          lpx holds LPX integration configuration. Only meaningful when
+                          `type` is `lpx`.
+                        properties:
+                          buildId:
+                            description: buildId references the immutable model build.
+                            minLength: 1
+                            type: string
+                        required:
+                          - buildId
+                        type: object
                       minAvailable:
                         description: |-
                           minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
@@ -29224,6 +29320,9 @@ spec:
                           leader and one worker role. Admission defaults omitted replicas to 1 for
                           leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                           preserves the implicit multinode role layout.
+                          LPX components each require an agent role. All LPX components in a DGD
+                          must declare exactly one conductor role in total. Every LPX role requires
+                          its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -29241,7 +29340,7 @@ spec:
                               description: |-
                                 podTemplate defines the Pod configuration for this role. Admission permits
                                 it only when the enclosing component type explicitly supports role-specific
-                                Pod templates. No component type supports it in this release.
+                                Pod templates.
                               properties:
                                 metadata:
                                   description: |-
@@ -37458,6 +37557,7 @@ spec:
                           - decode
                           - planner
                           - epp
+                          - lpx
                         type: string
                     required:
                       - name
@@ -37471,6 +37571,16 @@ spec:
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                       - message: type is immutable after it is set
                         rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
+                      - message: lpx may only be set when type is lpx
+                        rule: '!has(self.lpx) || (has(self.type) && self.type == ''lpx'')'
+                      - message: lpx is required when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'') || has(self.lpx)'
+                      - message: LPX Pod templates belong to roles
+                        rule: '!(has(self.type) && self.type == ''lpx'') || !has(self.podTemplate)'
+                      - message: replicas must be positive when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && self.replicas < 1)'
+                      - message: scalingAdapter is not supported when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'' && has(self.scalingAdapter))'
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
@@ -37776,6 +37886,18 @@ spec:
                   required:
                     - id
                   type: object
+                scheduling:
+                  description: scheduling configures attempts for LPX components. Omission means no deadline.
+                  properties:
+                    attemptDeadlineSeconds:
+                      description: |-
+                        attemptDeadlineSeconds limits how long each LPR may remain pending.
+                        Omission means unlimited; the value is not a solver budget.
+                      format: int64
+                      maximum: 9223372036
+                      minimum: 1
+                      type: integer
+                  type: object
                 topologyConstraint:
                   description: |-
                     topologyConstraint is the deployment-level topology constraint. When
@@ -37880,6 +38002,11 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
+                      ready:
+                        description: |-
+                          ready is the binary determination of whether the correct number of replicas
+                          are scheduled and available.
+                        type: boolean
                       readyReplicas:
                         description: |-
                           readyReplicas is the number of ready replicas. Populated for
@@ -37989,6 +38116,50 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
+                lpx:
+                  description: lpx contains the status of the graph's LPX workload, when present.
+                  properties:
+                    modelDownload:
+                      description: modelDownload contains the model download status for remote builds.
+                      properties:
+                        builds:
+                          description: |-
+                            builds is the sorted set of resolved remote LPU build URLs whose artifacts
+                            were successfully downloaded into model-storage.
+                          items:
+                            type: string
+                          type: array
+                        lastCheckedAt:
+                          description: lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+                          format: date-time
+                          type: string
+                      type: object
+                    placement:
+                      description: placement contains LPX scheduling progress and placement signals.
+                      properties:
+                        score:
+                          description: |-
+                            score is the DGD-level scheduler placement score aggregated from
+                            relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
+                            is better and 1.0 represents the best possible placement. Aggregation
+                            uses the minimum across placement units so the value is a worst-placement
+                            signal for the graph. Scores are only comparable across DGDs that share
+                            the same scheduler scoring contract and version.
+                          maximum: 1
+                          minimum: 0
+                          type: number
+                        state:
+                          description: |-
+                            state indicates placement score reporting state. See PlacementScoreState
+                            for the semantics of each value.
+                          enum:
+                            - Reported
+                            - Partial
+                            - Unsupported
+                            - Unknown
+                          type: string
+                      type: object
+                  type: object
                 observedGeneration:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64
