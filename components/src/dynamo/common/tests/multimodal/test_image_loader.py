@@ -405,6 +405,48 @@ async def test_image_batch_prioritizes_typed_client_error(
     assert exc_info.value is client_error
 
 
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "data:image/png;base64,not!!!base64!!!",
+        "data:image/png,abc",
+    ],
+    ids=["invalid-base64", "missing-base64-marker"],
+)
+async def test_malformed_data_url_batch_raises_value_error(
+    loader: ImageLoader, bad_url: str
+) -> None:
+    """A malformed data: URI is a client error. The batch path must preserve
+    ValueError — the bindings map it to Backend(InvalidArgument) → 4xx."""
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_image_batch([{URL_VARIANT_KEY: bad_url}])
+
+    assert not isinstance(exc_info.value, UrlValidationError)
+    assert "Failed to decoding image" in str(exc_info.value)
+
+
+async def test_unexpected_decoder_error_not_wrapped_as_value_error(
+    loader: ImageLoader,
+) -> None:
+    """An unexpected decoder failure (e.g. PIL OSError on a truncated file)
+    must not be classified as a client validation error: it propagates
+    unchanged from load_image and the batch path folds it into a generic
+    Exception, so the frontend answers 500, not 400."""
+    loader._open_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=OSError("image file is truncated")
+    )
+
+    with pytest.raises(OSError, match="truncated"):
+        await loader.load_image("data:image/png;base64,aGVsbG8=")
+
+    with pytest.raises(Exception) as exc_info:
+        await loader.load_image_batch(
+            [{URL_VARIANT_KEY: "data:image/png;base64,aGVsbG8="}]
+        )
+    assert not isinstance(exc_info.value, ValueError)
+    assert "truncated" in str(exc_info.value)
+
+
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     """Accessing a cached entry should protect it from eviction (LRU, not FIFO)."""
     loader._cache_size = 3

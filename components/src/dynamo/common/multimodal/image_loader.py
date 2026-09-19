@@ -254,7 +254,7 @@ class ImageLoader:
             except Image.UnidentifiedImageError as e:
                 logger.error(f"Unsupported image format decoding: '{image_url}'")
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
-            except Exception as e:
+            except ValueError as e:
                 if "Unsupported image format" in str(e):
                     logger.error(f"Unsupported image format decoding: '{image_url}'")
                     raise HttpStatusError(
@@ -262,6 +262,9 @@ class ImageLoader:
                     ) from e
                 logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
                 raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
+            except Exception:
+                logger.error(f"Unexpected error decoding image: '{image_url}'")
+                raise
 
         # It's not file:, http:, https:, or data:
         raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
@@ -315,6 +318,9 @@ class ImageLoader:
                 client-error code instead of 500.
             UrlValidationError: If a media URL is rejected by the SSRF policy;
                 preserved as a ValueError so the frontend returns a 4xx, not 500.
+            ValueError: If any image fails client-side input validation (e.g.
+                a malformed data: URI — invalid base64, missing ;base64 marker,
+                or non-image MIME).
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
             ValueError: If a UUID-only slot is received without opting in
@@ -360,6 +366,7 @@ class ImageLoader:
         collective_exceptions = ""
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
+        value_error: ValueError | None = None
         for media_item, future_idx in zip(
             image_mm_items, slot_to_future_idx, strict=True
         ):
@@ -389,6 +396,11 @@ class ImageLoader:
                 # preserve it so the frontend still gets a 4xx, not a 500.
                 elif url_error is None and isinstance(result, UrlValidationError):
                     url_error = result
+                # Same for any other ValueError (e.g. malformed data: URIs —
+                # invalid base64, missing ;base64 marker, non-image MIME). The
+                # bindings map ValueError to Backend(InvalidArgument) → 400.
+                elif value_error is None and isinstance(result, ValueError):
+                    value_error = result
                 continue
             loaded_images.append(result)
 
@@ -397,6 +409,9 @@ class ImageLoader:
 
         if url_error is not None:
             raise url_error
+
+        if value_error is not None:
+            raise value_error
 
         if collective_exceptions:
             raise Exception(collective_exceptions)
