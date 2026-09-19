@@ -29,6 +29,8 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataGetRequest,
     MetadataListRequest,
     MetadataPutRequest,
+    QuiesceGPUCohortRequest,
+    RegisterGPUClientRequest,
     ReleasePersistentAllocationRequest,
     UnclaimPersistentAllocationRequest,
 )
@@ -91,6 +93,8 @@ PERSISTENT_ALLOWED: frozenset[type] = frozenset(
         ReleasePersistentAllocationRequest,
         ExportPersistentAllocationRequest,
         ListPersistentAllocationsRequest,
+        RegisterGPUClientRequest,
+        QuiesceGPUCohortRequest,
     }
 )
 

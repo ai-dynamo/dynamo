@@ -233,6 +233,41 @@ class ListPersistentAllocationsResponse(
 
 
 # ----------------------------------------------------------------------
+# Daemon-owned GPU quiescence for crash-safe shared-KV recovery.
+# ----------------------------------------------------------------------
+
+
+class RegisterGPUClientRequest(msgspec.Struct, tag="register_gpu_client_request"):
+    backend: str
+    cohort: str
+    client_pid: int
+    process_start_time: str
+    rank: int = 0
+
+
+class RegisterGPUClientResponse(msgspec.Struct, tag="register_gpu_client_response"):
+    registered: bool
+
+
+class QuiesceGPUCohortRequest(msgspec.Struct, tag="quiesce_gpu_cohort_request"):
+    backend: str
+    # None asks this pool's GMS daemon to quiesce every registered cohort
+    # except the named successor. This is used at the per-rank remap boundary:
+    # a TP rank cannot reach another rank's Unix socket, while each rank's local
+    # daemon has authoritative knowledge of every CUDA client for its pool.
+    predecessor_cohort: str | None
+    successor_cohort: str
+
+
+class QuiesceGPUCohortResponse(msgspec.Struct, tag="quiesce_gpu_cohort_response"):
+    quiesced: bool
+    provider: str
+    client_count: int
+    detail: str = ""
+    elapsed_ms: float = 0.0
+
+
+# ----------------------------------------------------------------------
 # KV block leases for shared persistent KV pools.
 # ----------------------------------------------------------------------
 
@@ -365,6 +400,10 @@ Message = Union[
     ListPersistentAllocationsRequest,
     ListPersistentAllocationsResponse,
     PersistentAllocationInfo,
+    RegisterGPUClientRequest,
+    RegisterGPUClientResponse,
+    QuiesceGPUCohortRequest,
+    QuiesceGPUCohortResponse,
 ]
 
 _encoder = msgspec.msgpack.Encoder()

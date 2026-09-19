@@ -47,6 +47,10 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
     PersistentAllocationInfo,
+    QuiesceGPUCohortRequest,
+    QuiesceGPUCohortResponse,
+    RegisterGPUClientRequest,
+    RegisterGPUClientResponse,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
     UnclaimPersistentAllocationRequest,
@@ -286,6 +290,42 @@ class _GMSClientSession:
             ),
             ListPersistentAllocationsResponse,
         ).allocations
+
+    def register_gpu_client(
+        self,
+        *,
+        backend: str,
+        cohort: str,
+        client_pid: int,
+        process_start_time: str,
+        rank: int = 0,
+    ) -> bool:
+        return self._transport.request(
+            RegisterGPUClientRequest(
+                backend=backend,
+                cohort=cohort,
+                client_pid=client_pid,
+                process_start_time=process_start_time,
+                rank=rank,
+            ),
+            RegisterGPUClientResponse,
+        ).registered
+
+    def quiesce_gpu_cohort(
+        self,
+        *,
+        backend: str,
+        predecessor_cohort: str | None,
+        successor_cohort: str,
+    ) -> QuiesceGPUCohortResponse:
+        return self._transport.request(
+            QuiesceGPUCohortRequest(
+                backend=backend,
+                predecessor_cohort=predecessor_cohort,
+                successor_cohort=successor_cohort,
+            ),
+            QuiesceGPUCohortResponse,
+        )
 
     # ------------------------------------------------------------------
     # KV block leases (shared persistent KV pools)

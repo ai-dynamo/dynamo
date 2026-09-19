@@ -11,6 +11,7 @@ import os
 import shlex
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,69 @@ def _configured_command(backend_name: str) -> str | None:
 
 
 def gpu_quiescence_provider_configured(backend_name: str) -> bool:
-    return bool((_configured_command(backend_name) or "").strip())
+    provider = os.environ.get(
+        _backend_env(backend_name, "GPU_QUIESCENCE_PROVIDER"),
+        os.environ.get("DYN_GMS_GPU_QUIESCENCE_PROVIDER", ""),
+    )
+    return provider.strip().lower() == "gms-mps" or bool(
+        (_configured_command(backend_name) or "").strip()
+    )
+
+
+def gms_mps_provider_enabled(backend_name: str) -> bool:
+    provider = os.environ.get(
+        _backend_env(backend_name, "GPU_QUIESCENCE_PROVIDER"),
+        os.environ.get("DYN_GMS_GPU_QUIESCENCE_PROVIDER", ""),
+    )
+    return provider.strip().lower() == "gms-mps"
+
+
+def _socket_path(backend_name: str, device: int) -> str:
+    backend = backend_name.upper().replace("-", "_")
+    explicit = os.environ.get(f"GMS_{backend}_VMM_IPC_SOCKET") or os.environ.get(
+        "DYN_GMS_PERSISTENT_KV_SOCKET"
+    )
+    if explicit:
+        return explicit
+    from gpu_memory_service.common.utils import get_socket_path
+
+    return get_socket_path(device, "kv_cache")
+
+
+def _process_start_time(pid: int) -> str:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1]
+        return fields.split()[19]
+    except (FileNotFoundError, PermissionError, IndexError, OSError) as exc:
+        raise RuntimeError("cannot determine CUDA worker process identity") from exc
+
+
+def register_gpu_client(
+    *, backend_name: str, device: int, cohort: str, rank: int = 0
+) -> None:
+    """Register this CUDA writer with its persistent GMS daemon.
+
+    Registration is required only for the GMS-MPS provider and happens before
+    the engine initializes CUDA. The daemon intentionally retains it after this
+    short RPC session disconnects so a successor can identify a crashed cohort.
+    """
+    if not gms_mps_provider_enabled(backend_name):
+        return
+    from gpu_memory_service.client.session import _GMSClientSession
+    from gpu_memory_service.common.locks import RequestedLockType
+
+    pid = os.getpid()
+    with _GMSClientSession(
+        _socket_path(backend_name, device), RequestedLockType.RW_PERSISTENT, 1_000
+    ) as session:
+        if not session.register_gpu_client(
+            backend=backend_name,
+            cohort=cohort,
+            client_pid=pid,
+            process_start_time=_process_start_time(pid),
+            rank=rank,
+        ):
+            raise RuntimeError("GMS rejected CUDA worker registration")
 
 
 def _timeout_s(backend_name: str) -> float:
@@ -51,21 +114,64 @@ def _timeout_s(backend_name: str) -> float:
         return 1.0
 
 
-async def prove_predecessor_gpu_quiescence(
-    *, backend_name: str, predecessor_cohort: str | None
+def prove_predecessor_gpu_quiescence_sync(
+    *, backend_name: str, predecessor_cohort: str | None, device: int = 0
 ) -> GPUQuiescenceProof:
-    """Run the configured platform proof without a shell.
+    """Synchronously request the GMS-owned proof for one local GPU pool.
+
+    A None predecessor means every registered cohort other than the current
+    successor. That form is deliberately scoped by the per-device KV GMS
+    socket and is used by each TP worker immediately before remapping its pool.
+    """
+    if not gms_mps_provider_enabled(backend_name):
+        return GPUQuiescenceProof(False, "quarantine-only", "GMS MPS is disabled")
+    cohort_env = f"GMS_{backend_name.upper().replace('-', '_')}_WRITER_COHORT_PATH"
+    successor_cohort = os.environ.get(cohort_env, "").strip()
+    if not successor_cohort:
+        raise RuntimeError("current writer cohort is unavailable")
+
+    from gpu_memory_service.client.session import _GMSClientSession
+    from gpu_memory_service.common.locks import RequestedLockType
+
+    with _GMSClientSession(
+        _socket_path(backend_name, device), RequestedLockType.RW_PERSISTENT, 1_000
+    ) as session:
+        response = session.quiesce_gpu_cohort(
+            backend=backend_name,
+            predecessor_cohort=predecessor_cohort,
+            successor_cohort=successor_cohort,
+        )
+    return GPUQuiescenceProof(
+        response.quiesced,
+        response.provider,
+        response.detail,
+        response.elapsed_ms,
+    )
+
+
+async def prove_predecessor_gpu_quiescence(
+    *, backend_name: str, predecessor_cohort: str | None, device: int = 0
+) -> GPUQuiescenceProof:
+    """Request the configured platform proof without delaying safe serving.
 
     No command means quarantine-only recovery. A provider must exit zero only
     after the predecessor CUDA context is unable to issue or complete accesses
     to the shared allocation. Process death, heartbeats, traffic cessation and
     elapsed time are explicitly insufficient evidence.
 
-    Commands are split with :func:`shlex.split`; ``{backend}`` and
-    ``{cohort}`` placeholders are substituted per argument. This interface can
-    host a qualified CUDA MPS ``terminate_client`` adapter or a deployment's
-    equivalent context-lifecycle authority without baking either into Dynamo.
+    ``gms-mps`` delegates exact-cohort termination to the persistent GMS daemon.
+    The legacy external-command provider remains for deployment-specific context
+    authorities; it splits arguments with :func:`shlex.split` and substitutes
+    ``{backend}`` and ``{cohort}`` per argument.
     """
+    if gms_mps_provider_enabled(backend_name):
+        return await asyncio.to_thread(
+            prove_predecessor_gpu_quiescence_sync,
+            backend_name=backend_name,
+            predecessor_cohort=predecessor_cohort,
+            device=device,
+        )
+
     command = _configured_command(backend_name)
     if not command:
         return GPUQuiescenceProof(False, "quarantine-only", "no provider configured")
