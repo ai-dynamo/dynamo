@@ -259,14 +259,8 @@ def test_dyn_port_accepts_high_non_system_port() -> None:
     assert result.stdout.strip() == "40000"
 
 
-# Launch-script background contract.
-#
-# ``wait_any_exit`` (examples/common/launch_utils.sh) watches background jobs
-# only. A service left in the foreground blocks the script, so a crash in any
-# other service stays unnoticed until the foreground one exits, and the script
-# never reaches the TERM/INT trap that normalizes teardown signals. A launch
-# command can span continuations, quotes and pipelines, so the check below
-# parses the scripts rather than matching lines.
+# ``wait_any_exit`` (examples/common/launch_utils.sh) waits on background jobs
+# only; a foreground service hides other failures and delays the TERM/INT trap.
 
 _EXAMPLES_DIR = Path(__file__).parents[2] / "examples"
 _WAIT_ANY_EXIT = re.compile(r"^[ \t]*wait_any_exit[ \t]*$", re.MULTILINE)
