@@ -283,7 +283,12 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
+    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
+    # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
+    # without regard to where they came from, so registering both risks installing the
+    # remote copy in place of the artifact the image actually ships.
+    if not find_wheels(wheelhouse, "aisimulate"):
+        find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
     run(
         [
             str(venv_python),
