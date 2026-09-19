@@ -1142,11 +1142,12 @@ fn get_graceful_shutdown_timeout() -> usize {
 
 const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
 
+// `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
 fn parse_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
     value
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .filter(|n| *n > 0)
+        .filter(|n| (1..=i32::MAX as u32).contains(n))
         .unwrap_or(DEFAULT_LISTEN_BACKLOG)
 }
 
@@ -2751,6 +2752,14 @@ mod tests {
         assert_eq!(
             parse_listen_backlog(Ok("invalid".to_string())),
             DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok((i32::MAX as u32 + 1).to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok(i32::MAX.to_string())),
+            i32::MAX as u32
         );
         assert_eq!(parse_listen_backlog(Ok(" 8192 ".to_string())), 8192);
     }

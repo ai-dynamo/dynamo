@@ -356,10 +356,7 @@ pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
-    /// Listen backlog for the frontend HTTP and HTTPS socket. Defaults to 4096;
-    /// the kernel caps it at `net.core.somaxconn`. tokio's default is 128, which
-    /// a few thousand clients connecting within seconds can overflow; overflowed
-    /// connections are delayed or, depending on host TCP settings, fail.
+    /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
     pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
