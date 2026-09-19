@@ -124,13 +124,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
         # it never binds this port -- the env var only flips the feature on. One
         # shared value across workers is therefore sufficient (no collision).
         self._fpm_port = allocate_port(DynamoPortRange.FPM.value)
-        # torch.distributed rendezvous port, one per worker. Left unset, SGLang
-        # picks it with get_free_port(), which binds to port 0, reads the number
-        # and closes the socket before init_process_group binds it for real; the
-        # non-DP path does not re-check availability. A worker that loses that
-        # window blocks in rendezvous for torch's ~30 min default (dist_timeout
-        # is None) without allocating VRAM or exiting. Same race and same remedy
-        # as the note in examples/backends/sglang/launch/disagg_same_gpu.sh.
+        # Pin the torch.distributed rendezvous port per worker: on the non-DP path
+        # SGLang probes and closes a port, so it can be taken before the real bind.
         self._nccl_ports = [
             allocate_port(DynamoPortRange.NCCL.value) for _ in range(num_workers)
         ]
@@ -271,13 +266,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
                 timeout=120,  # Allow time for model loading
                 display_output=True,
                 health_check_ports=[],
-                # Gate each worker on its own readiness endpoint. Without a
-                # check here the mixin's per-worker health step is a no-op, so a
-                # worker that dies or hangs is only noticed when the frontend
-                # instance poll gives up, with no attribution. /health reports
-                # ready off the health-check payload dynamo.sglang registers on
-                # generate; DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS, which older
-                # tests set for this, is deprecated and warns at startup.
+                # Gate each worker on its own /health, which reports ready once
+                # dynamo.sglang registers its health-check payload on generate.
                 health_check_urls=[
                     (f"http://localhost:{system_port}/health", check_health_ready)
                 ],
