@@ -147,6 +147,23 @@ def _request_stop_strings(request: dict[str, Any]) -> set[str]:
     return set()
 
 
+def _parse_tool_stream_env(raw: str | None) -> bool:
+    """Parse DYN_SGLANG_TOOL_STREAM (default true: stream tool-call deltas).
+
+    When false, tool calls are held back and delivered as a single fully
+    assembled frame at finish (the legacy dynamo shape).
+    """
+    if raw is None:
+        return True
+    normalized = raw.strip().lower()
+    if normalized in ("0", "false", "off", "no"):
+        return False
+    if normalized in ("1", "true", "on", "yes"):
+        return True
+    logger.warning("Invalid DYN_SGLANG_TOOL_STREAM=%r, using default=true", raw)
+    return True
+
+
 def _request_stop_token_ids(request: dict[str, Any]) -> list[int]:
     """Merge ``stop_token_ids`` with the legacy integer-valued ``stop`` form."""
     values: list[Any] = list(request.get("stop_token_ids") or [])
@@ -222,7 +239,7 @@ def _runtime_config_parser_name(
 
 
 def _unsupported_n_message(n: int) -> str:
-    return f"Unsupported value: 'n={n}'. " "This endpoint currently supports only n=1."
+    return f"Unsupported value: 'n={n}'. This endpoint currently supports only n=1."
 
 
 _FINISH_REASON_MAP: dict[str, str] = {
@@ -532,6 +549,9 @@ class SglangProcessor:
         self.eos_token_ids = _normalize_eos_token_ids(eos_token_ids)
         self.debug_perf = debug_perf
         self.stream_interval = stream_interval
+        # Legacy opt-out for incremental tool-call delta streaming
+        # (see _parse_tool_stream_env).
+        self.tool_stream = _parse_tool_stream_env(os.getenv("DYN_SGLANG_TOOL_STREAM"))
         self.default_thinking_mode = default_thinking_mode
         self.preprocess_pool = preprocess_pool
         if preprocess_pool is not None:
@@ -642,6 +662,7 @@ class SglangProcessor:
             stop_strings=_request_stop_strings(request),
             skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
+            tool_stream=self.tool_stream,
         )
 
         async for item in self._generate_and_stream(
@@ -706,6 +727,7 @@ class SglangProcessor:
             stop_strings=_request_stop_strings(request),
             skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
+            tool_stream=self.tool_stream,
         )
 
         async for item in self._generate_and_stream(
