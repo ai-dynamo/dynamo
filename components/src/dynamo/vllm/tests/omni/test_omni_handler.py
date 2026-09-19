@@ -22,7 +22,11 @@ try:
     from dynamo.vllm.lora_state import LoRAState
     from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
     from dynamo.vllm.omni.main import _register_lora_engine_routes
-    from dynamo.vllm.omni.omni_handler import EngineInputs, OmniHandler
+    from dynamo.vllm.omni.omni_handler import (
+        EngineInputs,
+        OmniHandler,
+        lora_resolver_engine_args,
+    )
     from dynamo.vllm.omni.utils import (
         MAX_IMAGE_DIMENSION,
         build_original_prompt,
@@ -90,7 +94,7 @@ def _make_handler(stage_types=("diffusion",)):
     handler._served_model_aliases = tuple(
         getattr(config, "served_model_aliases", ()) or ()
     )
-    handler.engine_args = SimpleNamespace(model=config.model)
+    handler.engine_args = lora_resolver_engine_args(config)
 
     return handler
 
@@ -884,32 +888,44 @@ class TestLoraEnablement:
     def test_resolve_lora_request_unknown_adapter_raises_when_enabled(self):
         handler = _make_handler()
         handler.config.engine_args.enable_lora = True
+        handler.engine_args = lora_resolver_engine_args(handler.config)
 
-        with patch(
-            "dynamo.vllm.omni.omni_handler.get_lora_manager",
-            return_value=MagicMock(),
-        ):
-            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
-                handler._resolve_lora_request("ghost-adapter")
+        with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+            handler._resolve_lora_request("ghost-adapter")
 
-    def test_resolve_lora_request_unknown_adapter_is_none_when_manager_missing(self):
+    def test_resolve_lora_request_unknown_adapter_raises_when_manager_missing(self):
+        """Fail closed: with LoRA requested but the manager down, an unknown
+        adapter name must be rejected rather than answered from base weights."""
         handler = _make_handler()
         handler.config.engine_args.enable_lora = True
+        handler.engine_args = lora_resolver_engine_args(handler.config)
 
-        with patch("dynamo.vllm.omni.omni_handler.get_lora_manager", return_value=None):
-            assert handler._resolve_lora_request("ghost-adapter") is None
+        with patch("dynamo.common.lora.manager.get_lora_manager", return_value=None):
+            with pytest.raises(ValueError, match="unknown model or LoRA adapter"):
+                handler._resolve_lora_request("ghost-adapter")
 
     def test_resolve_lora_request_served_alias_is_treated_as_base_model(self):
         handler = _make_handler()
         handler.config.engine_args.enable_lora = True
         handler.config.served_model_aliases = ["test-model-alias"]
         handler._served_model_aliases = tuple(handler.config.served_model_aliases)
+        handler.engine_args = lora_resolver_engine_args(handler.config)
 
-        with patch(
-            "dynamo.vllm.omni.omni_handler.get_lora_manager",
-            return_value=MagicMock(),
-        ):
-            assert handler._resolve_lora_request("test-model-alias") is None
+        assert handler._resolve_lora_request("test-model-alias") is None
+
+    def test_projection_carries_enable_lora_from_engine_args(self):
+        """The projection stands in for engine args, so anything the mixin reads
+        off it must be carried. Dropping enable_lora disables the fail-closed
+        predicate without any other visible symptom."""
+        config = SimpleNamespace(
+            model="test-model", engine_args=SimpleNamespace(enable_lora=True)
+        )
+        projected = lora_resolver_engine_args(config)
+        assert projected.model == "test-model"
+        assert projected.enable_lora is True
+
+        config.engine_args.enable_lora = False
+        assert lora_resolver_engine_args(config).enable_lora is False
 
 
 class TestLoraCapacity:

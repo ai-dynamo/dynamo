@@ -40,6 +40,10 @@ from .lora_state import LoRAState
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# How long a cancelled lifecycle op waits for an in-flight engine or registry
+# mutation to settle before giving up and reporting the outcome as unknown.
+LORA_MUTATION_SETTLE_TIMEOUT_SECONDS = 10.0
+
 
 class LoRAHandlerMixin:
     """Adapter resolution, lifecycle endpoints, and discovery for LoRA hosts."""
@@ -185,12 +189,50 @@ class LoRAHandlerMixin:
         outlives the coroutine awaiting it. Returning the outcome lets the
         caller reconcile against what the engine or registry actually did
         instead of assuming the operation never happened.
+
+        The wait is bounded: a wedged engine call must not turn cancellation
+        into an indefinite hang, which would be a worse failure than the state
+        divergence the shield exists to prevent. On expiry the outcome is
+        reported as unknown, which every caller treats as "did not commit" --
+        the safe direction, since it drives cleanup rather than a false claim
+        of success.
         """
         with contextlib.suppress(BaseException):
-            await asyncio.shield(task)
+            await asyncio.wait_for(
+                asyncio.shield(task), LORA_MUTATION_SETTLE_TIMEOUT_SECONDS
+            )
+        if not task.done():
+            task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            logger.error(
+                "LoRA mutation was still in flight %.0fs after cancellation; "
+                "treating it as uncommitted, so engine and local state may "
+                "disagree until the adapter is loaded again",
+                LORA_MUTATION_SETTLE_TIMEOUT_SECONDS,
+            )
+            return asyncio.TimeoutError()
         if task.cancelled():
             return asyncio.CancelledError()
         return task.exception()
+
+    async def _guarded(self, coro, *, on_committed=None, on_missed=None) -> None:
+        """Run an external mutation so cancellation cannot leave it ambiguous.
+
+        The mutation is shielded, so a cancellation delivered mid-flight does
+        not abandon it half-done. It is then settled and the matching callback
+        reconciles local state to what the engine or registry actually did,
+        before the ``CancelledError`` is re-raised. Non-cancellation exceptions
+        propagate untouched so existing failure handling still applies.
+        """
+        task = asyncio.ensure_future(coro)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if await self._settle(task) is None:
+                if on_committed is not None:
+                    on_committed()
+            elif on_missed is not None:
+                on_missed()
+            raise
 
     @staticmethod
     def _is_lora_not_loaded_error(error: Exception) -> bool:
@@ -336,28 +378,32 @@ class LoRAHandlerMixin:
             logger.debug(f"load_lora request: {request}")
 
             hot_swap_enabled = env_bool("DYN_LORA_HOTSWAP_ENABLED")
+            lock = self._get_lora_lock(lora_name)
 
-            # An idempotent re-load needs no fetch at all. Revalidated under the
-            # lock below; this check only avoids downloading an adapter we
-            # already hold.
-            preexisting = self._lora_state.loaded_loras.get(lora_name)
-            if (
-                preexisting is not None
-                and preexisting.id != -1
-                and not hot_swap_enabled
-            ):
-                logger.info(
-                    f"LoRA adapter already loaded: {lora_name} "
-                    f"with ID {preexisting.id}"
-                )
-                yield {
-                    "status": "success",
-                    "message": f"LoRA adapter '{lora_name}' already loaded",
-                    "lora_name": lora_name,
-                    "lora_id": preexisting.id,
-                    "hot_swap": False,
-                }
-                return
+            # The idempotent check has to hold the lock. An unload may already
+            # own it with loaded_loras still populated, and answering "already
+            # loaded" from outside would be a lie the moment that unload
+            # commits. Holding it here also avoids fetching an adapter we
+            # already hold; it is released again before the fetch below.
+            async with lock:
+                preexisting = self._lora_state.loaded_loras.get(lora_name)
+                if (
+                    preexisting is not None
+                    and preexisting.id != -1
+                    and not hot_swap_enabled
+                ):
+                    logger.info(
+                        f"LoRA adapter already loaded: {lora_name} "
+                        f"with ID {preexisting.id}"
+                    )
+                    yield {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' already loaded",
+                        "lora_name": lora_name,
+                        "lora_id": preexisting.id,
+                        "hot_swap": False,
+                    }
+                    return
 
             # Fetch before taking the admission lock. _reserved_lora_request
             # needs that same lock, so downloading under it stalls every request
@@ -374,8 +420,7 @@ class LoRAHandlerMixin:
             lora_path = lora_path_or_error
             logger.debug(f"LoRA downloaded to: {lora_path}")
 
-            # Serialize load/unload operations per lora_name.
-            lock = self._get_lora_lock(lora_name)
+            # Reacquire for the mutation; everything is revalidated below.
             async with lock:
                 capacity_reserved = False
                 committed_lora_info = False
@@ -434,7 +479,17 @@ class LoRAHandlerMixin:
 
                     if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
-                            await self.engine_client.remove_lora(old_info.id)
+                            # Cancelled after vLLM drops it, the adapter is no
+                            # longer resident; tracking must say so. It stays in
+                            # loaded_loras with a valid path, which is the same
+                            # tracked-but-not-resident state prefill runs in, so
+                            # a later request re-activates it lazily.
+                            await self._guarded(
+                                self.engine_client.remove_lora(old_info.id),
+                                on_committed=lambda: self._engine_loaded_loras.discard(
+                                    lora_name
+                                ),
+                            )
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
                             if capacity_reserved:
@@ -460,13 +515,30 @@ class LoRAHandlerMixin:
                         self._preload_lora_into_engine() or is_hot_swap
                     )
                     if preload_into_engine:
-                        try:
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=lora_id,
-                                    lora_path=lora_path,
+
+                        def _new_adapter_is_live() -> None:
+                            self._engine_loaded_loras.add(lora_name)
+                            if is_hot_swap:
+                                # The card from the original load is still up, so
+                                # traffic is already reaching the new weights and
+                                # tracking has to name them.
+                                self._lora_state.loaded_loras[lora_name] = LoRAInfo(
+                                    id=lora_id, path=lora_path
                                 )
+                            # A fresh load has no card yet, so tracking stays
+                            # uncommitted and the placeholder cleanup makes the
+                            # retry do a full load.
+
+                        try:
+                            await self._guarded(
+                                self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=lora_id,
+                                        lora_path=lora_path,
+                                    )
+                                ),
+                                on_committed=_new_adapter_is_live,
                             )
                             self._engine_loaded_loras.add(lora_name)
                         except Exception as e:
@@ -514,7 +586,10 @@ class LoRAHandlerMixin:
 
                     if is_hot_swap:
                         try:
-                            await self.engine_client.reset_prefix_cache()
+                            # Tracking already names the new adapter, which is
+                            # what the engine holds, so a cancelled reset leaves
+                            # nothing to reconcile locally.
+                            await self._guarded(self.engine_client.reset_prefix_cache())
                         except Exception as e:
                             # The new adapter is already active in the engine, but
                             # the prefix cache still holds entries computed under
@@ -571,8 +646,20 @@ class LoRAHandlerMixin:
                             return
 
                     if not is_hot_swap:
+
+                        def _card_never_published() -> None:
+                            # Untrack so the retry is a full load rather than an
+                            # idempotent success on an adapter with no card.
+                            # _engine_loaded_loras is left alone: vLLM really did
+                            # take the adapter, and claiming otherwise would make
+                            # a later unload skip remove_lora and leak it.
+                            self._lora_state.loaded_loras.pop(lora_name, None)
+
                         try:
-                            await self._register_lora_discovery(lora_name, lora_id)
+                            await self._guarded(
+                                self._register_lora_discovery(lora_name, lora_id),
+                                on_missed=_card_never_published,
+                            )
                             logger.info(
                                 f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
                             )
@@ -590,7 +677,6 @@ class LoRAHandlerMixin:
                                     )
                                     await self.engine_client.remove_lora(lora_id)
                                     self._engine_loaded_loras.discard(lora_name)
-                                self._lora_state.loaded_loras.pop(lora_name, None)
                                 logger.debug(
                                     f"Successfully rolled back LoRA '{lora_name}'"
                                 )
@@ -598,6 +684,14 @@ class LoRAHandlerMixin:
                                 logger.exception(
                                     f"Failed to rollback LoRA {lora_name}: {rollback_error}"
                                 )
+                            finally:
+                                # Drop tracking even when the engine removal
+                                # failed. The card was never published, so an
+                                # adapter left in loaded_loras is unroutable and
+                                # the next load would take the idempotent
+                                # success branch and never republish it. Clearing
+                                # it forces that retry to do a full load.
+                                self._lora_state.loaded_loras.pop(lora_name, None)
 
                             # Return error status since registration failed
                             yield {

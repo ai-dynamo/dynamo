@@ -103,6 +103,21 @@ def _apply_media_passthrough(
             )
 
 
+def lora_resolver_engine_args(config) -> SimpleNamespace:
+    """Project config onto the engine-args surface LoRAHandlerMixin reads.
+
+    Omni resolves adapters against ``config.model`` rather than
+    ``engine_args.model``, so the mixin cannot simply be handed the real engine
+    args. Every attribute the mixin reads must be carried here: dropping
+    ``enable_lora`` silently turns the fail-closed predicate off, and an unknown
+    adapter name is then answered from the base weights.
+    """
+    return SimpleNamespace(
+        model=config.model,
+        enable_lora=bool(getattr(config.engine_args, "enable_lora", False)),
+    )
+
+
 class OmniHandler(BaseOmniHandler):
     """Unified handler for multi-stage pipelines using vLLM-Omni.
 
@@ -227,7 +242,7 @@ class OmniHandler(BaseOmniHandler):
         self._served_model_aliases = tuple(
             getattr(config, "served_model_aliases", ()) or ()
         )
-        self.engine_args = SimpleNamespace(model=config.model)
+        self.engine_args = lora_resolver_engine_args(config)
 
         self.output_formatter = OutputFormatter(
             model_name=config.served_model_name or config.model,

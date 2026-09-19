@@ -438,10 +438,53 @@ async def test_load_lora_cancellation_releases_capacity_placeholder(monkeypatch)
     assert handler._lora_state.loaded_loras["adapterA"].id == -1
 
     task.cancel()
+    # The activation is shielded, so let it finish the way a real engine call
+    # would rather than sitting out the settle timeout.
+    gate.set()
     with pytest.raises(asyncio.CancelledError):
         await task
 
     # Cancellation must not leave ghost placeholder capacity entries.
+    assert "adapterA" not in handler._lora_state.loaded_loras
+    # The engine did take the adapter, so that much is recorded; tracking stays
+    # clear because no card was ever published.
+    assert "adapterA" in handler._engine_loaded_loras
+
+
+@pytest.mark.asyncio
+async def test_cancelled_load_gives_up_on_a_wedged_engine_call(monkeypatch):
+    """A wedged engine call must not turn cancellation into an indefinite hang:
+    the settle is bounded and the outcome is then treated as uncommitted."""
+    monkeypatch.setattr(lora_mod, "LORA_MUTATION_SETTLE_TIMEOUT_SECONDS", 0.05)
+    handler = _make_prefill_handler()
+    handler.config.disaggregation_mode = DisaggregationMode.DECODE
+    handler._lora_capacity = 1
+    handler._lora_capacity_guard = asyncio.Lock()
+
+    never = asyncio.Event()
+    add_started = asyncio.Event()
+
+    async def _wedged_add(_lora_request):
+        add_started.set()
+        await never.wait()
+
+    handler.engine_client.add_lora = _wedged_add
+    manager = SimpleNamespace(
+        download_lora=AsyncMock(
+            return_value={"status": "success", "local_path": "/cache/adapter"}
+        )
+    )
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "unregister_model", AsyncMock())
+
+    task = asyncio.create_task(
+        _drain_load(handler, {"lora_name": "adapterA", "source": {"uri": "file:///a"}})
+    )
+    await add_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
     assert "adapterA" not in handler._lora_state.loaded_loras
 
 
@@ -665,3 +708,83 @@ async def test_cancellation_after_engine_removal_finishes_the_unload(monkeypatch
     assert removed == [7], "the engine removal committed"
     assert "adapterA" not in handler._lora_state.loaded_loras
     restore.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_idempotent_load_waits_for_an_unload_holding_the_lock(monkeypatch):
+    """The fast path must not answer from outside the lock. An unload can
+    already own the lock with loaded_loras still populated, so reporting
+    'already loaded' there is a lie the moment that unload commits."""
+    handler = _make_prefill_handler()
+    handler._lora_capacity_guard = asyncio.Lock()
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=7, path="/cache/adapter")
+    }
+    handler._engine_loaded_loras = {"adapterA"}
+    handler.engine_client.remove_lora = AsyncMock()
+    handler._register_lora_discovery = AsyncMock()
+    handler._resolve_lora_source_path = AsyncMock(return_value=(True, "/cache/adapter"))
+    monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
+
+    unregister_started = asyncio.Event()
+    finish_unregister = asyncio.Event()
+
+    async def _slow_unregister(_name):
+        unregister_started.set()
+        await finish_unregister.wait()
+
+    handler._unregister_lora_discovery = _slow_unregister
+
+    unload = asyncio.create_task(_drain_unload(handler, "adapterA"))
+    await unregister_started.wait()
+
+    load = asyncio.create_task(
+        _drain_load(handler, {"lora_name": "adapterA", "source": {"uri": "file:///a"}})
+    )
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not load.done(), "the load must block on the lock the unload holds"
+
+    finish_unregister.set()
+    await unload
+    results = await load
+
+    assert results[-1]["status"] == "success"
+    assert (
+        "already loaded" not in results[-1]["message"]
+    ), "the adapter was unloaded, so this must be a full load"
+    handler._register_lora_discovery.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_registration_with_failed_rollback_allows_a_full_retry(
+    monkeypatch,
+):
+    """If publishing the card fails and the rollback remove_lora fails too,
+    tracking must still be cleared. Otherwise the retry takes the idempotent
+    branch, never republishes, and the adapter stays unroutable."""
+    handler = _make_prefill_handler()
+    handler.config.disaggregation_mode = DisaggregationMode.DECODE
+    handler._lora_capacity_guard = asyncio.Lock()
+    handler.engine_client.add_lora = AsyncMock()
+    handler.engine_client.remove_lora = AsyncMock(
+        side_effect=RuntimeError("engine down")
+    )
+    handler._register_lora_discovery = AsyncMock(side_effect=RuntimeError("etcd down"))
+    handler._resolve_lora_source_path = AsyncMock(return_value=(True, "/cache/adapter"))
+    monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
+
+    request = {"lora_name": "adapterA", "source": {"uri": "file:///a"}}
+    results = await _drain_load(handler, request)
+
+    assert results[-1]["status"] == "error"
+    assert (
+        "adapterA" not in handler._lora_state.loaded_loras
+    ), "a tracked adapter with no card would make the retry idempotent"
+
+    handler._register_lora_discovery = AsyncMock()
+    results = await _drain_load(handler, request)
+
+    assert results[-1]["status"] == "success"
+    assert "already loaded" not in results[-1]["message"]
+    handler._register_lora_discovery.assert_awaited_once()
