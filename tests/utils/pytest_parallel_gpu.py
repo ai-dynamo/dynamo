@@ -9,9 +9,15 @@ Each test gets CUDA_VISIBLE_DEVICES and KV cache overrides
 (_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES / _PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS)
 so the engine allocates only its declared VRAM budget.
 
+A test needing several GPUs (``gpu_2`` and friends) is scheduled as a gang: it
+is given that many distinct devices atomically or none at all, and
+``profiled_vram_gib`` -- the maximum per-device peak -- is reserved on every one
+of them. CUDA_VISIBLE_DEVICES then lists the whole gang in ascending order.
+
 Usage (always via pytest):
     pytest --max-vram-gib=6 -n auto -m "gpu_1 and vllm" tests/serve/
     pytest --max-vram-gib=6 -n 4 -sv -m "gpu_1 and vllm" tests/serve/
+    pytest --max-vram-gib=80 -n auto -m "vllm and (gpu_1 or gpu_2)" tests/serve/
 
 Flags:
     --max-vram-gib=N   Only run tests with profiled_vram_gib <= N
@@ -32,6 +38,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +47,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from tests.utils.vram_utils import (  # noqa: E402
+    DEFAULT_GPU_COUNT,
     VRAM_MULTI_PROC_MARGIN,
     auto_worker_count,
     detect_gpus,
@@ -62,8 +70,12 @@ class _TestEntry:
     requested_trtllm_kv_tokens: int | None = None
     requested_trtllm_vram_gib: float | None = None
     skip_reason: str | None = None
+    gpu_count: int = 1
     w_id: int = 0
-    assigned_gpu: int | None = None
+    # The GPUs this test currently holds, ascending. Empty == holds none.
+    # A multi-GPU test owns either all `gpu_count` of them or none: the
+    # scheduler never assigns a partial gang.
+    assigned_gpus: tuple[int, ...] = ()
     retries: int = 0
 
     @property
@@ -139,6 +151,13 @@ def _fmt_req(test: _TestEntry) -> str:
         gib = int(test.requested_vllm_kv_cache_bytes) / (1024**3)
         return f"req_kv={gib:.2f} GiB"
     return "req_kv=None"
+
+
+def _fmt_gpus(gpus: tuple[int, ...]) -> str:
+    """Render an assigned gang for the log: ``GPU3`` or ``GPUs 0,1``."""
+    if len(gpus) == 1:
+        return f"GPU{gpus[0]}"
+    return "GPUs " + ",".join(str(gi) for gi in gpus)
 
 
 _JUNIT_DIR = os.path.join(tempfile.gettempdir(), "gpu_parallel_junit")
@@ -267,6 +286,24 @@ _RETRYABLE_INIT_MARKERS = [
 ]
 _MAX_RETRIES = 3
 
+# vLLM launches are staggered for two independent reasons.
+#
+# The primary one is scheduler-level and holds no matter how the engine is
+# configured: profiled_vram_gib is a *peak*, so during a launch's allocation
+# ramp the live NVML reading this module admits against has not settled yet.
+# Launching two engines concurrently lets an admission decision be taken
+# against a card that is still filling. Capping the KV pool does not remove
+# this; it is a property of observing an allocation in flight.
+#
+# The secondary one is engine-internal: when --gpu-memory-utilization drives
+# vLLM's own memory-profiling step, concurrent launches corrupt each other's
+# snapshots (bug #10643). Pinning --kv-cache-memory-bytes removes that second
+# effect, and only that one.
+#
+# SGLang uses --max-total-tokens which is deterministic, so no stagger is
+# needed.
+_VLLM_LAUNCH_STAGGER_S = 5.0
+
 
 def _capture_output(pipe, captured: list[str], prefix: str | None = None) -> None:
     """Read all lines from a pipe into `captured`. Runs in a thread.
@@ -331,38 +368,234 @@ def _priority_key(test: _TestEntry) -> tuple[bool, float, float]:
     return (test.profiled_gib > 0, test.est_duration, test.profiled_gib)
 
 
+def _status_lines(
+    now: float,
+    t0: float,
+    gpu_states: dict[int, _GpuState],
+    running: dict[int, _RunningTest],
+    gpu_used_gib: Callable[[int], float],
+) -> list[str]:
+    """Per-GPU status lines for periodic output.
+
+    A test is listed under every GPU of its gang, so a multi-GPU worker shows
+    up on each device it actually occupies instead of appearing to be a
+    single-GPU test parked on one of them.
+
+    Pure apart from ``gpu_used_gib``, which is injected so the caller decides
+    whether that means NVML or a stub.
+    """
+    elapsed = int(now - t0)
+    lines = []
+    for gi in sorted(gpu_states):
+        gs = gpu_states[gi]
+        actual = gpu_used_gib(gi)
+        workers = sorted(
+            w for w, run_info in running.items() if gi in run_info.test.assigned_gpus
+        )
+        wstr = ", ".join(f"w{w}({int(now - running[w].start_time)}s)" for w in workers)
+        part = f"GPU{gi}: {actual:.1f}/{gs.total_gib:.0f} GiB"
+        if wstr:
+            part += f" [{wstr}]"
+        lines.append(f"[elapsed {elapsed}s] {part}")
+    return lines
+
+
+def _reserve_gpus(
+    test: _TestEntry, gpus: tuple[int, ...], gpu_states: dict[int, _GpuState]
+) -> None:
+    """Commit a test onto its gang, charging every device it will occupy.
+
+    ``profiled_vram_gib`` is the maximum per-device peak, so the same figure is
+    reserved on each member, and each member counts one more resident process
+    (the multi-process margin is about CUDA contexts, and a gang puts one
+    context on every GPU it touches).
+    """
+    test.assigned_gpus = tuple(sorted(gpus))
+    for gi in test.assigned_gpus:
+        gpu_states[gi].budget_used += test.profiled_gib
+        gpu_states[gi].running_count += 1
+
+
+def _release_gpus(test: _TestEntry, gpu_states: dict[int, _GpuState]) -> None:
+    """Return every device a test holds, and record that it holds none.
+
+    Idempotent by construction: the second call sees an empty gang and does
+    nothing. Every terminal path -- pass, fail, runtime skip, retry -- goes
+    through here, so a reservation is returned exactly once and no count can be
+    driven negative by a double release.
+    """
+    for gi in test.assigned_gpus:
+        gs = gpu_states[gi]
+        gs.budget_used -= test.profiled_gib
+        gs.running_count -= 1
+    test.assigned_gpus = ()
+
+
+def _unschedulable_reason(
+    test: _TestEntry, gpu_states: dict[int, _GpuState]
+) -> str | None:
+    """Why this test can never run here, or None if some future state fits it.
+
+    Pure, and deliberately independent of live usage: it asks only whether the
+    *hardware* could ever satisfy the request once every other test has
+    finished. That is the state the scheduler reaches whenever nothing is
+    running, so a test that fails this check would otherwise sit in ``pending``
+    forever while the run loop waits for memory that is never coming.
+    """
+    n_gpus = len(gpu_states)
+    if test.gpu_count > n_gpus:
+        return f"needs {test.gpu_count} GPUs, only {n_gpus} available"
+    if test.profiled_gib > 0:
+        big_enough = [
+            gi for gi, gs in gpu_states.items() if gs.total_gib >= test.profiled_gib
+        ]
+        if len(big_enough) < test.gpu_count:
+            return (
+                f"needs {test.gpu_count} GPU(s) of >= {test.profiled_gib:.1f} GiB, "
+                f"only {len(big_enough)} of {n_gpus} that large"
+            )
+    return None
+
+
 def _select_launches(
     pending: list[_TestEntry],
     gpu_states: dict[int, _GpuState],
     actual_free: dict[int, float],
     num_slots: int,
     running_count: int,
-) -> list[tuple[int, int]]:
-    """Pick which pending tests to launch this pass, and on which GPU.
+) -> list[tuple[int, tuple[int, ...]]]:
+    """Pick which pending tests to launch this pass, and on which GPUs.
 
     Pure (no NVML / no subprocesses): the caller passes the live per-GPU budget
     state and the actual free VRAM (from nvidia-smi). ``pending`` must already be
     in scheduling-priority order (VRAM tests by longest est_duration / largest
     VRAM first, zero-VRAM fillers last -- see the sort in ``run_parallel``).
 
-    Returns a list of ``(pending_index, gpu_index)`` to launch now, honoring:
+    Returns a list of ``(pending_index, assigned_gpus)`` to launch now, where
+    ``assigned_gpus`` is the complete ascending device set for that test -- one
+    GPU for a ``gpu_1`` test, ``gpu_count`` distinct GPUs for a gang. Honors:
 
-      * ``num_slots`` -- global cap on concurrently running subprocesses.
+      * ``num_slots`` -- global cap on concurrently running subprocesses. A gang
+        is one subprocess and so costs one slot however many GPUs it holds.
       * Per-GPU VRAM budget with two independent gates (same as before): a test
         fits only if BOTH the reserved-budget sum AND the actual nvidia-smi
         usage leave room under the cap. The cap is the full card for the first
         test on an idle GPU, then ``budget_multi`` once it hosts 2+ (reserving
-        the multi-process margin for CUDA context overhead).
-      * Pairing -- best-fit places each VRAM test on the GPU with the most free
-        budget, so a large test that anchored an empty GPU gets backfilled with
-        smaller tests up to the budget instead of running alone.
-      * Anti-starvation -- when the highest-priority VRAM test does not fit, the
-        GPU where it is closest to fitting is *reserved* for it. Lower-priority
-        tests may still backfill that GPU, but only up to ``cap - required`` so
-        that once the current occupants free, the reserved test is guaranteed to
-        fit (the backfill we add now can never sum past the space it needs).
+        the multi-process margin for CUDA context overhead). For a gang, every
+        member must clear both gates on its own -- ``profiled_vram_gib`` is the
+        maximum per-device peak, so the same figure is reserved on each device.
+      * Atomicity -- a gang is placed only when all ``gpu_count`` devices clear
+        every gate, and then all of them are committed together. There is no
+        partial allocation.
+      * Pairing -- best-fit places each VRAM test on the GPU(s) with the most
+        free budget, so a large test that anchored an empty GPU gets backfilled
+        with smaller tests up to the budget instead of running alone.
+      * Anti-starvation -- when a VRAM test does not fit, the GPUs where it is
+        closest to fitting are *reserved* for it, and lower-priority tests are
+        limited in how far they may backfill those GPUs. The limit differs by
+        kind, because the two kinds need different guarantees:
+
+          - ``gpu_1`` (unchanged from upstream): backfill added *this pass* is
+            capped at ``cap - required``. Rebuilt on every call, so it bounds
+            backfill within a pass rather than across passes. The honest
+            property is finite-workload conditional progress, not starvation
+            freedom -- a single-GPU test only ever needs one card to come free
+            and any card will do, so the creep is survivable in practice.
+          - gangs: the *absolute* committed budget is capped at
+            ``budget_multi - required``. A gang needs headroom on ``gpu_count``
+            cards at the same instant, and a per-pass cap measured against
+            ``_cap`` cannot deliver that -- see the gate itself for why each
+            half matters. This makes per-card headroom monotone, which is what
+            buys the gang a finite wait.
+
+        A gang reserves all ``gpu_count`` devices or none -- headroom held on
+        fewer devices than it needs could never assemble into a launch.
         Zero-VRAM fillers bypass the budget gates entirely (they allocate no
-        memory) so transient memory pressure can't strand an otherwise-free slot.
+        memory) so transient memory pressure can't strand an otherwise-free
+        slot; a zero-VRAM gang still takes its full count of distinct devices,
+        because the count is a visibility requirement, not a memory one. Note
+        that a filler still raises ``running_count``, which drops a card's cap
+        to ``budget_multi``; a test profiled above ``budget_multi`` can
+        therefore still be held off by fillers. That is pre-existing upstream
+        behaviour for ``gpu_1`` and is not addressed here.
+
+    Gang progress, conditional. Clearing ``_unschedulable_reason`` is NOT
+    sufficient -- that check sees only hardware, and an earlier revision of this
+    code claimed finite-time progress from it alone, which was false. A gang
+    ``J`` needing ``r`` GiB on each of ``k`` devices launches in finite time when
+    all of the following hold for as long as it is queued:
+
+      1. at least ``k`` devices have ``r <= budget_multi``, so ``J`` can share a
+         card rather than needing one to itself;
+      2. at least ``k`` of those are not blocked by memory held outside this
+         run; holds prefer the cards that are, so foreign memory delays ``J``
+         only while it leaves fewer than ``k`` usable, and never merely because
+         it sits on a card ``J`` had no need of;
+      3. the competing work is VRAM-bearing -- a zero-VRAM filler bypasses the
+         budget gates yet still raises ``running_count``, which drops ``_cap``
+         from ``total_gib`` to ``budget_multi`` and can hold off a gang whose
+         ``r`` exceeds ``budget_multi - foreign``. That threshold, not
+         ``budget_multi`` alone, is the real one: a gang profiled strictly
+         *below* ``budget_multi`` is blocked too once foreign memory takes up
+         the difference. Nor is the block bounded by one filler's lifetime --
+         fillers are placed by least load and a drained held card is
+         systematically the least loaded, so the occupancy renews. This
+         limitation is pre-existing and shared with the single-GPU path, which
+         the paragraph below declines to address for the same reason;
+      4. ``J`` outranks that competing work under ``_priority_key``; a test that
+         is simply lowest-priority against an unbounded stream of higher-priority
+         arrivals is not being starved by backfill, and no reservation applies;
+      5. every test this run launches terminates.
+
+    Given those: each held member's committed budget can only fall to
+    ``budget_multi - foreign - required`` and never rise back above it -- net of
+    memory held outside the run, because that is the quantity ``J``'s own gate
+    is denominated in, and a hold bounding anything else bounds nothing. So any
+    device admitting backfill under a hold is left able to take a member
+    immediately.
+
+    That statement is exact only once every launched test has allocated what it
+    was profiled at. ``profiled_vram_gib`` is a *peak*, so during a launch's
+    allocation window the live free reading is higher than the settled one,
+    ``_foreign_held`` reads correspondingly lower, and the line sits above its
+    settled value -- admitting a filler the settled line would have refused. The
+    ramp is self-limiting rather than unsound: it loosens ``J``'s own
+    actual-usage gate by the same amount at the same instant, and searches
+    across ramp models found no starvation attributable to it. Every observer in
+    this repo models allocation as instantaneous, so none of them can see the
+    window; ``_VLLM_LAUNCH_STAGGER_S`` exists because it is real.
+
+    The foreign term is subtracted only on devices ``J`` could occupy *today*.
+    On a device it could not, subtracting foreign as well would make the line
+    ``budget_multi - foreign - required < budget_multi - total_gib < 0`` for
+    every test of every size -- B1, a whole-node freeze at ``n == gpu_count``.
+    The unusable-card line therefore drops the foreign term but still charges
+    the multi-process margin ``total_gib - budget_multi``, so admitted backfill
+    cannot forfeit the cap drop that the first tenant causes. Residual foreign
+    above that margin is a reachable state; the progress claim does not cover it.
+
+    That widening is scoped to condition 1, ``r <= budget_multi``. For a gang
+    profiled above ``budget_multi`` the line is ``budget_multi - r < 0`` even on
+    a device it could take today, and every backfill test is still refused --
+    correctly, and necessarily: admitting one drives ``running_count`` to 1,
+    which drops ``_cap`` from ``total_gib`` to ``budget_multi``, and a member
+    needing more than ``budget_multi`` can then never fit on that device at all.
+    Such a gang runs only by having a device to itself. The pre-flight admits
+    it (it checks physical size, not the multi-process budget), so the state is
+    reachable; it is outside the progress theorem by condition 1, and outside
+    the work-conservation claim for the same reason.
+
+    Holds are placed only on devices ``J`` could actually occupy,
+    the pre-hold occupants all finish, and ``J`` is scanned before every
+    lower-priority test -- so the ``k`` members eventually satisfy the gate
+    simultaneously.
+
+    Conditions 1-4 are properties of the workload and the hardware, not of this
+    scheduler. Nothing here assumes memory held outside the run ever frees: if it
+    leaves fewer than ``k`` devices usable, condition 2 fails and ``J`` waits,
+    which is correct because it cannot run. It waits holding the devices that
+    were usable, so it launches on the pass the neighbour releases rather than
+    re-entering the queue behind the backfill that accumulated meanwhile.
     """
     tentative = {
         gi: _TentativeGpu(
@@ -372,12 +605,22 @@ def _select_launches(
         )
         for gi, gs in gpu_states.items()
     }
+    # Rank position of each GPU, used as the deterministic tie-break between
+    # equally-good candidates. It is the caller's `gpu_states` ordering rather
+    # than the device number so that a run restricted to, say, GPUs "2,0,1"
+    # keeps picking them in the order it was given -- which is what the
+    # single-GPU best-fit scan did when it kept the first strict maximum.
+    rank = {gi: pos for pos, gi in enumerate(gpu_states)}
     # GPU -> required GiB of a blocked higher-priority VRAM test, and the budget
-    # we have since added to that GPU via lower-priority backfill. Backfill is
-    # capped at cap - required so the reserved test still fits once occupants free.
+    # we have since added to that GPU via lower-priority backfill this pass.
+    # `backfill_added` is only consulted for gpu_1 reservations; gang holds are
+    # gated on absolute committed budget instead (see the gate below).
     reserved_req: dict[int, float] = {}
     backfill_added: dict[int, float] = {}
-    to_launch: list[tuple[int, int]] = []
+    # Subset of `reserved_req` held for a blocked *gang*. Gangs need a stronger
+    # gate than gpu_1 tests do -- see the reservation block below.
+    reserved_gang: set[int] = set()
+    to_launch: list[tuple[int, tuple[int, ...]]] = []
 
     def _cap(gi: int) -> float:
         # First test on an idle GPU may use the whole card; once it hosts 2+,
@@ -385,22 +628,85 @@ def _select_launches(
         gs = gpu_states[gi]
         return gs.total_gib if tentative[gi].count < 1 else gs.budget_multi
 
+    def _can_ever_host(gi: int, required: float) -> bool:
+        """Could a test needing ``required`` GiB per device ever run on ``gi``?
+
+        Deliberately asks only about the card's physical size, which is exact and
+        permanent: a card smaller than the requirement cannot host the test in
+        any future state, so a hold placed on it is protection that can never be
+        collected. The comparison matches ``_unschedulable_reason`` exactly, so a
+        test that clears pre-flight is never rejected here by a rounding
+        difference.
+
+        Live free memory is deliberately not consulted HERE. It would have to
+        distinguish memory held by a neighbour on the box, which may never free,
+        from our own test overshooting its profile or still ramping, which always
+        does -- and ``(total - free) - budget`` cannot tell those apart in either
+        direction. A filter built on it would reject a card that recovers, and a
+        rejection here is permanent by construction.
+
+        That reasoning bars it from the FILTER, not from the ordering. See
+        ``_usable_now``, which consults exactly that quantity to rank candidates
+        the filter has already admitted: a misjudgement there costs a card its
+        place in a list that is rebuilt next pass, never its candidacy.
+        """
+        return gpu_states[gi].total_gib >= required
+
+    def _foreign_held(gi: int) -> float:
+        """GiB on ``gi`` held by a process outside this run.
+
+        Budget we committed ourselves is excluded because our own tests end --
+        what remains, ``total - free - budget``, is somebody else's and may not.
+        The two terms cancel exactly against this pass's tentative launches, so
+        the answer does not drift as the pass fills.
+
+        Defined once because both users of it must agree: the hold's ranking
+        (which card to protect) and the hold's admission gate (how much to let
+        in beside it). They were denominated differently once, and a hold that
+        bounds a different quantity from the one its gang is gated on bounds
+        nothing.
+        """
+        ts = tentative[gi]
+        return max(0.0, gpu_states[gi].total_gib - ts.free - ts.budget)
+
+    def _usable_now(gi: int, required: float) -> bool:
+        """Could ``gi`` host a member *today*, discounting only what we cannot free?
+
+        ``_can_ever_host`` asks about the card; this asks about the card as it
+        stands.
+
+        A card that fails this is never rejected, only outranked. That is the
+        whole distinction from the filter above: foreign memory is a fact about
+        right now, and the ordering is rebuilt from scratch on every pass.
+        """
+        return gpu_states[gi].total_gib - _foreign_held(gi) >= required
+
     for idx, test in enumerate(pending):
         if running_count + len(to_launch) >= num_slots:
             break
 
-        # Zero-VRAM filler: no budget impact, just needs a free slot. Place on
-        # the least-loaded GPU for balance; never reserves and is never blocked.
-        if test.profiled_gib <= 0:
-            gi = min(gpu_states, key=lambda g: tentative[g].count)
-            to_launch.append((idx, gi))
-            tentative[gi].count += 1
+        need = test.gpu_count
+        if need > len(gpu_states):
+            # Impossible on this node. run_parallel rejects these up front, so
+            # reaching here means the caller chose to keep going; skip rather
+            # than let the test block anything.
             continue
 
-        # VRAM test: best-fit on the GPU with the most free budget that passes
-        # both gates and respects any reservation.
-        best_gi: int | None = None
-        best_avail = -1.0
+        # Zero-VRAM filler: no budget impact, just needs a free slot and its
+        # devices. Place on the least-loaded GPUs for balance; never reserves
+        # and is never blocked.
+        if test.profiled_gib <= 0:
+            chosen = sorted(gpu_states, key=lambda g: (tentative[g].count, rank[g]))[
+                :need
+            ]
+            to_launch.append((idx, tuple(sorted(chosen))))
+            for gi in chosen:
+                tentative[gi].count += 1
+            continue
+
+        # VRAM test: collect every GPU that passes all gates on its own, then
+        # best-fit onto the `need` with the most free budget.
+        eligible: list[tuple[int, float]] = []
         for gi, gs in gpu_states.items():
             ts = tentative[gi]
             cap = _cap(gi)
@@ -410,37 +716,177 @@ def _select_launches(
             actual_used = gs.total_gib - ts.free
             if actual_used + test.profiled_gib > cap:
                 continue  # actual-usage gate (catches init-time spikes)
-            if gi in reserved_req and (
-                backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]
-            ):
-                continue  # would crowd out the reserved higher-priority test
-            if avail > best_avail:
-                best_gi, best_avail = gi, avail
+            if gi in reserved_req:
+                if gi in reserved_gang:
+                    # Gang reservations are gated on the ABSOLUTE committed
+                    # budget, in budget_multi units. Both halves are load
+                    # bearing, and the gpu_1 rule below is wrong for a gang in
+                    # both of them:
+                    #   * absolute, not per-pass: `backfill_added` is rebuilt on
+                    #     every call, so a per-pass cap lets committed budget
+                    #     creep upward one pass at a time. A gpu_1 test rides
+                    #     that out -- it needs one card to come free, and any
+                    #     card will do -- but a gang needs headroom on `k` cards
+                    #     at the same instant, and creep means the k never
+                    #     coincide. Gating on `ts.budget` (which starts from
+                    #     gpu_states, i.e. already-committed budget) makes the
+                    #     headroom monotone: once a member drops below the line
+                    #     it cannot be pushed back over it.
+                    #   * budget_multi, not `_cap(gi)`: an IDLE reserved card
+                    #     reports the whole-card cap, which is the cap for
+                    #     whoever lands first -- but the instant a filler lands,
+                    #     the gang's own cap on that card drops to budget_multi.
+                    #     Gating on `_cap` therefore over-grants by exactly
+                    #     VRAM_MULTI_PROC_MARGIN * total_gib and admits a filler
+                    #     that immediately re-blocks the gang; on a card that
+                    #     keeps draining and refilling, forever.
+                    # Together these give the gang a finite wait: every member
+                    # reaches `budget_multi - required` and stays there, so the
+                    # k members eventually hold simultaneously and the gang --
+                    # scanned before every lower-priority test -- launches.
+                    #   * net of foreign memory, not gross: the gate the GANG
+                    #     must pass counts observed usage (`total - free`),
+                    #     which includes memory held outside this run; this gate
+                    #     counts only what WE committed. The two are the same
+                    #     number only when that foreign hold is zero, and for
+                    #     any F > 0 the difference is a band exactly `required`
+                    #     wide in which a filler clears this gate and then
+                    #     leaves the reserved card unable to host a member. The
+                    #     hold then bounds nothing: every reserved card carries
+                    #     a filler the gang cannot fit beside, and the gang
+                    #     waits for all `k` of them to fall clean on the same
+                    #     pass -- a coincidence whose odds drop geometrically in
+                    #     `gpu_count`. Subtracting it here is safe in a way it
+                    #     would not be in `_can_ever_host`: this is a per-pass
+                    #     admission decision, not a permanent candidacy one, so
+                    #     a card whose neighbour leaves is admitted again on the
+                    #     very next pass.
+                    #   * the foreign term only where it can buy the gang
+                    #     something. On a card the gang could take today the
+                    #     bound above is exactly tight. On one it could not
+                    #     (`_usable_now` false) we have `foreign > total_gib -
+                    #     required`, so the line is `budget_multi - foreign -
+                    #     required < budget_multi - total_gib < 0` for every
+                    #     test of every size -- the card refuses ALL backfill
+                    #     for as long as the gang is queued. Nothing is bought
+                    #     by that: what gates the gang on such a card is the
+                    #     foreign hold retiring, which this run neither owns nor
+                    #     influences, and holding the card idle does not hasten
+                    #     it. At `n == gpu_count` -- the only topology gangs
+                    #     ship to -- every card is held and the node makes zero
+                    #     progress until the CI wall-clock kills it. Keeping
+                    #     `required` in the line unconditionally is what still
+                    #     lets the gang fit the moment the neighbour leaves.
+                    #   * on a device it could NOT take today, the foreign term is
+                    #     dropped -- but the widened line still has to reserve the
+                    #     multi-process margin, because admitting anything at all is
+                    #     what costs the device that margin. With nothing resident,
+                    #     ``_cap`` is the whole card and the device becomes able to
+                    #     host a member as soon as ``foreign <= total_gib - required``.
+                    #     The first admission takes ``running_count`` to 1, ``_cap``
+                    #     falls to ``budget_multi``, and the threshold collapses to
+                    #     ``foreign <= budget_multi - committed - required``. Reserving
+                    #     exactly the forfeited margin floors that at ``total_gib -
+                    #     budget_multi``: the gang can still take the device at any
+                    #     residual foreign hold up to the multi-process margin, which
+                    #     is the guarantee -- and the limit -- of this branch. Dropping
+                    #     the term entirely bought backfill that outlived the device's
+                    #     usefulness; keeping it whole refused every test of every size
+                    #     and stopped the node.
+                    committed = ts.budget + test.profiled_gib
+                    line = gs.budget_multi - reserved_req[gi]
+                    if _usable_now(gi, reserved_req[gi]):
+                        line -= _foreign_held(gi)
+                    else:
+                        line -= gs.total_gib - gs.budget_multi
+                    if committed > line:
+                        continue  # would crowd out the reserved gang
+                elif backfill_added[gi] + test.profiled_gib > cap - reserved_req[gi]:
+                    # Single-GPU reservation: unchanged per-pass semantics, so
+                    # gpu_1-only scheduling stays bit-identical to upstream.
+                    continue  # would crowd out the reserved higher-priority test
+            eligible.append((gi, avail))
 
-        if best_gi is not None:
-            to_launch.append((idx, best_gi))
-            tentative[best_gi].budget += test.profiled_gib
-            tentative[best_gi].free -= test.profiled_gib
-            tentative[best_gi].count += 1
-            if best_gi in reserved_req:
-                backfill_added[best_gi] += test.profiled_gib
+        if len(eligible) >= need:
+            eligible.sort(key=lambda e: (-e[1], rank[e[0]]))
+            chosen = [gi for gi, _ in eligible[:need]]
+            to_launch.append((idx, tuple(sorted(chosen))))
+            for gi in chosen:
+                tentative[gi].budget += test.profiled_gib
+                tentative[gi].free -= test.profiled_gib
+                tentative[gi].count += 1
+                if gi in reserved_req:
+                    backfill_added[gi] += test.profiled_gib
             continue
 
-        # Blocked: reserve the GPU where this test is closest to fitting (most
-        # free budget), unless that GPU is already held for an even-higher-
-        # priority test. Keep scanning -- smaller tests may still fit elsewhere
-        # or backfill under the reservation, and fillers keep filling slots.
-        cand: int | None = None
-        cand_avail = -1.0
-        for gi in gpu_states:
-            if gi in reserved_req:
-                continue
-            a = _cap(gi) - tentative[gi].budget
-            if a > cand_avail:
-                cand, cand_avail = gi, a
-        if cand is not None:
-            reserved_req[cand] = test.profiled_gib
-            backfill_added[cand] = 0.0
+        # Blocked: reserve the GPUs where this test is closest to fitting (most
+        # free budget), unless they are already held for an even-higher-priority
+        # test. All-or-none -- holding headroom on fewer devices than the test
+        # needs would starve backfill without ever letting the test launch.
+        # Keep scanning -- smaller tests may still fit elsewhere or backfill
+        # under the reservation, and fillers keep filling slots.
+        unreserved = [gi for gi in gpu_states if gi not in reserved_req]
+        if need > 1:
+            # A hold is only protection if the gang could actually run there.
+            # Ranked by headroom alone, an IDLE card scores its whole capacity --
+            # often the best score on the node -- even when that capacity is
+            # below what the gang needs, or is already spoken for by a process
+            # outside this run. Such a card wins one of the `need` slots, offers
+            # no path to a launch, and costs the gang a hold on a card that
+            # would have been one; the unprotected card then saturates under the
+            # very backfill this reservation exists to bound.
+            #
+            # There is no fallback to the unfiltered list on purpose. The test
+            # is on physical size, so a card that fails it fails permanently --
+            # holding it could never turn into a launch, which is the whole
+            # defect. Reserving nothing beats reserving something useless, and
+            # `_unschedulable_reason` has already established that the node has
+            # `need` cards large enough; a shortfall here means a
+            # higher-priority test is holding them, which is correct.
+            #
+            # gpu_1 keeps the unfiltered rule: its reservation is a hint, not a
+            # liveness mechanism -- it needs one card to come free and any card
+            # will do -- so filtering there would change upstream behaviour for
+            # no correctness gain.
+            unreserved = [
+                gi for gi in unreserved if _can_ever_host(gi, test.profiled_gib)
+            ]
+        if len(unreserved) >= need:
+            if need > 1:
+                # Headroom alone is the wrong key, for the same reason it was the
+                # wrong key before the size filter: an IDLE card scores its whole
+                # capacity, so a card sitting under somebody else's 4.5 GiB still
+                # scores a perfect 10.0 and takes a protector slot off a card
+                # that is genuinely free. Size is permanent and belongs in the
+                # filter; foreign memory is a fact about right now and belongs
+                # here, as a preference, where being wrong costs a card its place
+                # in a list rebuilt next pass rather than its candidacy. Cards
+                # that could host a member today therefore sort ahead of cards
+                # that could not, and headroom breaks ties within each group.
+                #
+                # It cannot manufacture capacity: when fewer than `need` cards
+                # are usable the gang waits, which is correct -- but it holds the
+                # ones that came back, so it launches on the pass they do.
+                req = test.profiled_gib
+
+                def _hold_key(gi: int, req: float = req) -> tuple[bool, float, int]:
+                    return (
+                        not _usable_now(gi, req),
+                        -(_cap(gi) - tentative[gi].budget),
+                        rank[gi],
+                    )
+
+                unreserved.sort(key=_hold_key)
+            else:
+                # gpu_1 keeps the upstream ordering, bit for bit.
+                unreserved.sort(
+                    key=lambda gi: (-(_cap(gi) - tentative[gi].budget), rank[gi])
+                )
+            for gi in unreserved[:need]:
+                reserved_req[gi] = test.profiled_gib
+                backfill_added[gi] = 0.0
+                if need > 1:
+                    reserved_gang.add(gi)
 
     return to_launch
 
@@ -518,6 +964,7 @@ def run_parallel(
                 requested_trtllm_kv_tokens=m.get("requested_trtllm_kv_tokens"),
                 requested_trtllm_vram_gib=m.get("requested_trtllm_vram_gib"),
                 skip_reason=m.get("skip_reason"),
+                gpu_count=m.get("gpu_count", DEFAULT_GPU_COUNT),
             )
         )
 
@@ -560,6 +1007,27 @@ def run_parallel(
         for t in no_kv:
             _print(f"  {t.name}")
         _print("\nAdd the appropriate marker via profile_pytest.py, " "then rerun.")
+        return 1
+
+    # Reject tests this node can never satisfy, before anything launches.
+    # Without this the run loop would sit in `while pending or running` with
+    # nothing running and nothing launchable, printing "waiting for N GiB free"
+    # until the CI job's timeout killed it. A gang asking for more GPUs than
+    # exist is the new way to reach that state; a test profiled larger than any
+    # card was always able to.
+    impossible = []
+    for t in tests:
+        reason = _unschedulable_reason(t, gpu_states)
+        if reason is not None:
+            impossible.append((t, reason))
+    if impossible:
+        _print(f"\nERROR: {len(impossible)} test(s) cannot be scheduled on this node:")
+        for t, reason in impossible:
+            _print(f"  {t.name}  ({reason})")
+        _print(
+            "\nRun them on a node with enough GPUs, or narrow the selection "
+            "with -m / --max-vram-gib."
+        )
         return 1
 
     # Identify tests in metadata that exceed the VRAM budget
@@ -652,36 +1120,17 @@ def run_parallel(
     pending = list(tests)
     running: dict[int, _RunningTest] = {}
     next_status = t0 + 10
-    # vLLM needs a stagger because --gpu-memory-utilization triggers a memory
-    # profiling step that snapshots free memory — concurrent launches corrupt
-    # each other's snapshots (bug #10643). SGLang uses --max-total-tokens
-    # which is deterministic, so no stagger is needed.
-    _VLLM_LAUNCH_STAGGER_S = 5.0
     last_vllm_launch: dict[int, float] = {}  # gpu_index -> monotonic timestamp
 
     def _build_status_lines(now: float) -> list[str]:
-        """Build per-GPU status lines for periodic output."""
-        elapsed = int(now - t0)
-        lines = []
-        for gi in sorted(gpu_states):
-            gs = gpu_states[gi]
-            actual = _get_gpu_used_gib(gi)
-            workers = sorted(
-                w for w, run_info in running.items() if run_info.test.assigned_gpu == gi
-            )
-            wstr = ", ".join(
-                f"w{w}({int(now - running[w].start_time)}s)" for w in workers
-            )
-            part = f"GPU{gi}: {actual:.1f}/{gs.total_gib:.0f} GiB"
-            if wstr:
-                part += f" [{wstr}]"
-            lines.append(f"[elapsed {elapsed}s] {part}")
-        return lines
+        return _status_lines(now, t0, gpu_states, running, _get_gpu_used_gib)
 
     def _launch_test(test: _TestEntry, env_base: dict) -> _RunningTest:
         """Build env, spawn subprocess, start output streamer thread."""
         env = env_base.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(test.assigned_gpu)
+        # The complete gang, ascending, so the child sees the same device
+        # order on every run and logical device i is a stable physical GPU.
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(gi) for gi in test.assigned_gpus)
         if test.requested_sglang_kv_tokens is not None:
             env["_PROFILE_OVERRIDE_SGLANG_MAX_TOTAL_TOKENS"] = str(
                 int(test.requested_sglang_kv_tokens)
@@ -777,7 +1226,6 @@ def run_parallel(
                 duration = now - run_info.start_time
                 passed = rc == 0
                 test = run_info.test
-                gi = test.assigned_gpu
 
                 # Detect retryable init errors (profiling race, OOM at startup)
                 if not passed and test.retries < _MAX_RETRIES:
@@ -795,11 +1243,8 @@ def run_parallel(
                             f"[w{w_id}] retrying ({test.retries}/{_MAX_RETRIES})"
                             f" — {matched_marker}"
                         )
-                        if gi is not None:
-                            gpu_states[gi].budget_used -= test.profiled_gib
-                            gpu_states[gi].running_count -= 1
+                        _release_gpus(test, gpu_states)
                         del running[w_id]
-                        test.assigned_gpu = None
                         pending.insert(0, test)
                         continue
 
@@ -841,9 +1286,7 @@ def run_parallel(
                 else:
                     _print(f"[w{w_id}] {test.name} {status} [{duration:.0f}s]")
 
-                if gi is not None:
-                    gpu_states[gi].budget_used -= test.profiled_gib
-                    gpu_states[gi].running_count -= 1
+                _release_gpus(test, gpu_states)
                 completed.append(
                     _CompletedTest(
                         test=test,
@@ -886,42 +1329,49 @@ def run_parallel(
 
             # Pop from pending in reverse to preserve indices, then reverse
             # back so highest-priority tests launch first.
-            batch: list[_TestEntry] = []
-            for pending_idx, assigned_gpu in reversed(to_launch):
-                entry = pending.pop(pending_idx)
-                entry.assigned_gpu = assigned_gpu
-                batch.append(entry)
+            batch: list[tuple[_TestEntry, tuple[int, ...]]] = []
+            for pending_idx, assigned_gpus in reversed(to_launch):
+                batch.append((pending.pop(pending_idx), assigned_gpus))
             batch.reverse()
 
-            for entry in batch:
+            for entry, assigned_gpus in batch:
                 w_id = entry.w_id
-                gi = entry.assigned_gpu
-                assert gi is not None
                 is_vllm = (
                     entry.requested_vllm_kv_cache_bytes is not None
                     and entry.profiled_gib > 0
                 )
 
-                # Per-GPU vLLM stagger — only between vLLM tests on the
-                # same GPU.  Tests on different GPUs launch simultaneously.
+                # Per-GPU vLLM stagger — only between vLLM tests sharing a
+                # GPU. Tests on disjoint GPUs launch simultaneously. A gang
+                # has to respect the most recent launch on *any* device it is
+                # about to touch, or it would race a test that just started on
+                # one of them.
                 if is_vllm:
-                    last_t = last_vllm_launch.get(gi, 0)
+                    last_t = max(
+                        (last_vllm_launch.get(gi, 0.0) for gi in assigned_gpus),
+                        default=0.0,
+                    )
                     wait = _VLLM_LAUNCH_STAGGER_S - (time.monotonic() - last_t)
                     if wait > 0:
                         time.sleep(wait)
 
-                gpu_states[gi].budget_used += entry.profiled_gib
-                gpu_states[gi].running_count += 1
+                _reserve_gpus(entry, assigned_gpus, gpu_states)
                 run_info = _launch_test(entry, env_base)
                 running[w_id] = run_info
 
                 if is_vllm:
-                    last_vllm_launch[gi] = time.monotonic()
+                    # Stamp every member, so the next launch on any of them
+                    # waits out this test's profiling window too.
+                    stamp = time.monotonic()
+                    for gi in entry.assigned_gpus:
+                        last_vllm_launch[gi] = stamp
 
                 retry_str = f" (retry {entry.retries})" if entry.retries else ""
                 _print(
                     f"[w{w_id}] {entry.name} "
-                    f"(GPU{gi}, profiled={entry.profiled_gib:.1f} GiB, "
+                    f"({_fmt_gpus(entry.assigned_gpus)}, "
+                    f"profiled={entry.profiled_gib:.1f} GiB"
+                    f"{' per GPU' if len(entry.assigned_gpus) > 1 else ''}, "
                     f"{_fmt_req(entry)}) RUNNING{retry_str}"
                 )
 
@@ -941,8 +1391,21 @@ def run_parallel(
             if pending:
                 queued_str = ", ".join(f"w{t.w_id}" for t in pending)
                 if not running:
-                    next_needed = pending[0].profiled_gib
-                    lines[-1] += f" [waiting for {next_needed:.1f} GiB free]"
+                    # Nothing of ours is holding memory, and pre-flight proved
+                    # the budget fits, so the block is live VRAM held outside
+                    # this run rather than anything the scheduler can resolve.
+                    head = pending[0]
+                    need = head.profiled_gib
+                    devices = (
+                        f" on each of {head.gpu_count} GPUs"
+                        if head.gpu_count > 1
+                        else ""
+                    )
+                    lines[-1] += (
+                        f" [stalled: nothing running; w{head.w_id} needs "
+                        f"{need:.1f} GiB{devices} but live GPU memory is held "
+                        f"outside this run]"
+                    )
                 lines[-1] += f" [queued: {queued_str}]"
             for ln in lines:
                 _print(ln)
