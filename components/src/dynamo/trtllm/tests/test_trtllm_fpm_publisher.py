@@ -30,13 +30,21 @@ in ``test_invoke_handler_matches_publisher_keyword_set``.
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import logging
 import queue
 import threading
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+from dynamo.common.multimodal.routing_utils import (
+    build_mm_routing_info_from_features,
+    pad_value_for_mm_hash,
+)
 from dynamo.trtllm import publisher as publisher_mod
 
 pytestmark = [
@@ -468,6 +476,7 @@ def _publisher_for_kv_event_test():
     pub.processing_initial_created_events = False
     pub.partial_block_hashes = set()
     pub.kv_block_size = 4
+    pub.mm_token_id_offset = 1000
     pub.max_window_size = None
     return pub
 
@@ -493,6 +502,206 @@ def _stored_kv_event(cache_salt="tenant-a"):
             ],
         },
     }
+
+
+def _load_v2_mm_fixture():
+    fixture_path = Path(__file__).parent / "fixtures" / "trtllm_v2_mm_kv_events.json"
+    return json.loads(fixture_path.read_text())
+
+
+@pytest.mark.parametrize("hash_algo", ["v1_block_key", "v2_sha256_64"])
+@pytest.mark.multimodal
+def test_text_only_v1_and_v2_events_remain_unchanged(hash_algo):
+    pub = _publisher_for_kv_event_test()
+    event = _stored_kv_event()
+    event["hash_algo"] = hash_algo
+
+    _, normalized = pub._normalize_kv_event(event)
+
+    assert normalized["token_ids"] == [1, 2, 3, 4]
+    assert normalized["num_block_tokens"] == [4]
+    assert normalized["block_hashes"] == [123]
+    assert normalized["block_mm_infos"] == [None]
+
+
+@pytest.mark.multimodal
+def test_v2_mm_fixture_matches_request_side_canonical_tokens():
+    fixture = _load_v2_mm_fixture()
+    pub = _publisher_for_kv_event_test()
+    pub.mm_token_id_offset = fixture["mm_token_id_offset"]
+
+    _, normalized = pub._normalize_kv_event(copy.deepcopy(fixture["forward_event"]))
+
+    digest_a = fixture["forward_event"]["data"]["blocks"][0]["mm_keys"][0]["hash"]
+    digest_b = fixture["forward_event"]["data"]["blocks"][2]["mm_keys"][1]["hash"]
+    request_tokens = [1, 99, 99, 99, 99, 7, 99, 99, 99, 88, 88, 9]
+    request_features = [
+        SimpleNamespace(
+            mm_hash=digest_a,
+            mm_position=SimpleNamespace(
+                offset=1,
+                length=8,
+                is_embed=[True, True, True, True, False, True, True, True],
+            ),
+        ),
+        SimpleNamespace(
+            mm_hash=digest_b,
+            mm_position=SimpleNamespace(offset=9, length=2, is_embed=None),
+        ),
+    ]
+    request_routing = build_mm_routing_info_from_features(
+        request_features, request_tokens
+    )
+
+    assert request_routing is not None
+    assert normalized["token_ids"] == request_routing["routing_token_ids"]
+    assert normalized["num_block_tokens"] == [4, 4, 4]
+    assert normalized["block_hashes"] == [101, 102, 103]
+    assert normalized["parent_hash"] == 77
+    assert normalized["block_mm_infos"] == [None, None, None]
+
+
+@pytest.mark.multimodal
+def test_v2_mm_fixture_preserves_cross_block_and_text_separated_offsets():
+    fixture = _load_v2_mm_fixture()
+    blocks = fixture["forward_event"]["data"]["blocks"]
+
+    assert [[key["start_offset"] for key in block["mm_keys"]] for block in blocks] == [
+        [0],
+        [3, 4],
+        [6, 0],
+    ]
+
+    pub = _publisher_for_kv_event_test()
+    _, normalized = pub._normalize_kv_event(copy.deepcopy(fixture["forward_event"]))
+    digest_a = blocks[0]["mm_keys"][0]["hash"]
+    pad_a = pad_value_for_mm_hash(int(digest_a[:16], 16))
+    assert normalized["token_ids"][1:5] == [pad_a] * 4
+    assert normalized["token_ids"][5] == 7
+    assert normalized["token_ids"][6:9] == [pad_a] * 3
+
+
+@pytest.mark.multimodal
+def test_v2_mm_fixture_normalizes_distinct_image_and_video_items():
+    fixture = _load_v2_mm_fixture()
+    blocks = fixture["forward_event"]["data"]["blocks"]
+    digest_a = blocks[0]["mm_keys"][0]["hash"]
+    digest_b = blocks[2]["mm_keys"][1]["hash"]
+    pub = _publisher_for_kv_event_test()
+
+    _, normalized = pub._normalize_kv_event(copy.deepcopy(fixture["forward_event"]))
+
+    pad_a = pad_value_for_mm_hash(int(digest_a[:16], 16))
+    pad_b = pad_value_for_mm_hash(int(digest_b[:16], 16))
+    assert pad_a != pad_b
+    assert normalized["token_ids"][-4:] == [pad_a, pad_b, pad_b, 9]
+
+
+@pytest.mark.parametrize(
+    "bad_digest",
+    ["abcd", "z" * 64],
+    ids=["wrong-length", "non-hex"],
+)
+@pytest.mark.multimodal
+def test_v2_mm_malformed_digest_is_dropped_without_logging_digest(bad_digest, caplog):
+    fixture = _load_v2_mm_fixture()
+    event = copy.deepcopy(fixture["forward_event"])
+    first_block = event["data"]["blocks"][0]
+    first_block["tokens"][1]["token_id"] = bad_digest
+    first_block["mm_keys"][0]["hash"] = bad_digest
+    pub = _publisher_for_kv_event_test()
+
+    with caplog.at_level(logging.WARNING):
+        normalized = pub._normalize_kv_event(event)
+
+    assert normalized is None
+    assert "Dropping unsupported multimodal stored KV event" in caplog.text
+    assert bad_digest not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    ["missing", "inconsistent", "out-of-order"],
+)
+@pytest.mark.multimodal
+def test_v2_mm_incomplete_or_inconsistent_keys_fail_closed(malformation, caplog):
+    fixture = _load_v2_mm_fixture()
+    event = copy.deepcopy(fixture["forward_event"])
+    blocks = event["data"]["blocks"]
+    if malformation == "missing":
+        blocks[0]["mm_keys"] = []
+    elif malformation == "inconsistent":
+        blocks[0]["mm_keys"][0]["hash"] = blocks[2]["mm_keys"][1]["hash"]
+    else:
+        blocks[1]["mm_keys"][0]["start_offset"] = 2
+    pub = _publisher_for_kv_event_test()
+
+    with caplog.at_level(logging.WARNING):
+        normalized = pub._normalize_kv_event(event)
+
+    assert normalized is None
+    assert "Dropping unsupported multimodal stored KV event" in caplog.text
+
+
+@pytest.mark.multimodal
+def test_legacy_digest_event_is_skipped_and_next_text_event_is_published(caplog):
+    fixture = _load_v2_mm_fixture()
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+    next_event = _stored_kv_event()
+    next_event["event_id"] = fixture["legacy_event"]["event_id"] + 1
+
+    with caplog.at_level(logging.WARNING):
+        pub._handle_kv_event_batch([copy.deepcopy(fixture["legacy_event"]), next_event])
+
+    publisher.publish_batch.assert_called_once()
+    assert publisher.publish_batch.call_args.args[0] == [
+        {
+            "type": "stored",
+            "token_ids": [1, 2, 3, 4],
+            "num_block_tokens": [4],
+            "block_hashes": [123],
+            "parent_hash": None,
+            "block_mm_infos": [None],
+            "lora_name": None,
+            "cache_salt": "tenant-a",
+        }
+    ]
+    assert "Dropping unsupported multimodal stored KV event" in caplog.text
+
+
+@pytest.mark.multimodal
+def test_direct_and_consolidator_paths_receive_identical_v2_mm_content():
+    fixture = _load_v2_mm_fixture()
+    event = fixture["forward_event"]
+
+    direct = _publisher_for_kv_event_test()
+    direct_publisher = MagicMock()
+    direct.zmq_kv_event_publisher = None
+    direct.kv_event_publishers = {0: direct_publisher}
+    direct._handle_kv_event_batch([copy.deepcopy(event)])
+    direct_event = direct_publisher.publish_batch.call_args.args[0][0]
+
+    consolidator = _publisher_for_kv_event_test()
+    consolidator.zmq_kv_event_publisher = MagicMock()
+    consolidator.kv_event_publishers = None
+    consolidator._handle_zmq_kv_event(copy.deepcopy(event))
+    zmq_args = consolidator.zmq_kv_event_publisher.publish_stored.call_args.args
+    consolidator_event = {
+        "type": "stored",
+        "token_ids": zmq_args[0],
+        "num_block_tokens": zmq_args[1],
+        "block_hashes": zmq_args[2],
+        "parent_hash": zmq_args[3],
+        "block_mm_infos": zmq_args[4],
+        "lora_name": zmq_args[6],
+        "cache_salt": zmq_args[7],
+    }
+
+    assert zmq_args[5] == 0
+    assert consolidator_event == direct_event
 
 
 def test_handle_kv_event_forwards_cache_salt_to_direct_publisher():

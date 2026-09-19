@@ -177,6 +177,15 @@ def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
     return resolve_routing_image_token_id(config.model, _resolve_model_dir(config))
 
 
+def _resolve_mm_token_id_offset(model_config: Any) -> Optional[int]:
+    """Resolve the vocabulary-size offset used by TRT-LLM V2 MM tokens."""
+    for config in (model_config, getattr(model_config, "text_config", None)):
+        vocab_size = getattr(config, "vocab_size", None)
+        if type(vocab_size) is int and vocab_size >= 0:
+            return vocab_size
+    return None
+
+
 def build_kv_connector_config(config: Config):
     if config.connector:
         if config.connector[0] == "kvbm":
@@ -632,6 +641,7 @@ async def init_llm_worker(
 
     multimodal_processor = None
     image_token_id: Optional[int] = None
+    mm_token_id_offset: Optional[int] = None
 
     if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
         # We need to initialize the tokenizer for the test logits processor
@@ -646,6 +656,7 @@ async def init_llm_worker(
             config.model,
             trust_remote_code=engine_args.get("trust_remote_code", False),
         )
+        mm_token_id_offset = _resolve_mm_token_id_offset(model_config)
         # MM-aware KV routing is aggregated-only, so the image marker is resolved
         # only in aggregated mode; disaggregated MM requests are not routed on it.
         if config.disaggregation_mode == DisaggregationMode.AGGREGATED:
@@ -1040,6 +1051,7 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
+                mm_token_id_offset=mm_token_id_offset,
                 publish_metrics=config.publish_metrics,
                 kv_event_publication_mode=kv_event_publication_mode,
                 streaming_kv_events_config=streaming_kv_events_config,

@@ -40,6 +40,10 @@ from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import LLMBackendMetrics
 from dynamo.llm import FpmDirectPublisher, KvEventPublisher, WorkerMetricsPublisher
+from dynamo.trtllm.kv_event_normalizer import (
+    UnsupportedMultimodalKvEvent,
+    normalize_kv_event_blocks,
+)
 from dynamo.trtllm.utils.request_utils import stored_event_cache_salt
 
 if TYPE_CHECKING:
@@ -524,6 +528,7 @@ class Publisher:
         metrics_collector: Any = None,
         kv_state_endpoint: Optional[str] = None,
         image_token_id: Optional[int] = None,
+        mm_token_id_offset: Optional[int] = None,
         publish_metrics: bool = True,
         kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
         streaming_kv_events_config: Optional[dict[str, Any]] = None,
@@ -543,6 +548,7 @@ class Publisher:
         self.metrics_collector = metrics_collector
         self.kv_state_endpoint = kv_state_endpoint
         self.image_token_id = image_token_id
+        self.mm_token_id_offset = mm_token_id_offset
         self.publish_metrics = publish_metrics
         self.kv_event_publication_mode = kv_event_publication_mode
         self.streaming_kv_events_config = streaming_kv_events_config
@@ -1047,13 +1053,28 @@ class Publisher:
             # request handling under load).
             self.processing_initial_created_events = False
             parent_hash = _to_signed_i64(data["parent_hash"])
+            blocks = data["blocks"]
+            try:
+                normalized_token_blocks, normalized_v2_mm = normalize_kv_event_blocks(
+                    blocks, self.mm_token_id_offset
+                )
+            except UnsupportedMultimodalKvEvent as error:
+                logger.warning(
+                    "Dropping unsupported multimodal stored KV event: "
+                    "engine_event_id=%s attention_dp_rank=%s reason=%s",
+                    event_id,
+                    attention_dp_rank,
+                    error,
+                )
+                return
+
             token_ids: list[int] = []
             num_block_tokens: list[int] = []
             block_hashes: list[int] = []
             block_mm_infos: list[dict | None] = []
             kv_block_size = self.kv_block_size
             partial_block_hashes = self.partial_block_hashes
-            for block in data["blocks"]:
+            for block_index, block in enumerate(blocks):
                 block_tokens = block["tokens"]
                 token_num_in_block = len(block_tokens)
                 if token_num_in_block > kv_block_size:
@@ -1072,9 +1093,9 @@ class Publisher:
                     break
                 num_block_tokens.append(token_num_in_block)
                 block_hashes.append(block_hash)
-                token_ids.extend(int(t["token_id"]) for t in block_tokens)
+                token_ids.extend(normalized_token_blocks[block_index])
 
-                mm_keys = block.get("mm_keys")
+                mm_keys = block.get("mm_keys") if not normalized_v2_mm else None
                 if mm_keys:
                     mm_hashes = [
                         int(mk["hash"][:16], 16)
@@ -1326,6 +1347,7 @@ async def get_publisher(
     metrics_collector: Any = None,
     kv_state_endpoint: Optional[str] = None,
     image_token_id: Optional[int] = None,
+    mm_token_id_offset: Optional[int] = None,
     publish_metrics: bool = True,
     kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
     streaming_kv_events_config: Optional[dict[str, Any]] = None,
@@ -1345,6 +1367,7 @@ async def get_publisher(
         metrics_collector=metrics_collector,
         kv_state_endpoint=kv_state_endpoint,
         image_token_id=image_token_id,
+        mm_token_id_offset=mm_token_id_offset,
         publish_metrics=publish_metrics,
         kv_event_publication_mode=kv_event_publication_mode,
         streaming_kv_events_config=streaming_kv_events_config,
