@@ -18,7 +18,7 @@ from dynamo.profiler.utils.config import (
     get_component_name_by_type,
     get_main_container,
     get_worker_component_from_config,
-    remove_valued_arguments,
+    remove_all_argument_occurrences,
     set_argument_value,
     set_unique_argument_value,
     setup_worker_component_resources,
@@ -109,22 +109,6 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
             DEFAULT_VLLM_KV_TRANSFER_CONFIG,
         )
     return finalized
-
-
-def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
-    filtered_args: list[str] = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg == "--disaggregation-mode":
-            index += 2
-            continue
-        if arg.startswith("--disaggregation-mode="):
-            index += 1
-            continue
-        filtered_args.append(arg)
-        index += 1
-    return filtered_args
 
 
 class VllmV1ConfigModifier(BaseConfigModifier):
@@ -222,7 +206,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # Remove role selection when converting the prefill worker to aggregated.
-            args = remove_valued_arguments(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
             # AIC may still emit this removed vLLM role flag.
             if "--is-prefill-worker" in args:
                 args.remove("--is-prefill-worker")
@@ -263,7 +247,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # The decode candidate is standalone after its prefill peer is removed.
-            args = _remove_disaggregation_mode_args(args)
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
 
             # enable prefix caching
             if "--enable-prefix-caching" not in args:
@@ -436,7 +420,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Remove --tp alias if present, use --tensor-parallel-size as canonical form
-        args = remove_valued_arguments(args, "--tp")
+        args = remove_all_argument_occurrences(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", str(tp_size))
 
         get_main_container(worker_service).args = args
@@ -472,13 +456,13 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Remove aliases, use canonical forms
-        args = remove_valued_arguments(args, "--tp")
+        args = remove_all_argument_occurrences(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", str(tep_size))
-        args = remove_valued_arguments(args, "--dp")
+        args = remove_all_argument_occurrences(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", "1")
 
         # Remove hybrid load balancing flags - not compatible with DP=1
-        args = remove_valued_arguments(args, "--data-parallel-size-local")
+        args = remove_all_argument_occurrences(args, "--data-parallel-size-local")
         if "--data-parallel-hybrid-lb" in args:
             args.remove("--data-parallel-hybrid-lb")
 
@@ -518,9 +502,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Remove aliases, use canonical forms
-        args = remove_valued_arguments(args, "--tp")
+        args = remove_all_argument_occurrences(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", "1")
-        args = remove_valued_arguments(args, "--dp")
+        args = remove_all_argument_occurrences(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", str(dep_size))
 
         # Handle hybrid load balancing for multinode DEP
@@ -532,7 +516,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             )
         else:
             # Remove hybrid-lb flags if not needed or not multinode
-            args = remove_valued_arguments(args, "--data-parallel-size-local")
+            args = remove_all_argument_occurrences(args, "--data-parallel-size-local")
             if "--data-parallel-hybrid-lb" in args:
                 args.remove("--data-parallel-hybrid-lb")
 

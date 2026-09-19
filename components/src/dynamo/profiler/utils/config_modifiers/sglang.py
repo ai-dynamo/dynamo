@@ -16,7 +16,7 @@ from dynamo.profiler.utils.config import (
     get_component_name_by_type,
     get_main_container,
     get_worker_component_from_config,
-    remove_valued_arguments,
+    remove_all_argument_occurrences,
     set_argument_value,
     set_unique_argument_value,
     setup_worker_component_resources,
@@ -238,9 +238,13 @@ class SGLangConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # remove disagg flags
-            args = remove_valued_arguments(args, "--disaggregation-mode")
-            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
-            args = remove_valued_arguments(args, "--disaggregation-bootstrap-port")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-transfer-backend"
+            )
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-bootstrap-port"
+            )
 
             # disable prefix caching
             if "--disable-radix-cache" not in args:
@@ -276,9 +280,13 @@ class SGLangConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # remove disagg flags
-            args = remove_valued_arguments(args, "--disaggregation-mode")
-            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
-            args = remove_valued_arguments(args, "--disaggregation-bootstrap-port")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-transfer-backend"
+            )
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-bootstrap-port"
+            )
 
             # enable prefix caching
             if "--disable-radix-cache" in args:
@@ -330,18 +338,18 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # Set --tp argument
         args = set_argument_value(args, "--tp", str(tp_size))
-        args = remove_valued_arguments(args, "--tp-size")
-        args = remove_valued_arguments(args, "--tensor-parallel-size")
+        args = remove_all_argument_occurrences(args, "--tp-size")
+        args = remove_all_argument_occurrences(args, "--tensor-parallel-size")
 
         # Remove --ep if present
-        args = remove_valued_arguments(args, "--ep")
-        args = remove_valued_arguments(args, "--ep-size")
-        args = remove_valued_arguments(args, "--expert-parallel-size")
+        args = remove_all_argument_occurrences(args, "--ep")
+        args = remove_all_argument_occurrences(args, "--ep-size")
+        args = remove_all_argument_occurrences(args, "--expert-parallel-size")
 
         # remove --dp if present
-        args = remove_valued_arguments(args, "--dp")
-        args = remove_valued_arguments(args, "--dp-size")
-        args = remove_valued_arguments(args, "--data-parallel-size")
+        args = remove_all_argument_occurrences(args, "--dp")
+        args = remove_all_argument_occurrences(args, "--dp-size")
+        args = remove_all_argument_occurrences(args, "--data-parallel-size")
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()
@@ -367,18 +375,18 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # 1. Set --tp=tep_size, if not present add it
         args = set_argument_value(args, "--tp", str(tep_size))
-        args = remove_valued_arguments(args, "--tp-size")
-        args = remove_valued_arguments(args, "--tensor-parallel-size")
+        args = remove_all_argument_occurrences(args, "--tp-size")
+        args = remove_all_argument_occurrences(args, "--tensor-parallel-size")
 
         # 2. Set --ep=tep_size, if not present add it
         args = set_argument_value(args, "--ep", str(tep_size))
-        args = remove_valued_arguments(args, "--ep-size")
-        args = remove_valued_arguments(args, "--expert-parallel-size")
+        args = remove_all_argument_occurrences(args, "--ep-size")
+        args = remove_all_argument_occurrences(args, "--expert-parallel-size")
 
         # 3. Remove --dp if present
-        args = remove_valued_arguments(args, "--dp")
-        args = remove_valued_arguments(args, "--dp-size")
-        args = remove_valued_arguments(args, "--data-parallel-size")
+        args = remove_all_argument_occurrences(args, "--dp")
+        args = remove_all_argument_occurrences(args, "--dp-size")
+        args = remove_all_argument_occurrences(args, "--data-parallel-size")
 
         # 4. Remove --enable-dp-attention if present
         if "--enable-dp-attention" in args:
@@ -408,13 +416,13 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # 1. Set --tp=dep_size
         args = set_argument_value(args, "--tp", str(dep_size))
-        args = remove_valued_arguments(args, "--tp-size")
-        args = remove_valued_arguments(args, "--tensor-parallel-size")
+        args = remove_all_argument_occurrences(args, "--tp-size")
+        args = remove_all_argument_occurrences(args, "--tensor-parallel-size")
 
         # 2. Set --dp=dep_size (data parallelism across experts)
         args = set_argument_value(args, "--dp", str(dep_size))
-        args = remove_valued_arguments(args, "--dp-size")
-        args = remove_valued_arguments(args, "--data-parallel-size")
+        args = remove_all_argument_occurrences(args, "--dp-size")
+        args = remove_all_argument_occurrences(args, "--data-parallel-size")
 
         # 3. Enable --enable-dp-attention
         if "--enable-dp-attention" not in args:
@@ -422,8 +430,8 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         # 4. Set --ep=dep_size (expert parallelism size)
         args = set_argument_value(args, "--ep", str(dep_size))
-        args = remove_valued_arguments(args, "--ep-size")
-        args = remove_valued_arguments(args, "--expert-parallel-size")
+        args = remove_all_argument_occurrences(args, "--ep-size")
+        args = remove_all_argument_occurrences(args, "--expert-parallel-size")
 
         get_main_container(worker_service).args = args
         return cfg.model_dump()
