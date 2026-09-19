@@ -187,3 +187,33 @@ class TestAgainstRealData:
         table = gen.driver_floor_table(real)
         assert table.startswith("| Driver |")
         assert "TensorRT-LLM" in table
+
+
+class TestGeneratedNightlyLedger:
+    def test_loads_generated_rows(self, tmp_path: Path):
+        path = tmp_path / "nightly.generated.ts"
+        path.write_text(
+            "export const NIGHTLY_BUILDS = [\n"
+            '  { version: "1.5.0.dev20260914", date: "Sep 14, 2026", '
+            'packages: ["ai-dynamo", "ai-dynamo-runtime", "kvbm"] },\n'
+            "];\n"
+        )
+
+        assert gen.load_nightly_builds(path) == [
+            {
+                "version": "1.5.0.dev20260914",
+                "date": "Sep 14, 2026",
+                "packages": ["ai-dynamo", "ai-dynamo-runtime", "kvbm"],
+            }
+        ]
+
+    def test_rejects_incomplete_generated_rows(self, tmp_path: Path):
+        path = tmp_path / "nightly.generated.ts"
+        path.write_text(
+            'export const NIGHTLY_BUILDS = [{ version: "1.5.0.dev20260914" }];\n'
+        )
+
+        with pytest.raises(
+            gen.TSParseError, match="require version, date, and packages"
+        ):
+            gen.load_nightly_builds(path)
