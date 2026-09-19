@@ -820,6 +820,14 @@ mod tests {
     }
 
     #[test]
+    fn empty_prompt_logprobs_are_omitted() {
+        // Native SGLang returns an empty array, rather than a diagnostic field,
+        // when a disaggregated decode cannot return prefill logprobs.
+        let meta = HashMap::from([("input_token_logprobs".to_string(), json!([]).to_string())]);
+        assert!(engine_data_from_meta(&meta, true).unwrap().is_none());
+    }
+
+    #[test]
     fn decode_requires_rendezvous_params() {
         assert!(
             build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None,)
