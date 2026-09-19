@@ -251,6 +251,7 @@ expression: "canonicalize(serde_json::to_value(events).unwrap())"
         "usage": {
           "input_tokens": 5,
           "input_tokens_details": {
+            "cache_write_tokens": 0,
             "cached_tokens": 0
           },
           "output_tokens": 2,
