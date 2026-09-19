@@ -2139,7 +2139,7 @@ request_classifier:
             }
         });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
         registry
             .register_request_classifier("test", Arc::new(move |_| Ok(factory.clone())))
             .unwrap();
@@ -2152,7 +2152,7 @@ request_classifier:
                         let selectors = selectors.clone();
                         Ok(Arc::new(move |config, role, partition| {
                             selectors.lock().push((role, partition.into_owned()));
-                            dynamo_kv_router::WorkerSelectionPolicy::default(
+                            dynamo_custom_policy_builtin::default_policy(
                                 config.clone(),
                                 role.default_selector_label(),
                             )
