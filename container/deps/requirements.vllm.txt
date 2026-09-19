@@ -25,6 +25,7 @@ imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # libcudart.so.12, so the floor has to name the CUDA 13 distribution. CUDA
 # only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
 mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
+msgspec==0.19.0
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
@@ -35,3 +36,5 @@ pillow>=12.3.0
 # rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
 # Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
 PyNvVideoCodec>=2.2.0
+s3fs>=2026.4.0,<2027.0
+zstandard==0.23.0
