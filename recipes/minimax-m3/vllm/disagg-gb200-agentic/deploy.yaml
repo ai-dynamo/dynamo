@@ -1,0 +1,451 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# MiniMax M3 NVFP4 on vLLM, disaggregated prefill/decode on the DGXC GB200
+# cluster. Topology: 3 prefill replicas and 3 decode replicas, each using TP4
+# on one GB200 node. The manifest consumes a rack-scoped ComputeDomain claim
+# template for MNNVL communication. Update the site-specific scheduling,
+# networking, registry, and ComputeDomain values for the target cluster.
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: minimax-m3-disagg-gb200-agentic
+  labels:
+    app.kubernetes.io/name: minimax-m3-disagg-gb200-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  priorityClassName: inference
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      runtimeVersionOverride: "1.5.0"
+      replicas: 1
+      podTemplate:
+        spec:
+          priorityClassName: inference
+          nodeSelector:
+            kubernetes.io/hostname: gke-brugdizq-dgxc-k8-customer-gpu-w0e-32ae6790-24wk
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: present
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              imagePullPolicy: IfNotPresent
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 15
+                failureThreshold: 400
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --router-kv-events
+                - --router-track-active-blocks
+                - --router-track-output-blocks
+                - --http-host
+                - 0.0.0.0
+                - --http-port
+                - "8000"
+                - --kv-cache-block-size
+                - "128"
+                - --model-name
+                - nvidia/MiniMax-M3-NVFP4
+                - --trust-remote-code
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              securityContext:
+                runAsUser: 0
+                capabilities:
+                  add: [IPC_LOCK]
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: 8Gi
+                  ephemeral-storage: 512Mi
+                limits:
+                  cpu: "8"
+                  memory: 24Gi
+                  ephemeral-storage: 12Gi
+
+    - name: PrefillWorker
+      type: prefill
+      runtimeVersionOverride: "1.5.0"
+      replicas: 3
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/vllm-distributed-executor-backend: mp
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: >-
+              [{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]
+        spec:
+          priorityClassName: inference
+          imagePullSecrets:
+            - name: nvcr-pull
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB200
+            cloud.google.com/gce-topology-subblock: 3b54d5c731918dab3bbf86cce15021d2
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: present
+              effect: NoSchedule
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: mm3-d12-disagg-compute-domain-channel
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --router-mode
+                - kv
+                - --no-router-track-output-blocks
+                - --model
+                - $(MODEL_NAME)
+                - --revision
+                - 901464083161bf8612a29ff7ad29914cd4ab4a85
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --tensor-parallel-size
+                - "4"
+                - --block-size
+                - "128"
+                - --gpu-memory-utilization
+                - "0.8"
+                - --max-model-len
+                - "1048576"
+                - --max-num-seqs
+                - "32"
+                - --max-num-batched-tokens
+                - "24576"
+                - --enable-prefix-caching
+                - --kv-cache-metrics
+                - --kv-cache-dtype
+                - fp8
+                - --skip-mm-profiling
+                - --enable-cumem-allocator
+                - --no-enable-flashinfer-autotune
+                - --enable-bf16x3-router-gemm
+                - --attention-config
+                - '{"backend":"FLASHINFER","use_trtllm_attention":true,"indexer_kv_dtype":"fp8","minimax_m3_msa_decode_backend":"cutlass"}'
+                - --compilation-config
+                - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":16384,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024,1536,2048,2560,3072,4096,6144,8192,12288,14336,16384]}'
+                - --speculative-config
+                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","use_local_argmax_reduction":true}'
+                - --disaggregation-mode
+                - prefill
+                - --kv-transfer-config
+                - $(KV_TRANSFER_CONFIG)
+                - --dyn-tool-call-parser
+                - minimax_m3
+                - --dyn-reasoning-parser
+                - minimax_m3
+                - --reasoning-parser
+                - minimax_m3
+                - --kv-events-config
+                - '{"enable_kv_cache_events":true,"publisher":"zmq"}'
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - name: MODEL_NAME
+                  value: nvidia/MiniMax-M3-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: nvidia/MiniMax-M3-NVFP4
+                - name: HF_HOME
+                  value: /model-cache
+                - name: FLASHINFER_WORKSPACE_BASE
+                  value: /model-cache/flashinfer-workspaces/fi-23945310-sm100-d07-prefill-v2
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "14400"
+                - name: VLLM_FLOAT32_MATMUL_PRECISION
+                  value: high
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: mnnvl
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: UCX_TLS
+                  value: cuda_copy,cuda_ipc,tcp
+                - name: UCX_NET_DEVICES
+                  value: all
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: "y"
+                - name: ETCD_LEASE_TTL
+                  value: "120"
+                - name: VLLM_RPC_TIMEOUT
+                  value: "600000"
+                - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+                  value: "1800"
+                - name: VLLM_CONNECTOR_PREFETCH_DEPTH
+                  value: "8"
+                - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
+                  value: "0.65"
+              # Cold kernel compilation can exceed the operator's default
+              # startup budget for this one-million-token configuration.
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 15
+                timeoutSeconds: 5
+                failureThreshold: 720
+              # Long prefills can delay the generation canary. Retain the
+              # /live check while allowing a ten-minute grace window.
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 5
+                timeoutSeconds: 4
+                failureThreshold: 120
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: "32"
+                  memory: 448Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  cpu: "128"
+                  memory: 512Gi
+                  nvidia.com/gpu: "4"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: DecodeWorker
+      type: decode
+      runtimeVersionOverride: "1.5.0"
+      replicas: 3
+      sharedMemorySize: 64Gi
+      podTemplate:
+        metadata:
+          annotations:
+            nvidia.com/vllm-distributed-executor-backend: mp
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: >-
+              [{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]
+        spec:
+          priorityClassName: inference
+          imagePullSecrets:
+            - name: nvcr-pull
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-GB200
+            cloud.google.com/gce-topology-subblock: 3b54d5c731918dab3bbf86cce15021d2
+          tolerations:
+            - key: kubernetes.io/arch
+              operator: Equal
+              value: arm64
+              effect: NoSchedule
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: present
+              effect: NoSchedule
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: mm3-d12-disagg-compute-domain-channel
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --revision
+                - 901464083161bf8612a29ff7ad29914cd4ab4a85
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --tensor-parallel-size
+                - "4"
+                - --block-size
+                - "128"
+                - --gpu-memory-utilization
+                - "0.9"
+                - --max-model-len
+                - "1048576"
+                - --max-num-seqs
+                - "256"
+                - --max-num-batched-tokens
+                - "8192"
+                - --enable-prefix-caching
+                - --kv-cache-metrics
+                - --kv-cache-dtype
+                - fp8
+                - --skip-mm-profiling
+                - --enable-cumem-allocator
+                - --no-enable-flashinfer-autotune
+                - --enable-bf16x3-router-gemm
+                - --attention-config
+                - '{"backend":"FLASHINFER","use_trtllm_attention":true,"indexer_kv_dtype":"fp8","minimax_m3_msa_decode_backend":"cutlass"}'
+                - --compilation-config
+                - '{"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":8192,"cudagraph_capture_sizes":[1,2,4,8,12,16,20,24,32,48,64,96,128,192,256,512,1024,1536,2048,2560,3072,4096,6144,8192]}'
+                - --speculative-config
+                - '{"method":"eagle3","model":"Inferact/MiniMax-M3-EAGLE3-GQA","revision":"96692486b5fd38ebf8fd2a5f6bb53427d30819a8","num_speculative_tokens":3,"attention_backend":"FLASH_ATTN","use_local_argmax_reduction":true}'
+                - --disaggregation-mode
+                - decode
+                - --kv-transfer-config
+                - $(KV_TRANSFER_CONFIG)
+                - --kv-events-config
+                - '{"enable_kv_cache_events":true,"publisher":"zmq"}'
+                - --dyn-tool-call-parser
+                - minimax_m3
+                - --dyn-reasoning-parser
+                - minimax_m3
+                - --reasoning-parser
+                - minimax_m3
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              env:
+                - name: KV_TRANSFER_CONFIG
+                  value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+                - name: MODEL_NAME
+                  value: nvidia/MiniMax-M3-NVFP4
+                - name: SERVED_MODEL_NAME
+                  value: nvidia/MiniMax-M3-NVFP4
+                - name: HF_HOME
+                  value: /model-cache
+                - name: FLASHINFER_WORKSPACE_BASE
+                  value: /model-cache/flashinfer-workspaces/fi-23945310-sm100
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_ENGINE_READY_TIMEOUT_S
+                  value: "14400"
+                - name: VLLM_FLOAT32_MATMUL_PRECISION
+                  value: high
+                - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+                  value: mnnvl
+                - name: VLLM_USE_NCCL_SYMM_MEM
+                  value: "0"
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_P2P_LEVEL
+                  value: NVL
+                - name: NCCL_SOCKET_IFNAME
+                  value: eth0
+                - name: GLOO_SOCKET_IFNAME
+                  value: eth0
+                - name: UCX_TLS
+                  value: cuda_copy,cuda_ipc,tcp
+                - name: UCX_NET_DEVICES
+                  value: all
+                - name: UCX_CUDA_IPC_ENABLE_MNNVL
+                  value: "y"
+                - name: ETCD_LEASE_TTL
+                  value: "120"
+                - name: VLLM_RPC_TIMEOUT
+                  value: "600000"
+                - name: VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+                  value: "1800"
+                - name: VLLM_CONNECTOR_PREFETCH_DEPTH
+                  value: "8"
+                - name: VLLM_CONNECTOR_PREFETCH_KV_CAP
+                  value: "0.65"
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 15
+                timeoutSeconds: 5
+                failureThreshold: 720
+              livenessProbe:
+                httpGet:
+                  path: /live
+                  port: 9090
+                periodSeconds: 5
+                timeoutSeconds: 4
+                failureThreshold: 120
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: "32"
+                  memory: 448Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  cpu: "128"
+                  memory: 512Gi
+                  nvidia.com/gpu: "4"
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
