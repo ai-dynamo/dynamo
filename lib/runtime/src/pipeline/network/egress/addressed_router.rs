@@ -842,6 +842,14 @@ impl AddressedPushRouter {
         // or the worker died before establishing the response stream).
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
+            Err(_) | Ok(Err(_)) if engine_ctx.is_stopped() || engine_ctx.is_killed() => {
+                return Err(anyhow::anyhow!(
+                    DynamoError::builder()
+                        .error_type(ErrorType::Cancelled)
+                        .message("Request cancelled before response stream was established")
+                        .build()
+                ));
+            }
             Ok(Err(e)) => {
                 return Err(anyhow::anyhow!(pre_stream_failure_error(e)));
             }

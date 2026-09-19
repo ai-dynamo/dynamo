@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Sidecar integration
+
+on:
+  workflow_call:
+    inputs:
+      target_tag_plain:
+        type: string
+        required: true
+      source_ref:
+        type: string
+        default: ''
+      image_tag_suffix:
+        type: string
+        default: ''
+      dd_env:
+        type: string
+        required: true
+
+jobs:
+  cpu:
+    name: CPU wire, process and handoff
+    runs-on:
+      group: Fastchecker
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          lfs: true
+      - name: Install protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --retry 5 -fsSLO https://github.com/protocolbuffers/protobuf/releases/download/v30.2/protoc-30.2-linux-x86_64.zip
+          echo '327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f  protoc-30.2-linux-x86_64.zip' | sha256sum -c -
+          unzip -o protoc-30.2-linux-x86_64.zip -d "${RUNNER_TEMP}/protoc"
+          echo "PROTOC=${RUNNER_TEMP}/protoc/bin/protoc" >> "${GITHUB_ENV}"
+          echo "PROTOC_INCLUDE=${RUNNER_TEMP}/protoc/include" >> "${GITHUB_ENV}"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+      - name: Run isolated CPU integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 lib/sidecar/testkit/run.py --level integration --export "${RUNNER_TEMP}/sidecar-cpu"
+          docker build -f lib/sidecar/testkit/CPU.Dockerfile -t sidecar-process-tests "${RUNNER_TEMP}/sidecar-cpu"
+          docker run --rm --network none sidecar-process-tests --level integration
+      - name: Build native compatibility executable
+        run: python3 lib/sidecar/testkit/run.py --level native --export "${RUNNER_TEMP}/sidecar-native"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        with:
+          name: sidecar-native-${{ inputs.source_ref || github.sha }}
+          path: ${{ runner.temp }}/sidecar-native/native_engine
+          if-no-files-found: error
+          retention-days: 7
+
+  native:
+    name: vLLM native cancellation and KV transfer
+    needs: cpu
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: sidecar-native
+      framework: vllm
+      test_type: Native integration
+      amd_runner: prod-tester-amd-gpu-2-v2
+      target_tag_plain: ${{ inputs.target_tag_plain }}
+      source_ref: ${{ inputs.source_ref }}
+      image_tag_suffix: ${{ inputs.image_tag_suffix }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: false
+      gpu_test_markers: sidecar_native
+      gpu_test_timeout_minutes: 30
+      dd_env: ${{ inputs.dd_env }}
+      dd_flaky_retry_enabled: 'false'
+      sidecar_native_artifact: sidecar-native-${{ inputs.source_ref || github.sha }}
+    secrets: inherit

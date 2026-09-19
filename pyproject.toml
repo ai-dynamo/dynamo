@@ -353,6 +353,7 @@ markers = [
     "router: marks tests for router component",
     "planner: marks tests for planner component",
     "sidecar: marks tests that launch a Dynamo dynamo-*-sidecar binary against its native-gRPC engine via lib/sidecar/*/launch/*.sh",
+    "sidecar_native: direct sidecar integration against a real native engine; requires the native test artifact",
     "kvbm: marks tests for KV behavior and model determinism",
     "kvbm_consolidator: marks KVBM consolidator/router integration tests",
     "kvbm_determinism: marks KVBM model determinism tests",

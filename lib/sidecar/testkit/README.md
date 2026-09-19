@@ -15,6 +15,7 @@ Run or collect CPU tests (only vLLM is enabled):
 python3 lib/sidecar/testkit/run.py --framework vllm --level all
 python3 lib/sidecar/testkit/run.py --level unit --list
 python3 lib/sidecar/testkit/run.py --level pre-merge
+python3 lib/sidecar/testkit/run.py --level integration
 ```
 
 Run the same binaries without engines, CUDA, a model cache or external networking:
@@ -31,9 +32,17 @@ use loopback sockets and the existing CPU Mocker scheduler; they do not establis
 real GPU-work release or actual KV transfer. See [coverage](COVERAGE.md) and the
 separate [deviation report](DEVIATIONS.md).
 
-`unit` includes shared common production code once and vLLM's isolated modules.
-`wire` includes shared conformance and retained socket suites. `pre-merge` and
-`all` select both CPU layers. `--framework all` currently enables only vLLM.
-The runner rejects missing exported layers and mismatched collection/execution
-counts, in addition to failures and ignored cases. Detailed isolated coverage
-and the preserved assertions are mapped in [UNITS.md](UNITS.md).
+`unit` includes the shared common crate once and vLLM's isolated modules.
+`wire` includes shared conformance and retained socket suites. `process` starts
+actual sidecar children with local discovery; `integration` combines wire and
+process. `pre-merge` selects units and wire; `all` selects all CPU layers.
+`--framework all` currently enables the same vLLM profile, without activating
+other backends. The runner rejects missing exported layers and mismatched
+collection/execution counts, in addition to failures and ignored cases.
+
+Native engine tests have a separate opt-in feature and launcher; see
+[NATIVE.md](NATIVE.md). CPU wire/process tests never substitute for its scheduler
+and transfer observations. New process/native CI runs after merge and nightly;
+existing E2E scheduling remains unchanged. Detailed isolated and process mappings
+are in [UNITS.md](UNITS.md) and [PROCESS.md](PROCESS.md). The full refreshed
+capability ledger is [SUPPORT.md](SUPPORT.md).

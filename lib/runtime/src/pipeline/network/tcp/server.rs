@@ -38,6 +38,7 @@ use super::{
 };
 use crate::discovery::EndpointInstanceId;
 use crate::engine::AsyncEngineContext;
+use crate::error::{DynamoError, ErrorType};
 use crate::pipeline::{
     PipelineError,
     network::{
@@ -1041,7 +1042,7 @@ async fn tcp_listener(
         subject: String,
         state: Arc<Mutex<State>>,
         mut reader: FramedRead<BoxRead, TwoPartCodec>,
-        writer: FramedWrite<BoxWrite, TwoPartCodec>,
+        mut writer: FramedWrite<BoxWrite, TwoPartCodec>,
     ) -> Result<()> {
         let response_stream = TcpStreamServer::take_response_stream(&state, &subject).ok_or_else(|| {
             error!("Subject not found: {}; upstream publisher specified a subject unknown to the downsteam subscriber", subject)
@@ -1050,7 +1051,7 @@ async fn tcp_listener(
         // unwrap response_stream
         let RequestedRecvConnection {
             context,
-            connection,
+            mut connection,
             send_buffer_count,
         } = response_stream;
 
@@ -1058,10 +1059,33 @@ async fn tcp_listener(
         // there must be a second control message it indicate the other segment's generate method was successful
         // No timeout here: the worker sends the prologue only after generate() setup completes,
         // which can take arbitrarily long (model load, queue delay, cold start).
-        let prologue = reader
-            .next()
-            .await
-            .ok_or(error!("Connection closed without a ControlMessge"))??;
+        let prologue = tokio::select! {
+            biased;
+            _ = context.killed() => Err(ControlMessage::Kill),
+            _ = connection.closed() => Err(ControlMessage::Kill),
+            _ = context.stopped() => Err(ControlMessage::Stop),
+            prologue = reader.next() => Ok(prologue),
+        };
+        let prologue = match prologue {
+            Ok(prologue) => {
+                prologue.ok_or(error!("Connection closed without a ControlMessge"))??
+            }
+            Err(control) => {
+                let message = "Request cancelled before response stream was established";
+                let error = DynamoError::builder()
+                    .error_type(ErrorType::Cancelled)
+                    .message(message)
+                    .build();
+                let _ = connection.send(Err(StreamPrologueError::new(message, error)));
+                writer
+                    .send(TwoPartMessage::from_header(
+                        serde_json::to_vec(&control)?.into(),
+                    ))
+                    .await?;
+                writer.close().await?;
+                return Ok(());
+            }
+        };
 
         // deserialize prologue
         let prologue = match prologue.into_message_type() {
@@ -2549,6 +2573,91 @@ mod tests {
             result.is_ok(),
             "concurrent response registration and call-home timed out"
         );
+    }
+
+    #[tokio::test]
+    async fn test_response_stream_cancellation_before_prologue() {
+        temp_env::async_with_vars(
+            [
+                ("DYN_TCP_TLS_CERT_PATH", None::<&str>),
+                ("DYN_TCP_TLS_KEY_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+                ("DYN_TCP_TLS_INSECURE", None),
+                ("DYN_TCP_TLS_CLIENT_CERT_PATH", None),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            async {
+                let server = test_server().await;
+                for action in [Some(ControlMessage::Stop), Some(ControlMessage::Kill), None] {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        let context = Context::new(()).context();
+                        let options = StreamOptions::builder()
+                            .context(context.clone())
+                            .enable_request_stream(false)
+                            .enable_response_stream(true)
+                            .build()
+                            .unwrap();
+                        let pending = server.register(options).await;
+                        let (connection_info, stream_provider) =
+                            pending.recv_stream.unwrap().into_parts();
+                        let worker_context = Context::with_id_and_metadata(
+                            (),
+                            context.id().to_string(),
+                            Default::default(),
+                        )
+                        .context();
+                        let sender = TcpClient::create_response_stream(
+                            worker_context.clone(),
+                            connection_info,
+                            None,
+                        )
+                        .await
+                        .unwrap();
+
+                        let stream_provider = match action {
+                            Some(ControlMessage::Stop) => {
+                                context.stop_generating();
+                                Some(stream_provider)
+                            }
+                            Some(ControlMessage::Kill) => {
+                                context.kill();
+                                Some(stream_provider)
+                            }
+                            None => {
+                                drop(stream_provider);
+                                assert!(!context.is_stopped());
+                                None
+                            }
+                            Some(ControlMessage::Sentinel) => unreachable!(),
+                        };
+                        if let Some(stream_provider) = stream_provider {
+                            let failure = match stream_provider.await.unwrap() {
+                                Err(failure) => failure,
+                                Ok(_) => {
+                                    panic!("cancellation must not establish a response stream")
+                                }
+                            };
+                            assert_eq!(
+                                failure.typed_error.as_ref().map(|error| error.error_type()),
+                                Some(ErrorType::Cancelled)
+                            );
+                        }
+                        worker_context.stopped().await;
+                        sender.tx.closed().await;
+                        assert_eq!(
+                            worker_context.is_killed(),
+                            action != Some(ControlMessage::Stop)
+                        );
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!("cancellation before prologue timed out: {action:?}")
+                    });
+                }
+            },
+        )
+        .await;
     }
 
     /// A worker that refuses a request before producing any response bytes must
