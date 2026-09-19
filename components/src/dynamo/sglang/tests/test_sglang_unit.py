@@ -3,12 +3,14 @@
 
 """Unit tests for SGLang backend components."""
 
+import asyncio
 import logging
 import os
 import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import torch
@@ -163,6 +165,54 @@ def test_resolved_server_args_uses_declarative_view(monkeypatch):
 
     assert resolved_server_args(raw_server_args) is resolved_server_args_view
     assert raw_server_args.page_size is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initializer", ["init_decode", "init_prefill"])
+@pytest.mark.parametrize("raw_metrics,resolved_metrics", [(True, False), (False, True)])
+async def test_snapshot_metrics_check_uses_resolved_configuration(
+    monkeypatch, initializer, raw_metrics, resolved_metrics
+):
+    import dynamo.sglang.init_llm as sglang_init_llm
+
+    raw_args = SimpleNamespace(
+        node_rank=0,
+        disaggregation_mode="null",
+        enable_forward_pass_metrics=raw_metrics,
+    )
+    resolved_args = SimpleNamespace(
+        node_rank=0,
+        enable_trace=False,
+        enable_forward_pass_metrics=resolved_metrics,
+    )
+    monkeypatch.setattr(sglang_compat, "sglang_resolved_view", lambda _: resolved_args)
+    config = sglang_args.Config(
+        raw_args,
+        SimpleNamespace(namespace="test", component="worker", endpoint="generate"),
+    )
+    engine = SimpleNamespace(server_args=raw_args)
+
+    class ReachedMetricsSetup(Exception):
+        pass
+
+    setup_metrics = AsyncMock(side_effect=ReachedMetricsSetup)
+    monkeypatch.setattr(sglang_init_llm, "setup_sgl_metrics", setup_metrics)
+    initialize = getattr(sglang_init_llm, initializer)
+
+    if resolved_metrics:
+        with pytest.raises(RuntimeError, match="must disable forward-pass metrics"):
+            await initialize(
+                Mock(), config, asyncio.Event(), [], snapshot_engine=engine
+            )
+        setup_metrics.assert_not_awaited()
+    else:
+        with pytest.raises(ReachedMetricsSetup):
+            await initialize(
+                Mock(), config, asyncio.Event(), [], snapshot_engine=engine
+            )
+        setup_metrics.assert_awaited_once()
+
+    assert config.server_args is resolved_args
 
 
 def test_compat_uses_current_sglang_model_config_accessor(monkeypatch):
