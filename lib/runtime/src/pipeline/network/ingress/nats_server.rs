@@ -11,6 +11,7 @@ use super::*;
 use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::pipeline::network::ingress::push_endpoint::PushEndpoint;
+use crate::protocols::EndpointId;
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -26,18 +27,34 @@ use tokio_util::sync::CancellationToken;
 pub struct NatsMultiplexedServer {
     nats_client: async_nats::Client,
     component_registry: crate::component::Registry,
-    handlers: Arc<DashMap<String, EndpointTask>>,
+    handlers: Arc<DashMap<(EndpointId, u64), EndpointTask>>,
     cancellation_token: CancellationToken,
 }
 
+#[derive(Clone)]
 struct EndpointTask {
+    registration: Arc<()>,
     cancel_token: CancellationToken,
-    join_handle: tokio::task::JoinHandle<()>,
+    finished: CancellationToken,
 }
 
-/// NATS subject and handler-map key for one endpoint instance. Several instances in one
-/// process can register the same endpoint name, so the key must carry the instance id;
-/// register and unregister must agree on it or a teardown removes the wrong task, or none.
+/// Retains the reservation until setup and listener shutdown have both finished.
+struct EndpointTaskGuard {
+    handlers: Arc<DashMap<(EndpointId, u64), EndpointTask>>,
+    endpoint_key: (EndpointId, u64),
+    task: EndpointTask,
+}
+
+impl Drop for EndpointTaskGuard {
+    fn drop(&mut self) {
+        self.handlers.remove_if(&self.endpoint_key, |_, task| {
+            Arc::ptr_eq(&task.registration, &self.task.registration)
+        });
+        self.task.finished.cancel();
+    }
+}
+
+/// NATS subject within a namespace/component service group for one endpoint instance.
 fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
     format!("{endpoint_name}-{instance_id:x}")
 }
@@ -83,148 +100,133 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
             "NatsMultiplexedServer::register_endpoint called"
         );
 
-        // Get the service group from the component registry
-        // Service name format matches Component::service_name(): "{namespace}_{component}" slugified
-        use crate::transports::nats::Slug;
-        let service_name_raw = format!("{}_{}", namespace, component_name);
-        let service_name = Slug::slugify(&service_name_raw).to_string();
-
-        tracing::debug!(
-            service_name_raw = %service_name_raw,
-            service_name = %service_name,
-            "Looking up service group in registry"
-        );
-
-        let registry = self.component_registry.inner.lock().await;
-        let service_group = registry
-            .services
-            .get(&service_name)
-            .map(|service| service.group(&service_name))
-            .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in registry", service_name))?;
-        drop(registry);
-
-        tracing::info!("Successfully retrieved service group");
-
         let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
-
-        // Create NATS service endpoint with the full subject
-        let service_endpoint = service_group
-            .endpoint(&endpoint_with_id)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to create NATS endpoint '{}': {}",
-                    endpoint_with_id,
-                    e
-                )
-            })?;
-
-        tracing::info!(
-            endpoint_name = %endpoint_name,
-            endpoint_with_id = %endpoint_with_id,
-            namespace = %namespace,
-            component = %component_name,
-            instance_id = instance_id,
-            "Registering NATS endpoint"
+        let endpoint_key = (
+            EndpointId {
+                namespace: namespace.clone(),
+                component: component_name.clone(),
+                name: endpoint_name.clone(),
+            },
+            instance_id,
         );
-
-        // Create cancellation token for this specific endpoint
-        let endpoint_cancel = CancellationToken::new();
-        let endpoint_cancel_clone = endpoint_cancel.clone();
-
-        // Build the push endpoint
+        let task = EndpointTask {
+            registration: Arc::new(()),
+            cancel_token: self.cancellation_token.child_token(),
+            finished: CancellationToken::new(),
+        };
+        // Dropping the registration future must not leave an orphaned setup task.
+        let cancel_on_drop = task.cancel_token.clone().drop_guard();
         let push_endpoint = PushEndpoint::builder()
             .service_handler(service_handler)
-            .cancellation_token(endpoint_cancel_clone)
+            .cancellation_token(task.cancel_token.clone())
             .graceful_shutdown(true)
             .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build NATS push endpoint: {}", e))?;
-
-        tracing::info!(
-            endpoint_name = %endpoint_name,
-            endpoint_with_id = %endpoint_with_id,
-            "Starting NATS push endpoint listener (blocking)"
-        );
-
-        // Spawn task to handle this endpoint using PushEndpoint
-        // Note: PushEndpoint::start() is a blocking loop that runs until cancelled
-        let endpoint_name_clone = endpoint_name.clone();
-        let join_handle = tokio::spawn(async move {
-            if let Err(e) = push_endpoint
-                .start(
-                    service_endpoint,
-                    namespace,
-                    component_name,
-                    endpoint_name_clone.clone(),
-                    instance_id,
-                    system_health,
-                )
-                .await
-            {
-                tracing::error!(
-                    endpoint_name = %endpoint_name_clone,
-                    error = %e,
-                    "NATS endpoint task failed"
-                );
-            } else {
-                tracing::info!(
-                    endpoint_name = %endpoint_name_clone,
-                    "NATS push endpoint listener completed"
-                );
+            .map_err(|e| anyhow::anyhow!("Failed to build NATS push endpoint: {e}"))?;
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let component_registry = self.component_registry.clone();
+        let endpoint_name_for_task = endpoint_name.clone();
+        match self.handlers.entry(endpoint_key.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(task.clone());
+                let task_guard = EndpointTaskGuard {
+                    handlers: self.handlers.clone(),
+                    endpoint_key,
+                    task: task.clone(),
+                };
+                // Setup runs in the owned task so caller cancellation cannot drop
+                // service_group.endpoint halfway through creating a subscription.
+                tokio::spawn(async move {
+                    let _task_guard = task_guard;
+                    let endpoint_cancel = &_task_guard.task.cancel_token;
+                    use crate::transports::nats::Slug;
+                    let service_name =
+                        Slug::slugify(&format!("{namespace}_{component_name}")).to_string();
+                    let setup = async {
+                        let registry = component_registry.inner.lock().await;
+                        let service_group = registry
+                            .services
+                            .get(&service_name)
+                            .map(|service| service.group(&service_name))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Service '{service_name}' not found in registry")
+                            })?;
+                        drop(registry);
+                        if endpoint_cancel.is_cancelled() {
+                            anyhow::bail!("NATS endpoint setup cancelled");
+                        }
+                        service_group
+                            .endpoint(&endpoint_with_id)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Failed to create NATS endpoint '{endpoint_with_id}': {e}"
+                                )
+                            })
+                    }
+                    .await;
+                    let mut service_endpoint = match setup {
+                        Ok(endpoint) => endpoint,
+                        Err(error) => {
+                            let _ = started_tx.send(Err(error));
+                            return;
+                        }
+                    };
+                    if endpoint_cancel.is_cancelled() || started_tx.send(Ok(())).is_err() {
+                        if let Err(error) = service_endpoint.stop().await {
+                            tracing::warn!(%error, "Failed to stop cancelled NATS endpoint setup");
+                        }
+                        return;
+                    }
+                    if let Err(error) = push_endpoint
+                        .start(
+                            service_endpoint,
+                            namespace,
+                            component_name,
+                            endpoint_name_for_task.clone(),
+                            instance_id,
+                            system_health,
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            endpoint_name = %endpoint_name_for_task,
+                            %error,
+                            "NATS endpoint task failed"
+                        );
+                    }
+                });
             }
-        });
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                anyhow::bail!("Endpoint '{endpoint_name}' is already registered for this instance");
+            }
+        }
 
-        // Give the endpoint a moment to start listening
-        // This prevents a race condition where discovery registers the endpoint
-        // before NATS is actually ready to receive requests
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Store task info for later cleanup
-        self.handlers.insert(
-            endpoint_with_id,
-            EndpointTask {
-                cancel_token: endpoint_cancel,
-                join_handle,
-            },
-        );
-
+        started_rx.await.map_err(|error| {
+            anyhow::anyhow!("NATS endpoint setup task ended before ready: {error}")
+        })??;
+        if task.cancel_token.is_cancelled() {
+            anyhow::bail!("Endpoint '{endpoint_name}' was unregistered while starting");
+        }
+        cancel_on_drop.disarm();
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
-        let endpoint_with_id = instance_subject(endpoint_name, instance_id);
-        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
-            tracing::info!(
-                endpoint_name = %endpoint_name,
-                endpoint_with_id = %endpoint_with_id,
-                "Unregistering NATS endpoint"
-            );
-            // Cancel the token to trigger graceful shutdown
+    async fn unregister_endpoint(&self, endpoint: &EndpointId, instance_id: u64) -> Result<()> {
+        let task = self
+            .handlers
+            .get(&(endpoint.clone(), instance_id))
+            .map(|entry| entry.value().clone());
+        if let Some(task) = task {
             task.cancel_token.cancel();
-
-            // Wait for the endpoint task to complete (which includes waiting for inflight requests)
-            tracing::debug!(
-                endpoint_name = %endpoint_name,
-                "Waiting for NATS endpoint task to complete"
-            );
-            if let Err(e) = task.join_handle.await {
-                tracing::warn!(
-                    endpoint_name = %endpoint_name,
-                    error = %e,
-                    "NATS endpoint task panicked during shutdown"
-                );
-            }
-            tracing::info!(
-                endpoint_name = %endpoint_name,
-                "NATS endpoint unregistration complete"
-            );
+            // Keep the reservation until setup and the listener have stopped, so
+            // a replacement cannot overlap an outgoing subscription. Concurrent
+            // unregister callers all observe the same completion signal.
+            task.finished.cancelled().await;
         }
         Ok(())
     }
 
     fn address(&self) -> String {
-        // Return NATS server URL from connection info
-        // NATS client doesn't expose server info directly, return generic address
         "nats://connected".to_string()
     }
 
@@ -233,8 +235,6 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
     }
 
     fn is_healthy(&self) -> bool {
-        // Check if NATS client is connected
-        // NATS client doesn't expose connection state directly, assume healthy
         true
     }
 }

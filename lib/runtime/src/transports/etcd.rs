@@ -149,7 +149,12 @@ impl Client {
                 Err(err) => {
                     let now = Instant::now();
                     if now >= deadline {
-                        return Err(err);
+                        return Err(err).with_context(|| {
+                            format!(
+                                "etcd startup connection timed out after {} seconds",
+                                timeout.as_secs_f64()
+                            )
+                        });
                     }
 
                     let sleep_duration = backoff.min(deadline.saturating_duration_since(now));

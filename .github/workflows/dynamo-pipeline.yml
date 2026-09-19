@@ -167,6 +167,31 @@ jobs:
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
 
+      - name: Run endpoint lifecycle integration tests
+        shell: bash
+        run: |
+          nats-server -js -a 127.0.0.1 -sd "$RUNNER_TEMP/endpoint-nats" > "$RUNNER_TEMP/endpoint-nats.log" 2>&1 &
+          endpoint_nats_pid=$!
+          trap 'kill "$endpoint_nats_pid" 2>/dev/null || true; wait "$endpoint_nats_pid" 2>/dev/null || true' EXIT
+          if ! timeout 10 bash -c 'until echo > /dev/tcp/127.0.0.1/4222; do sleep 0.1; done' 2>/dev/null; then
+            cat "$RUNNER_TEMP/endpoint-nats.log"
+            exit 1
+          fi
+          # The request-plane TCP server is process-global and runs on the first
+          # test's Tokio runtime. Isolate tests so a later test cannot reuse a
+          # listener whose runtime has already shut down.
+          cargo test --locked -p dynamo-runtime --features integration --lib \
+            component::endpoint::integration_tests -- --list > "$RUNNER_TEMP/endpoint-tests.txt"
+          mapfile -t endpoint_tests < <(sed -n 's/: test$//p' "$RUNNER_TEMP/endpoint-tests.txt")
+          if [[ ${#endpoint_tests[@]} -eq 0 ]]; then
+            echo "No endpoint lifecycle tests found"
+            exit 1
+          fi
+          for endpoint_test in "${endpoint_tests[@]}"; do
+            cargo test --locked -p dynamo-runtime --features integration --lib \
+              "$endpoint_test" -- --exact --test-threads=1 --nocapture
+          done
+
   mypy:
     needs: image
     runs-on: prod-tester-amd-v2

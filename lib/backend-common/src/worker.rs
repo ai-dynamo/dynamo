@@ -4138,7 +4138,7 @@ mod handoff_and_lifecycle_tests {
             device_type: None,
             request_plane_codec: None,
         };
-        system_health.lock().register_health_check_target(
+        let _ = system_health.lock().register_health_check_target(
             endpoint.name(),
             instance,
             serde_json::json!({}),

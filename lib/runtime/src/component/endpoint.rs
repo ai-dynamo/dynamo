@@ -103,6 +103,67 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, setter(into, strip_option))]
     health_check_payload: Option<serde_json::Value>,
+
+    /// Engine published for direct calls while this endpoint is running.
+    #[educe(Debug(ignore))]
+    #[builder(default, setter(custom))]
+    local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
+}
+
+struct EndpointScopedState {
+    endpoint_name: String,
+    registry: crate::local_endpoint_registry::LocalEndpointRegistry,
+    system_health: Arc<parking_lot::Mutex<crate::system_health::SystemHealth>>,
+    local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
+    health_check_registration: Option<crate::system_health::HealthCheckRegistration>,
+}
+
+impl EndpointScopedState {
+    fn acquire(
+        endpoint_name: String,
+        registry: crate::local_endpoint_registry::LocalEndpointRegistry,
+        system_health: Arc<parking_lot::Mutex<crate::system_health::SystemHealth>>,
+        local_engine: Option<crate::local_endpoint_registry::LocalAsyncEngine>,
+        health_check_target: Option<(Instance, serde_json::Value)>,
+    ) -> (Self, Option<Arc<tokio::sync::Notify>>) {
+        if let Some(engine) = &local_engine {
+            // Publish the engine before exposing its health-check target.
+            registry.register(endpoint_name.clone(), engine.clone());
+            tracing::debug!("Registered engine for endpoint '{endpoint_name}' in local registry");
+        }
+
+        let mut notifier = None;
+        let health_check_registration = health_check_target.map(|(instance, payload)| {
+            tracing::debug!(endpoint_name = %endpoint_name, "Registering endpoint health check target");
+            let guard = system_health.lock();
+            let registration = guard.register_health_check_target(&endpoint_name, instance, payload);
+            notifier = guard.get_endpoint_health_check_notifier(&endpoint_name);
+            registration
+        });
+
+        (
+            Self {
+                endpoint_name,
+                registry,
+                system_health,
+                local_engine,
+                health_check_registration,
+            },
+            notifier,
+        )
+    }
+
+    fn release(self) {
+        if let Some(registration) = self.health_check_registration {
+            self.system_health
+                .lock()
+                .release_health_check_target(registration);
+        }
+        if let Some(engine) = &self.local_engine {
+            self.registry
+                .remove_registration(&self.endpoint_name, engine);
+        }
+    }
 }
 
 impl EndpointConfigBuilder {
@@ -110,19 +171,12 @@ impl EndpointConfigBuilder {
         Self::default().endpoint(endpoint)
     }
 
-    /// Register an async engine in the local endpoint registry for direct in-process calls
+    /// Register an async engine for direct calls while the endpoint is running.
     pub fn register_local_engine(
-        self,
+        mut self,
         engine: crate::local_endpoint_registry::LocalAsyncEngine,
     ) -> Result<Self> {
-        if let Some(endpoint) = &self.endpoint {
-            let registry = endpoint.drt().local_endpoint_registry();
-            registry.register(endpoint.name.clone(), engine);
-            tracing::debug!(
-                "Registered engine for endpoint '{}' in local registry",
-                endpoint.name
-            );
-        }
+        self.local_engine = Some(Some(engine));
         Ok(self)
     }
 
@@ -132,8 +186,14 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
-        let (endpoint, handler, metrics_labels, graceful_shutdown, health_check_payload) =
-            self.build_internal()?.dissolve();
+        let (
+            endpoint,
+            handler,
+            metrics_labels,
+            graceful_shutdown,
+            health_check_payload,
+            local_engine,
+        ) = self.build_internal()?.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -161,42 +221,44 @@ impl EndpointConfigBuilder {
         let server = endpoint.drt().request_plane_server().await?;
         let transport = build_transport_type(&endpoint, &endpoint_id, connection_id).await?;
 
-        // Register health check target in SystemHealth if provided
-        if let Some(health_check_payload) = &health_check_payload {
-            if system_health.lock().health_check_enabled()
-                && endpoint
-                    .drt()
-                    .local_endpoint_registry()
-                    .get(&endpoint.name)
-                    .is_none()
-            {
-                anyhow::bail!(
-                    "Endpoint '{}' has a health_check_payload and canary is enabled, \
-                     but no local engine is registered. Call .register_local_engine() \
-                     before .start() so the canary health check can function.",
-                    endpoint.name
-                );
-            }
+        let health_check_target = match &health_check_payload {
+            Some(health_check_payload) => {
+                if system_health.lock().health_check_enabled() && local_engine.is_none() {
+                    anyhow::bail!(
+                        "Endpoint '{}' has a health_check_payload and canary is enabled, \
+                         but no local engine is registered. Call .register_local_engine() \
+                         before .start() so the canary health check can function.",
+                        endpoint.name
+                    );
+                }
 
-            let instance = Instance {
-                component: endpoint_id.component.clone(),
-                endpoint: endpoint_id.name.clone(),
-                namespace: endpoint_id.namespace.clone(),
-                instance_id: connection_id,
-                transport: transport.clone(),
-                device_type: endpoint_device_type(),
-                request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
-            };
-            tracing::debug!(endpoint_name = %endpoint.name, "Registering endpoint health check target");
-            let guard = system_health.lock();
-            guard.register_health_check_target(
-                &endpoint.name,
-                instance,
-                health_check_payload.clone(),
-            );
-            if let Some(notifier) = guard.get_endpoint_health_check_notifier(&endpoint.name) {
-                handler.set_endpoint_health_check_notifier(notifier)?;
+                let instance = Instance {
+                    component: endpoint_id.component.clone(),
+                    endpoint: endpoint_id.name.clone(),
+                    namespace: endpoint_id.namespace.clone(),
+                    instance_id: connection_id,
+                    transport: transport.clone(),
+                    device_type: endpoint_device_type(),
+                    request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
+                };
+                Some((instance, health_check_payload.clone()))
             }
+            None => None,
+        };
+
+        let (scoped_state, notifier) = EndpointScopedState::acquire(
+            endpoint.name.clone(),
+            endpoint.drt().local_endpoint_registry().clone(),
+            system_health.clone(),
+            local_engine,
+            health_check_target,
+        );
+
+        if let Some(notifier) = notifier
+            && let Err(error) = handler.set_endpoint_health_check_notifier(notifier)
+        {
+            scoped_state.release();
+            return Err(error);
         }
 
         tracing::debug!(
@@ -206,7 +268,7 @@ impl EndpointConfigBuilder {
         );
 
         // Register endpoint with the server (unified interface)
-        server
+        if let Err(error) = server
             .register_endpoint(
                 endpoint_name_for_task.clone(),
                 handler,
@@ -215,7 +277,11 @@ impl EndpointConfigBuilder {
                 component_name_for_task.clone(),
                 system_health.clone(),
             )
-            .await?;
+            .await
+        {
+            scoped_state.release();
+            return Err(error);
+        }
 
         let tracker_clone = if graceful_shutdown {
             tracing::debug!(
@@ -253,11 +319,12 @@ impl EndpointConfigBuilder {
                     "Unable to register service for discovery"
                 );
                 let _ = server
-                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                    .unregister_endpoint(&endpoint_id, connection_id)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
                 }
+                scoped_state.release();
                 anyhow::bail!(
                     "Unable to register service for discovery. Check discovery service status"
                 );
@@ -287,7 +354,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup, connection_id)
+                .unregister_endpoint(&endpoint_id, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -301,6 +368,8 @@ impl EndpointConfigBuilder {
                 tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
             }
+
+            scoped_state.release();
 
             anyhow::Ok(())
         });
@@ -317,7 +386,7 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
+/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/namespace/component/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -344,7 +413,11 @@ fn tcp_transport_type(
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> TransportType {
-    TransportType::Tcp(format!("{address}/{connection_id:x}/{}", endpoint_id.name))
+    let path = crate::pipeline::network::ingress::shared_tcp_endpoint::instance_path(
+        endpoint_id,
+        connection_id,
+    );
+    TransportType::Tcp(format!("{address}/{path}"))
 }
 
 /// Build transport type, ensuring TCP server is initialized when needed.
@@ -459,6 +532,12 @@ impl Endpoint {
 mod tests {
     use super::*;
 
+    use crate::config::HealthStatus;
+    use crate::local_endpoint_registry::{
+        LocalAsyncEngine, LocalEndpointRegistry, test_support::stub_engine,
+    };
+    use crate::system_health::SystemHealth;
+
     #[test]
     fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {
         let endpoint_id = EndpointId {
@@ -468,13 +547,644 @@ mod tests {
         };
 
         for (address, expected) in [
-            ("192.0.2.10:1234", "192.0.2.10:1234/2a/generate"),
-            ("[2001:db8::10]:1234", "[2001:db8::10]:1234/2a/generate"),
+            ("192.0.2.10:1234", "192.0.2.10:1234/2a/ns/worker/generate"),
+            (
+                "[2001:db8::10]:1234",
+                "[2001:db8::10]:1234/2a/ns/worker/generate",
+            ),
         ] {
             let transport = tcp_transport_type(address.parse().unwrap(), &endpoint_id, 0x2a);
             assert_eq!(transport.address(), expected);
             assert!(!transport.address().starts_with("0.0.0.0"));
             assert!(!transport.address().starts_with("[::]"));
+        }
+    }
+
+    const ENDPOINT: &str = "generate";
+
+    fn system_health() -> Arc<parking_lot::Mutex<SystemHealth>> {
+        Arc::new(parking_lot::Mutex::new(SystemHealth::new(
+            HealthStatus::NotReady,
+            Vec::new(),
+            true,
+            "/health".to_string(),
+            "/live".to_string(),
+        )))
+    }
+
+    fn instance(instance_id: u64) -> Instance {
+        Instance {
+            component: "backend".to_string(),
+            endpoint: ENDPOINT.to_string(),
+            namespace: "dynamo".to_string(),
+            instance_id,
+            transport: TransportType::Tcp("127.0.0.1:0".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }
+    }
+
+    fn acquire(
+        registry: &LocalEndpointRegistry,
+        health: &Arc<parking_lot::Mutex<SystemHealth>>,
+        engine: &LocalAsyncEngine,
+        instance_id: u64,
+        payload: serde_json::Value,
+    ) -> (EndpointScopedState, Option<Arc<tokio::sync::Notify>>) {
+        EndpointScopedState::acquire(
+            ENDPOINT.to_string(),
+            registry.clone(),
+            health.clone(),
+            Some(engine.clone()),
+            Some((instance(instance_id), payload)),
+        )
+    }
+
+    #[test]
+    fn acquire_publishes_the_engine_target_notifier_and_notready_status() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let engine = stub_engine();
+
+        let (_scope, notifier) = acquire(
+            &registry,
+            &health,
+            &engine,
+            7,
+            serde_json::json!({"probe": "payload"}),
+        );
+
+        let registered = registry.get(ENDPOINT).expect(
+            "the canary dispatches through the local registry, so the engine must be there",
+        );
+        assert!(Arc::ptr_eq(&registered, &engine));
+
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the canary needs a target to probe");
+        assert_eq!(target.instance.instance_id, 7);
+        assert_eq!(target.payload, serde_json::json!({"probe": "payload"}));
+        assert_eq!(
+            guard.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "an endpoint the canary has not verified yet must not count as ready"
+        );
+        let published = guard
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .expect("the handler signals the canary through this notifier");
+        let handed_back = notifier.expect("acquire hands the notifier to the handler");
+        assert!(
+            Arc::ptr_eq(&published, &handed_back),
+            "the handler must signal the same notifier the canary waits on"
+        );
+        assert!(
+            !guard.get_health_status().0,
+            "an unverified endpoint holds the worker unhealthy"
+        );
+    }
+
+    #[test]
+    fn release_leaves_no_endpoint_scoped_state_behind() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        health.lock().set_health_status(HealthStatus::Ready);
+        let engine = stub_engine();
+
+        let (scope, _notifier) = acquire(&registry, &health, &engine, 7, serde_json::json!({}));
+        assert!(!health.lock().get_health_status().0);
+
+        scope.release();
+
+        assert!(
+            registry.get(ENDPOINT).is_none(),
+            "a stopped endpoint must not stay locally dispatchable"
+        );
+        let guard = health.lock();
+        assert!(guard.get_health_check_target(ENDPOINT).is_none());
+        assert!(guard.get_endpoint_health_check_notifier(ENDPOINT).is_none());
+        assert!(guard.get_endpoint_health_status(ENDPOINT).is_none());
+        assert!(
+            guard.get_health_status().0,
+            "an abandoned target would hold the worker unhealthy with no endpoint to blame"
+        );
+    }
+
+    #[test]
+    fn release_withdraws_the_engine_even_with_no_health_check_target() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let engine = stub_engine();
+
+        let (scope, notifier) = EndpointScopedState::acquire(
+            ENDPOINT.to_string(),
+            registry.clone(),
+            health.clone(),
+            Some(engine.clone()),
+            None,
+        );
+        assert!(
+            notifier.is_none(),
+            "no target means nothing to notify about"
+        );
+        assert!(registry.get(ENDPOINT).is_some());
+        assert!(health.lock().get_health_check_target(ENDPOINT).is_none());
+
+        scope.release();
+
+        assert!(registry.get(ENDPOINT).is_none());
+    }
+
+    #[test]
+    fn a_restart_under_the_same_name_installs_its_own_engine_and_target() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let first_engine = stub_engine();
+        let second_engine = stub_engine();
+
+        let (first, _) = acquire(
+            &registry,
+            &health,
+            &first_engine,
+            1,
+            serde_json::json!({"generation": "first"}),
+        );
+        first.release();
+        let (_second, _) = acquire(
+            &registry,
+            &health,
+            &second_engine,
+            2,
+            serde_json::json!({"generation": "second"}),
+        );
+
+        let registered = registry.get(ENDPOINT).expect("the restart is dispatchable");
+        assert!(
+            Arc::ptr_eq(&registered, &second_engine),
+            "requests must reach the engine that is serving now"
+        );
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart registered a target");
+        assert_eq!(
+            target.instance.instance_id, 2,
+            "the canary must report on the instance that exists"
+        );
+        assert_eq!(target.payload, serde_json::json!({"generation": "second"}));
+        assert!(
+            guard.get_endpoint_health_check_notifier(ENDPOINT).is_some(),
+            "the restart's handler needs a notifier to signal"
+        );
+    }
+
+    #[test]
+    fn releasing_an_overlapped_scope_leaves_the_newer_one_serving() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let outgoing_engine = stub_engine();
+        let live_engine = stub_engine();
+
+        let (outgoing, _) = acquire(
+            &registry,
+            &health,
+            &outgoing_engine,
+            1,
+            serde_json::json!({"generation": "outgoing"}),
+        );
+        let (_live, _) = acquire(
+            &registry,
+            &health,
+            &live_engine,
+            2,
+            serde_json::json!({"generation": "live"}),
+        );
+
+        outgoing.release();
+
+        let registered = registry
+            .get(ENDPOINT)
+            .expect("the live endpoint must stay dispatchable");
+        assert!(
+            Arc::ptr_eq(&registered, &live_engine),
+            "the outgoing scope must not evict the engine that replaced its own"
+        );
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the live endpoint must keep its canary target");
+        assert_eq!(target.instance.instance_id, 2);
+        assert_eq!(target.payload, serde_json::json!({"generation": "live"}));
+        assert!(
+            guard.get_endpoint_health_check_notifier(ENDPOINT).is_some(),
+            "the live endpoint's handler still signals through this notifier"
+        );
+        assert_eq!(
+            guard.get_endpoint_health_status(ENDPOINT),
+            Some(HealthStatus::NotReady),
+            "the live endpoint is still tracked, awaiting its own canary verdict"
+        );
+    }
+
+    #[test]
+    fn releasing_the_newer_scope_hands_the_name_back_to_the_older_one() {
+        let registry = LocalEndpointRegistry::new();
+        let health = system_health();
+        let displaced_engine = stub_engine();
+        let newer_engine = stub_engine();
+
+        let (_displaced, _) = acquire(
+            &registry,
+            &health,
+            &displaced_engine,
+            1,
+            serde_json::json!({"generation": "displaced"}),
+        );
+        let (newer, _) = acquire(
+            &registry,
+            &health,
+            &newer_engine,
+            2,
+            serde_json::json!({"generation": "newer"}),
+        );
+
+        newer.release();
+
+        let registered = registry
+            .get(ENDPOINT)
+            .expect("the displaced endpoint is still running and must be reachable again");
+        assert!(
+            Arc::ptr_eq(&registered, &displaced_engine),
+            "requests must reach the endpoint that is serving now"
+        );
+        let guard = health.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the displaced endpoint's target is re-exposed");
+        assert_eq!(
+            target.instance.instance_id, 1,
+            "the canary must probe the instance the registry now dispatches to"
+        );
+        assert_eq!(
+            target.payload,
+            serde_json::json!({"generation": "displaced"})
+        );
+    }
+}
+
+#[cfg(all(test, feature = "integration"))]
+mod integration_tests {
+    use super::*;
+    use crate::distributed::distributed_test_utils::create_test_drt_async;
+    use crate::local_endpoint_registry::{LocalAsyncEngine, test_support::stub_engine};
+    use crate::pipeline::PipelineError;
+    use crate::pipeline::network::PushWorkHandler;
+    use crate::system_health::SystemHealth;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+
+    const ENDPOINT: &str = "generate";
+
+    struct TestHandler {
+        refuse_notifier: bool,
+        received: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    #[async_trait]
+    impl PushWorkHandler for TestHandler {
+        async fn handle_payload(
+            &self,
+            _payload: Bytes,
+            _request_id: Option<String>,
+        ) -> Result<(), PipelineError> {
+            if let Some(received) = &self.received {
+                received.notify_one();
+            }
+            Ok(())
+        }
+
+        fn add_metrics(
+            &self,
+            _endpoint: &Endpoint,
+            _metrics_labels: Option<&[(&str, &str)]>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_endpoint_health_check_notifier(
+            &self,
+            _notifier: Arc<tokio::sync::Notify>,
+        ) -> Result<()> {
+            if self.refuse_notifier {
+                anyhow::bail!("handler rejected the health check notifier");
+            }
+            Ok(())
+        }
+    }
+
+    fn handler(refuse_notifier: bool) -> Arc<dyn PushWorkHandler> {
+        Arc::new(TestHandler {
+            refuse_notifier,
+            received: None,
+        })
+    }
+
+    fn assert_no_endpoint_state(
+        registry: &crate::local_endpoint_registry::LocalEndpointRegistry,
+        system_health: &Arc<parking_lot::Mutex<SystemHealth>>,
+        context: &str,
+    ) {
+        assert!(
+            registry.get(ENDPOINT).is_none(),
+            "{context}: the engine must not stay locally dispatchable"
+        );
+        let guard = system_health.lock();
+        assert!(
+            guard.get_health_check_target(ENDPOINT).is_none(),
+            "{context}: an abandoned canary target holds the whole worker unhealthy"
+        );
+        assert!(
+            guard.get_endpoint_health_check_notifier(ENDPOINT).is_none(),
+            "{context}: nothing is left to signal this notifier"
+        );
+        assert!(
+            guard.get_endpoint_health_status(ENDPOINT).is_none(),
+            "{context}: a stale health entry keeps counting towards worker health"
+        );
+    }
+
+    async fn start(
+        drt: &crate::DistributedRuntime,
+        namespace: &str,
+        engine: &LocalAsyncEngine,
+        payload: serde_json::Value,
+        refuse_notifier: bool,
+    ) -> Result<StartedEndpoint> {
+        drt.namespace(namespace)?
+            .component("backend")?
+            .endpoint(ENDPOINT)
+            .endpoint_builder()
+            .handler(handler(refuse_notifier))
+            .health_check_payload(payload)
+            .register_local_engine(engine.clone())?
+            .start_with_registration()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_failed_start_leaves_no_endpoint_scoped_state_behind() {
+        let drt = create_test_drt_async().await;
+        let engine = stub_engine();
+
+        let outcome = start(
+            &drt,
+            "rollback_ns",
+            &engine,
+            serde_json::json!({"probe": "payload"}),
+            true,
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "the handler refused the notifier, so the start cannot succeed"
+        );
+
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after a failed start",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restart_after_shutdown_is_the_one_the_canary_reports_on() {
+        let drt = create_test_drt_async().await;
+        let first_engine = stub_engine();
+        let second_engine = stub_engine();
+
+        let started = start(
+            &drt,
+            "restart_ns",
+            &first_engine,
+            serde_json::json!({"generation": "first"}),
+            false,
+        )
+        .await
+        .expect("the first start succeeds");
+        assert!(Arc::ptr_eq(
+            &drt.local_endpoint_registry()
+                .get(ENDPOINT)
+                .expect("the first endpoint is dispatchable"),
+            &first_engine
+        ));
+
+        started.shutdown().await.expect("shutdown runs cleanly");
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after shutdown",
+        );
+
+        let _restarted = start(
+            &drt,
+            "restart_ns",
+            &second_engine,
+            serde_json::json!({"generation": "second"}),
+            false,
+        )
+        .await
+        .expect("the endpoint can be started again under the same name");
+
+        let registered = drt
+            .local_endpoint_registry()
+            .get(ENDPOINT)
+            .expect("the restart is dispatchable");
+        assert!(
+            Arc::ptr_eq(&registered, &second_engine),
+            "requests must reach the engine that is serving now"
+        );
+        let guard = drt.system_health();
+        let guard = guard.lock();
+        let target = guard
+            .get_health_check_target(ENDPOINT)
+            .expect("the restart registered a canary target");
+        assert_eq!(
+            target.payload,
+            serde_json::json!({"generation": "second"}),
+            "the canary must probe the incarnation that is serving, not the one that stopped"
+        );
+        assert!(
+            guard.get_endpoint_health_status(ENDPOINT).is_some(),
+            "the restart counts towards worker health again"
+        );
+        assert!(guard.get_endpoint_health_check_notifier(ENDPOINT).is_some());
+    }
+
+    async fn check_same_named_endpoint_isolation(request_plane: RequestPlaneMode) {
+        use crate::distributed::DistributedConfig;
+        use crate::pipeline::network::egress::unified_client::Headers;
+        use std::time::Duration;
+
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = request_plane;
+        if request_plane == RequestPlaneMode::Nats {
+            config.nats_config = Some(nats::ClientOptions::default());
+        }
+        let drt = crate::DistributedRuntime::new(crate::Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let client = drt.network_manager().create_client().unwrap();
+        let mut endpoints = Vec::new();
+        for (namespace, component) in [
+            ("isolation", "backend"),
+            ("other", "backend"),
+            ("isolation", "other"),
+        ] {
+            let received = Arc::new(tokio::sync::Notify::new());
+            let endpoint = drt
+                .namespace(namespace)
+                .unwrap()
+                .component(component)
+                .unwrap()
+                .endpoint(ENDPOINT);
+            let started = endpoint
+                .endpoint_builder()
+                .handler(Arc::new(TestHandler {
+                    refuse_notifier: false,
+                    received: Some(received.clone()),
+                }))
+                .start_with_registration()
+                .await
+                .unwrap();
+            endpoints.push((started, received));
+        }
+
+        // Exercise discovery's advertised addresses before and after selective shutdown.
+        for pass in 0..2 {
+            for (started, received) in &endpoints {
+                let ack = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    client.send_request(
+                        started.instance().transport.address().to_string(),
+                        Bytes::from_static(b"probe"),
+                        Headers::new(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(
+                    ack.is_empty(),
+                    "the live endpoint must acknowledge the request"
+                );
+                tokio::time::timeout(Duration::from_secs(5), received.notified())
+                    .await
+                    .expect("the addressed handler must receive the request");
+            }
+            if pass == 0 {
+                endpoints.remove(1).0.shutdown().await.unwrap();
+            }
+        }
+        for (started, _) in endpoints {
+            started.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_same_names_are_isolated_by_namespace_and_component() {
+        check_same_named_endpoint_isolation(RequestPlaneMode::Tcp).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nats_same_names_are_isolated_by_namespace_and_component() {
+        check_same_named_endpoint_isolation(RequestPlaneMode::Nats).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nats_unregistration_waits_for_pending_or_cancelled_setup() {
+        use crate::distributed::DistributedConfig;
+        use crate::pipeline::network::egress::unified_client::Headers;
+        use std::time::Duration;
+
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = RequestPlaneMode::Nats;
+        config.nats_config = Some(nats::ClientOptions::default());
+        let drt = crate::DistributedRuntime::new(crate::Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("setup")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint(ENDPOINT);
+        let endpoint_id = endpoint.id();
+        let server = drt.request_plane_server().await.unwrap();
+
+        for cancel_caller in [false, true] {
+            // Hold setup at the registry lookup after register_endpoint has
+            // reserved the identity. No sleep or scheduler timing is needed.
+            let registry = drt.component_registry().inner.lock().await;
+            let mut registering = Box::pin(server.register_endpoint(
+                ENDPOINT.to_string(),
+                handler(false),
+                drt.connection_id(),
+                endpoint_id.namespace.clone(),
+                endpoint_id.component.clone(),
+                drt.system_health(),
+            ));
+            assert!(futures::poll!(registering.as_mut()).is_pending());
+            let mut registering = Some(registering);
+            if cancel_caller {
+                drop(registering.take());
+            }
+            let mut unregistering =
+                Box::pin(server.unregister_endpoint(&endpoint_id, drt.connection_id()));
+            assert!(
+                futures::poll!(unregistering.as_mut()).is_pending(),
+                "unregistration must wait for the owned setup task"
+            );
+            drop(registry);
+            tokio::time::timeout(Duration::from_secs(5), unregistering)
+                .await
+                .unwrap()
+                .unwrap();
+            if let Some(registering) = registering {
+                assert!(
+                    registering.await.is_err(),
+                    "cancelled setup must not report success"
+                );
+            }
+
+            // Completion releases the reservation and leaves no stale subscriber
+            // that could steal the replacement's request.
+            let received = Arc::new(tokio::sync::Notify::new());
+            let started = endpoint
+                .endpoint_builder()
+                .handler(Arc::new(TestHandler {
+                    refuse_notifier: false,
+                    received: Some(received.clone()),
+                }))
+                .start_with_registration()
+                .await
+                .unwrap();
+            let client = drt.network_manager().create_client().unwrap();
+            let ack = tokio::time::timeout(
+                Duration::from_secs(5),
+                client.send_request(
+                    started.instance().transport.address().to_string(),
+                    Bytes::from_static(b"replacement"),
+                    Headers::new(),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(ack.is_empty());
+            tokio::time::timeout(Duration::from_secs(5), received.notified())
+                .await
+                .unwrap();
+            started.shutdown().await.unwrap();
         }
     }
 }
