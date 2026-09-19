@@ -180,6 +180,10 @@ class BenchmarkConfig:
     decode_max_kv_read_token_samples: int = 128
     decode_max_batch_size_samples: int = 128
     prefix_max_batch_size_samples: int = 3
+    # Cap on the decode batch-size axis, independent of the engine's own
+    # max_num_running_reqs: points above the cap are never generated. None
+    # keeps the historical behavior (axis runs to the engine limit).
+    max_batch_size: int | None = None
     # Measure the manifest's imbalanced prefill points (explicit rows, or a
     # partition) as well as its uniform ones. Those points come from an
     # explicit --benchmark-points-file; see the flag's comment in backend_args
@@ -2246,6 +2250,10 @@ class InstrumentedScheduler(AsyncScheduler):
         for k in _INT_FIELDS:
             if k in cfg and not isinstance(cfg[k], int):
                 cfg[k] = int(cfg[k])
+        if cfg.get("max_batch_size") is not None and not isinstance(
+            cfg["max_batch_size"], int
+        ):
+            cfg["max_batch_size"] = int(cfg["max_batch_size"])
         # A bool that arrives as JSON text: "false" is a non-empty string and
         # would otherwise turn the collection on.
         if "collect_imbalanced" in cfg and isinstance(cfg["collect_imbalanced"], str):
@@ -2276,6 +2284,11 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         if self._bench_config.timeout <= 0:
             raise ValueError("benchmark timeout must be positive")
+        if (
+            self._bench_config.max_batch_size is not None
+            and self._bench_config.max_batch_size < 1
+        ):
+            raise ValueError("benchmark max_batch_size must be positive")
         uniform_sample_limits = {
             "prefill_max_new_token_samples": (
                 self._bench_config.prefill_max_new_token_samples
@@ -3511,6 +3524,10 @@ class InstrumentedScheduler(AsyncScheduler):
             return
 
         feasible_max_batch = self._bench_decode_feasible_max_batch_size()
+        if self._bench_config.max_batch_size is not None:
+            feasible_max_batch = min(
+                feasible_max_batch, self._bench_config.max_batch_size
+            )
         self._bench_feasible_max_decode_batch_size = feasible_max_batch
         if feasible_max_batch < 1:
             logger.warning("KV cache too small for decode grid, skipping")
