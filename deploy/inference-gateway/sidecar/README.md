@@ -73,8 +73,15 @@ rejected, the error taxonomy, and the upgrade checklist are in
 | `DYN_VLLM_NIXL_PROTOCOL_VERSION` | `vllm-v0.29.0-nixl-pull` | Must match the revision this build implements; a mismatch refuses startup |
 | `DYN_MODEL_NAME` | empty | Model both workers serve; recorded at startup |
 | `DYN_SIDECAR_MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Maximum request body the P/D path buffers |
+| `DYN_SIDECAR_CLIENT_BODY_TIMEOUT_MS` | `30000` (30 s) | Total time allowed to read a client's request body. Bounds a client that sends an under-cap body slowly |
 | `DYN_SIDECAR_MAX_PREFILL_RESPONSE_BYTES` | `1048576` (1 MiB) | Maximum prefill response the P/D path buffers |
 | `DYN_SIDECAR_PREFILL_DEADLINE_MS` | `60000` (60 s) | Total time allowed for the prefill leg, across every chunk. The read timeout bounds one gap between chunks, not the leg |
+
+Note on the two prefill timeouts: the leg deadline is the ceiling on the whole
+prefill exchange, and the read timeout only bounds one gap inside it. With the
+defaults the leg ends at 60 s, so a single gap can never reach the 300 s read
+timeout, and raising `DYN_SIDECAR_READ_TIMEOUT_MS` alone buys a slow worker no
+extra prefill time. Raise `DYN_SIDECAR_PREFILL_DEADLINE_MS` for that.
 
 The decode target is always the locally configured decode engine
 (`DYN_DECODE_ENGINE_PORT`). `remote_host` and `remote_port` in the handoff are

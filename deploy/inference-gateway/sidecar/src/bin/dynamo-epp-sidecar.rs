@@ -36,6 +36,8 @@ fn build_adapter(config: &Config) -> anyhow::Result<Arc<dyn PdAdapter>> {
                 decode_engine = %config.decode_engine_url,
                 max_request_bytes = config.max_request_bytes,
                 max_prefill_response_bytes = config.max_prefill_response_bytes,
+                client_body_timeout_ms = config.client_body_timeout.as_millis() as u64,
+                prefill_deadline_ms = config.prefill_deadline.as_millis() as u64,
                 "Enabled the raw-vLLM NIXL P/D adapter"
             );
             let adapter = VllmNixlAdapter::new(
