@@ -44,7 +44,7 @@ from dynamo.llm import (
     register_llm,
     unregister_llm,
 )
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import WorkerShutdown
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
 from dynamo.sglang.capacity import kv_event_block_size
@@ -1193,7 +1193,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             request_ids: Live set of unfinished parallel-choice IDs, when available.
 
         Raises:
-            EngineShutdown: If shutdown event was triggered.
+            WorkerShutdown: If shutdown event was triggered.
         """
         cancellation_future: asyncio.Future[Any] | None = None
         shutdown_task: asyncio.Task[Any] | None = None
@@ -1240,9 +1240,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 request_ids if request_ids is not None else {sglang_request_id}, context
             )
 
-            # Check which event triggered and raise EngineShutdown if shutdown
+            # Check which event triggered and raise WorkerShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during token generation")
+                raise WorkerShutdown("Engine was shut down during token generation")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes
@@ -1278,7 +1278,7 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
         Automatically creates a background task to monitor for cancellation and
         shutdown events, cleaning it up when the context exits.
 
-        If shutdown event was triggered, raises EngineShutdown on exit.
+        If shutdown event was triggered, raises WorkerShutdown on exit.
 
         Args:
             request_id_future: Future that will be set with the SGLang request ID
@@ -1323,4 +1323,4 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                 cancellation_task.result()
 
             if self.shutdown_event and self.shutdown_event.is_set():
-                raise EngineShutdown("Engine was shut down during token generation")
+                raise WorkerShutdown("Engine was shut down during token generation")

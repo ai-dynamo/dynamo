@@ -260,11 +260,14 @@ where
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
+        // Latch: an engine that emits several error frames before ending its
+        // stream is still one failed request.
+        let mut counted_engine_stream_error = false;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
             let encoded = match self
                 .payload_adapter
-                .encode_response(payload_codec, Some(resp), false)
+                .encode_response_classified(payload_codec, Some(resp), false)
                 .await
             {
                 Ok(encoded) => encoded,
@@ -280,8 +283,26 @@ where
                     break;
                 }
             };
+            let (encoded, kind) = encoded;
             let is_error = encoded.is_error;
             saw_error_response |= is_error;
+            if kind == ResponseFrameKind::SerializationError
+                && let Some(m) = self.metrics()
+            {
+                m.error_counter
+                    .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                    .inc();
+            }
+            // Counted here rather than at the engine adapter because every
+            // backend reaches this pump; `generate` covers setup failure.
+            if kind == ResponseFrameKind::EngineError && !counted_engine_stream_error {
+                counted_engine_stream_error = true;
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                        .inc();
+                }
+            }
             let resp_bytes = encoded.bytes;
             if let Some(m) = self.metrics() {
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
@@ -1048,14 +1069,13 @@ pub(crate) fn typed_error_from_pipeline_error(e: &PipelineError) -> DynamoError 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{BackendError, DynamoError, ErrorType};
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
     use futures::stream;
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    use crate::error::{BackendError, ErrorType};
 
     type TestRequest = serde_json::Value;
     type TestResponse = Annotated<serde_json::Value>;
@@ -1430,6 +1450,181 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
         )
+    }
+
+    async fn run_response_frames(content: Vec<TestResponse>) -> Arc<WorkHandlerMetrics> {
+        let ingress = TestIngress::new();
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(content.len() + 2);
+        let publisher = StreamSender { tx, prologue: None };
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::iter(content)), ctx.context());
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+
+        metrics
+    }
+
+    #[tokio::test]
+    async fn test_engine_stream_errors_count_once_per_request() {
+        let metrics = run_response_frames(vec![
+            Annotated::from_data(serde_json::json!({"token": 0})),
+            Annotated::from_error("engine returned 503"),
+            Annotated::from_error("engine stream ended unexpectedly"),
+        ])
+        .await;
+
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                .get(),
+            1,
+            "multiple engine error frames are one failed request"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_frame_does_not_count_as_engine_stream_error() {
+        for error_type in [
+            ErrorType::Cancelled,
+            ErrorType::Backend(BackendError::Cancelled),
+        ] {
+            let cancellation = DynamoError::builder()
+                .error_type(error_type)
+                .message("request cancelled")
+                .build();
+            let metrics = run_response_frames(vec![Annotated::from_err(cancellation)]).await;
+
+            assert_eq!(
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                    .get(),
+                0,
+                "cancellation frames must not count as engine failures"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_engine_crash_counts_but_controlled_worker_shutdown_does_not() {
+        for (error_type, expected) in [
+            (ErrorType::Backend(BackendError::EngineShutdown), 1),
+            (ErrorType::WorkerUnavailable, 0),
+        ] {
+            let shutdown = DynamoError::builder()
+                .error_type(error_type)
+                .message("worker stopped")
+                .build();
+            // Preserve the retry policy's identity across the wire as well as
+            // the encoder's local accounting classification.
+            let encoded = serde_json::to_vec(&shutdown).unwrap();
+            let decoded: DynamoError = serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(decoded.error_type(), error_type);
+            let metrics = run_response_frames(vec![Annotated::from_err(decoded)]).await;
+
+            assert_eq!(
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                    .get(),
+                expected,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_serialization_fallback_is_counted_and_forwarded() {
+        use crate::pipeline::network::{EncodedResponseFrame, SerdeIngressPayloadAdapter};
+
+        struct SerializationFallbackAdapter;
+
+        impl IngressResponseEncoder<TestResponse> for SerializationFallbackAdapter {
+            async fn encode_response(
+                &self,
+                payload_codec: RequestPlanePayloadCodec,
+                response: Option<TestResponse>,
+                complete_final: bool,
+            ) -> Result<EncodedResponseFrame, PipelineError> {
+                SerdeIngressPayloadAdapter
+                    .encode_response(payload_codec, response, complete_final)
+                    .await
+            }
+
+            async fn encode_response_classified(
+                &self,
+                payload_codec: RequestPlanePayloadCodec,
+                _response: Option<TestResponse>,
+                complete_final: bool,
+            ) -> Result<(EncodedResponseFrame, ResponseFrameKind), PipelineError> {
+                assert!(!complete_final);
+                // Match the Python encoder's successful fallback return: the
+                // client receives an error frame even though encoding failed.
+                let mut frame = self
+                    .encode_response(
+                        payload_codec,
+                        Some(Annotated::from_error("response serialization failed")),
+                        false,
+                    )
+                    .await?;
+                frame.stop_stream = true;
+                Ok((frame, ResponseFrameKind::SerializationError))
+            }
+        }
+
+        let ingress = Ingress::<SingleIn<TestRequest>, ManyOut<TestResponse>, _>::new_with_adapter(
+            SerializationFallbackAdapter,
+        );
+        let metrics = Arc::new(test_metrics());
+        ingress.metrics.set(metrics.clone()).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let publisher = StreamSender { tx, prologue: None };
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream = ResponseStream::new(
+            Box::pin(stream::iter(vec![Annotated::from_data(serde_json::json!(
+                {}
+            ))])),
+            ctx.context(),
+        );
+
+        ingress
+            .pump_response_stream(response_stream, &publisher, RequestPlanePayloadCodec::Json)
+            .await;
+        drop(publisher);
+
+        let message = rx.recv().await.expect("fallback frame must be forwarded");
+        let frame: NetworkStreamWrapper<TestResponse> = RequestPlanePayloadCodec::Json
+            .decode(&message.data)
+            .unwrap();
+        assert!(!frame.complete_final);
+        assert!(frame.data.unwrap().is_error());
+        let message = rx.recv().await.expect("clean terminal frame must follow");
+        let frame: NetworkStreamWrapper<TestResponse> = RequestPlanePayloadCodec::Json
+            .decode(&message.data)
+            .unwrap();
+        assert!(frame.complete_final);
+        assert!(frame.data.is_none());
+        assert!(rx.recv().await.is_none(), "fallback must end the stream");
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::SERIALIZATION])
+                .get(),
+            1
+        );
+        assert_eq!(
+            metrics
+                .error_counter
+                .with_label_values(&[work_handler::error_types::ENGINE_STREAM])
+                .get(),
+            0
+        );
     }
 
     /// Losing the `complete_final` send to a client that has already

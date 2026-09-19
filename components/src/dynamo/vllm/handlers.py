@@ -81,7 +81,7 @@ from dynamo.llm import (
     register_model,
     unregister_model,
 )
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument, WorkerShutdown
 from dynamo.runtime import Client
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_connector_protocols import (
@@ -2258,7 +2258,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     async def _monitor_abort(self, context, request_id, is_prefill, abort_guard=None):
         """
         Background task that monitors for context cancellation and shutdown.
-        Aborts the request if either occurs. Raises EngineShutdown if shutdown was triggered.
+        Aborts the request if either occurs. Raises WorkerShutdown if shutdown was triggered.
 
         If abort_guard is provided, the abort call is routed through it so that
         it can be deferred until the first engine output (used in disagg decode
@@ -2316,9 +2316,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     f"Aborted {'Prefill ' if is_prefill else ''}Request ID: {request_id}"
                 )
 
-            # Check which event triggered and raise EngineShutdown if shutdown
+            # Check which event triggered and raise WorkerShutdown if shutdown
             if shutdown_task and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during generation.")
+                raise WorkerShutdown("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, normal cleanup if not aborted
@@ -2333,7 +2333,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 if not task.done():
                     task.cancel()
                     to_drain.append(task)
-            # Avoid suspending with EngineShutdown in flight. The owner can
+            # Avoid suspending with WorkerShutdown in flight. The owner can
             # otherwise cancel this monitor and replace the pending exception.
             if to_drain:
                 await asyncio.gather(*to_drain, return_exceptions=True)
@@ -2344,7 +2344,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     ):
         """
         Context manager that creates and automatically cleans up an abort monitoring task.
-        If shutdown event was triggered, raises EngineShutdown on exit.
+        If shutdown event was triggered, raises WorkerShutdown on exit.
 
         If abort_guard is provided, the abort call is routed through it so the
         abort can be deferred until the first engine output.
@@ -2363,7 +2363,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 except asyncio.CancelledError:
                     pass
             else:
-                # If the task completed, check if it raised EngineShutdown
+                # If the task completed, check if it raised WorkerShutdown
                 task.result()
 
     async def clear_kv_blocks(self, request=None):
@@ -4163,7 +4163,7 @@ class EmbeddingWorkerHandler:
 
     async def _monitor_abort(self, context: Context, request_id: str) -> None:
         """Background task: abort the encode if context is cancelled or
-        shutdown_event fires. Raises EngineShutdown on shutdown so the
+        shutdown_event fires. Raises WorkerShutdown on shutdown so the
         ``_abort_monitor`` context manager can propagate it.
 
         Mirrors ``BaseWorkerHandler._monitor_abort`` but trimmed for the
@@ -4201,7 +4201,7 @@ class EmbeddingWorkerHandler:
                 )
 
             if shutdown_task is not None and shutdown_task in done:
-                raise EngineShutdown("Engine was shut down during embedding.")
+                raise WorkerShutdown("Engine was shut down during embedding.")
         except asyncio.CancelledError:
             pass
         except EngineShutdown:
@@ -4227,7 +4227,7 @@ class EmbeddingWorkerHandler:
     async def _abort_monitor(self, context: Context, request_id: str):
         """Create + tear down an abort monitor task around one encode call.
 
-        On exit, re-raises EngineShutdown if the monitor caught a shutdown.
+        On exit, re-raises WorkerShutdown if the monitor caught a shutdown.
         """
         task = asyncio.create_task(self._monitor_abort(context, request_id))
         try:
@@ -4240,7 +4240,7 @@ class EmbeddingWorkerHandler:
                 except asyncio.CancelledError:
                     pass
             else:
-                # Re-raise EngineShutdown if the monitor task raised it.
+                # Re-raise WorkerShutdown if the monitor task raised it.
                 task.result()
 
     async def generate(

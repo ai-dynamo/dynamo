@@ -36,6 +36,7 @@ use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
 use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
+use pyo3::exceptions::PyGeneratorExit;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
@@ -43,7 +44,9 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
+use crate::errors::{
+    http_like_error_to_dynamo, py_exception_to_backend_error, worker_shutdown_to_dynamo,
+};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -1685,7 +1688,18 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
+    if Python::with_gil(|py| err.is_instance_of::<PyGeneratorExit>(py)) {
+        return DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::Cancelled))
+            .message("Python generator closed")
+            .build();
+    }
+
     Python::with_gil(|py| {
+        if let Some(error) = worker_shutdown_to_dynamo(py, &err) {
+            return error;
+        }
+
         if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
             let mut builder = DynamoError::builder()
                 .error_type(ErrorType::Backend(backend))
@@ -1698,13 +1712,6 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
 
         if let Some(error) = http_like_error_to_dynamo(py, &err) {
             return error;
-        }
-
-        if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            return DynamoError::builder()
-                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
-                .message("engine shutting down")
-                .build();
         }
 
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
