@@ -3,6 +3,7 @@
 
 """Unit tests for SGLang backend components."""
 
+import argparse
 import logging
 import os
 import re
@@ -21,6 +22,7 @@ import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    add_sglang_cli_compat,
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
@@ -51,6 +53,37 @@ try:
     from dynamo.sglang import register as sglang_register
 except ImportError:
     sglang_register = None
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        ([], None),
+        (["--disable-piecewise-cuda-graph"], "disabled"),
+        (["--cuda-graph-backend-prefill", "breakable"], "breakable"),
+        (
+            ["--disable-piecewise-cuda-graph", "--cuda-graph-backend-prefill", "full"],
+            "full",
+        ),
+    ],
+)
+def test_removed_piecewise_flag_preserves_prefill_backend_selection(argv, expected):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cuda-graph-backend-prefill")
+    add_sglang_cli_compat(parser)
+
+    assert parser.parse_args(argv).cuda_graph_backend_prefill == expected
+
+
+def test_piecewise_cli_compat_preserves_native_legacy_flag():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--disable-piecewise-cuda-graph", action="store_true")
+    add_sglang_cli_compat(parser)
+
+    assert parser.parse_args(
+        ["--disable-piecewise-cuda-graph"]
+    ).disable_piecewise_cuda_graph
+
 
 # Get path relative to this test file
 REPO_ROOT = Path(__file__).resolve().parents[5]

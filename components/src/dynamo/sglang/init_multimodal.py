@@ -80,9 +80,33 @@ async def init_multimodal_encode_worker(
 
     await pd_worker_client.wait_for_instances()
 
-    ready_event = asyncio.Event()
+    async def register_encoder() -> None:
+        await register_model_with_readiness_gate(
+            None,  # engine
+            generate_endpoint,
+            server_args,
+            dynamo_args,
+            input_type=ModelInput.Tokens,
+            # The encode worker is the OpenAI front door for sglang
+            # multimodal: it carries the Chat/Completions surface and
+            # delegates token generation to the internal PD worker via
+            # pd_worker_client. Its `worker_type=Encode` topology role gates
+            # serving on the downstream worker(s) — `needs` is a DNF: a P+D
+            # pair OR a single Aggregated peer — so the model is not
+            # advertised until the whole pipeline is live.
+            output_type=ModelType.Chat | ModelType.Completions,
+            worker_type=WorkerType.Encode,
+            needs=[
+                [WorkerType.Prefill, WorkerType.Decode],
+                [WorkerType.Aggregated],
+            ],
+        )
+        # Encode has no engine canary payload; publish process health only
+        # after initialization and model registration have succeeded.
+        runtime.set_health_status(True)
 
     register_model_taint_route(runtime, generate_endpoint)
+    registration_task = asyncio.create_task(register_encoder())
     try:
         _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -93,32 +117,15 @@ async def init_multimodal_encode_worker(
                     (prometheus_names.labels.MODEL_NAME, server_args.served_model_name),
                 ],
             ),
-            register_model_with_readiness_gate(
-                None,  # engine
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Tokens,
-                # The encode worker is the OpenAI front door for sglang
-                # multimodal: it carries the Chat/Completions surface and
-                # delegates token generation to the internal PD worker via
-                # pd_worker_client. Its `worker_type=Encode` topology role gates
-                # serving on the downstream worker(s) — `needs` is a DNF: a P+D
-                # pair OR a single Aggregated peer — so the model is not
-                # advertised until the whole pipeline is live.
-                output_type=ModelType.Chat | ModelType.Completions,
-                readiness_gate=ready_event,
-                worker_type=WorkerType.Encode,
-                needs=[
-                    [WorkerType.Prefill, WorkerType.Decode],
-                    [WorkerType.Aggregated],
-                ],
-            ),
+            registration_task,
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        registration_task.cancel()
+        await asyncio.gather(registration_task, return_exceptions=True)
+        runtime.set_health_status(False)
         handler.cleanup()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")

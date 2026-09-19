@@ -35,6 +35,18 @@ fn request(request_id: &str) -> pb::GenerateRequest {
 }
 
 #[tokio::test]
+async fn engine_state_watch_is_explicitly_unsupported() {
+    let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
+    let error = service
+        .watch_engine_state(Request::new(pb::WatchEngineStateRequest::default()))
+        .await
+        .err()
+        .expect("Mocker does not implement native engine-state watching");
+    assert_eq!(error.code(), tonic::Code::Unimplemented);
+    assert!(error.message().contains("WatchEngineState"));
+}
+
+#[tokio::test]
 async fn generate_rejects_invalid_requests() {
     let service = SglangMockerService::new(MockerServerConfig::default(), engine_args()).unwrap();
     let mut negative = request("negative");

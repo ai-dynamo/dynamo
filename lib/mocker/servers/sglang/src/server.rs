@@ -228,6 +228,14 @@ impl pb::sglang_service_server::SglangService for SglangMockerService {
     type GenerateStream = BoxStream<pb::GenerateResponse>;
     type ChatCompleteStream = BoxStream<pb::OpenAiStreamChunk>;
     type CompleteStream = BoxStream<pb::OpenAiStreamChunk>;
+    type WatchEngineStateStream = BoxStream<pb::EngineStateSnapshot>;
+
+    async fn watch_engine_state(
+        &self,
+        _request: Request<pb::WatchEngineStateRequest>,
+    ) -> Result<Response<Self::WatchEngineStateStream>, Status> {
+        unsupported("WatchEngineState")
+    }
 
     async fn text_generate(
         &self,

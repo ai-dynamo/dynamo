@@ -431,6 +431,44 @@ async def _build_mm_items(
     return image_mm_items, video_data_items, embeddings, tensor_id
 
 
+def _build_decode_mm_items(
+    request: SglangMultimodalRequest, bootstrap_room: int
+) -> dict[str, list[dict[str, Any]]]:
+    """Reconstruct positions on decode without transferring vision embeddings again."""
+    result: dict[str, list[dict[str, Any]]] = {}
+    for modality, grid_key, data_key in (
+        ("IMAGE", "image_grid_thw", "image_data"),
+        ("VIDEO", "video_grid_thw", "video_data"),
+    ):
+        groups = [
+            group
+            for group in request.multimodal_inputs
+            if group.num_mm_tokens and getattr(group, grid_key) is not None
+        ]
+        if not groups:
+            continue
+        item: dict[str, Any] = {
+            "format": "processor_output",
+            "modality": modality,
+            grid_key: torch.tensor([getattr(group, grid_key) for group in groups]),
+            # Decode receives KV, not features. Give its metadata-only item a
+            # request-local identity so SGLang need not hash absent features or
+            # reuse cached metadata from a different image with the same grid.
+            "hash": bootstrap_room * 2 + (modality == "VIDEO"),
+        }
+        if modality == "VIDEO":
+            for key in ("second_per_grid_ts", "video_timestamps"):
+                values = [getattr(group, key) for group in groups]
+                if any(value is not None for value in values):
+                    if any(value is None for value in values):
+                        raise ValueError(f"{key} must be present for every video group")
+                    item[key] = (
+                        torch.tensor(values) if key == "second_per_grid_ts" else values
+                    )
+        result[data_key] = [item]
+    return result
+
+
 class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
     """
     Multimodal worker handler for LLM inference with multimodal data.
@@ -550,7 +588,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             context.trace_headers() if context and self.enable_trace else None
         )
 
-        # Start decode generation with bootstrap info (no image data needed)
+        # Decode still needs the image/video grids to reconstruct M-RoPE positions.
+        # Only prefill receives the encoded features through NIXL.
         decode_stream = await self.engine.async_generate(
             input_ids=input_ids,
             sampling_params=sampling_params,
@@ -558,6 +597,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             bootstrap_host=bootstrap_info["bootstrap_host"],
             bootstrap_port=bootstrap_info["bootstrap_port"],
             bootstrap_room=bootstrap_info["bootstrap_room"],
+            **_build_decode_mm_items(request, bootstrap_info["bootstrap_room"]),
             external_trace_header=trace_header,
             rid=context.trace_id if context else None,
         )
