@@ -676,21 +676,28 @@ async fn test_unknown_model_uses_sentinel_label() {
     .await;
 }
 
-/// #11349: the non-streaming chat handler must observe metrics before the
+/// #11349: a non-streaming handler must observe metrics before the
 /// backend-error preflight. The preflight buffers leading data-less
 /// annotation frames until the first data-bearing event, so an observer
 /// placed after it would stamp TTFT with release time rather than arrival
 /// time. The engine holds its first data chunk behind a gate; TTFT must
 /// already be exposed on `/metrics` while the gate is closed. With the
 /// observer after the preflight the frame sits unobserved in the buffer and
-/// this test times out.
-#[tokio::test]
-async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
+/// the case times out.
+///
+/// `path` selects the handler under test; `request` is the non-streaming
+/// request body for that endpoint. Both handlers route to the same chat
+/// engine, so one gated engine serves both cases.
+async fn assert_non_streaming_observes_metrics_before_preflight(
+    path: &str,
+    request: serde_json::Value,
+) {
     temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
         let (listener, port) = bind_random_port().await;
         let service = HttpService::builder()
             .port(port)
             .enable_chat_endpoints(true)
+            .enable_responses_endpoints(true)
             .build()
             .unwrap();
 
@@ -715,15 +722,9 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
 
         let client = reqwest::Client::new();
         let metrics_url = format!("http://localhost:{port}/metrics");
-        let request = serde_json::json!({
-            "model": "gatedmodel",
-            "stream": false,
-            "max_tokens": 8,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
         let request_task = {
             let client = client.clone();
-            let url = format!("http://localhost:{port}/v1/chat/completions");
+            let url = format!("http://localhost:{port}{path}");
             tokio::spawn(async move { client.post(url).json(&request).send().await })
         };
 
@@ -736,7 +737,7 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
         while !metrics_body.contains(ttft_line) {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "TTFT was not observed while the leading metrics frame sat in the \
+                "{path}: TTFT was not observed while the leading metrics frame sat in the \
                  backend-error preflight buffer; got:\n{metrics_body}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -755,10 +756,13 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
         let response = request_task.await.unwrap().unwrap();
         assert!(
             response.status().is_success(),
-            "Request failed: {response:?}"
+            "{path}: request failed: {response:?}"
         );
-        let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["choices"][0]["message"]["content"], "gated");
+        let body = response.text().await.unwrap();
+        assert!(
+            body.contains("gated"),
+            "{path}: response body must carry the gated chunk's content; got:\n{body}"
+        );
 
         // Give the handler time to drop the collector, which flushes OSL.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -781,7 +785,7 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
         ] {
             assert!(
                 metrics_body.contains(needle),
-                "expected `{}` in metrics; got:\n{metrics_body}",
+                "{path}: expected `{}` in metrics; got:\n{metrics_body}",
                 needle.trim_end()
             );
         }
@@ -789,6 +793,38 @@ async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     })
+    .await;
+}
+
+/// Non-streaming `/v1/chat/completions`: observe → preflight → aggregate.
+#[tokio::test]
+async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+}
+
+/// Non-streaming `/v1/responses` reaches the same fold through the chat
+/// engine and must keep the same order; reverting only that handler fails
+/// this case while the chat case stays green.
+#[tokio::test]
+async fn test_responses_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/responses",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_output_tokens": 8,
+            "input": "hi"
+        }),
+    )
     .await;
 }
 
