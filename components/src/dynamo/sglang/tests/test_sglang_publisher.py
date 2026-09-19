@@ -869,31 +869,36 @@ async def test_metrics_fanout_reaches_sibling_gateways(tmp_path):
     metrics_ep = f"ipc://{tmp_path}/metrics"
     fanout_ep = f"ipc://{tmp_path}/fanout"
     ctx = zmq.asyncio.Context()
+    sockets = []
     try:
         owner_sock, fanout = publisher_mod._open_metrics_sockets(
             ctx, metrics_ep, fanout_ep, owner=True
         )
+        sockets += [owner_sock, fanout]
         assert fanout is not None
         sibling_sock, sibling_fanout = publisher_mod._open_metrics_sockets(
             ctx, metrics_ep, fanout_ep, owner=False
         )
+        sockets.append(sibling_sock)
         assert sibling_fanout is None
         await asyncio.sleep(0.3)  # PUB/SUB slow joiner
 
         scheduler = ctx.socket(zmq.PUSH)
+        sockets.append(scheduler)
         scheduler.connect(metrics_ep)
         payload = {"data_parallel_rank": 3, "gpu_cache_usage_perc": 0.5}
-        await scheduler.send_pyobj(payload)
+        await asyncio.wait_for(scheduler.send_pyobj(payload), 5)
 
         received = await asyncio.wait_for(owner_sock.recv_pyobj(), 5)
         assert received == payload
-        await fanout.send_pyobj(received)
+        await asyncio.wait_for(fanout.send_pyobj(received), 5)
         relayed = await asyncio.wait_for(sibling_sock.recv_pyobj(), 5)
         assert relayed == payload
 
         with pytest.raises(ValueError, match="fan-out"):
             publisher_mod._open_metrics_sockets(ctx, metrics_ep, None, owner=False)
-        for s in (scheduler, owner_sock, fanout, sibling_sock):
-            s.close(linger=0)
     finally:
+        for s in sockets:
+            if s is not None:
+                s.close(linger=0)
         ctx.term()

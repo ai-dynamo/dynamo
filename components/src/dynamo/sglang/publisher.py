@@ -177,18 +177,20 @@ def _open_metrics_sockets(
     """The schedulers push KvMetrics to one PULL socket. Its owner (the single
     worker, or gateway child 0) re-publishes every message on ``fanout_endpoint``
     so sibling gateways can report the same usage for their own identities."""
+    # SGLang's get_zmq_socket only configures PUSH/PULL/DEALER/REQ/REP/PAIR and
+    # raises for PUB/SUB, so the fan-out pair is created directly.
     if owner:
         sock = get_zmq_socket(ctx, zmq.PULL, metrics_ipc_name, True)
-        fanout = (
-            get_zmq_socket(ctx, zmq.PUB, fanout_endpoint, True)
-            if fanout_endpoint is not None
-            else None
-        )
+        fanout = None
+        if fanout_endpoint is not None:
+            fanout = ctx.socket(zmq.PUB)
+            fanout.bind(fanout_endpoint)
         return sock, fanout
     if fanout_endpoint is None:
         raise ValueError("a sibling gateway needs the metrics fan-out endpoint")
-    sock = get_zmq_socket(ctx, zmq.SUB, fanout_endpoint, False)
+    sock = ctx.socket(zmq.SUB)
     sock.setsockopt(zmq.SUBSCRIBE, b"")
+    sock.connect(fanout_endpoint)
     return sock, None
 
 
@@ -238,6 +240,7 @@ class DynamoSglangPublisher:
         # need KV event publishing which is set up separately in init_kv_event_publish()
         node_rank = getattr(self.server_args, "node_rank", 0) or 0
         self._ctx: zmq.asyncio.Context | None = None
+        self._sock: zmq.asyncio.Socket | None = None
         self._fanout: zmq.asyncio.Socket | None = None
         # Engine-level gauges (total blocks, cache usage) describe one engine; only
         # the process that consumes the schedulers' metrics publishes them, so a
