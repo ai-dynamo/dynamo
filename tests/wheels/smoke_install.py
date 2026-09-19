@@ -271,11 +271,8 @@ def create_venv(python_spec: str) -> Path:
     return venv_dir / "bin" / "python"
 
 
-# AISimulate ships its real abi3 wheel on NVIDIA's package index; the public index
-# carries only a small placeholder sdist whose build backend re-downloads that wheel and
-# hash-checks it while pip prepares metadata. Search the NVIDIA project page and require
-# a binary for this one distribution so that backend never runs, the same way the
-# AISimulate download stage in container/templates/wheel_builder.Dockerfile does.
+# The public index carries only a placeholder aisimulate sdist whose build backend
+# downloads the real wheel; take the binary from NVIDIA's index instead.
 AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
 
 
