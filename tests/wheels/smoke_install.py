@@ -271,6 +271,14 @@ def create_venv(python_spec: str) -> Path:
     return venv_dir / "bin" / "python"
 
 
+# AISimulate ships its real abi3 wheel on NVIDIA's package index; the public index
+# carries only a small placeholder sdist whose build backend re-downloads that wheel and
+# hash-checks it while pip prepares metadata. Search the NVIDIA project page and require
+# a binary for this one distribution so that backend never runs, the same way the
+# AISimulate download stage in container/templates/wheel_builder.Dockerfile does.
+AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
+
+
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
     # --find-links only registers search paths; nixl is pulled from nixl/ only when a
     # requirement (e.g. kvbm's nixl[cu12]) resolves to it, not installed on its own.
@@ -278,7 +286,19 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    run([str(venv_python), "-m", "pip", "install", *find_links, *requirements])
+    find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
+    run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--only-binary",
+            "aisimulate",
+            *find_links,
+            *requirements,
+        ]
+    )
 
 
 def pip_check(venv_python: Path) -> None:
