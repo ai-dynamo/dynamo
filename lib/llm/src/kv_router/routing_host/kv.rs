@@ -502,6 +502,13 @@ impl RoutingHost {
                 if let Some(hit_rate) = tracker.kv_hit_rate() {
                     guard.request_metrics().kv_hit_rate.observe(hit_rate);
                 }
+                // Recorded with the routing decision, beside kv_hit_rate, so both
+                // describe the same decisions. The query-only branch in
+                // RoutingHost::generate observes neither: it returns a selection and
+                // never reaches admission, so no decision is committed.
+                guard
+                    .request_metrics()
+                    .observe_kv_overlap_blocks(selection.effective_overlap_blocks, isl_blocks);
             }
             guard
                 .request_metrics()
