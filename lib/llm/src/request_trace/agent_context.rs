@@ -5,13 +5,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{OnceLock, Weak};
 
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::pipeline::Context;
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::transports::event_plane::EventSubscriber;
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::local_model::LocalModel;
 use crate::protocols::common::FinishReason as BackendFinishReason;
@@ -183,8 +184,116 @@ pub(crate) fn record_llm_metric_tokens(
     tracker.record_osl(output_tokens);
 }
 
-static REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED: AtomicBool = AtomicBool::new(false);
-static TOOL_EVENT_RELAY_STARTED: AtomicBool = AtomicBool::new(false);
+/// One live tool-event task, owned by the runtime that started it.
+///
+/// The spawned task holds the only strong reference, so the generation exists
+/// exactly as long as that task is running. `stopped` fires when the last
+/// reference drops, which lets a replacement wait for a predecessor to finish
+/// instead of assuming it already has.
+struct TaskGeneration {
+    /// Shutdown token of the runtime this generation belongs to. A cancelled
+    /// token means the generation is on its way out even though its task has
+    /// not reached its final statement yet.
+    owner_shutdown: CancellationToken,
+    stopped: CancellationToken,
+}
+
+impl Drop for TaskGeneration {
+    fn drop(&mut self) {
+        self.stopped.cancel();
+    }
+}
+
+/// Process-global slot holding the current generation of one tool-event task.
+///
+/// A bare `AtomicBool` could not distinguish "a task is running" from "a task
+/// is shutting down but has not cleared the flag yet". During that window a
+/// replacement runtime saw the flag set, logged that the task was already
+/// started and returned `Ok(())`, so it ended up owning no task at all while
+/// its initialisation reported success.
+struct GenerationSlot(OnceLock<tokio::sync::Mutex<Weak<TaskGeneration>>>);
+
+/// Outcome of trying to take ownership of a tool-event task.
+enum Claim {
+    /// A generation is running under a runtime that was live when the slot was
+    /// read. The generation is handed back so the joiner commits against a
+    /// retained handle rather than against the memory of an observation: see
+    /// [`Claim::join`].
+    AlreadyLive(Arc<TaskGeneration>),
+    /// The caller owns the slot and must publish a generation into it.
+    Vacant(tokio::sync::MutexGuard<'static, Weak<TaskGeneration>>),
+}
+
+impl GenerationSlot {
+    const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+
+    /// Take ownership of the slot, waiting out a predecessor that is shutting
+    /// down. Returns [`Claim::AlreadyLive`] only when the running generation
+    /// belongs to a runtime that has not been cancelled, which is the one case
+    /// where joining it is safe for the caller.
+    async fn claim(&'static self) -> Claim {
+        let cell = self.0.get_or_init(|| tokio::sync::Mutex::new(Weak::new()));
+        loop {
+            let guard = cell.lock().await;
+            let Some(current) = guard.upgrade() else {
+                return Claim::Vacant(guard);
+            };
+            if !current.owner_shutdown.is_cancelled() {
+                return Claim::AlreadyLive(current);
+            }
+            // The generation is winding down. Release the slot and both
+            // references so the old task can finish, then look again.
+            let stopped = current.stopped.clone();
+            drop(current);
+            drop(guard);
+            stopped.cancelled().await;
+        }
+    }
+}
+
+impl Claim {
+    /// Commit to a generation another runtime owns, or refuse to.
+    ///
+    /// The joiner cannot keep the owner alive, so "already live" cannot be made
+    /// durable by observing it harder. What it can do is refuse to report
+    /// success once the owner is known to be gone: the retained
+    /// [`Arc<TaskGeneration>`] is re-read here, at the point the joiner would
+    /// otherwise return `Ok(())`, so an owner cancelled between the slot read
+    /// and this commit fails the caller's initialisation instead of leaving it
+    /// believing a task it does not own is running.
+    ///
+    /// `task` names the task for the error and the trace line.
+    fn join(generation: &Arc<TaskGeneration>, task: &str) -> anyhow::Result<()> {
+        if generation.owner_shutdown.is_cancelled() {
+            anyhow::bail!(
+                "request trace {task} owner shut down while joining its generation; \
+                 refusing to report a task this runtime does not own"
+            );
+        }
+        tracing::debug!("request trace {task} already started");
+        Ok(())
+    }
+}
+
+/// Publish a freshly started generation into a slot the caller has claimed.
+/// The returned handle must be moved into the spawned task: dropping it is what
+/// marks the generation finished.
+fn publish_generation(
+    mut guard: tokio::sync::MutexGuard<'static, Weak<TaskGeneration>>,
+    owner_shutdown: CancellationToken,
+) -> Arc<TaskGeneration> {
+    let generation = Arc::new(TaskGeneration {
+        owner_shutdown,
+        stopped: CancellationToken::new(),
+    });
+    *guard = Arc::downgrade(&generation);
+    generation
+}
+
+static TOOL_EVENT_INGEST_GENERATION: GenerationSlot = GenerationSlot::new();
+static TOOL_EVENT_RELAY_GENERATION: GenerationSlot = GenerationSlot::new();
 
 pub(crate) fn request_metrics(
     request_id: String,
@@ -400,13 +509,13 @@ pub(crate) async fn start_request_trace_tool_event_ingest(
 
     start_tool_event_relay(drt.clone(), local_model, zmq_endpoint, zmq_topic).await?;
 
-    if REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        tracing::debug!("request trace tool event ingest already started");
-        return Ok(());
-    }
+    let shutdown = drt.child_token();
+    let slot = match TOOL_EVENT_INGEST_GENERATION.claim().await {
+        Claim::AlreadyLive(generation) => {
+            return Claim::join(&generation, "tool event ingest");
+        }
+        Claim::Vacant(slot) => slot,
+    };
 
     let namespace_name = tool_events_namespace(local_model);
     let mut subscriber = match async {
@@ -418,14 +527,13 @@ pub(crate) async fn start_request_trace_tool_event_ingest(
     .await
     {
         Ok(subscriber) => subscriber,
-        Err(error) => {
-            REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
 
-    let shutdown = drt.child_token();
+    let generation = publish_generation(slot, shutdown.clone());
     drt.runtime().secondary().spawn(async move {
+        // Dropping this on exit is what releases the slot for a replacement.
+        let _generation = generation;
         tracing::info!(
             namespace = %namespace_name,
             topic = DEFAULT_TOOL_EVENTS_TOPIC,
@@ -453,7 +561,6 @@ pub(crate) async fn start_request_trace_tool_event_ingest(
                 }
             }
         }
-        REQUEST_TRACE_TOOL_EVENT_INGEST_STARTED.store(false, Ordering::Release);
         tracing::info!("request trace tool event ingest stopped");
     });
 
@@ -466,13 +573,13 @@ async fn start_tool_event_relay(
     zmq_endpoint: String,
     zmq_topic: Option<String>,
 ) -> anyhow::Result<()> {
-    if TOOL_EVENT_RELAY_STARTED
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        tracing::debug!("request trace tool event relay already started");
-        return Ok(());
-    }
+    let shutdown = drt.child_token();
+    let slot = match TOOL_EVENT_RELAY_GENERATION.claim().await {
+        Claim::AlreadyLive(generation) => {
+            return Claim::join(&generation, "tool event relay");
+        }
+        Claim::Vacant(slot) => slot,
+    };
 
     let namespace_name = tool_events_namespace(local_model);
     let relay = match async {
@@ -490,13 +597,12 @@ async fn start_tool_event_relay(
     .await
     {
         Ok(relay) => relay,
-        Err(error) => {
-            TOOL_EVENT_RELAY_STARTED.store(false, Ordering::Release);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
-    let shutdown = drt.child_token();
+    let generation = publish_generation(slot, shutdown.clone());
     drt.runtime().secondary().spawn(async move {
+        // Dropping this on exit is what releases the slot for a replacement.
+        let _generation = generation;
         tracing::info!(
             namespace = %namespace_name,
             topic = DEFAULT_TOOL_EVENTS_TOPIC,
@@ -505,7 +611,10 @@ async fn start_tool_event_relay(
         );
         shutdown.cancelled().await;
         relay.shutdown();
-        TOOL_EVENT_RELAY_STARTED.store(false, Ordering::Release);
+        // Hold the generation until the relay's socket is actually released.
+        // `shutdown` only signals; a replacement woken any earlier can rebind
+        // the same endpoint while it is still bound and fail to start at all.
+        relay.wait_finished().await;
         tracing::info!("request trace tool event relay stopped");
     });
 
@@ -521,6 +630,7 @@ fn tool_events_namespace(local_model: &LocalModel) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, OnceLock, Weak};
     use std::{thread, time::Duration};
 
     use crate::protocols::common::{
@@ -538,8 +648,11 @@ mod tests {
     };
     use dynamo_runtime::protocols::annotated::Annotated;
 
+    use tokio_util::sync::CancellationToken;
+
     use super::{
-        AgentContextTraceState, SharedFinishReasonMetadata, record_backend_finish_reason_metadata,
+        AgentContextTraceState, Claim, GenerationSlot, SharedFinishReasonMetadata, TaskGeneration,
+        publish_generation, record_backend_finish_reason_metadata,
         record_chat_finish_reason_metadata, record_completion_finish_reason_metadata,
         request_metrics, request_metrics_from_agent_state,
     };
@@ -806,5 +919,113 @@ mod tests {
             metadata.choices[0].finish_reason,
             Some(FinishReason::Length)
         );
+    }
+
+    #[tokio::test]
+    async fn vacant_generation_slot_is_claimable() {
+        static SLOT: GenerationSlot = GenerationSlot::new();
+
+        assert!(matches!(SLOT.claim().await, Claim::Vacant(_)));
+    }
+
+    #[tokio::test]
+    async fn generation_under_a_live_runtime_is_joined() {
+        static SLOT: GenerationSlot = GenerationSlot::new();
+        let owner = CancellationToken::new();
+
+        let Claim::Vacant(slot) = SLOT.claim().await else {
+            panic!("fresh slot should be vacant");
+        };
+        let _generation = publish_generation(slot, owner);
+
+        // The owning runtime has not been cancelled, so joining is correct and
+        // a second task must not be started.
+        assert!(matches!(SLOT.claim().await, Claim::AlreadyLive(_)));
+    }
+
+    /// Deterministic barrier for the window @biswapanda identified: the slot is
+    /// read while the owner is live, the owner is then cancelled, and only
+    /// after that does the joiner commit. Previously `Claim::AlreadyLive` was a
+    /// unit variant, so the generation and the guard were both dropped at
+    /// return and the joiner had nothing left to re-read: it returned `Ok(())`
+    /// and owned no task. Driven for both the ingest and the relay task names
+    /// because each has its own call site.
+    #[tokio::test]
+    async fn owner_cancelled_after_the_live_check_fails_the_joiner() {
+        for task in ["tool event ingest", "tool event relay"] {
+            let slot_cell: OnceLock<tokio::sync::Mutex<Weak<TaskGeneration>>> = OnceLock::new();
+            let cell = slot_cell.get_or_init(|| tokio::sync::Mutex::new(Weak::new()));
+            let owner = CancellationToken::new();
+
+            // Take the slot and publish a generation under a live owner.
+            let guard = cell.lock().await;
+            let generation = Arc::new(TaskGeneration {
+                owner_shutdown: owner.clone(),
+                stopped: CancellationToken::new(),
+            });
+            let mut guard = guard;
+            *guard = Arc::downgrade(&generation);
+            drop(guard);
+
+            // The joiner reads the slot and sees a live owner.
+            let observed = {
+                let guard = cell.lock().await;
+                let current = guard.upgrade().expect("generation is retained");
+                assert!(!current.owner_shutdown.is_cancelled());
+                current
+            };
+
+            // The barrier: the owner shuts down after the observation and
+            // before the joiner commits.
+            owner.cancel();
+
+            let error = Claim::join(&observed, task)
+                .expect_err("joining a cancelled owner must not report success");
+            let message = error.to_string();
+            assert!(
+                message.contains(task),
+                "error should name the task: {message}"
+            );
+            assert!(
+                message.contains("does not own"),
+                "error should say the runtime owns nothing: {message}"
+            );
+        }
+    }
+
+    /// Regression test for the handoff window: a generation whose runtime is
+    /// cancelled but whose task has not finished must not be reported as live.
+    /// Previously the guard was an `AtomicBool` cleared only in the old task's
+    /// final statement, so a replacement saw it set, logged "already started"
+    /// and returned success while owning no task at all.
+    #[tokio::test]
+    async fn stopping_generation_does_not_hand_the_slot_to_a_replacement() {
+        static SLOT: GenerationSlot = GenerationSlot::new();
+        let owner = CancellationToken::new();
+
+        let Claim::Vacant(slot) = SLOT.claim().await else {
+            panic!("fresh slot should be vacant");
+        };
+        let generation = publish_generation(slot, owner.clone());
+
+        // The owning runtime starts shutting down. Its task is still running,
+        // so the generation is alive but no longer usable by a replacement.
+        owner.cancel();
+
+        // The replacement must wait rather than be told the task already runs.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), SLOT.claim())
+                .await
+                .is_err(),
+            "claim resolved while the previous generation was still running"
+        );
+
+        // Once the old task exits and drops its handle, the replacement owns it.
+        drop(generation);
+        match tokio::time::timeout(Duration::from_secs(5), SLOT.claim()).await {
+            Ok(Claim::Vacant(_)) => {}
+            Ok(Claim::AlreadyLive(_)) => panic!("stopped generation reported as live"),
+            Err(_) => panic!("claim did not resolve after the generation stopped"),
+        }
     }
 }
