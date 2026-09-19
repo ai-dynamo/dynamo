@@ -14,6 +14,7 @@ import asyncio
 import os
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -311,6 +312,59 @@ def test_gpu_client_registration_survives_disconnect_and_mps_runs_in_daemon(
     assert result.client_count == 1
     assert calls.read_text().splitlines() == [
         f"terminate_client 444 {pid}",
+        "get_client_list 444",
+    ]
+
+
+@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
+def test_gpu_crash_interlock_fd_drives_daemon_quiescence_and_host_teardown(
+    running_gms, monkeypatch, tmp_path
+):
+    _, socket_path = running_gms
+    calls = tmp_path / "mps-interlock-calls"
+    control = tmp_path / "fake-mps-control"
+    control.write_text(
+        f"#!/bin/sh\nread command\nprintf '%s\n' \"$command\" >> {calls}\n"
+        "case \"$command\" in terminate_client*) printf '0\n' ;; esac\n"
+    )
+    control.chmod(0o700)
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_MPS_CONTROL_BINARY", str(control))
+    monkeypatch.setenv("DYN_GMS_MPS_SERVER_PID", "444")
+
+    child = subprocess.Popen(["sleep", "30"])
+    registration = None
+    crash_fd = -1
+    try:
+        birth = process_start_time(child.pid)
+        assert birth is not None
+        registration = _GMSClientSession(
+            socket_path, RequestedLockType.RW_PERSISTENT, 1_000
+        )
+        crash_fd = registration.register_gpu_client_with_crash_interlock(
+            backend="vllm",
+            cohort="old-interlock",
+            client_pid=child.pid,
+            process_start_time=birth,
+            rank=0,
+        )
+        assert not os.get_inheritable(crash_fd)
+        os.write(
+            crash_fd,
+            struct.pack("=IIii", 0x47534D43, 1, signal.SIGABRT, child.pid),
+        )
+        assert child.wait(timeout=2) == -signal.SIGKILL
+    finally:
+        if crash_fd >= 0:
+            os.close(crash_fd)
+        if registration is not None:
+            registration.close()
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=2)
+
+    assert calls.read_text().splitlines() == [
+        f"terminate_client 444 {child.pid}",
         "get_client_list 444",
     ]
 

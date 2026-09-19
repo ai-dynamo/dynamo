@@ -3,6 +3,8 @@
 
 import asyncio
 import os
+import signal
+import struct
 
 import pytest
 from gpu_memory_service.server import gpu_quiescence as quiescence
@@ -327,3 +329,71 @@ async def test_mps_all_predecessors_fails_closed_without_local_registration(
 
     assert not result.quiesced
     assert result.detail == "no predecessor CUDA cohort registered for this pool"
+
+
+@pytest.mark.asyncio
+async def test_crash_interlock_quiesces_then_kills_registered_cohort(monkeypatch):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_MPS_SERVER_PID", "444")
+    pid = os.getpid()
+    start = quiescence.process_start_time(pid)
+    assert start is not None
+
+    async def control(_backend, *command):
+        return (0, "") if command[0] == "get_client_list" else (0, "0")
+
+    killed = []
+    monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(
+        quiescence.os, "kill", lambda target, sig: killed.append((target, sig))
+    )
+    write_fd = manager.register(
+        backend="vllm",
+        cohort="old",
+        pid=pid,
+        process_start_time_value=start,
+        rank=0,
+        crash_interlock=True,
+    )
+    task = manager._crash_tasks[("vllm", "old", pid)]
+    os.write(write_fd, struct.pack("=IIii", 0x47534D43, 1, signal.SIGABRT, pid))
+    await asyncio.wait_for(task, timeout=1)
+    os.close(write_fd)
+
+    assert killed == [(pid, signal.SIGKILL)]
+    assert ("vllm", "old") in manager._proofs
+
+
+@pytest.mark.asyncio
+async def test_crash_interlock_leaves_process_stopped_without_mps_proof(monkeypatch):
+    manager = GPUQuiescenceManager()
+    monkeypatch.setenv("DYN_GMS_GPU_QUIESCENCE_PROVIDER", "gms-mps")
+    monkeypatch.setenv("DYN_GMS_MPS_SERVER_PID", "444")
+    pid = os.getpid()
+    start = quiescence.process_start_time(pid)
+    assert start is not None
+
+    async def control(_backend, *_command):
+        return 0, "201"
+
+    killed = []
+    monkeypatch.setattr(manager, "_control", control)
+    monkeypatch.setattr(
+        quiescence.os, "kill", lambda target, sig: killed.append((target, sig))
+    )
+    write_fd = manager.register(
+        backend="sglang",
+        cohort="old",
+        pid=pid,
+        process_start_time_value=start,
+        rank=0,
+        crash_interlock=True,
+    )
+    task = manager._crash_tasks[("sglang", "old", pid)]
+    os.write(write_fd, struct.pack("=IIii", 0x47534D43, 1, signal.SIGSEGV, pid))
+    await asyncio.wait_for(task, timeout=1)
+    os.close(write_fd)
+
+    assert killed == []
+    assert ("sglang", "old") not in manager._proofs
