@@ -371,6 +371,20 @@ Install the Fern CLI globally via npm:
 npm install -g fern-api
 ```
 
+### Generate local API references
+
+Python and Rust API pages are generated during the publish workflow and are not committed. Generate
+them before running Fern locally from a fresh checkout:
+
+```bash
+uv run --no-project --python 3.13 --with 'griffe==2.1.0' \
+  python3 docs/fern/scripts/gen_python_api.py
+python3 docs/fern/scripts/gen_rust_api.py
+```
+
+The generated pages are gitignored. If they are absent, Fern reports missing paths under
+`pages/reference/api/python/` and `pages/reference/api/rust/`.
+
 ### Validate configuration
 
 Run `fern check` from `docs/fern/` to validate that `docs/fern/docs.yml`,
@@ -415,8 +429,13 @@ cd docs/fern
 fern docs dev
 ```
 
-The local server lets you see exactly how pages will look on the live site,
-including navigation, version dropdowns, and custom styling.
+The local server loads `main.css`, which approximates the private NVIDIA organization theme. It is
+suitable for content, layout, interaction, and page-level component-style checks, but it is not
+pixel-identical to a hosted build. The publishing workflow injects `global-theme: nvidia`, which can
+replace project-level CSS and custom footer configuration.
+
+Use the hosted pull request preview for the final visual check because it uses the same theme
+delivery path as the live site.
 
 ---
 
