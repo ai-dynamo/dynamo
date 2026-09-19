@@ -15,7 +15,9 @@ from typing import Any, Dict, Optional
 import aiohttp
 
 from dynamo.llm import KvRouter
+from dynamo.prometheus_names import kv_publisher, name_prefix
 from dynamo.runtime import DistributedRuntime
+from tests.utils.prometheus import sum_metric_samples
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,50 @@ def parse_sse_json_chunks(body: str) -> list[dict[str, Any]]:
         if isinstance(chunk, dict):
             chunks.append(chunk)
     return chunks
+
+
+async def send_router_chat_request(
+    session: aiohttp.ClientSession,
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], bool]:
+    """Return merged routing metadata and whether a streaming request generated text."""
+    async with session.post(url, json=payload, headers=headers) as response:
+        body = await response.text()
+        assert response.status == 200, body
+
+    assert "data: [DONE]" in body, f"Incomplete SSE response: {body}"
+    nvext: dict[str, Any] = {}
+    generated = False
+    for chunk in parse_sse_json_chunks(body):
+        assert "error" not in chunk, chunk
+        nvext.update(chunk.get("nvext") or {})
+        for choice in chunk.get("choices", []):
+            delta = choice.get("delta") or {}
+            generated |= any(
+                delta.get(field)
+                for field in ("content", "reasoning_content", "reasoning")
+            )
+    return nvext, generated
+
+
+async def get_stored_kv_event_counts(
+    session: aiohttp.ClientSession, system_port: int
+) -> tuple[float, float]:
+    """Read one worker's received and accepted Stored-event counters."""
+    async with session.get(f"http://localhost:{system_port}/metrics") as response:
+        response.raise_for_status()
+        metrics = await response.text()
+    metric_name = f"{name_prefix.COMPONENT}_{kv_publisher.ZMQ_EVENTS_TOTAL}"
+    return (
+        sum_metric_samples(
+            metrics, metric_name, {"stage": "received", "event_type": "stored"}
+        ),
+        sum_metric_samples(
+            metrics, metric_name, {"stage": "accepted", "event_type": "stored"}
+        ),
+    )
 
 
 def generate_random_suffix() -> str:
