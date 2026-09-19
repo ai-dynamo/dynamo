@@ -26,8 +26,15 @@
 //! Ties between equally ranked workers resolve on candidate row order, which the host leaves
 //! unspecified. This matches the ported implementation; note that Dynamo's built-in selector
 //! instead samples uniformly among ties.
+//!
+//! The optional `adaptive` mode replaces the tier switch with a weighted cache/load cost. A
+//! sigmoid increases the load weight with imbalance; pool-wide pressure limits that increase to
+//! preserve cache reuse. This is a signal-driven rule, not a latency-reward learner.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
@@ -48,10 +55,10 @@ const DEFAULT_CACHE_THRESHOLD: f64 = 0.5;
 const DEFAULT_BALANCE_ABS_THRESHOLD: usize = 32;
 const DEFAULT_BALANCE_REL_THRESHOLD: f64 = 1.1;
 
-/// Tunables for [`POLICY_TYPE`], named after their `sgl-router` counterparts.
+/// Two-tier thresholds and optional adaptive cache/load parameters for [`POLICY_TYPE`].
 ///
-/// Every field is optional and keeps the upstream default when omitted. Unknown keys are rejected
-/// at startup rather than ignored, so a misremembered name fails loudly.
+/// Every field is optional. Omitting `adaptive` keeps the ported two-tier behavior. Unknown keys
+/// are rejected at startup rather than ignored, so a misremembered name fails loudly.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct Parameters {
@@ -62,6 +69,8 @@ struct Parameters {
     balance_abs_threshold: usize,
     /// Minimum ratio of largest to smallest active-request count before the load tier applies.
     balance_rel_threshold: f64,
+    /// Opt into the adaptive weighted cost instead of the two-tier thresholds.
+    adaptive: Option<AdaptiveParameters>,
 }
 
 impl Default for Parameters {
@@ -70,6 +79,7 @@ impl Default for Parameters {
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
             balance_abs_threshold: DEFAULT_BALANCE_ABS_THRESHOLD,
             balance_rel_threshold: DEFAULT_BALANCE_REL_THRESHOLD,
+            adaptive: None,
         }
     }
 }
@@ -85,6 +95,26 @@ impl Parameters {
             return Err(WorkerSelectionPolicyProviderError::new(
                 "balance_rel_threshold must be a finite number greater than or equal to 1.0",
             ));
+        }
+        if let Some(adaptive) = self.adaptive {
+            if self.cache_threshold != DEFAULT_CACHE_THRESHOLD
+                || self.balance_abs_threshold != DEFAULT_BALANCE_ABS_THRESHOLD
+                || self.balance_rel_threshold != DEFAULT_BALANCE_REL_THRESHOLD
+            {
+                return Err(WorkerSelectionPolicyProviderError::new(
+                    "adaptive mode cannot be combined with non-default two-tier thresholds",
+                ));
+            }
+            if adaptive.update_interval_ms == 0 {
+                return Err(WorkerSelectionPolicyProviderError::new(
+                    "adaptive.update_interval_ms must be positive",
+                ));
+            }
+            if !adaptive.load_scale.is_finite() || adaptive.load_scale < 1.0 {
+                return Err(WorkerSelectionPolicyProviderError::new(
+                    "adaptive.load_scale must be finite and at least 1.0",
+                ));
+            }
         }
         Ok(())
     }
@@ -133,8 +163,89 @@ fn select_row(
     least_loaded(load, 0..load.len())
 }
 
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct AdaptiveParameters {
+    update_interval_ms: u64,
+    /// Active requests: damps small load differences and sets the pressure scale.
+    load_scale: f64,
+}
+
+impl Default for AdaptiveParameters {
+    fn default() -> Self {
+        Self {
+            update_interval_ms: 100,
+            load_scale: 32.0,
+        }
+    }
+}
+
+#[derive(Default)]
+struct AdaptiveState {
+    last_update: Option<Instant>,
+    distribution_weight: f64,
+}
+
+impl AdaptiveState {
+    fn update(&mut self, parameters: AdaptiveParameters, now: Instant, min: usize, max: usize) {
+        if self.last_update.is_some_and(|last| {
+            now.saturating_duration_since(last)
+                < Duration::from_millis(parameters.update_interval_ms)
+        }) {
+            return;
+        }
+        // Active counts are Dynamo-owned load proxies, not GPU utilization or queue depth.
+        let imbalance = (max - min) as f64 / (max as f64 + parameters.load_scale);
+        let pressure = min as f64 / (min as f64 + parameters.load_scale);
+        let sigmoid = 1.0 / (1.0 + (-10.0 * (imbalance - 0.5)).exp());
+        // llm-d's pressure rule: as every worker fills, cap distribution at 0.5 rather than
+        // 0.9. Moving work to cold workers adds prefill work without creating capacity.
+        let distribution_max = 0.9 - pressure * (0.9 - 0.5);
+        self.distribution_weight = 0.1 + sigmoid * (distribution_max - 0.1);
+        self.last_update = Some(now);
+    }
+
+    fn select(
+        &mut self,
+        parameters: AdaptiveParameters,
+        now: Instant,
+        cache: &[WorkerCacheInput],
+        load: &[WorkerLoadInput],
+        request_blocks: u64,
+    ) -> Option<usize> {
+        if cache.is_empty() || cache.len() != load.len() {
+            return None;
+        }
+        let min = load.iter().map(|item| item.active_requests()).min()?;
+        let max = load.iter().map(|item| item.active_requests()).max()?;
+        let spread = (max - min) as f64;
+        self.update(parameters, now, min, max);
+
+        let weight = self.distribution_weight;
+        let denominator = parameters.load_scale + spread;
+        let mut best = None;
+        let mut best_cost = f64::INFINITY;
+        for (row, (cache, load)) in cache.iter().zip(load).enumerate() {
+            let overlap = cache.device_overlap_blocks();
+            let affinity = if request_blocks > 0 && overlap.is_finite() {
+                (overlap / request_blocks as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let distribution = (load.active_requests() - min) as f64 / denominator;
+            let cost = (1.0 - weight) * (1.0 - affinity) + weight * distribution;
+            if cost < best_cost {
+                best = Some(row);
+                best_cost = cost;
+            }
+        }
+        best
+    }
+}
+
 struct TwoTierCostFnPicker {
     parameters: Parameters,
+    adaptive: AdaptiveState,
 }
 
 impl WorkerPicker for TwoTierCostFnPicker {
@@ -153,8 +264,17 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        select_row(&self.parameters, cache, load, context.request_blocks())
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+        let row = match self.parameters.adaptive {
+            Some(parameters) => self.adaptive.select(
+                parameters,
+                Instant::now(),
+                cache,
+                load,
+                context.request_blocks(),
+            ),
+            None => select_row(&self.parameters, cache, load, context.request_blocks()),
+        };
+        row.ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
 }
 
@@ -170,7 +290,10 @@ fn provider(
                 config.clone(),
                 worker_type.as_str(),
                 Vec::new(),
-                Box::new(TwoTierCostFnPicker { parameters }),
+                Box::new(TwoTierCostFnPicker {
+                    parameters,
+                    adaptive: AdaptiveState::default(),
+                }),
             )
         },
     ))
@@ -269,7 +392,10 @@ mod tests {
             KvRouterConfig::default(),
             "test",
             Vec::new(),
-            Box::new(TwoTierCostFnPicker { parameters }),
+            Box::new(TwoTierCostFnPicker {
+                parameters,
+                adaptive: AdaptiveState::default(),
+            }),
         )
         .select_worker(WorkerSelectionInput::configured(
             &configs,
@@ -336,5 +462,43 @@ mod tests {
         // straddles the ratio boundary: 705 would clear it and take the load tier.
         assert_eq!(select([(A, 0, 640), (B, 10, 704)]), worker(B));
         assert_eq!(select([(A, 0, 640), (B, 10, 705)]), worker(A));
+    }
+
+    #[test]
+    fn adaptive_moves_from_cache_to_load_and_preserves_cache_under_pressure() {
+        let parameters = Parameters {
+            adaptive: Some(AdaptiveParameters::default()),
+            ..Parameters::default()
+        };
+        // Modest skew preserves affinity. A hotspot with an idle alternative favors load.
+        assert_eq!(select_with(parameters, [(A, 0, 0), (B, 6, 4)]), worker(B));
+        assert_eq!(select_with(parameters, [(A, 0, 0), (B, 10, 64)]), worker(A));
+        // Same normalized imbalance (2/3), but all workers are busy: preserve the cached prefix.
+        let busy = [(A, 0, 320), (B, 10, 1024)];
+        assert_eq!(select_with(parameters, busy), worker(B));
+        assert_eq!(select(busy), worker(A));
+        // Without cache benefit, either mode selects least load even under pressure.
+        assert_eq!(
+            select_with(parameters, [(A, 0, 320), (B, 0, 1024)]),
+            worker(A)
+        );
+    }
+
+    #[test]
+    fn adaptive_updates_on_interval_and_recovers_after_a_hotspot() {
+        let parameters = AdaptiveParameters::default();
+        let now = Instant::now();
+        let tick = Duration::from_millis(parameters.update_interval_ms);
+        let mut state = AdaptiveState::default();
+        state.update(parameters, now, 0, 0);
+        let baseline = state.distribution_weight;
+        assert!((0.1..0.2).contains(&baseline));
+
+        state.update(parameters, now + tick / 2, 0, 1024);
+        assert_eq!(state.distribution_weight, baseline);
+        state.update(parameters, now + tick, 0, 1024);
+        assert!(state.distribution_weight > 0.8 && state.distribution_weight < 0.9);
+        state.update(parameters, now + tick * 2, 0, 0);
+        assert_eq!(state.distribution_weight, baseline);
     }
 }
