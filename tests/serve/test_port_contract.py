@@ -263,7 +263,6 @@ def test_dyn_port_accepts_high_non_system_port() -> None:
 # only; a foreground service hides other failures and delays the TERM/INT trap.
 
 _EXAMPLES_DIR = Path(__file__).parents[2] / "examples"
-_WAIT_ANY_EXIT = re.compile(r"^[ \t]*wait_any_exit[ \t]*$", re.MULTILINE)
 _HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)(\w+)\2")
 # `python -m dynamo.vllm`, `python3 -m dynamo.frontend`, `python -m "$WORKER_MODULE"`.
 _SERVICE = re.compile(
@@ -420,14 +419,24 @@ def _split_commands(script: str) -> list[_Command]:
     return commands
 
 
+def _calls_wait_any_exit(script: str) -> bool:
+    """Report whether the script runs ``wait_any_exit``, whatever follows the call."""
+    return any(
+        command.text.split()[:1] == ["wait_any_exit"] and command.quoted[0] == "."
+        for command in _split_commands(script)
+    )
+
+
 def _service_launches(script: str) -> list[tuple[int, str, bool]]:
     """Return (line, command, is_background) for each Dynamo service launched."""
     launches = []
     for command in _split_commands(script):
-        match = _SERVICE.search(command.text)
-        if match is None or command.quoted[match.start()] == "q":
-            continue  # a quoted match builds a command string, it does not run one
-        launches.append((command.line, match.group(0), command.terminator == "&"))
+        # Every match, not just the first: a pipeline holds several commands, and
+        # a quoted match early in one would otherwise hide a real launch after it.
+        for match in _SERVICE.finditer(command.text):
+            if command.quoted[match.start()] == "q":
+                continue  # a quoted match builds a command string, it does not run one
+            launches.append((command.line, match.group(0), command.terminator == "&"))
     return launches
 
 
@@ -482,6 +491,32 @@ wait_any_exit
 """
 
 
+_MASKED_SAMPLE = """\
+#!/bin/bash
+echo "python -m dynamo.fake" | python -m dynamo.frontend &
+CMD="python -m dynamo.vllm"
+eval "$CMD" &
+python -m dynamo.planner
+wait_any_exit # watch the children
+"""
+
+
+def test_quoted_match_does_not_hide_a_later_launch() -> None:
+    """A quoted match masks only itself, not an executable one in the same command."""
+    assert _service_launches(_MASKED_SAMPLE) == [
+        (2, "python -m dynamo.frontend", True),
+        (5, "python -m dynamo.planner", False),
+    ]
+
+
+def test_wait_any_exit_is_found_whatever_follows_the_call() -> None:
+    """Keep a script in scope when its `wait_any_exit` carries trailing syntax."""
+    assert _calls_wait_any_exit(_MASKED_SAMPLE)
+    assert _calls_wait_any_exit("wait_any_exit || true\n")
+    assert not _calls_wait_any_exit('echo "wait_any_exit"\n')
+    assert not _calls_wait_any_exit("# wait_any_exit\n")
+
+
 def test_and_or_list_inherits_its_trailing_ampersand() -> None:
     """Bash backgrounds a whole `&&`/`||` list, so every member of it is one job."""
     assert _service_launches(_AND_OR_SAMPLE) == [
@@ -502,7 +537,7 @@ def test_launch_scripts_background_the_services_wait_any_exit_watches() -> None:
     scripts = sorted(
         path
         for path in _EXAMPLES_DIR.rglob("*.sh")
-        if _WAIT_ANY_EXIT.search(path.read_text())
+        if _calls_wait_any_exit(path.read_text())
     )
     launched = 0
     foreground = []
