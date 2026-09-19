@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::{BackendError, DisaggregationMode, ErrorType, FinishReason, LLMEngine};
+use dynamo_backend_common::{DisaggregationMode, FinishReason, LLMEngine};
 use dynamo_runtime::pipeline::{AsyncEngine, AsyncEngineContextProvider};
 use dynamo_sidecar_testkit::{
     assert::terminal,
@@ -103,23 +103,10 @@ pub async fn worker_cancel_and_consumer_drop_release_only_the_target<F: ProcessF
             let cancelled = if let Some(stream) = stream {
                 outputs(stream).await
             } else {
-                match bounded("cancel pending response headers", &mut generation).await {
-                    Ok(stream) => outputs(stream).await,
-                    Err(error) => {
-                        assert!(
-                            dynamo_runtime::error::match_error_chain(
-                                error.as_ref(),
-                                &[
-                                    ErrorType::Cancelled,
-                                    ErrorType::Backend(BackendError::Cancelled)
-                                ],
-                                &[]
-                            ),
-                            "{error}"
-                        );
-                        Vec::new()
-                    }
-                }
+                let stream = bounded("cancel pending response headers", &mut generation)
+                    .await
+                    .unwrap();
+                outputs(stream).await
             };
             assert!(
                 cancelled

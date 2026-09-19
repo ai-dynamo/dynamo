@@ -197,34 +197,20 @@ pub async fn vllm_prefill_router_preserves_handoff_failure_and_cancellation() {
     assert!(prefill_observation.reached(Event::Received));
     decode_observation.release();
     bounded("handoff cancellation completion", async {
-        match match stream {
-            Some(stream) => Ok(stream),
-            None => generation.await,
-        } {
-            Ok(stream) => assert!(
-                outputs(stream)
-                    .await
-                    .iter()
-                    .filter_map(|item| item.as_ref().ok())
-                    .all(|output| !matches!(
-                        output.finish_reason,
-                        Some(FinishReason::Stop | FinishReason::Length)
-                    ))
-            ),
-            Err(error) => assert!(
-                dynamo_runtime::error::match_error_chain(
-                    error.as_ref(),
-                    &[
-                        dynamo_backend_common::ErrorType::Cancelled,
-                        dynamo_backend_common::ErrorType::Backend(
-                            dynamo_backend_common::BackendError::Cancelled
-                        )
-                    ],
-                    &[],
-                ),
-                "{error}"
-            ),
-        }
+        let stream = match stream {
+            Some(stream) => stream,
+            None => generation.await.unwrap(),
+        };
+        assert!(
+            outputs(stream)
+                .await
+                .iter()
+                .filter_map(|item| item.as_ref().ok())
+                .all(|output| !matches!(
+                    output.finish_reason,
+                    Some(FinishReason::Stop | FinishReason::Length)
+                ))
+        );
     })
     .await;
     bounded("prefill release", prefill_observation.wait(Event::Dropped)).await;

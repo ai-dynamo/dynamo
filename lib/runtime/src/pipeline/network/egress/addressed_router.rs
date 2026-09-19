@@ -843,11 +843,9 @@ impl AddressedPushRouter {
         let response_stream = match response_stream_provider.await {
             Ok(Ok(stream)) => stream,
             Err(_) | Ok(Err(_)) if engine_ctx.is_stopped() || engine_ctx.is_killed() => {
-                return Err(anyhow::anyhow!(
-                    DynamoError::builder()
-                        .error_type(ErrorType::Cancelled)
-                        .message("Request cancelled before response stream was established")
-                        .build()
+                return Ok(ResponseStream::new(
+                    Box::pin(futures::stream::empty()),
+                    engine_ctx,
                 ));
             }
             Ok(Err(e)) => {

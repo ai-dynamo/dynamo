@@ -62,7 +62,8 @@ changes from the read-only DEP.
 | Failure | Classification | Correction and regression |
 | --- | --- | --- |
 | Cancelling while native response headers were held timed out; independently reproduced against the frozen pre-fix binary in 10.35 seconds | Production defect | TCP response setup waited for the response prologue before forwarding cancellation. The runtime now observes Stop, Kill and provider drop during that wait, forwards the correct control and releases setup. `test_response_stream_cancellation_before_prologue` checks all three controls, including that Stop never becomes Kill. The process cancellation scenario proves native handler release and independent-request survival. |
-| The first correction delivered cancellation but the caller received CannotConnect, temporarily excluding the healthy worker from routing | Production defect | The addressed router now returns typed Cancelled for a failed response provider when the local request context is cancelled. Existing remote migration-error classification stays unchanged. Both process cancellation and cancelled-handoff recovery exercise this correction. |
+| The first correction delivered cancellation but the caller received CannotConnect, temporarily excluding the healthy worker from routing | Production defect | The addressed router now returns an empty stream with the original cancelled context when the local response provider fails. Existing remote migration-error classification stays unchanged. Both process cancellation and cancelled-handoff recovery exercise this correction. |
+| PR3's initial typed Cancelled setup error failed four existing Python cancellation cases on both CI architectures | Stack regression | Existing callers expect `generate()` to return an empty stream after local cancellation. The corrected adapter preserves that contract; both process scenarios now require successful stream setup instead of accepting an exception. The existing Python assertions remain unchanged. |
 | Shutdown waited for every persistent model card to disappear | Harness defect | The actual Worker contract withdraws serving endpoints. The test now reads authoritative discovery, observes exclusion in the existing router, rejects new requests and verifies withdrawal precedes cleanup/exit. It does not infer worker liveness from persistent metadata. |
 | A setup error was expected only inside an already-open stream | Harness defect | Accept the real pre-stream error return and assert its exact semantic type through the runtime's existing cause chain. Stream failures retain exact prefix and typed terminal assertions. |
 | Immediate retry selected no worker after an injected connection failure | Harness defect | Await the router's actual availability through its existing five-second inhibition period; preserve fault detection and assert successful reuse. |
@@ -91,13 +92,13 @@ building the binary and tests.
 
 | Check | Executed result |
 | --- | --- |
-| Final actual sidecar build | Passed, 1 minute 26 seconds |
-| Process target compilation and execution | Passed after the generic scenario factoring; 23.66-second incremental compilation; 6 collected/executed, 0 ignored; 22.47-second execution |
+| Final actual sidecar build | Passed after the cancellation compatibility correction; 8.85-second incremental build |
+| Process target compilation and execution | Corrected source compiled; all 6 cases collected/executed in the isolated CPU container, 0 ignored; 22.48-second execution |
 | Focused runtime cancellation regression | Passed; 1 test covers Stop/Kill/provider drop, 0 ignored; 0.01 seconds |
 | Broader TCP server tests | 45 collected; initial parallel execution 40 passed/5 failed due to existing TLS tests mutating process environment concurrently; immediate serial execution 45 passed/0 failed/0 ignored in 0.26 seconds. This used the TCP fix before the additional addressed-router guard. |
 | Process source formatting and whitespace | Passed |
-| Targeted process Clippy | Final generic source passed with `-D warnings`; 1 minute 39 seconds |
-| Isolated CPU container | 54 collected/executed: 9 conformance, 2 Mocker, 2 common transport, 35 retained vLLM socket, 6 process; all passed, zero ignored, with external networking disabled. Process execution took 22.30 seconds. |
+| Targeted process Clippy | Corrected cancellation source passed with `-D warnings`; 1 minute 40 seconds |
+| Isolated CPU container | Initial implementation: 54 collected/executed (9 conformance, 2 Mocker, 2 common transport, 35 retained vLLM socket, 6 process), all passed. After the cancellation contract correction: all 6 strengthened process cases passed again in 22.48 seconds. Both containers disabled external networking; zero ignored. |
 | Current-head CI | Pending; tracked by the stack's validation report |
 | Pinned native-engine compatibility/cancellation/handoff | Cancellation passed; native handoff executed and failed due to the upstream float conversion described in NATIVE.md. CPU Mocker evidence is not credited as native transfer. |
 
@@ -108,25 +109,25 @@ test is not execution evidence; pending validation is not complete.
 
 ## Executed source fingerprints
 
-SHA-256 values below identify the final generic process-suite execution. Paths
+SHA-256 values below identify the corrected process-suite container execution. Paths
 are relative to the repository root.
 
 ```text
 87177d30aee8ee69aec64daf85324870d6082b00dee0665f4330867019800e53  lib/sidecar/testkit/tests/cross_process.rs
-662762175e75f8050b4a090729e280c60db68c65d69a079da51a570e84d02444  lib/sidecar/testkit/tests/process/cancellation.rs
-fbedd3bde684864616110eed2b478baecebb72e9971b1e012bcce9ceb5dda24a  lib/sidecar/testkit/tests/process/handoff.rs
+a09e20217dba7583626b4e0702b396e2b9d9508619ef99645923f0b3805883e1  lib/sidecar/testkit/tests/process/cancellation.rs
+bd2408a8936d8e8583a3735b273081bfb0bf12e91718d360e8e71a2a3f14bdef  lib/sidecar/testkit/tests/process/handoff.rs
 57c429a8b156e251c93edf9aac99c581bd4b983d395616a31343b01494c8e962  lib/sidecar/testkit/tests/process/lifecycle.rs
 3585d65ef42242a9734d0363308ae81079a95a36a5b4411c1c8db26558ef896b  lib/sidecar/testkit/tests/process/vllm.rs
 a59f2306bf505425958bc7352dcb80e4ea555075cf030a835eb6dc971a73d701  lib/sidecar/testkit/tests/support/mod.rs
 429494ab4610aea74a0848f61f0009549590115e83ae1fab0c596d7bac640de0  lib/sidecar/testkit/tests/support/process.rs
 13cae2df5700e15832ee48f11263da1d55f386c15d33670d993eb15ec2e9940b  lib/sidecar/testkit/tests/support/vllm.rs
 b43c87b0e5d9377f0fd7acc866ab2e69a6617b9c2048e0f9f6881aefe2a628a0  lib/runtime/src/pipeline/network/tcp/server.rs
-7c5db213b6a050e215f2125b89487bdb11b1ada628263a6eee75701ce0c74756  lib/runtime/src/pipeline/network/egress/addressed_router.rs
+7094b8642cb38f98535884ddffe0eccb08d14d9c7711cc54a932e409173381f4  lib/runtime/src/pipeline/network/egress/addressed_router.rs
 ```
 
 Executed artifacts:
 
 ```text
-a5a7cb76ddca35bd202220521e231927174e58c8689437663c8c28da30ee5082  dynamo-vllm-sidecar
-ad18f4666faa2b6433a49463ae6362ee26df0fe7671c6f0f09921b36f475ca98  cross_process-2aa13ca440945e3a
+7a24d288a1455f8f992de3cb8814ebe4c0d070554866795271dae8c8ab545ef0  dynamo-vllm-sidecar
+00c79f5557eeb38e89e21480834c6421d421c34836e717a8c6e69d5b04b842bd  dynamo-sidecar-testkit-cross_process
 ```
