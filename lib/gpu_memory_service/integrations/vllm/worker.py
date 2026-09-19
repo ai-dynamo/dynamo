@@ -204,6 +204,18 @@ class GMSWorker(_BaseWorker):
         current_platform.set_device(
             torch.device(f"{get_vmm_device_type().value}:{device}")
         )
+        cohort = os.environ.get("GMS_VLLM_WRITER_COHORT_PATH")
+        if cohort:
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                register_gpu_client,
+            )
+
+            register_gpu_client(
+                backend_name="vllm",
+                device=device,
+                cohort=cohort,
+                rank=max(0, int(self.local_rank)),
+            )
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
         # Lock type is determined by model_loader_extra_config, set upstream by
@@ -435,6 +447,30 @@ class GMSWorker(_BaseWorker):
                 engine_id,
                 shared_kv_enabled(),
             )
+            if shared_kv_enabled():
+                from gpu_memory_service.integrations.common.gpu_quiescence import (
+                    gms_mps_provider_enabled,
+                    prove_predecessor_gpu_quiescence_sync,
+                )
+
+                if gms_mps_provider_enabled("vllm"):
+                    proof = prove_predecessor_gpu_quiescence_sync(
+                        backend_name="vllm",
+                        predecessor_cohort=None,
+                        device=self._gms_device,
+                    )
+                    if not proof.quiesced:
+                        raise RuntimeError(
+                            "GMS refused persistent KV remap without local GPU "
+                            f"quiescence proof: {proof.detail}"
+                        )
+                    logger.info(
+                        "[GMS] vLLM local GPU quiescence proven before KV remap "
+                        "provider=%s elapsed_ms=%.2f detail=%s",
+                        proof.provider,
+                        proof.elapsed_ms,
+                        proof.detail,
+                    )
             kv_manager.connect(RequestedLockType.RW_PERSISTENT)
             kv_manager.remap_persistent_vas(engine_id, shared=shared_kv_enabled())
             logger.info("[GMS] vLLM KV wake_up remap done")

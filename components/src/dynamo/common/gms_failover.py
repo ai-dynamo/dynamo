@@ -411,6 +411,7 @@ async def _finish_gpu_quiescence_recovery(
     role: str,
     predecessor_cohort: str | None,
     recovery_owner_id: str,
+    lease_device: int,
 ) -> None:
     """Complete phase two without delaying safe phase-one serving."""
     from gpu_memory_service.integrations.common.gpu_quiescence import (
@@ -420,6 +421,7 @@ async def _finish_gpu_quiescence_recovery(
     proof = await prove_predecessor_gpu_quiescence(
         backend_name=backend_name,
         predecessor_cohort=predecessor_cohort,
+        device=lease_device,
     )
     if not proof.quiesced:
         logger.warning(
@@ -583,6 +585,7 @@ async def run_gms_failover_post_lock_fence(
             role=role,
             predecessor_cohort=(None if predecessor is None else str(predecessor)),
             recovery_owner_id=recovery_owner_id,
+            lease_device=lease_device,
         )
 
 

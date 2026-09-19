@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -153,6 +154,18 @@ class GMSMemorySaverImpl:
         ro_connect_timeout_ms=None,
     ):
         self._device = torch.device(get_vmm_device_type().value, device_index)
+        cohort = os.environ.get("GMS_SGLANG_WRITER_COHORT_PATH")
+        if cohort:
+            from gpu_memory_service.integrations.common.gpu_quiescence import (
+                register_gpu_client,
+            )
+
+            register_gpu_client(
+                backend_name="sglang",
+                device=device_index,
+                cohort=cohort,
+                rank=max(0, int(os.environ.get("LOCAL_RANK", device_index))),
+            )
         self._kv_engine_id = allocation_engine_id(device_index)
         self._kv_tag = allocator_tag(device_index)
         self._kv_shared = allocation_shared()
@@ -313,6 +326,30 @@ class GMSMemorySaverImpl:
                 continue
 
             logger.info("[GMS] Remapping %s", target_tag)
+            if target_tag == "kv_pool" and self._kv_shared:
+                from gpu_memory_service.integrations.common.gpu_quiescence import (
+                    gms_mps_provider_enabled,
+                    prove_predecessor_gpu_quiescence_sync,
+                )
+
+                if gms_mps_provider_enabled("sglang"):
+                    proof = prove_predecessor_gpu_quiescence_sync(
+                        backend_name="sglang",
+                        predecessor_cohort=None,
+                        device=self._device.index,
+                    )
+                    if not proof.quiesced:
+                        raise RuntimeError(
+                            "GMS refused persistent KV remap without local GPU "
+                            f"quiescence proof: {proof.detail}"
+                        )
+                    logger.info(
+                        "[GMS] SGLang local GPU quiescence proven before KV remap "
+                        "provider=%s elapsed_ms=%.2f detail=%s",
+                        proof.provider,
+                        proof.elapsed_ms,
+                        proof.detail,
+                    )
             timeout_ms = self.ro_connect_timeout_ms if target_tag == "weights" else None
             self.allocators[target_tag].connect(
                 _TAG_LOCK_TYPES[target_tag], timeout_ms=timeout_ms
