@@ -681,7 +681,15 @@ type vllmLaunchArgs struct {
 // WorldSize is the number of ranks one engine occupies: tensor-parallel size
 // times pipeline-parallel size.
 func (a vllmLaunchArgs) WorldSize() int64 {
-	return a.TensorParallelSize * a.PipelineParallelSize
+	worldSize := a.TensorParallelSize * a.PipelineParallelSize
+	if worldSize <= 0 {
+		// A non-positive world size means a malformed launch flag (e.g.
+		// "--tensor-parallel-size 0" or a negative value) -- treat it as vLLM's
+		// default of 1 rather than letting it silently skip the multinode
+		// decision downstream or divide by zero in injectDataParallelLaunchFlags.
+		return 1
+	}
+	return worldSize
 }
 
 // parseVLLMLaunchArgs parses an already-expanded, normalized command line
@@ -759,12 +767,6 @@ func needsTensorParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64
 		return false
 	}
 	return args.WorldSize() > containerGPUs
-}
-
-func getWorldSize(expandedArgs []string) int64 {
-	tensorParallelSize := getFlagValue(expandedArgs, tensorParallelSizeFlag)
-	pipelineParallelSize := getFlagValue(expandedArgs, pipelineParallelSizeFlag)
-	return tensorParallelSize * pipelineParallelSize
 }
 
 // if world size across all DP ranks > GPU count, then we need to inject data parallel multinode coordination

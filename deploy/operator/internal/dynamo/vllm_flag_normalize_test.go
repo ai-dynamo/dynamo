@@ -86,17 +86,18 @@ func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 }
 
 // TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms covers the multinode consumer.
-// getWorldSize multiplies tensor by pipeline size, and it decides data-parallel-size-local and
-// whether multinode coordination is injected at all -- so a size silently read as 1 is not a
-// cosmetic miss.
+// vllmLaunchArgs.WorldSize multiplies tensor by pipeline size, and it decides
+// data-parallel-size-local and whether multinode coordination is injected at all -- so a
+// size silently read as 1 is not a cosmetic miss.
 func TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms(t *testing.T) {
 	for name, args := range map[string][]string{
 		"equals": {tensorParallelSizeFlag + "=4", pipelineParallelSizeFlag + "=2"},
 		"short":  {"-tp", "4", "-pp", "2"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if got := getWorldSize(getExpandedCommandLine(vllmContainer(args...))); got != 8 {
-				t.Errorf("getWorldSize = %d, want 8 (tp 4 x pp 2) for spelling %q", got, args)
+			got := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(args...))).WorldSize()
+			if got != 8 {
+				t.Errorf("WorldSize() = %d, want 8 (tp 4 x pp 2) for spelling %q", got, args)
 			}
 		})
 	}
@@ -160,6 +161,29 @@ func TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP(t *testing.T) {
 	container := vllmContainer("--enable_elastic_ep", "--data_parallel_backend=ray")
 	if !IsElasticEPRayLaunch(container) {
 		t.Fatal("underscore-spelled --enable_elastic_ep/--data_parallel_backend should qualify as an elastic-EP Ray launch")
+	}
+}
+
+// TestWorldSize_NonPositiveFallsBackToOne guards against a malformed
+// "--tensor-parallel-size 0" or a negative parallelism value producing a
+// non-positive world size: nothing in getFlagValue rejects zero or negative
+// integers, and a non-positive WorldSize would either divide by zero in
+// injectDataParallelLaunchFlags or silently make the multinode gating
+// functions decide no coordination is needed at all.
+func TestWorldSize_NonPositiveFallsBackToOne(t *testing.T) {
+	for name, args := range map[string][]string{
+		"zero tensor-parallel-size":     {tensorParallelSizeFlag, "0"},
+		"negative tensor-parallel-size": {tensorParallelSizeFlag, "-1"},
+		"negative pipeline-parallel-size combined": {
+			tensorParallelSizeFlag, "2", pipelineParallelSizeFlag, "-1",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(args...))).WorldSize()
+			if got != 1 {
+				t.Errorf("WorldSize() = %d, want 1 (fallback for non-positive input) for %q", got, args)
+			}
+		})
 	}
 }
 
