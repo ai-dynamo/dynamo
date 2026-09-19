@@ -196,10 +196,11 @@ class _DynamoBenchmarkWorker(ManagedProcess):
     """Process manager for a vLLM worker started with ``--benchmark-mode``.
 
     Modeled on ``tests/fault_tolerance/cancellation/test_vllm.py``'s
-    ``DynamoWorkerProcess`` so the disagg worker pair (prefill + decode)
-    wires NixlConnector / kv-events / NIXL side channel exactly the
-    same way -- this keeps CI ports and process layout consistent with
-    other vLLM e2e tests.
+    ``DynamoWorkerProcess`` for the disagg worker pair's NixlConnector /
+    kv-events / NIXL side-channel wiring. Every listener port this class
+    controls is allocated from the shared ranges in
+    ``tests/utils/constants.py`` rather than hardcoded, so concurrent
+    runs on one host cannot collide on a bind.
     """
 
     def __init__(
@@ -312,10 +313,20 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         # the other worker's publisher for tcp://*:20380.
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
-        # Prefill worker publishes KV events on its own ZMQ port and uses
-        # a distinct NIXL side-channel port. Same constants as
-        # ``tests/fault_tolerance/cancellation/test_vllm.py``.
+        # Both disagg workers run with --kv-transfer-config, so both open a
+        # NIXL handshake listener. vLLM's default VLLM_NIXL_SIDE_CHANNEL_PORT
+        # (5600) is host-wide and unknown to the port allocator, so leaving
+        # either worker on a fixed value lets any concurrent user of that port
+        # kill engine-core init with ``Address already in use``.
+        if is_prefill is not None:
+            self.nixl_side_channel_port = allocate_port(DynamoPortRange.NIXL.value)
+            allocated_ports.append(self.nixl_side_channel_port)
+            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
+
+        # Only the prefill worker publishes KV events, on its own ZMQ socket.
         if is_prefill is True:
+            self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
+            allocated_ports.append(self.kv_event_port)
             command.extend(
                 [
                     "--kv-events-config",
@@ -323,13 +334,12 @@ class _DynamoBenchmarkWorker(ManagedProcess):
                         {
                             "publisher": "zmq",
                             "topic": "kv-events",
-                            "endpoint": "tcp://*:20082",
+                            "endpoint": f"tcp://*:{self.kv_event_port}",
                             "enable_kv_cache_events": True,
                         }
                     ),
                 ]
             )
-            env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = "5601"
 
         if is_prefill is True:
             worker_type = "prefill_worker"
