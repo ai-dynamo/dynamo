@@ -1,0 +1,19 @@
+Upstream: https://github.com/vllm-project/vllm/pull/57505
+Commit: 61e5255e333d580dbe530c5c713123b424ae55d4
+Runtime change only; upstream tests omitted.
+
+diff --git a/vllm/v1/simple_kv_offload/manager.py b/vllm/v1/simple_kv_offload/manager.py
+index 85dde88f2d55..ab2dcbf44968 100644
+--- a/vllm/v1/simple_kv_offload/manager.py
++++ b/vllm/v1/simple_kv_offload/manager.py
+@@ -1021,7 +1021,9 @@ def _process_store_completion(
+         for i, (gpu_block_id, cpu_block) in enumerate(zip(gpu_block_ids, cpu_blocks)):
+             gpu_block = self._gpu_block_pool.blocks[gpu_block_id]
+             primary_hash = gpu_block.block_hash
+-            assert primary_hash is not None
++            if primary_hash is None:
++                # Mamba copy-on-write can move hashes off a pinned source block.
++                continue
+             self.cpu_block_pool._insert_block_hash(
+                 primary_hash,
+                 cpu_block,
