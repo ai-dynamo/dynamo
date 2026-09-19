@@ -34,6 +34,17 @@ type DynamoGraphDeploymentSetupOptions struct {
 	SSHKeyManager         *secret.SSHKeyManager
 }
 
+type DynamoGraphDeploymentEngineGroupSetupOptions struct {
+	RuntimeProvider EngineGroupRuntimeProvider
+}
+
+func (o DynamoGraphDeploymentEngineGroupSetupOptions) runtimeProvider() EngineGroupRuntimeProvider {
+	if o.RuntimeProvider != nil {
+		return o.RuntimeProvider
+	}
+	return unavailableEngineGroupRuntimeProvider{}
+}
+
 type DynamoGraphDeploymentRequestSetupOptions struct {
 	SetupOptions
 	RBACManager             RBACManager
@@ -107,6 +118,19 @@ func SetupDynamoGraphDeploymentScalingAdapter(mgr ctrl.Manager, opts SetupOption
 		RuntimeConfig: opts.RuntimeConfig,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DGDScalingAdapter controller: %w", err)
+	}
+	return nil
+}
+
+func SetupDynamoGraphDeploymentEngineGroup(
+	mgr ctrl.Manager,
+	opts DynamoGraphDeploymentEngineGroupSetupOptions,
+) error {
+	if err := (&DynamoGraphDeploymentEngineGroupReconciler{
+		Client:          mgr.GetClient(),
+		RuntimeProvider: opts.runtimeProvider(),
+	}).SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("unable to create DynamoGraphDeploymentEngineGroup controller: %w", err)
 	}
 	return nil
 }
