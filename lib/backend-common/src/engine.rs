@@ -507,6 +507,8 @@ pub enum KvEventSource {
         dp_rank: u32,
         /// Model image-placeholder token used to normalize multimodal events.
         image_token_id: Option<u32>,
+        /// Opt-in idle heartbeat deadline; absent preserves legacy publishers.
+        heartbeat_timeout: Option<std::time::Duration>,
     },
     Push {
         on_ready: OnPublisherReady,

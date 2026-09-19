@@ -77,6 +77,8 @@ pub enum KvEventSourceConfig {
         /// Model video-placeholder token id. `None` leaves video runs on the
         /// engine's native hashing path.
         video_token_id: Option<u32>,
+        /// Expected source rank and negotiated heartbeat timeout.
+        liveness: Option<(u32, std::time::Duration)>,
     },
 }
 
@@ -135,6 +137,7 @@ impl KvEventSource {
                 topic,
                 image_token_id,
                 video_token_id,
+                liveness,
             } => {
                 let listener_handle =
                     component
@@ -151,6 +154,7 @@ impl KvEventSource {
                             next_event_id,
                             image_token_id,
                             video_token_id,
+                            liveness,
                         ));
                 let listener_abort_handle = listener_handle.abort_handle();
                 let supervisor_handle =

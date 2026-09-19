@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -55,6 +56,7 @@ pub(super) async fn start_zmq_listener(
     next_event_id: Arc<AtomicU64>,
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
+    liveness: Option<(u32, std::time::Duration)>,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -80,6 +82,9 @@ pub(super) async fn start_zmq_listener(
     }
 
     let mut messages_processed = 0u64;
+    let mut last_source_cursors = HashMap::<u32, u64>::new();
+    let mut last_message = tokio::time::Instant::now();
+    let mut expired = false;
 
     let exit_reason = 'main: loop {
         tokio::select! {
@@ -88,6 +93,28 @@ pub(super) async fn start_zmq_listener(
             _ = cancellation_token.cancelled() => {
                 tracing::debug!("ZMQ listener received cancellation signal");
                 break 'main String::from("cancellation token cancelled");
+            }
+
+            _ = async {
+                if let Some((_, timeout)) = liveness {
+                    tokio::time::sleep_until(last_message + timeout).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            }, if !expired => {
+                let (rank, _) = liveness.expect("deadline requires negotiated liveness");
+                let worker = WorkerWithDpRank::new(worker_id, rank);
+                let clear = normalizer.preprocess_with_reason(
+                    RawKvEvent::AllBlocksCleared { ownership: None }, worker
+                ).expect("clear is accepted");
+                let clear = normalizer.normalize_preprocessed(
+                    clear, next_event_id.fetch_add(1, Ordering::SeqCst), worker
+                ).expect("clear normalizes");
+                if tx.send(vec![clear]).is_err() {
+                    break 'main String::from("channel receiver dropped");
+                }
+                expired = true;
+                tracing::warn!(%zmq_endpoint, rank, "KV event source heartbeat expired; cleared residency");
             }
 
             msg_result = socket.next() => {
@@ -119,7 +146,36 @@ pub(super) async fn start_zmq_listener(
                 );
 
                 let dp_rank = batch.data_parallel_rank.unwrap_or(0).cast_unsigned();
-                let mut events = Vec::with_capacity(batch.events.len());
+                if let Some((expected_rank, _)) = liveness
+                    && (batch.data_parallel_rank.is_none() || dp_rank != expected_rank)
+                {
+                    tracing::warn!(%zmq_endpoint, dp_rank, expected_rank, "Ignoring mismatched KV source rank");
+                    continue;
+                }
+                last_message = tokio::time::Instant::now();
+                expired = false;
+                let discontinuity = last_source_cursors
+                    .insert(dp_rank, engine_seq)
+                    .is_some_and(|previous| previous.checked_add(1) != Some(engine_seq));
+                let mut events = Vec::with_capacity(batch.events.len() + usize::from(discontinuity));
+                if discontinuity {
+                    tracing::warn!(
+                        endpoint = %zmq_endpoint,
+                        source_cursor = engine_seq,
+                        dp_rank,
+                        "ZMQ KV event sequence discontinuity; clearing stale router state"
+                    );
+                    let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                    let raw_event = RawKvEvent::AllBlocksCleared { ownership: None };
+                    let raw_event = normalizer
+                        .preprocess_with_reason(raw_event, worker)
+                        .expect("synthetic clear event is always accepted");
+                    let event_id = next_event_id.fetch_add(1, Ordering::SeqCst);
+                    let event = normalizer
+                        .normalize_preprocessed(raw_event, event_id, worker)
+                        .expect("synthetic clear event always normalizes");
+                    events.push(event);
+                }
                 for raw_event in batch.events {
                     let event_type = raw_event.event_type_label();
                     if let Some(metrics) = &metrics {
