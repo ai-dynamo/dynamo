@@ -688,7 +688,7 @@ reason = "Mere aggregation; system component"
 type = "dpkg"
 name = "libcom-err2"
 allow = ["GPL-2.0-only", "GPL-2.0-or-later", "LGPL-2.0-only"]
-reason = "Mere aggregation; system component (Debian bookworm copyright adds the -or-later variant)"
+reason = "Mere aggregation; system component (Debian e2fsprogs copyright adds the -or-later variant)"
 
 [[exceptions]]
 type = "dpkg"
@@ -2417,8 +2417,8 @@ name = "libprotoc32t64"
 allow = ["GPL-2.0-only", "GPL-3.0-only"]
 reason = "Protobuf compiler; same dual-licensing posture as libprotobuf32t64"
 
-# --- planner image (python:3.12-slim = Debian 13) dpkg additions ---
-# These are core Debian system packages from the bookworm-based slim image.
+# --- planner image (python:3.13-slim = Debian 13) dpkg additions ---
+# These are core Debian system packages from the trixie-based (Debian 13) slim image.
 # DEP-5 multi-license SPDX expressions include GPL clauses for build scripts
 # / documentation; the shipped binaries are MIT/BSD. Mere aggregation.
 

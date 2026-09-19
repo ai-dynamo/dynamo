@@ -38,12 +38,25 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.12-slim
+  planner_build_image_tag: 3.13-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.12-v4.0.9
+  planner_runtime_image_tag: 3.13-v4.1.4
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@ec133be9
+  planner_baseline_sbom: python@eb5be985
+  # Planner-scoped interpreter. The planner uses a separate, newer CPython line
+  # from the global python_version below because it is the only stage whose
+  # interpreter is decoupled from the framework/runtime bases: the build stage
+  # FROMs python:${planner_build_image_tag} (Docker Hub), and the runtime
+  # stage FROMs nvcr.io/nvidia/distroless/python:${planner_runtime_image_tag}.
+  # Neither of those images pin the frontend or framework stacks. The global
+  # python_version cannot follow because (a) frontend.Dockerfile apt-installs
+  # python${PYTHON_VERSION}-dev on nvcr.io/nvidia/base/ubuntu:noble (Ubuntu
+  # 24.04 ships python3.12 with no python3.13 in its archive), and (b) the
+  # framework runtime images (vllm/vllm-openai, lmsysorg/sglang,
+  # nvcr.io/nvidia/tensorrt-llm/release) ship python3.12 with cp312 ABI wheels
+  # for torch/vllm/sglang/tensorrt-llm. Moving those is a separate change.
+  planner_python_version: "3.13"
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
