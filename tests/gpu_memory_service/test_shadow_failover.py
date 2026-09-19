@@ -9,6 +9,7 @@ import re
 import signal
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from gpu_memory_service.server.fsm import ServerState
@@ -107,6 +108,41 @@ def _kill_process_group(process: ManagedProcess) -> None:
     if pid is None:
         logger.warning("kill process group: no PID available")
         return
+
+    fault_signal = os.environ.get("GMS_TEST_FAULT_SIGNAL", "KILL").strip().upper()
+    if fault_signal == "ABRT":
+        # Deliver the catchable signal to leaves before the launcher. The CUDA
+        # worker can then report and stop while its parent is still alive; the
+        # final launcher signal releases its failover lock. Races with exiting
+        # descendants are expected and harmless.
+        pending = [pid]
+        descendants = []
+        while pending:
+            parent = pending.pop()
+            try:
+                children = [
+                    int(item)
+                    for item in Path(
+                        f"/proc/{parent}/task/{parent}/children"
+                    ).read_text().split()
+                ]
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            descendants.extend(children)
+            pending.extend(children)
+        for child in reversed(descendants):
+            try:
+                os.kill(child, signal.SIGABRT)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.02)
+        try:
+            os.kill(pid, signal.SIGABRT)
+        except ProcessLookupError:
+            pass
+        return
+    if fault_signal != "KILL":
+        raise ValueError("GMS_TEST_FAULT_SIGNAL must be KILL or ABRT")
 
     # SGLang and vLLM may place GPU workers in child process groups. Killing
     # only the launcher's group can leave those workers and the stale backend
