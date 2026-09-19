@@ -64,6 +64,7 @@ changes from the read-only DEP.
 | Cancelling while native response headers were held timed out; independently reproduced against the frozen pre-fix binary in 10.35 seconds | Production defect | TCP response setup waited for the response prologue before forwarding cancellation. The runtime now observes Stop, Kill and provider drop during that wait, forwards the correct control and releases setup. `test_response_stream_cancellation_before_prologue` checks all three controls, including that Stop never becomes Kill. The process cancellation scenario proves native handler release and independent-request survival. |
 | The first correction delivered cancellation but the caller received CannotConnect, temporarily excluding the healthy worker from routing | Production defect | The addressed router now returns an empty stream with the original cancelled context when the local response provider fails. Existing remote migration-error classification stays unchanged. Both process cancellation and cancelled-handoff recovery exercise this correction. |
 | PR3's initial typed Cancelled setup error failed four existing Python cancellation cases on both CI architectures | Stack regression | Existing callers expect `generate()` to return an empty stream after local cancellation. The corrected adapter preserves that contract; both process scenarios now require successful stream setup instead of accepting an exception. The existing Python assertions remain unchanged. |
+| Early pre-prologue cancellation could release an existing frontend media-retention guard before the worker used its source buffer | Stack regression | Only a dispatch that owns the taken first-response guard defers early Stop/Kill until the prologue, preserving its original setup behavior. Ordinary sidecar requests retain early cancellation. A real router/TCP regression reproduces premature guard release when protection is disabled. Existing post-prologue cancellation behavior is unchanged. |
 | Shutdown waited for every persistent model card to disappear | Harness defect | The actual Worker contract withdraws serving endpoints. The test now reads authoritative discovery, observes exclusion in the existing router, rejects new requests and verifies withdrawal precedes cleanup/exit. It does not infer worker liveness from persistent metadata. |
 | A setup error was expected only inside an already-open stream | Harness defect | Accept the real pre-stream error return and assert its exact semantic type through the runtime's existing cause chain. Stream failures retain exact prefix and typed terminal assertions. |
 | Immediate retry selected no worker after an injected connection failure | Harness defect | Await the router's actual availability through its existing five-second inhibition period; preserve fault detection and assert successful reuse. |
@@ -92,13 +93,14 @@ building the binary and tests.
 
 | Check | Executed result |
 | --- | --- |
-| Final actual sidecar build | Passed after the cancellation compatibility correction; 8.85-second incremental build |
-| Process target compilation and execution | Corrected source compiled; all 6 cases collected/executed in the isolated CPU container, 0 ignored; 22.48-second execution |
-| Focused runtime cancellation regression | Passed; 1 test covers Stop/Kill/provider drop, 0 ignored; 0.01 seconds |
+| Final actual sidecar build | Passed after both cancellation corrections; 13.60-second incremental build |
+| Process target compilation and execution | Final guarded-path source compiled; all 6 cases collected/executed in the isolated CPU container, 0 ignored; 22.51-second execution |
+| Focused runtime cancellation regression | Passed again after guard containment; 1 test covers Stop/Kill/provider drop, 0 ignored; 0.01 seconds |
+| Guarded runtime setup | Protection-disabled mutation reproduced premature guard release (1 failed, 0 ignored). Restored protection passed (1 case, 0.21 seconds); all 7 addressed-router cases passed. This protects the original pre-prologue behavior only. |
 | Broader TCP server tests | 45 collected; initial parallel execution 40 passed/5 failed due to existing TLS tests mutating process environment concurrently; immediate serial execution 45 passed/0 failed/0 ignored in 0.26 seconds. This used the TCP fix before the additional addressed-router guard. |
 | Process source formatting and whitespace | Passed |
-| Targeted process Clippy | Corrected cancellation source passed with `-D warnings`; 1 minute 40 seconds |
-| Isolated CPU container | Initial implementation: 54 collected/executed (9 conformance, 2 Mocker, 2 common transport, 35 retained vLLM socket, 6 process), all passed. After the cancellation contract correction: all 6 strengthened process cases passed again in 22.48 seconds. Both containers disabled external networking; zero ignored. |
+| Targeted process Clippy | Final process source passed with `-D warnings` in 1 minute; runtime including tests also passed in 43.82 seconds |
+| Isolated CPU container | Initial implementation: 54 collected/executed (9 conformance, 2 Mocker, 2 common transport, 35 retained vLLM socket, 6 process), all passed. After the cancellation contract correction: all 6 strengthened process cases passed again in 22.48 seconds; after guarded-path containment, all 6 passed again in 22.51 seconds. All containers disabled external networking; zero ignored. |
 | Current-head CI | Pending; tracked by the stack's validation report |
 | Pinned native-engine compatibility/cancellation/handoff | Cancellation passed; native handoff executed and failed due to the upstream float conversion described in NATIVE.md. CPU Mocker evidence is not credited as native transfer. |
 
@@ -113,6 +115,7 @@ SHA-256 values below identify the corrected process-suite container execution. P
 are relative to the repository root.
 
 ```text
+5173cddc036fb683090f1610ca781d398b8acfabe9057739c2f8d3a39e5706d4  lib/runtime/src/pipeline/network.rs
 87177d30aee8ee69aec64daf85324870d6082b00dee0665f4330867019800e53  lib/sidecar/testkit/tests/cross_process.rs
 a09e20217dba7583626b4e0702b396e2b9d9508619ef99645923f0b3805883e1  lib/sidecar/testkit/tests/process/cancellation.rs
 bd2408a8936d8e8583a3735b273081bfb0bf12e91718d360e8e71a2a3f14bdef  lib/sidecar/testkit/tests/process/handoff.rs
@@ -121,13 +124,13 @@ bd2408a8936d8e8583a3735b273081bfb0bf12e91718d360e8e71a2a3f14bdef  lib/sidecar/te
 a59f2306bf505425958bc7352dcb80e4ea555075cf030a835eb6dc971a73d701  lib/sidecar/testkit/tests/support/mod.rs
 429494ab4610aea74a0848f61f0009549590115e83ae1fab0c596d7bac640de0  lib/sidecar/testkit/tests/support/process.rs
 13cae2df5700e15832ee48f11263da1d55f386c15d33670d993eb15ec2e9940b  lib/sidecar/testkit/tests/support/vllm.rs
-b43c87b0e5d9377f0fd7acc866ab2e69a6617b9c2048e0f9f6881aefe2a628a0  lib/runtime/src/pipeline/network/tcp/server.rs
-7094b8642cb38f98535884ddffe0eccb08d14d9c7711cc54a932e409173381f4  lib/runtime/src/pipeline/network/egress/addressed_router.rs
+3a72ea744c9a85d6b8172a162733d63f43e5c4773fa3a2931022263902334765  lib/runtime/src/pipeline/network/tcp/server.rs
+a3ce6709dbbdf662fa267d81a0b273918564a10606331810067f3cd2bb8cccd3  lib/runtime/src/pipeline/network/egress/addressed_router.rs
 ```
 
 Executed artifacts:
 
 ```text
-7a24d288a1455f8f992de3cb8814ebe4c0d070554866795271dae8c8ab545ef0  dynamo-vllm-sidecar
-00c79f5557eeb38e89e21480834c6421d421c34836e717a8c6e69d5b04b842bd  dynamo-sidecar-testkit-cross_process
+4512b959c48bf20022b25c2fdb4f4589de8d16e44efc4054f152a9604a54aacd  dynamo-vllm-sidecar
+e5addabc38cc617696bd40073d301e290ccf9c325c61b8b933fe79189efd5c92  dynamo-sidecar-testkit-cross_process
 ```

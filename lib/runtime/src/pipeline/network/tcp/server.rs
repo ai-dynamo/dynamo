@@ -102,6 +102,7 @@ struct RequestedRecvConnection {
     /// Capacity of the per-stream mpsc buffer between the socket task and the
     /// engine consumer; carried from the registration [`StreamOptions`].
     send_buffer_count: usize,
+    defer_cancellation_until_prologue: bool,
 }
 
 /// Build the per-stream data-plane mpsc channel that bridges the socket task
@@ -523,6 +524,7 @@ impl ResponseService for TcpStreamServer {
                 context: options.context.clone(),
                 connection: pending_recver_tx,
                 send_buffer_count: options.send_buffer_count,
+                defer_cancellation_until_prologue: options.defer_cancellation_until_prologue,
             };
 
             let cleanup_subject = receiver_subject.clone();
@@ -1053,6 +1055,7 @@ async fn tcp_listener(
             context,
             mut connection,
             send_buffer_count,
+            defer_cancellation_until_prologue,
         } = response_stream;
 
         // the [`Prologue`]
@@ -1061,9 +1064,9 @@ async fn tcp_listener(
         // which can take arbitrarily long (model load, queue delay, cold start).
         let prologue = tokio::select! {
             biased;
-            _ = context.killed() => Err(ControlMessage::Kill),
+            _ = context.killed(), if !defer_cancellation_until_prologue => Err(ControlMessage::Kill),
             _ = connection.closed() => Err(ControlMessage::Kill),
-            _ = context.stopped() => Err(ControlMessage::Stop),
+            _ = context.stopped(), if !defer_cancellation_until_prologue => Err(ControlMessage::Stop),
             prologue = reader.next() => Ok(prologue),
         };
         let prologue = match prologue {
