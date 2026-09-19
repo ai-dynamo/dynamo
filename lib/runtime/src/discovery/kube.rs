@@ -22,7 +22,10 @@ use crate::discovery::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use kube::{Api, Client as KubeClient, api::DeleteParams};
+use kube::{
+    Api, Client as KubeClient,
+    api::{DeleteParams, ListParams},
+};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
@@ -155,6 +158,17 @@ impl KubeDiscoveryClient {
 
 #[async_trait]
 impl Discovery for KubeDiscoveryClient {
+    async fn check_connection(&self) -> Result<()> {
+        // `list` reads the daemon's cache and cannot detect an API outage.
+        // Read the collection with discovery's existing list permissions. An
+        // empty collection is healthy before registration, but a missing CRD
+        // or namespace must remain an error (get_opt would suppress NotFound).
+        let api: Api<DynamoWorkerMetadata> =
+            Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
+        api.list(&ListParams::default().limit(1)).await?;
+        Ok(())
+    }
+
     fn instance_id(&self) -> u64 {
         self.instance_id
     }
@@ -537,6 +551,55 @@ mod tests {
     use super::*;
     use crate::component::TransportType;
     use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
+
+    // Regression: suppressing NotFound reports healthy for a missing discovery
+    // API, even though discovery cannot list or watch any workers.
+    #[tokio::test]
+    async fn connectivity_requires_resource_but_not_registered_workers() {
+        use axum::{
+            body::Body,
+            http::{Request, Response, StatusCode},
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let available = Arc::new(AtomicBool::new(false));
+        let resource_available = available.clone();
+        let service = tower::service_fn(move |_request: Request<kube::client::Body>| {
+            let available = resource_available.load(Ordering::Acquire);
+            async move {
+                let response = if available {
+                    Response::new(Body::from(
+                        r#"{"apiVersion":"nvidia.com/v1alpha1","kind":"DynamoWorkerMetadataList","metadata":{"resourceVersion":"1"},"items":[]}"#,
+                    ))
+                } else {
+                    Response::builder().status(StatusCode::NOT_FOUND).body(Body::from(
+                        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404,"message":"resource not found"}"#,
+                    )).unwrap()
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        });
+        let discovery = KubeDiscoveryClient {
+            instance_id: 1,
+            metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
+            list_state: Arc::new(RwLock::new(HashMap::new())),
+            event_tx: broadcast::channel(1).0,
+            kube_client: KubeClient::new(service, "default"),
+            pod_info: PodInfo {
+                pod_name: "worker".into(),
+                pod_namespace: "default".into(),
+                pod_uid: "uid".into(),
+                system_port: 0,
+                mode: KubeDiscoveryMode::Pod,
+                target: utils::KubeDiscoveryTarget::Pod("worker".into()),
+            },
+        };
+        assert!(discovery.check_connection().await.is_err());
+        available.store(true, Ordering::Release);
+        assert!(discovery.check_connection().await.is_ok());
+        available.store(false, Ordering::Release);
+        assert!(discovery.check_connection().await.is_err());
+    }
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
