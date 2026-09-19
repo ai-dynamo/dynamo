@@ -73,6 +73,7 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
+shadow-consumer = ["dep:dynamo-llm", "dep:dynamo-runtime"]
 request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
 weka-to-agentic-mooncake = [
   "dep:dynamo-data-gen",
@@ -100,6 +101,11 @@ required-features = ["multiturn"]
 name = "claude_trace_export"
 path = "claude_trace_export.rs"
 required-features = ["claude-trace-export"]
+
+[[bin]]
+name = "shadow_consumer"
+path = "shadow_consumer.rs"
+required-features = ["shadow-consumer"]
 
 [[bin]]
 name = "request_trace_to_satf"
@@ -195,6 +201,8 @@ dynamo-tokens = { workspace = true, optional = true }
 dynamo-data-gen = { workspace = true, optional = true }
 dynamo-mocker = { workspace = true, optional = true }
 dynamo-kv-router = { workspace = true }
+dynamo-llm = { path = "../llm", default-features = false, optional = true }
+dynamo-runtime = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }

@@ -24,6 +24,11 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    // A dynamic engine builds its pipelines in the background watcher, where a
+    // bad tap config would leave models unregistered behind a running server.
+    super::reject_shadow_taps_for_text_engine(&engine_config)?;
+    crate::shadow::taps(&distributed_runtime).await?;
+
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .metrics_prefix(engine_config.local_model().metrics_prefix())
@@ -90,15 +95,23 @@ pub async fn run(
             let chat_pipeline = common::build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            >(
+                model.card(),
+                inner_engine.clone(),
+                tokenizer.clone(),
+                crate::shadow::taps(&distributed_runtime).await?,
+            )
             .await?;
             manager.add_chat_completions_model(model.service_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_pipeline::<NvCreateCompletionRequest, NvCreateCompletionResponse>(
+                    model.card(),
+                    inner_engine,
+                    tokenizer,
+                    crate::shadow::taps(&distributed_runtime).await?,
+                )
+                .await?;
             manager.add_completions_model(model.service_name(), checksum, cmpl_pipeline)?;
             grpc_service
         }
@@ -235,5 +248,85 @@ mod tests {
                 .await
                 .expect("metrics bind failure must initiate runtime shutdown");
         }
+    }
+
+    #[tokio::test]
+    async fn bad_shadow_tap_config_stops_a_dynamic_frontend_at_startup() {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            "schema_version: 1\ntaps:\n  - {name: t, capture: request, filters: [nope]}\n",
+        )
+        .unwrap();
+        let model = Box::new(
+            LocalModelBuilder::default()
+                .model_name(Some("bad-taps".to_string()))
+                .http_port(0)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let engine_config = EngineConfig::Dynamic {
+            model,
+            chat_engine_factory: None,
+            prefill_load_estimator: None,
+        };
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+
+        let started = crate::shadow::TEST_CONFIG_PATH.scope(
+            Some(config.path().to_path_buf()),
+            tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config)),
+        );
+        let error = started
+            .await
+            .expect("a bad tap config must stop startup, not leave the server running")
+            .expect_err("an unknown filter name is a config error");
+        assert!(format!("{error:#}").contains("nope"), "got {error:#}");
+    }
+
+    #[tokio::test]
+    async fn shadow_tap_config_is_an_error_for_a_text_engine() {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            "schema_version: 1\ntaps:\n  - {name: t, capture: request}\n",
+        )
+        .unwrap();
+        let model = Box::new(
+            LocalModelBuilder::default()
+                .model_name(Some("text-engine".to_string()))
+                .http_port(0)
+                .build()
+                .await
+                .unwrap(),
+        );
+        let engine_config = EngineConfig::InProcessText {
+            engine: make_echo_engine(),
+            model,
+        };
+        let drt = DistributedRuntime::new(
+            Runtime::from_current().unwrap(),
+            DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+
+        let started = crate::shadow::TEST_CONFIG_PATH.scope(
+            Some(config.path().to_path_buf()),
+            tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config)),
+        );
+        let error = started
+            .await
+            .expect("a tap config that cannot take effect must stop startup")
+            .expect_err("a text engine has no tokenized request to mirror");
+        assert!(
+            format!("{error:#}").contains("text engine"),
+            "got {error:#}"
+        );
     }
 }

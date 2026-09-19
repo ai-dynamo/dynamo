@@ -91,7 +91,10 @@ impl HttpFrontend {
         // this runtime's token.
         let active_input = crate::request_trace::ActiveInput::register();
 
-        super::initialize_input(&distributed_runtime, &engine_config).await;
+        if let Err(error) = super::initialize_input(&distributed_runtime, &engine_config).await {
+            active_input.release_and_drain().await;
+            return Err(error);
+        }
 
         let selection_policy = match self.worker_selection_policy_factory {
             Some(factory) => SelectionPolicySource::Factory(factory),
@@ -270,15 +273,23 @@ async fn run_with_selection_policy(
             let chat_pipeline = common::build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone(), tokenizer.clone())
+            >(
+                model.card(),
+                inner_engine.clone(),
+                tokenizer.clone(),
+                crate::shadow::taps(&distributed_runtime).await?,
+            )
             .await?;
             manager.add_chat_completions_model(model.display_name(), checksum, chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<
-                NvCreateCompletionRequest,
-                NvCreateCompletionResponse,
-            >(model.card(), inner_engine, tokenizer)
-            .await?;
+            let cmpl_pipeline =
+                common::build_pipeline::<NvCreateCompletionRequest, NvCreateCompletionResponse>(
+                    model.card(),
+                    inner_engine,
+                    tokenizer,
+                    crate::shadow::taps(&distributed_runtime).await?,
+                )
+                .await?;
             manager.add_completions_model(model.display_name(), checksum, cmpl_pipeline)?;
             enable_in_process_model_endpoints(&http_service)?;
             http_service
