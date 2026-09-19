@@ -142,11 +142,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="minimax" data-runtime="vllm" data-hardware="gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
-      <div><h3>MiniMax M3 NVFP4</h3><p>MiniMax / NVIDIA</p></div>
+      <div><h3>MiniMax M3</h3><p>MiniMax / NVIDIA</p></div>
     </div>
-    <p className="dynamo-model-summary">Experimental vLLM manifests for MiniMax M3 NVFP4 on GB200: two TP4 aggregated replicas with CPU KV offload, or 3P3D disaggregated serving with NIXL KV transfer.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>8x/24x GB200</span><span>Experimental · up to 1M context</span></div>
-  <a className="dynamo-card-link" href="minimax-m3.mdx" aria-label="Open the MiniMax M3 NVFP4 recipe">Open recipe</a>
+    <p className="dynamo-model-summary">vLLM recipes for MiniMax M3 on GB200: multi-replica aggregated or prefill/decode disaggregated, both with KV-aware routing, Eagle3 speculation and NVFP4 quantization.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>GB200</span><span>up to 1M context</span></div>
+  <a className="dynamo-card-link" href="minimax-m3.mdx" aria-label="Open the MiniMax M3 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm sglang" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">

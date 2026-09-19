@@ -15,22 +15,17 @@
 #
 # MiniMax M3 NVFP4 on vLLM, disaggregated prefill/decode on the DGXC GB200
 # cluster. Topology: 3 prefill replicas and 3 decode replicas, each using TP4
-# on one GB200 node. This temporary site manifest consumes the cluster's
-# pre-existing rack-scoped ComputeDomain claim template because the namespace
-# service account cannot create or delete ComputeDomain resources. Its serving
-# arguments, image, environment, resources, and topology match the validated
-# D20 deployment; only site integration and the recipe's exec-form layout differ.
+# on one GB200 node. The manifest consumes a rack-scoped ComputeDomain claim
+# template for MNNVL communication. Update the site-specific scheduling,
+# networking, registry, and ComputeDomain values for the target cluster.
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: mm3-official-recipe-temp
-  namespace: dyntest-shreyasm-mm3
+  name: minimax-m3-disagg-gb200-agentic
   labels:
     app.kubernetes.io/name: minimax-m3-disagg-gb200-agentic
     app.kubernetes.io/part-of: dynamo
-    app: minimax-m3
-    config: official-recipe-temp
 spec:
   priorityClassName: inference
   backendFramework: vllm
@@ -55,7 +50,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-76b18bfea93735c34c5898561abf94485a27318c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
               imagePullPolicy: IfNotPresent
               startupProbe:
                 httpGet:
@@ -134,7 +129,7 @@ spec:
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-76b18bfea93735c34c5898561abf94485a27318c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -166,8 +161,8 @@ spec:
                 - --kv-cache-metrics
                 - --kv-cache-dtype
                 - fp8
+                - --skip-mm-profiling
                 - --enable-cumem-allocator
-                - --language-model-only
                 - --no-enable-flashinfer-autotune
                 - --enable-bf16x3-router-gemm
                 - --attention-config
@@ -315,7 +310,7 @@ spec:
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-76b18bfea93735c34c5898561abf94485a27318c-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-2cb3b12f3d0d184b1f23af6099dc7b323809a84c-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -344,8 +339,8 @@ spec:
                 - --kv-cache-metrics
                 - --kv-cache-dtype
                 - fp8
+                - --skip-mm-profiling
                 - --enable-cumem-allocator
-                - --language-model-only
                 - --no-enable-flashinfer-autotune
                 - --enable-bf16x3-router-gemm
                 - --attention-config
