@@ -607,6 +607,22 @@ mod tests {
     use crate::config::environment_names::runtime as env_runtime;
 
     #[tokio::test(start_paused = true)]
+    async fn cancelling_completion_token_does_not_cancel_shared_state() {
+        let runtime = Runtime::from_current().unwrap();
+        let completion = runtime.shutdown_complete_token();
+
+        runtime.shutdown_complete_token().cancel();
+        assert!(!completion.is_cancelled());
+        assert!(!runtime.shutdown_complete_token().is_cancelled());
+
+        runtime.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), completion.cancelled())
+            .await
+            .expect("shutdown completion did not reach the uncancelled child");
+        assert!(runtime.shutdown_complete_token().is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn shutdown_cancels_main_token_after_graceful_timeout() {
         temp_env::async_with_vars(
             [(
