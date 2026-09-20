@@ -32,13 +32,8 @@ SGLANG_SYSTEM_PORT_BASE="${SGLANG_SYSTEM_PORT_BASE:-18091}"
 # Differs from agg_router.sh's 5557 so the two variants can co-run.
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-29090}"
 
-# One absolute budget for the whole startup: workers first, then frontend.
-# Shared rather than split per phase, so no phase gets an arbitrary share and
-# NUM_WORKERS cannot multiply the wait. It has to stay below the caller's own
-# budget — the serve tests give this topology 400s, see
-# tests/serve/multimodal_profiles/sglang.py — so that a startup which stalls
-# ends here, with the logs, instead of being killed from outside with no
-# diagnostics. A healthy startup is well under a minute.
+# One shared budget for workers plus frontend, so NUM_WORKERS cannot multiply
+# it; stays under the serve tests' 400s so a stall is reported here.
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-330}"
 
 DYN_LOG_VAL="${DYN_LOG:-info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug}"
@@ -88,11 +83,7 @@ print_launch_banner --multimodal --no-curl \
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
 # Poll ${url} until ready, giving up at the absolute ${deadline} (a SECONDS
-# value) or as soon as ${pid} dies. The liveness check matters as much as the
-# deadline: without it a worker that dies during model load or CUDA-graph
-# capture is polled at its corpse until the caller kills the whole tree, which
-# reports a bare timeout and discards the engine error that explains it.
-# Returning non-zero exits the script under `set -e`.
+# value) or as soon as ${pid} dies, so the worker's own error is reported.
 wait_ready() {
     local url="$1" name="$2" deadline="$3" pid="${4:-}"
     echo "Waiting for ${name} ..."
