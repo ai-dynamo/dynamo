@@ -151,7 +151,13 @@ wait_any_exit() {
     fi
     if [[ -n "$_pid" ]]; then
         # `jobs -l` lines read: "[1]-  12345 Running   python3 -m dynamo.trtllm ... &"
-        _who=$(awk -v pid="$_pid" '$2 == pid { $1=""; $2=""; $3=""; sub(/^ +/, ""); sub(/ *&$/, ""); print; exit }' <<<"$_jobs_snapshot")
+        # A pipeline adds a continuation line per extra member, which carries no
+        # job spec or state: "      12346       | tee log.txt &". `wait -n -p`
+        # reports whichever member exited, so match the pid in either column.
+        _who=$(awk -v pid="$_pid" '
+            $2 == pid { $1=""; $2=""; $3=""; sub(/^ +/, ""); sub(/ *&$/, ""); print; exit }
+            $1 == pid { $1="";               sub(/^ +/, ""); sub(/^\| */, ""); sub(/ *&$/, ""); print; exit }
+        ' <<<"$_jobs_snapshot")
         _who=" (pid $_pid${_who:+: $_who})"
     fi
     # Keep the leading sentence byte-for-byte: log scrapers match on it.

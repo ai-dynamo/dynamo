@@ -34,15 +34,14 @@ def _env_without_profile_overrides() -> dict[str, str]:
     }
 
 
-def test_trtllm_override_states_kv_memory_fraction_only_with_token_cap() -> None:
-    """The fraction belongs to the token cap, not to every launch.
+def test_trtllm_override_caps_tokens_without_imposing_a_memory_fraction() -> None:
+    """The profiler sizes the token cap; the engine config sizes the memory.
 
-    The override replaces the engine config's whole ``kv_cache_config``, so a
-    token cap on its own silently leaves the memory fraction at the engine
-    default instead of a chosen value. Stating it is only correct while the
-    profiler is sizing the launch: emitting it unconditionally would impose one
-    fraction on every launch script that sources the helper, whatever its own
-    engine config declares.
+    Thirteen launch scripts share this helper, each with its own engine config
+    declaring its own ``free_gpu_memory_fraction`` -- 0.85 for qwen3, 0.30 for
+    the multimodal configs. Those values reach the worker and survive the
+    override merge, so naming a fraction here would impose one launcher's memory
+    policy on all of them.
     """
     env = _env_without_profile_overrides()
     env["_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS"] = "2592"
@@ -52,7 +51,7 @@ def test_trtllm_override_states_kv_memory_fraction_only_with_token_cap() -> None
     assert args[0] == "--override-engine-args"
     kv_cache_config = json.loads(args[1])["kv_cache_config"]
     assert kv_cache_config["max_tokens"] == 2592
-    assert kv_cache_config["free_gpu_memory_fraction"] == 0.85
+    assert "free_gpu_memory_fraction" not in kv_cache_config
 
     # No token cap: an unprofiled launch keeps the engine config's own sizing.
     assert gpu_args.build_trtllm_override_args(_env_without_profile_overrides()) == []

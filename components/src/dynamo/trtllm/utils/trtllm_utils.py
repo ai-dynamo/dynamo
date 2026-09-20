@@ -28,15 +28,31 @@ def publish_trtllm_token_budget(runtime_config: Any, max_seq_len: int | None) ->
 def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
     """Recursively update nested dictionaries.
 
+    Sub-configs loaded from an engine YAML arrive here as pydantic models
+    (``kv_cache_config`` becomes a ``KvCacheConfig``), not as dicts. Merging a
+    plain-dict override into the model's explicitly-set fields keeps the keys
+    the override does not mention; assigning it straight over the model would
+    drop all of them. Fields the YAML never set stay unset so TRT-LLM can still
+    apply its own per-model defaults.
+
     Args:
         target: Dictionary to update.
         source: Dictionary with new values.
     """
     for key, value in source.items():
-        if isinstance(value, dict) and key in target and isinstance(target[key], dict):
-            deep_update(target[key], value)
-        else:
-            target[key] = value
+        if isinstance(value, dict) and key in target:
+            existing = target[key]
+            if isinstance(existing, dict):
+                deep_update(existing, value)
+                continue
+            model_dump = getattr(existing, "model_dump", None)
+            if callable(model_dump):
+                dumped = model_dump(exclude_none=True, exclude_unset=True)
+                if isinstance(dumped, dict):
+                    deep_update(dumped, value)
+                    target[key] = dumped
+                    continue
+        target[key] = value
 
 
 def warn_override_collisions(

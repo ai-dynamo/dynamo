@@ -418,6 +418,24 @@ def test_deep_update_adds_new_keys():
     assert target == {"a": 1, "b": 2, "c": {"nested": 3}}
 
 
+def test_deep_update_merges_into_pydantic_sub_config():
+    """An override merges into a sub-config model instead of replacing it.
+
+    An engine YAML reaches the worker as a pydantic model, so an override that
+    names one field must not discard the fields it does not name. Keys the YAML
+    never set stay absent, leaving TRT-LLM's per-model defaults in force.
+    """
+    from tensorrt_llm.llmapi.llm_args import KvCacheConfig
+
+    target = {"kv_cache_config": KvCacheConfig(free_gpu_memory_fraction=0.3)}
+    deep_update(target, {"kv_cache_config": {"max_tokens": 2592}})
+
+    merged = target["kv_cache_config"]
+    assert merged["free_gpu_memory_fraction"] == 0.3
+    assert merged["max_tokens"] == 2592
+    assert "max_gpu_total_bytes" not in merged
+
+
 # ---- Tests for trtllm_utils.warn_override_collisions ----
 
 
