@@ -39,6 +39,8 @@ const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const WATCH_RESYNC_GET_TIMEOUT: Duration = Duration::from_secs(10);
+/// Watch events buffered between the etcd stream and a slow consumer.
+const WATCH_CHANNEL_CAPACITY: usize = 32;
 
 /// ETCD Client
 #[derive(Clone)]
@@ -509,8 +511,8 @@ impl Client {
     /// Core watch implementation that sets up a resilient watcher for a key prefix.
     ///
     /// Creates a background task that maintains a watch stream with automatic reconnection
-    /// on recoverable errors. If `include_existing` is true, existing keys are included
-    /// in the initial watch events.
+    /// on recoverable errors. If `include_existing` is true, the first event is one
+    /// [`WatchEvent::Resync`] that holds every existing key, possibly none.
     async fn watch_internal(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
@@ -520,16 +522,12 @@ impl Client {
             .get_start_revision(prefix.as_ref(), include_existing)
             .await?;
 
-        // Size channel to fit all existing KVs (avoids deadlock when sending before return)
-        let existing_count = existing_kvs.as_ref().map_or(0, |kvs| kvs.len());
-        let (tx, rx) = mpsc::channel(existing_count + 32);
+        let (tx, rx) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
 
-        // Send existing KVs before returning so they're immediately available to consumers
+        // Send the snapshot before returning so it is immediately available to consumers
         if let Some(kvs) = existing_kvs {
-            tracing::trace!("sending {} existing kvs", kvs.len());
-            for kv in kvs {
-                tx.send(WatchEvent::Put(kv)).await?;
-            }
+            tracing::trace!("sending {} existing kvs as the initial snapshot", kvs.len());
+            tx.send(WatchEvent::Resync(kvs)).await?;
         }
 
         // Watch for new events in background

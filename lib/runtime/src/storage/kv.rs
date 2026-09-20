@@ -106,10 +106,16 @@ impl KeyValue {
     }
 }
 
+/// One change reported by a [`Bucket::watch`] stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchEvent {
+    /// A key was created or its value changed after the last snapshot.
     Put(KeyValue),
+    /// A key was deleted after the last snapshot.
     Delete(Key),
+    /// The full bucket at one moment. The first event of every stream is one of these, possibly
+    /// empty; a later one means the backend fell behind and re-read the bucket. A consumer that
+    /// holds state replaces it with the payload; nothing that arrived earlier is still valid.
     Resync(HashMap<Key, bytes::Bytes>),
 }
 
@@ -336,7 +342,10 @@ impl Manager {
         }
     }
 
-    /// Returns a receiver for all the existing keys of a bucket, and then for every later change.
+    /// Returns a receiver for one snapshot of a bucket, and then for every later change.
+    ///
+    /// The first event is one [`WatchEvent::Resync`] with every existing key, empty when the
+    /// bucket is empty. A receiver that gets no event has not seen the bucket yet.
     ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
@@ -499,8 +508,10 @@ pub trait Bucket: Send + Sync {
     ///
     /// Implementations must establish the snapshot and incremental watch without a gap and must
     /// never emit an incremental value older than a value already emitted in the initial snapshot.
-    /// Existing entries may be emitted as individual WatchEvent::Put events or as one
-    /// WatchEvent::Resync.
+    /// The first event is exactly one [`WatchEvent::Resync`] that holds every existing entry, and
+    /// is empty when the bucket is empty. Every later event is a change that follows the
+    /// snapshot, or a further `Resync` after the backend fell behind. [`Manager::watch`] and the
+    /// discovery layer depend on this order.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
@@ -633,10 +644,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::Put(first) = first else {
-            panic!("expected initial put");
+        let WatchEvent::Resync(snapshot) = first else {
+            panic!("expected the initial resync, got {first:?}");
         };
-        assert_eq!(first.value(), b"old");
+        assert_eq!(
+            snapshot.get(&key).map(|value| value.as_ref()),
+            Some(b"old".as_slice())
+        );
 
         bucket.insert(&key, "new".into(), 2).await.unwrap();
         let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -651,6 +665,26 @@ mod tests {
             b"new",
             "the initial value must not be replayed after the snapshot"
         );
+
+        cancel_token.cancel();
+        watch_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_watch_on_an_empty_bucket_starts_with_an_empty_resync() {
+        let manager = Arc::new(Manager::memory());
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("an empty bucket must still report its snapshot")
+            .unwrap();
+        assert_eq!(first, WatchEvent::Resync(HashMap::new()));
 
         cancel_token.cancel();
         watch_task.await.unwrap();
@@ -678,10 +712,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::Put(first) = first else {
+        let WatchEvent::Resync(snapshot) = first else {
             panic!("expected the existing key in the initial snapshot, got {first:?}");
         };
-        assert_eq!(first.key_str(), key.as_ref());
+        assert!(
+            snapshot.contains_key(&key),
+            "snapshot {snapshot:?} lacks {key}"
+        );
 
         let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -824,7 +861,7 @@ mod tests {
         assert_eq!(res, StoreOutcome::Created(0));
 
         let expected = [
-            WatchEvent::Put(KeyValue::new(Key::new("test1".into()), "value1".into())),
+            WatchEvent::Resync(HashMap::from([(Key::new("test1".into()), "value1".into())])),
             WatchEvent::Put(KeyValue::new(Key::new("test2".into()), "value2".into())),
             WatchEvent::Put(KeyValue::new(
                 Key::new("test2".into()),

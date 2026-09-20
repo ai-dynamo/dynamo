@@ -206,8 +206,8 @@ impl Bucket for MemoryBucketRef {
         Ok(())
     }
 
-    /// All current values in the bucket first, then block waiting for new
-    /// values to be published.
+    /// One [`WatchEvent::Resync`] with every current value in the bucket first, then block
+    /// waiting for new values to be published.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
@@ -218,21 +218,17 @@ impl Bucket for MemoryBucketRef {
             return Err(StoreError::MissingBucket(self.name.to_string()));
         };
         let mut changes = self.inner.change_sender.subscribe();
-        let existing_items: Vec<_> = bucket
+        let snapshot: HashMap<Key, bytes::Bytes> = bucket
             .data
             .iter()
-            .map(|(key, (_revision, value))| {
-                WatchEvent::Put(KeyValue::new(Key::new(key.clone()), value.clone()))
-            })
+            .map(|(key, (_revision, value))| (Key::new(key.clone()), value.clone()))
             .collect();
         drop(data_lock);
         let bucket_name = self.name.clone();
         let inner = self.inner.clone();
 
         Ok(Box::pin(async_stream::stream! {
-            for event in existing_items {
-                yield event;
-            }
+            yield WatchEvent::Resync(snapshot);
             loop {
                 match changes.recv().await {
                     Ok(MemoryEvent::Put { bucket, key, value }) => {
@@ -298,7 +294,7 @@ mod tests {
         Bucket as _, Key, MemoryStore, Store as _, StoreError, StoreOutcome, WatchEvent,
     };
     use futures::StreamExt;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Barrier;
@@ -380,6 +376,13 @@ mod tests {
             .await
             .unwrap();
 
+        // Every watch opened on an empty bucket, so each starts with an empty snapshot.
+        for watcher in [&mut a_first, &mut a_second, &mut b] {
+            assert_eq!(
+                watcher.next().await.unwrap(),
+                WatchEvent::Resync(HashMap::new())
+            );
+        }
         for watcher in [&mut a_first, &mut a_second] {
             let WatchEvent::Put(item) = watcher.next().await.unwrap() else {
                 panic!("expected bucket-a put");
@@ -393,6 +396,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watch_starts_with_one_resync_of_the_bucket() {
+        let store = MemoryStore::new();
+        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
+        bucket
+            .insert(&Key::new("first".to_string()), "1".into(), 1)
+            .await
+            .unwrap();
+        bucket
+            .insert(&Key::new("second".to_string()), "2".into(), 1)
+            .await
+            .unwrap();
+        let mut watcher = bucket.watch().await.unwrap();
+
+        // Both existing keys arrive in one snapshot, bucket-relative, before any put.
+        let WatchEvent::Resync(snapshot) = watcher.next().await.unwrap() else {
+            panic!("expected the initial resync");
+        };
+        assert_eq!(
+            snapshot,
+            HashMap::from([
+                (Key::new("first".to_string()), bytes::Bytes::from("1")),
+                (Key::new("second".to_string()), bytes::Bytes::from("2")),
+            ])
+        );
+
+        bucket
+            .insert(&Key::new("third".to_string()), "3".into(), 1)
+            .await
+            .unwrap();
+        let WatchEvent::Put(item) = watcher.next().await.unwrap() else {
+            panic!("expected a put after the snapshot");
+        };
+        assert_eq!(item.key_str(), "third");
+    }
+
+    #[tokio::test]
+    async fn watch_on_an_empty_bucket_starts_with_an_empty_resync() {
+        let store = MemoryStore::new();
+        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
+        let mut watcher = bucket.watch().await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(1), watcher.next())
+            .await
+            .expect("an empty bucket must still report its snapshot")
+            .unwrap();
+        assert_eq!(first, WatchEvent::Resync(HashMap::new()));
+    }
+
+    #[tokio::test]
     async fn watcher_observes_updates_to_an_existing_key() {
         let store = MemoryStore::new();
         let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
@@ -401,7 +453,15 @@ mod tests {
             .await
             .unwrap();
         let mut watcher = bucket.watch().await.unwrap();
-        assert!(matches!(watcher.next().await, Some(WatchEvent::Put(_))));
+        let WatchEvent::Resync(snapshot) = watcher.next().await.unwrap() else {
+            panic!("expected the initial resync");
+        };
+        assert_eq!(
+            snapshot
+                .get(&Key::new("key".to_string()))
+                .map(|v| v.as_ref()),
+            Some(b"old".as_slice())
+        );
 
         bucket
             .insert(&Key::new("key".to_string()), "new".into(), 2)
@@ -418,6 +478,11 @@ mod tests {
         let store = MemoryStore::new();
         let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
         let mut watcher = bucket.watch().await.unwrap();
+        // Consume the startup snapshot so the resync below can only come from the lag.
+        assert_eq!(
+            watcher.next().await.unwrap(),
+            WatchEvent::Resync(HashMap::new())
+        );
         let key = Key::new("key".to_string());
 
         for revision in 1..=MEMORY_EVENT_BUFFER_CAPACITY + 1 {

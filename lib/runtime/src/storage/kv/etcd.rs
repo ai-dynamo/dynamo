@@ -289,6 +289,7 @@ mod concurrent_create_tests {
     use super::*;
     use crate::Runtime;
     use crate::transports::etcd as etcd_transport;
+    use futures::StreamExt;
     use std::sync::Arc;
     use tokio::sync::Barrier;
 
@@ -352,6 +353,51 @@ mod concurrent_create_tests {
                 update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_)))
             );
             assert_eq!(bucket.get(&key).await.unwrap(), None);
+        });
+    }
+
+    #[test]
+    fn watch_starts_with_one_resync_of_the_prefix() {
+        let rt = Runtime::single_threaded().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            let etcd_client =
+                etcd_transport::Client::new(etcd_transport::ClientOptions::default(), rt)
+                    .await
+                    .unwrap();
+            let storage = crate::storage::kv::Manager::etcd(etcd_client);
+            let bucket_name = format!("test_watch_resync_{}", uuid::Uuid::new_v4());
+            let bucket = storage
+                .get_or_create_bucket(&bucket_name, None)
+                .await
+                .unwrap();
+            let existing = Key::new("existing".to_string());
+            bucket.insert(&existing, "1".into(), 0).await.unwrap();
+
+            let mut events = bucket.watch().await.unwrap();
+            // The snapshot holds the full etcd key, the same shape as `entries()`.
+            let first = events.next().await.unwrap();
+            let WatchEvent::Resync(snapshot) = first else {
+                panic!("expected the initial resync, got {first:?}");
+            };
+            assert_eq!(
+                snapshot
+                    .get(&Key::new(make_key(&bucket_name, &existing)))
+                    .map(|value| value.as_ref()),
+                Some(b"1".as_slice())
+            );
+
+            let later = Key::new("later".to_string());
+            bucket.insert(&later, "2".into(), 0).await.unwrap();
+            let second = events.next().await.unwrap();
+            let WatchEvent::Put(item) = second else {
+                panic!("expected a put after the snapshot, got {second:?}");
+            };
+            assert_eq!(item.key_str(), make_key(&bucket_name, &later));
+
+            bucket.delete(&existing).await.unwrap();
+            bucket.delete(&later).await.unwrap();
         });
     }
 
