@@ -77,6 +77,8 @@ impl Drop for EncoderRouter {
 }
 
 impl EncoderRouter {
+    /// Returns `None` when this router does not target `endpoint`, and an empty
+    /// set when it targets the endpoint but its binding is not yet available.
     pub(crate) fn available_worker_ids_for(
         &self,
         endpoint: &EndpointId,
@@ -84,9 +86,18 @@ impl EncoderRouter {
         // Target changes and activation publish binding/lifecycle under this same lock.
         let _target = self.target.lock();
         let binding = self.binding.load();
-        let binding = binding
+        let binding_matches = binding
             .as_ref()
-            .filter(|binding| &binding.router.client.endpoint.id() == endpoint)?;
+            .is_some_and(|binding| &binding.router.client.endpoint.id() == endpoint);
+        let target_matches = self.target_tx.as_ref().map(|target_tx| {
+            target_tx
+                .borrow()
+                .as_ref()
+                .is_some_and(|target| &target.endpoint().id() == endpoint)
+        });
+        if !target_matches.unwrap_or(binding_matches) {
+            return None;
+        }
         Some(
             if self.cancel_token.is_cancelled()
                 || self.lifecycle_state() != EncoderLifecycleState::Active
@@ -94,10 +105,16 @@ impl EncoderRouter {
                 std::collections::HashSet::new()
             } else {
                 binding
-                    .router
-                    .client
-                    .available_instance_ids()
-                    .map(|ids| ids.as_ref().clone())
+                    .as_ref()
+                    .filter(|binding| &binding.router.client.endpoint.id() == endpoint)
+                    .map(|binding| {
+                        binding
+                            .router
+                            .client
+                            .available_instance_ids()
+                            .map(|ids| ids.as_ref().clone())
+                            .unwrap_or_default()
+                    })
                     .unwrap_or_default()
             },
         )
@@ -648,13 +665,13 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
+        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
+        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
+        router.set_target(Some(target(2, successor_ids)));
         assert_eq!(
             router.available_worker_ids_for(&endpoint.id()),
             Some(HashSet::new())
         );
-        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
-        router.set_target(Some(target(2, successor_ids)));
-        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(worker) = encoded_worker(&router).await {

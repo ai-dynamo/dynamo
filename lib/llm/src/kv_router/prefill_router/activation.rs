@@ -997,13 +997,13 @@ mod tests {
         admissions.send_replace(Vec::new());
         drop(admissions);
         router.set_target(None);
+        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
+        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
+        router.set_target(Some(target(2, 32, successor_ids)));
         assert_eq!(
             router.available_worker_ids_for(&endpoint.id()),
             Some(HashSet::new())
         );
-        let (_successor_admissions, successor_ids) = watch::channel(vec![ids[2]]);
-        router.set_target(Some(target(2, 32, successor_ids)));
-        assert!(router.available_worker_ids_for(&endpoint.id()).is_none());
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let worker = prefilled_worker(&router).await;
