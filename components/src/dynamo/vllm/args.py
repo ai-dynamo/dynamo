@@ -505,18 +505,23 @@ def create_kv_events_config(
     return None
 
 
-# Both NIXL connectors need the side-channel handshake: pull and push mode
+# All NIXL connectors need the side-channel handshake: pull and push mode
 # share vLLM's NIXL base scheduler, which publishes side_channel_host/port in
 # the params it hands the decode side.
-_NIXL_CONNECTOR_NAMES = ("NixlConnector", "NixlPushConnector")
+_NIXL_CONNECTOR_NAMES = (
+    "NixlConnector",
+    "NixlPullConnector",
+    "NixlPushConnector",
+)
 
 
 def _uses_nixl_connector(engine_config: AsyncEngineArgs) -> bool:
     """Check if the user-provided --kv-transfer-config uses a NIXL connector.
 
-    Covers NixlConnector (pull) and NixlPushConnector (push), both directly
-    (kv_connector="NixlConnector") and nested inside a wrapper connector
-    (PdConnector or MultiConnector, via kv_connector_extra_config.connectors).
+    Covers NixlConnector and its NixlPullConnector alias (pull), plus
+    NixlPushConnector (push), both directly and nested inside a wrapper
+    connector (PdConnector or MultiConnector, via
+    kv_connector_extra_config.connectors).
     """
     kv_cfg = getattr(engine_config, "kv_transfer_config", None)
     if kv_cfg is None:

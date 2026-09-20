@@ -339,9 +339,18 @@ _PD_KVBM_NIXL_PUSH = {
 }
 
 
+_PD_KVBM_NIXL_PULL = {
+    "connectors": [
+        {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlPullConnector", "kv_role": "kv_both"},
+    ]
+}
+
+
 def test_uses_nixl_connector_direct_and_nested():
     """Test _uses_nixl_connector for direct, nested-in-PdConnector, and absent cases."""
     assert _uses_nixl_connector(_make_engine_cfg("NixlConnector")) is True
+    assert _uses_nixl_connector(_make_engine_cfg("NixlPullConnector")) is True
     assert _uses_nixl_connector(_make_engine_cfg("NixlPushConnector")) is True
     assert _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL)) is True
     assert (
@@ -349,10 +358,18 @@ def test_uses_nixl_connector_direct_and_nested():
         is True
     )
     assert (
+        _uses_nixl_connector(_make_engine_cfg("PdConnector", _PD_KVBM_NIXL_PULL))
+        is True
+    )
+    assert (
         _uses_nixl_connector(_make_engine_cfg("MultiConnector", _PD_KVBM_NIXL)) is True
     )
     assert (
         _uses_nixl_connector(_make_engine_cfg("MultiConnector", _PD_KVBM_NIXL_PUSH))
+        is True
+    )
+    assert (
+        _uses_nixl_connector(_make_engine_cfg("MultiConnector", _PD_KVBM_NIXL_PULL))
         is True
     )
     assert _uses_nixl_connector(_make_engine_cfg("LMCacheConnectorV1")) is False
