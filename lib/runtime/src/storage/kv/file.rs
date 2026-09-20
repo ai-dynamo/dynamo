@@ -10,6 +10,7 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -48,6 +49,11 @@ pub struct FileStore {
     /// Directories we may have created files in, for shutdown cleanup and keep-alive.
     /// Arc so that we only ever have one map here after clone.
     active_dirs: Arc<Mutex<HashMap<PathBuf, Directory>>>,
+    /// Set by `shutdown`. A shut down store must not put new state on disk: the
+    /// caller may already be deleting our root, and `Runtime::shutdown` returns
+    /// before the cancel token is cancelled, so background tasks can still reach us.
+    /// Arc so that all clones observe the same flag.
+    is_shutdown: Arc<AtomicBool>,
 }
 
 impl FileStore {
@@ -57,6 +63,7 @@ impl FileStore {
             root: root_dir.into(),
             connection_id: rand::random::<u64>(),
             active_dirs: Arc::new(Mutex::new(HashMap::new())),
+            is_shutdown: Arc::new(AtomicBool::new(false)),
         };
         let c = fs.clone();
         thread::spawn(move || c.expiry_thread());
@@ -65,8 +72,9 @@ impl FileStore {
 
     /// Keep our files alive and delete expired keys.
     ///
-    /// Does not return until cancellation token cancelled. On shutdown the process will
-    /// often exit before we detect cancellation. That's fine.
+    /// Does not return until the store is shut down or the cancellation token is
+    /// cancelled. On shutdown the process will often exit before we detect either.
+    /// That's fine.
     /// We run this in a real thread so it doesn't get delayed by tokio runtime under heavy load.
     fn expiry_thread(&self) {
         loop {
@@ -74,13 +82,13 @@ impl FileStore {
             let keep_alive_interval = cmp::max(ttl / 3, MIN_KEEP_ALIVE);
 
             // Check before and after the sleep
-            if self.cancel_token.is_cancelled() {
+            if self.is_stopped() {
                 break;
             }
 
             thread::sleep(keep_alive_interval);
 
-            if self.cancel_token.is_cancelled() {
+            if self.is_stopped() {
                 break;
             }
 
@@ -89,6 +97,11 @@ impl FileStore {
                 tracing::error!(error = %err, "FileStore delete_expired_files");
             }
         }
+    }
+
+    /// Shut down, either by our own `shutdown` or by the runtime's cancellation token.
+    fn is_stopped(&self) -> bool {
+        self.is_shutdown.load(Ordering::Acquire) || self.cancel_token.is_cancelled()
     }
 
     /// The shortest TTL of any directory we are using.
@@ -133,6 +146,15 @@ impl Store for FileStore {
         if let Some(dir) = self.active_dirs.lock().get(&p) {
             return Ok(dir.clone());
         };
+
+        // A shut down store must not create directories. Callers can still reach us after
+        // `shutdown` returns, and re-creating a bucket under a root the caller is deleting
+        // makes that removal fail with ENOTEMPTY.
+        if self.is_shutdown.load(Ordering::Acquire) {
+            return Err(StoreError::FilesystemError(format!(
+                "FileStore is shut down, refusing to create bucket '{bucket_name}'"
+            )));
+        }
 
         if p.exists() {
             // Get
@@ -188,6 +210,8 @@ impl Store for FileStore {
     // This cannot be a Drop imp because DistributedRuntime is cloned various places including
     // Python. Drop doesn't get called.
     fn shutdown(&self) {
+        // Set before draining, so a concurrent caller cannot re-create a bucket we just dropped.
+        self.is_shutdown.store(true, Ordering::Release);
         for (_, mut dir) in self.active_dirs.lock().drain() {
             if let Err(err) = dir.delete_owned_files() {
                 tracing::error!(error = %err, %dir, "Failed shutdown delete of owned files");
@@ -959,6 +983,28 @@ mod tests {
 
         assert!(!created);
         assert_eq!(fs::read(&temp_path).unwrap(), b"sentinel");
+    }
+
+    #[tokio::test]
+    async fn shutdown_store_does_not_create_bucket_directories() {
+        let t = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), t.path());
+
+        // The runtime's cancel token is deliberately left uncancelled: `Runtime::shutdown`
+        // returns before it is cancelled, which is the window a late caller arrives in.
+        store.shutdown();
+        let late = store.get_or_create_bucket("v1/late", None).await;
+        cancel_token.cancel();
+
+        // The on-disk assertion first: a recreated `v1` under a root the caller is
+        // removing is exactly what fails that removal with ENOTEMPTY.
+        assert!(
+            !t.path().join("v1").exists(),
+            "shut down store put {} on disk",
+            t.path().join("v1").display()
+        );
+        assert!(late.is_err(), "shut down store created a bucket");
     }
 
     #[tokio::test]
