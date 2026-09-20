@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Send an OpenAI-compatible request with a per-request SGLang thinking budget.
-#
-# Start Dynamo with the SGLang chat processor, then start an SGLang worker with
-# --enable-strict-thinking and a reasoning parser before running this script.
+# Start `dynamo.frontend --dyn-chat-processor sglang --reasoning-parser qwen3`
+# and an SGLang worker with `--enable-strict-thinking --reasoning-parser qwen3`
+# and an enabled grammar backend before running this script.
 
 set -euo pipefail
 
