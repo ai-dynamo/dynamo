@@ -58,6 +58,7 @@ Env vars:
   BLOCK_SIZE                  (default 16 — SGLang \`--page-size\`)
   MAX_MODEL_LEN               (default 4096)
   KV_EVENTS_PORT_BASE         (default 29090 — worker i uses port BASE + (i-1))
+  STARTUP_TIMEOUT             (default 330 — whole-startup budget in seconds)
   DYN_LOG                     (default info + mm_routing + scheduling debug)
 EOF
             exit 0
@@ -82,22 +83,37 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
+# Non-zero as soon as any launched worker has died, naming it and its exit
+# status. Every startup poll checks all of WORKER_PIDS, not just the process it
+# happens to be waiting on: the waits are sequential, so a worker that dies
+# while a different one is still loading would otherwise go unnoticed until the
+# shared deadline — the slow, diagnostics-free failure this startup path exists
+# to avoid.
+check_workers_alive() {
+    local i pid status
+    for i in "${!WORKER_PIDS[@]}"; do
+        pid="${WORKER_PIDS[i]}"
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            status=0
+            wait "${pid}" 2>/dev/null || status=$?
+            echo "SGLang backend $((i + 1)) (pid ${pid}) exited with status ${status} before startup completed" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
 # Poll ${url} until ready, giving up at the absolute ${deadline} (a SECONDS
-# value) or as soon as ${pid} dies, so the worker's own error is reported.
+# value) or as soon as any worker dies, so the worker's own error is reported.
 wait_ready() {
-    local url="$1" name="$2" deadline="$3" pid="${4:-}"
+    local url="$1" name="$2" deadline="$3"
     echo "Waiting for ${name} ..."
     while (( SECONDS < deadline )); do
         if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
             echo "${name} is ready"
             return 0
         fi
-        if [[ -n "${pid}" ]] && ! kill -0 "${pid}" 2>/dev/null; then
-            local status=0
-            wait "${pid}" 2>/dev/null || status=$?
-            echo "${name} (pid ${pid}) exited with status ${status} before becoming ready" >&2
-            return 1
-        fi
+        check_workers_alive || return 1
         sleep 1
     done
     echo "${name} did not become ready within the ${STARTUP_TIMEOUT}s startup budget" >&2
@@ -155,7 +171,7 @@ done
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
     wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "SGLang backend $i" \
-        "${STARTUP_DEADLINE}" "${WORKER_PIDS[i-1]}"
+        "${STARTUP_DEADLINE}"
 done
 
 echo "=== Starting frontend (KV router, MM-aware routing) ==="
@@ -175,6 +191,9 @@ while (( SECONDS < STARTUP_DEADLINE )); do
         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
         2>/dev/null || echo "000")
     [[ "$HTTP_CODE" == "200" ]] && { FRONTEND_READY=true; echo "Frontend ready"; break; }
+    # A worker that dies after reporting ready would otherwise only surface as
+    # the frontend never answering, at the far end of the shared deadline.
+    check_workers_alive || exit 1
     sleep 2
 done
 if [[ "$FRONTEND_READY" != true ]]; then
