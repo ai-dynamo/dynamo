@@ -154,6 +154,45 @@ sglang_configs = {
             metric_payload_default(min_num_requests=6, backend="sglang"),
         ],
     ),
+    "thinking_token_budget": SGLangConfig(
+        # Exercise the full frontend-to-SGLang translation with the native
+        # strict-thinking grammar enabled. The unit suite checks the exact
+        # SamplingParams shape; this request proves the deployed configuration
+        # accepts the public OpenAI field.
+        name="thinking_token_budget",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.core,
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(3.7),
+            pytest.mark.requested_sglang_kv_tokens(2048),
+            pytest.mark.timeout(360),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        script_args=[
+            "--enable-strict-thinking",
+            "--reasoning-parser",
+            "qwen3",
+            "--grammar-backend",
+            "xgrammar",
+        ],
+        env={
+            "DYN_CHAT_PROCESSOR": "sglang",
+            "DYN_REASONING_PARSER": "qwen3",
+        },
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                "Return a short answer for this synthetic prompt.",
+                repeat_count=1,
+                expected_response=[],
+                max_tokens=128,
+                extra_body={"thinking_token_budget": 32},
+            )
+        ],
+    ),
     "disaggregated": SGLangConfig(
         name="disaggregated",
         directory=sglang_dir,
