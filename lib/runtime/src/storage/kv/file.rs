@@ -101,7 +101,6 @@ impl FileStore {
         }
     }
 
-    /// Shut down, either by our own `shutdown` or by the runtime's cancellation token.
     fn is_stopped(&self) -> bool {
         self.is_shutdown.load(Ordering::Acquire) || self.cancel_token.is_cancelled()
     }
