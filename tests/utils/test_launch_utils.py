@@ -5,11 +5,16 @@
 
 These run the real helper under bash, so they fail if the launch scripts stop
 reporting which child exited -- the first thing read when a launch dies in CI.
+
+The message is the surface under test, not a diagnostic: the parallel-test
+orchestrator scrapes this line, so its wording is the contract.
 """
 
 from __future__ import annotations
 
 import re
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,6 +28,11 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
     pytest.mark.timeout(90),
+    # setsid is util-linux; it is absent on macOS, where these helpers are not
+    # used. Skipping beats a failure that says nothing about the helper.
+    pytest.mark.skipif(
+        shutil.which("setsid") is None, reason="setsid is required to isolate the pgid"
+    ),
 ]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -38,7 +48,8 @@ def _run_wait_any_exit(body: str, tmp_path: Path) -> tuple[int, str]:
     gets a group of its own rather than taking pytest down with it.
     """
     script = tmp_path / "harness.sh"
-    script.write_text(f"#!/bin/bash\nsource {LAUNCH_UTILS}\n{body}\nwait_any_exit\n")
+    sourced = shlex.quote(str(LAUNCH_UTILS))
+    script.write_text(f"#!/bin/bash\nsource {sourced}\n{body}\nwait_any_exit\n")
     script.chmod(0o755)
 
     completed = subprocess.run(
