@@ -169,6 +169,58 @@ deployment default.
 > engine or model to follow the requested mode. Models that ignore their
 > template's thinking control may still emit reasoning.
 
+## Per-Request Thinking Token Budgets
+
+Set the optional root-level `thinking_token_budget` field on an OpenAI-compatible chat request to limit generated reasoning tokens for that request. Omit the field to preserve the model and backend defaults. The field is independent of `max_completion_tokens`, which still limits the whole completion.
+
+```json
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Return a short answer for this synthetic prompt."
+    }
+  ],
+  "max_completion_tokens": 128,
+  "thinking_token_budget": 32
+}
+```
+
+The budget must be a non-negative integer. A value of `0` prevents additional reasoning-token generation while leaving the request valid.
+
+### vLLM
+
+Dynamo forwards `thinking_token_budget` to vLLM's `SamplingParams.thinking_token_budget` when the installed vLLM version exposes that field. Configure reasoning for the model as usual, then send the request above through the Dynamo frontend.
+
+```bash
+python -m dynamo.vllm \
+  --model Qwen/Qwen3-0.6B \
+  --dyn-reasoning-parser qwen3
+```
+
+Use a vLLM release that provides the built-in thinking-budget logits processor. If the active vLLM `SamplingParams` does not expose `thinking_token_budget`, Dynamo cannot apply a per-request budget.
+
+### SGLang
+
+SGLang requires strict thinking, an SGLang reasoning parser, an initialized tokenizer, and a grammar backend. Run the SGLang chat processor in the frontend so Dynamo can preserve the canonical preprocessed request state.
+
+```bash
+python -m dynamo.frontend \
+  --dyn-chat-processor sglang \
+  --reasoning-parser qwen3
+```
+
+```bash
+python -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --enable-strict-thinking \
+  --reasoning-parser qwen3 \
+  --grammar-backend xgrammar
+```
+
+Dynamo translates the request field to SGLang's `sampling_params.custom_params.thinking_budget`. Do not combine a thinking budget with a custom logit processor because SGLang applies custom processors after the grammar mask that enforces the budget. The deprecated worker `--use-sglang-tokenizer` path and native SGLang passthrough requests do not support this field.
+
 ## Supported Reasoning Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
