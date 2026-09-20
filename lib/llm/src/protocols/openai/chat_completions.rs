@@ -84,7 +84,7 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     #[schema(value_type = Object)]
@@ -110,6 +110,12 @@ pub struct NvCreateChatCompletionRequest {
     /// Normalized into `chat_template_args` before preprocessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
+
+    /// OpenAI-style thinking token budget: bounds the number of thinking
+    /// tokens generated per request. Forwarded to the backend's
+    /// `thinking_token_budget` sampling parameter when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<u32>,
 
     /// Runtime media decoding parameters, forwarded verbatim to the worker when the
     /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
@@ -554,6 +560,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     fn get_ignore_eos(&self) -> Option<bool> {
         self.common.ignore_eos
     }
+
+    /// Returns the root-level thinking token budget if set.
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        self.thinking_token_budget
+    }
 }
 
 impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
@@ -591,6 +602,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
@@ -688,16 +700,13 @@ mod tests {
         ];
 
         for extra in conflicts {
-            let error = chat_request_with(&extra)
-                .extract_sampling_options()
-                .unwrap_err();
-            let dynamo_error = error
-                .downcast_ref::<dynamo_runtime::error::DynamoError>()
-                .expect("sampling extraction must preserve the HTTP error type");
-            assert_eq!(
-                dynamo_error.error_type(),
-                dynamo_runtime::error::ErrorType::InvalidArgument,
-                "guided-decoding conflicts must map to HTTP 400",
+            let request = chat_request_with(&extra);
+            let error = ValidateRequest::validate(&request).expect_err("constraints conflict");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Only one guided-decoding constraint"),
+                "validation error should name the conflict, got: {error}"
             );
         }
     }
@@ -755,7 +764,10 @@ mod tests {
             json!({"guided_whitespace_pattern": "[\n ]?"}),
             json!({"guided_decoding_backend": "xgrammar"}),
         ] {
-            let sampling = chat_request_with(&extra)
+            let request = chat_request_with(&extra);
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|e| panic!("{extra} must pass request validation, got: {e}"));
+            let sampling = request
                 .extract_sampling_options()
                 .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
             assert!(
@@ -947,6 +959,73 @@ mod tests {
             serde_json::from_value(invalid_stop_token_ids).expect("Failed to deserialize request");
         let err = ValidateRequest::validate(&request).expect_err("invalid stop_token_ids");
         assert!(err.to_string().contains("stop_token_ids"));
+    }
+
+    #[test]
+    fn test_stop_sequence_limit_enforced_consistently() {
+        use crate::protocols::openai::validate::MAX_STOP_SEQUENCES;
+
+        let max_stops: Vec<String> = (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("max stops must validate");
+        request
+            .extract_stop_conditions()
+            .expect("max stops must extract");
+
+        let over_max_stops: Vec<String> = (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        let err =
+            ValidateRequest::validate(&request).expect_err("over-max stops must fail validation");
+        let expected = format!(
+            "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        assert_eq!(err.to_string(), expected);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stops must fail extraction");
+        assert_eq!(err.to_string(), expected);
+
+        let over_max_token_ids: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let expected_token_ids = format!(
+            "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stop token IDs must fail extraction");
+        assert_eq!(err.to_string(), expected_token_ids);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max passthrough stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
     }
 
     #[test]
@@ -1828,5 +1907,70 @@ mod tests {
                 serde_json::from_value(json_str).expect("Failed to deserialize request");
             assert!(request.normalize_reasoning_template_args().is_err());
         }
+    }
+
+    #[test]
+    fn test_thinking_token_budget_reaches_stop_conditions() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request).expect("thinking_token_budget must be valid");
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
+    }
+
+    #[test]
+    fn test_thinking_token_budget_overrides_nvext() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32,
+            "nvext": {"max_thinking_tokens": 16}
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
+    }
+
+    #[test]
+    fn test_nvext_max_thinking_tokens_fallback() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "nvext": {"max_thinking_tokens": 16}
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(16));
+    }
+
+    #[test]
+    fn test_omitted_thinking_token_budget_is_none() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, None);
     }
 }

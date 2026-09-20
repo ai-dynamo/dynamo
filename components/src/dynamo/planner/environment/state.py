@@ -15,6 +15,7 @@ class ReplicaState:
     active: int = 0
     expected: Optional[int] = None
     scaling: bool = False
+    pending_startup: int = 0
 
 
 @dataclass

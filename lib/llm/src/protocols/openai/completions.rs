@@ -451,6 +451,7 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
 impl ValidateRequest for NvCreateCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_model(&self.inner.model)?;
 
         // Validate prompt and prompt_embeds together (checks presence, format, and content)
@@ -536,6 +537,24 @@ mod tests {
     use crate::protocols::common::OutputOptionsProvider;
     use base64::Engine;
     use serde_json::json;
+
+    #[test]
+    fn test_conflicting_guided_decoding_options_fail_request_validation() {
+        let request: NvCreateCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "prompt": "hello",
+            "guided_regex": "a+",
+            "guided_choice": ["a"]
+        }))
+        .expect("request should deserialize");
+
+        let error = ValidateRequest::validate(&request).expect_err("constraints conflict");
+        assert!(
+            error
+                .to_string()
+                .contains("Only one guided-decoding constraint")
+        );
+    }
 
     #[test]
     fn test_skip_special_tokens_none() {

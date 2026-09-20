@@ -164,6 +164,9 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("No self-benchmark rank results were loaded")
 
     source_ranks = [rank for rank, _, _ in rank_data]
+    # Row-level KV seed provenance travels from each rank artifact into the
+    # merged artifact unchanged (per rank, per benchmark id).
+    regimes: dict[tuple[int, int], object] = {}
     reference_rank, reference_path, reference = rank_data[0]
     run_id = reference.get("run_id")
     grid_digest = reference.get("grid_digest")
@@ -369,6 +372,8 @@ def _merge_benchmark_rank_results(
         for result in data.get("results", []):
             point = result.get("point", {})
             benchmark_id = point.get("benchmark_id")
+            if "kv_seed_regime" in result:
+                regimes[(dp_rank, benchmark_id)] = result["kv_seed_regime"]
             if benchmark_id in results_by_id:
                 raise RuntimeError(
                     f"Self-benchmark rank {dp_rank} has duplicate "
@@ -423,7 +428,10 @@ def _merge_benchmark_rank_results(
             fpms = copy.deepcopy(rank_result["fpms"])
             point = copy.deepcopy(canonical_point)
             point["dp_rank"] = dp_rank
-            flattened_results.append({"point": point, "fpms": fpms})
+            entry: dict = {"point": point, "fpms": fpms}
+            if (dp_rank, benchmark_id) in regimes:
+                entry["kv_seed_regime"] = regimes[(dp_rank, benchmark_id)]
+            flattened_results.append(entry)
 
     merged = copy.deepcopy(reference)
     merged["artifact_type"] = "merged"
@@ -564,10 +572,18 @@ async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
     logger.info("FPM GC policy stopped in all model workers")
 
 
+async def _restore_benchmark_workers(bench_cfg: dict, engine_client: AsyncLLM) -> None:
+    try:
+        if bench_cfg.get("randomize_kda_state", False):
+            await engine_client.collective_rpc("finish_benchmark_kda_state")
+    finally:
+        await _stop_worker_gc_policy(engine_client)
+
+
 async def _await_benchmark_then_restore_workers(
     bench_cfg: dict, vllm_config: VllmConfig, engine_client: AsyncLLM
 ) -> dict:
-    """Wait for the self-benchmark and restore worker GC on every exit path.
+    """Wait for the self-benchmark and restore worker state and GC on every exit path.
 
     The worker stop must not depend on the wait succeeding: ``_bench_abort``
     publishes ``status="failed"`` artifacts, so an aborted benchmark makes
@@ -586,17 +602,17 @@ async def _await_benchmark_then_restore_workers(
         # always wins.
         try:
             await asyncio.wait_for(
-                _stop_worker_gc_policy(engine_client),
+                _restore_benchmark_workers(bench_cfg, engine_client),
                 timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
             )
         except BaseException:
             logger.exception(
-                "Failed to stop the FPM GC policy in model workers while "
+                "Failed to restore model workers while "
                 "handling a self-benchmark failure"
             )
         raise
     await asyncio.wait_for(
-        _stop_worker_gc_policy(engine_client),
+        _restore_benchmark_workers(bench_cfg, engine_client),
         timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
     )
     return results
@@ -878,6 +894,7 @@ class WorkerFactory:
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
             enable_frontend_decoding=config.frontend_decoding,
+            embedding_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         )
         await handler.async_init(runtime)
 
@@ -1826,6 +1843,7 @@ class WorkerFactory:
             "init_weights_update_group": handler.init_weights_update_group,
             "destroy_weights_update_group": handler.destroy_weights_update_group,
             "get_weight_version": handler.get_weight_version,
+            "set_weight_version": handler.set_weight_version,
         }
 
         if lora_enabled:
