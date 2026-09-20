@@ -37,7 +37,7 @@ from .base import (
     HttpStatusError,
     HttpTimeoutError,
 )
-from .media_reference import fetch_media_bytes, max_media_bytes
+from .media_reference import fetch_media_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,6 @@ __all__ = [
     "from_env",
     "fetch_bytes",
     "fetch_media_bytes",
-    "max_media_bytes",
     "close_http_client",
     "get_default_client",
 ]
