@@ -308,6 +308,8 @@ impl Discovery for MockDiscovery {
             for event in events {
                 yield Ok(event);
             }
+            // The snapshot closes the establishment burst and is empty for an empty registry.
+            yield Ok(DiscoveryEvent::Resync(known_instances.values().cloned().collect()));
 
             while let Some(instances) = changes.recv().await {
                 let (events, reconciled) = reconcile_discovery_snapshot(
@@ -349,6 +351,10 @@ mod tests {
             request_plane_codec: None,
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            DiscoveryEvent::Resync(vec![])
+        );
 
         let original = client.register(spec("127.0.0.1:8000")).await.unwrap();
         let event = timeout(Duration::from_secs(1), stream.next())
@@ -396,6 +402,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+        // The snapshot closes the establishment burst and predates the unregister.
+        let snapshot = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("the snapshot must follow the Added burst")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot, DiscoveryEvent::Resync(vec![instance.clone()]));
 
         let removed = timeout(Duration::from_secs(1), stream.next())
             .await
@@ -412,6 +425,10 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            DiscoveryEvent::Resync(vec![])
+        );
 
         let instance = client
             .register(DiscoverySpec::Endpoint {
@@ -627,6 +644,10 @@ mod tests {
 
         // Start watching
         let mut stream = client1.list_and_watch(query.clone(), None).await.unwrap();
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            DiscoveryEvent::Resync(vec![])
+        );
 
         // Add first instance
         let instance1 = client1.register(spec.clone()).await.unwrap();
