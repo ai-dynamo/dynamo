@@ -137,10 +137,26 @@ wait_any_exit() {
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
+    # Snapshot pid -> command before waiting: once `wait -n` reaps the child,
+    # neither `ps` nor `jobs` can still say what it was, and an exit code on its
+    # own does not name which of several workers died.
+    local _jobs_snapshot
+    _jobs_snapshot=$(jobs -l)
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
-    local _rc=0
-    wait -n || _rc=$?
-    echo "A background process exited with code $_rc"
+    local _rc=0 _pid="" _who=""
+    if ((BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1))); then
+        # -p reports WHICH child exited; bash 5.1+ only, and this file supports 4.3+.
+        wait -n -p _pid || _rc=$?
+    else
+        wait -n || _rc=$?
+    fi
+    if [[ -n "$_pid" ]]; then
+        # `jobs -l` lines read: "[1]-  12345 Running   python3 -m dynamo.trtllm ... &"
+        _who=$(awk -v pid="$_pid" '$2 == pid { $1=""; $2=""; $3=""; sub(/^ +/, ""); sub(/ *&$/, ""); print; exit }' <<<"$_jobs_snapshot")
+        _who=" (pid $_pid${_who:+: $_who})"
+    fi
+    # Keep the leading sentence byte-for-byte: log scrapers match on it.
+    echo "A background process exited with code $_rc$_who"
     # Backstop signal trap; double quotes bake _rc in before it goes out of scope.
     # shellcheck disable=SC2064  # intentional expand-at-set-time
     trap "dynamo_reap_and_exit $_rc" TERM INT

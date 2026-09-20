@@ -80,7 +80,7 @@ build_sglang_gpu_mem_args() {
 #   (unlike vLLM/SGLang which use direct CLI flags).
 #
 #   Environment variables:
-#     _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS        → {"kv_cache_config": {"max_tokens": N}}
+#     _PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS        → {"kv_cache_config": {"max_tokens": N, "free_gpu_memory_fraction": 0.85}}
 #     _PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES → {"kv_cache_config": {"max_gpu_total_bytes": N}}
 #
 #   If --merge-with-json is provided, merges GPU config with the existing JSON.
@@ -109,9 +109,31 @@ build_trtllm_override_args_with_mem() {
 
     local gpu_mem_json=""
 
+    # This override reaches the worker as a plain dict and replaces the engine
+    # config's whole kv_cache_config object, so every key it does not name falls
+    # back to a TensorRT-LLM default. With only max_tokens set,
+    # free_gpu_memory_fraction lands on the engine default 0.9 rather than on
+    # the value the launch config's YAML declares, so state it here and keep a
+    # profiled launch on a chosen number.
+    #
+    # Stating it does not make the pool independent of co-tenants. The engine
+    # takes the MINIMUM of max_tokens and free_gpu_memory_fraction * headroom,
+    # and that headroom term already has co-tenant memory subtracted from it, so
+    # the fraction scales a contended reading. The token cap binds in every
+    # profiled test configuration here; the fraction only decides how much
+    # headroom stays unclaimed when it does not.
+    #
+    # 0.85 is what examples/backends/trtllm/engine_configs/qwen3/agg.yaml
+    # declares, and it is at or below the 0.9 default, so no caller of this
+    # helper claims more of a shared card than the default already gave it.
+    # TensorRT-LLM engine configs in this tree declare 0.10 to 0.85, so one
+    # constant cannot match them all; honouring each caller's own YAML needs the
+    # worker-side override to stop replacing kv_cache_config wholesale.
+    local kv_mem_fraction=0.85
+
     # Token-based (preferred, simpler to reason about)
     if [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS:-}" ]]; then
-        gpu_mem_json='"kv_cache_config": {"max_tokens": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS}"'}'
+        gpu_mem_json='"kv_cache_config": {"max_tokens": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS}"', "free_gpu_memory_fraction": '"${kv_mem_fraction}"'}'
     # Byte-based (alternative, more precise)
     elif [[ -n "${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES:-}" ]]; then
         gpu_mem_json='"kv_cache_config": {"max_gpu_total_bytes": '"${_PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES}"'}'
@@ -203,7 +225,7 @@ _gpu_utils_self_test() {
     echo "=== trtllm: token cap env ==="
     result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=4096 \
         build_trtllm_override_args_with_mem)
-    _assert "trtllm token cap" '{"kv_cache_config": {"max_tokens": 4096}}' "$result"
+    _assert "trtllm token cap" '{"kv_cache_config": {"max_tokens": 4096, "free_gpu_memory_fraction": 0.85}}' "$result"
 
     echo ""
     echo "=== trtllm: byte cap env ==="
@@ -220,19 +242,19 @@ _gpu_utils_self_test() {
     echo "=== trtllm: token cap takes precedence over byte cap ==="
     result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 _PROFILE_OVERRIDE_TRTLLM_MAX_GPU_TOTAL_BYTES=999999 \
         build_trtllm_override_args_with_mem)
-    _assert "trtllm token precedence" '{"kv_cache_config": {"max_tokens": 2048}}' "$result"
+    _assert "trtllm token precedence" '{"kv_cache_config": {"max_tokens": 2048, "free_gpu_memory_fraction": 0.85}}' "$result"
 
     echo ""
     echo "=== trtllm: merge with existing JSON ==="
     result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 \
         build_trtllm_override_args_with_mem --merge-with-json '{"return_perf_metrics": true, "otlp_traces_endpoint": "http://localhost:4317"}')
-    _assert "trtllm merged" '{"kv_cache_config": {"max_tokens": 2048}, "return_perf_metrics": true, "otlp_traces_endpoint": "http://localhost:4317"}' "$result"
+    _assert "trtllm merged" '{"kv_cache_config": {"max_tokens": 2048, "free_gpu_memory_fraction": 0.85}, "return_perf_metrics": true, "otlp_traces_endpoint": "http://localhost:4317"}' "$result"
 
     echo ""
     echo "=== trtllm: merge with empty JSON object ==="
     result=$(_PROFILE_OVERRIDE_TRTLLM_MAX_TOTAL_TOKENS=2048 \
         build_trtllm_override_args_with_mem --merge-with-json '{}')
-    _assert "trtllm merge empty obj" '{"kv_cache_config": {"max_tokens": 2048}}' "$result"
+    _assert "trtllm merge empty obj" '{"kv_cache_config": {"max_tokens": 2048, "free_gpu_memory_fraction": 0.85}}' "$result"
 
     echo ""
     echo "=== trtllm: no GPU override, but pass through existing JSON ==="
