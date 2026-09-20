@@ -4100,8 +4100,7 @@ def test_prefill_point_with_exact_batch_shape_is_saved():
     ]
 
 
-@pytest.mark.parametrize("fpm_count", [0, 2])
-def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
+def _decode_point_and_fpm():
     point = BenchmarkPoint(
         point_type="decode",
         benchmark_id=4,
@@ -4114,10 +4113,30 @@ def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
             "sum_decode_kv_tokens": 48,
         }
     }
-    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(fpm_count)])
+    return point, fpm
+
+
+def test_benchmark_point_rejects_multiple_fpms():
+    # Two FPMs under one benchmark_id means the point isolation broke: abort.
+    point, fpm = _decode_point_and_fpm()
+    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(2)])
 
     with pytest.raises(RuntimeError, match="exactly one FPM"):
         InstrumentedScheduler._bench_save_current_point(stub)
+
+
+def test_benchmark_point_with_no_fpm_is_skipped_not_aborted():
+    # The deadline passed before a single FPM was recorded (first pass at a
+    # fresh giant shape, kernel JIT): a group-synchronized skip, not a sweep abort.
+    point, _ = _decode_point_and_fpm()
+    stub = _benchmark_save_stub(point, [])
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="no_fpm_before_deadline")
+    ]
 
 
 def test_decode_point_with_no_fpm_stops_waiting_at_deadline(monkeypatch):
