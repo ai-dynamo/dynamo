@@ -52,7 +52,9 @@ pub struct FileStore {
     /// Set by `shutdown`. A shut down store must not put new state on disk: the
     /// caller may already be deleting our root, and `Runtime::shutdown` returns
     /// before the cancel token is cancelled, so background tasks can still reach us.
-    /// Arc so that all clones observe the same flag.
+    /// Shared with every `Directory` we hand out, because a caller can keep writing
+    /// through a bucket it took before shutdown. Arc so that all clones observe the
+    /// same flag.
     is_shutdown: Arc<AtomicBool>,
 }
 
@@ -143,12 +145,17 @@ impl Store for FileStore {
         ttl: Option<Duration>,
     ) -> Result<Self::Bucket, StoreError> {
         let p = self.root.join(bucket_name);
-        if let Some(dir) = self.active_dirs.lock().get(&p) {
+
+        // Hold `active_dirs` across the lookup, the shutdown check, the directory creation
+        // and the registration. `shutdown` sets `is_shutdown` before it takes this same
+        // lock to drain, so a call either registers before the drain and is cleaned up by
+        // it, or sees the flag and refuses; it cannot slip between the two. Re-creating a
+        // bucket under a root the caller is deleting makes that removal fail with ENOTEMPTY.
+        let mut active_dirs = self.active_dirs.lock();
+        if let Some(dir) = active_dirs.get(&p) {
             return Ok(dir.clone());
         };
 
-        // Re-creating a bucket under a root the caller is deleting makes that removal
-        // fail with ENOTEMPTY.
         if self.is_shutdown.load(Ordering::Acquire) {
             return Err(StoreError::FilesystemError(format!(
                 "FileStore is shut down, refusing to create bucket '{bucket_name}'"
@@ -166,13 +173,13 @@ impl Store for FileStore {
             // Create
             fs::create_dir_all(&p).map_err(to_fs_err)?;
         }
-        let candidate = Directory::new(self.root.clone(), p.clone(), ttl.unwrap_or(DEFAULT_TTL));
-        let dir = self
-            .active_dirs
-            .lock()
-            .entry(p)
-            .or_insert(candidate)
-            .clone();
+        let candidate = Directory::new(
+            self.root.clone(),
+            p.clone(),
+            ttl.unwrap_or(DEFAULT_TTL),
+            self.is_shutdown.clone(),
+        );
+        let dir = active_dirs.entry(p).or_insert(candidate).clone();
         Ok(dir)
     }
 
@@ -192,7 +199,12 @@ impl Store for FileStore {
             ));
         }
         // The filesystem itself doesn't store the TTL so for now default it
-        let candidate = Directory::new(self.root.clone(), p.clone(), DEFAULT_TTL);
+        let candidate = Directory::new(
+            self.root.clone(),
+            p.clone(),
+            DEFAULT_TTL,
+            self.is_shutdown.clone(),
+        );
         let dir = self
             .active_dirs
             .lock()
@@ -209,7 +221,10 @@ impl Store for FileStore {
     // This cannot be a Drop imp because DistributedRuntime is cloned various places including
     // Python. Drop doesn't get called.
     fn shutdown(&self) {
-        // Set before draining, so a concurrent caller cannot re-create a bucket we just dropped.
+        // Set before either lock is taken below, so a concurrent caller that passes a
+        // shutdown check has already been seen by the drain it raced: `get_or_create_bucket`
+        // checks under `active_dirs`, and `Directory` writes check under the per-directory
+        // mutation lock that `delete_owned_files` also takes.
         self.is_shutdown.store(true, Ordering::Release);
         for (_, mut dir) in self.active_dirs.lock().drain() {
             if let Err(err) = dir.delete_owned_files() {
@@ -226,6 +241,9 @@ pub struct Directory {
     ttl: Duration,
     /// These are the files we created and hence must delete on shutdown
     owned_files: Arc<Mutex<HashSet<PathBuf>>>,
+    /// The owning `FileStore`'s shutdown flag. A caller can hold a `Directory` it
+    /// obtained before shutdown, so the bucket itself has to refuse late writes.
+    is_shutdown: Arc<AtomicBool>,
 }
 
 struct DirectoryMutationLock {
@@ -249,7 +267,7 @@ impl DirectoryMutationLock {
 }
 
 impl Directory {
-    fn new(root: PathBuf, p: PathBuf, ttl: Duration) -> Self {
+    fn new(root: PathBuf, p: PathBuf, ttl: Duration, is_shutdown: Arc<AtomicBool>) -> Self {
         // Keep watched paths and event paths in the same form across symlinked roots.
         let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
         let canonical_path = p.canonicalize().unwrap_or_else(|_| p.clone());
@@ -263,7 +281,23 @@ impl Directory {
             p: canonical_path,
             ttl,
             owned_files: Arc::new(Mutex::new(HashSet::new())),
+            is_shutdown,
         }
+    }
+
+    /// Refuse a mutation that would put state back on disk after `shutdown`.
+    ///
+    /// Call this while holding the mutation lock. `shutdown` sets the flag before it
+    /// takes that same lock to delete owned files, so a write either records its file
+    /// before the deletion and is cleaned up by it, or sees the flag and refuses.
+    fn reject_if_shutdown(&self) -> Result<(), StoreError> {
+        if self.is_shutdown.load(Ordering::Acquire) {
+            return Err(StoreError::FilesystemError(format!(
+                "FileStore is shut down, refusing to write to '{}'",
+                self.p.display()
+            )));
+        }
+        Ok(())
     }
 
     /// touch the files we own so they don't get deleted by a different FileStore
@@ -410,6 +444,7 @@ impl Bucket for Directory {
         let str_path = full_path.display().to_string();
 
         let _mutation_lock = self.lock_mutations().await?;
+        self.reject_if_shutdown()?;
         let temp_path = self.write_temp_file(&value)?;
 
         if revision == 0 {
@@ -468,6 +503,7 @@ impl Bucket for Directory {
         let full_path = self.p.join(key.url_safe().as_ref());
         let str_path = full_path.display().to_string();
         let _mutation_lock = self.lock_mutations().await?;
+        self.reject_if_shutdown()?;
 
         let current = match fs::read(&full_path) {
             Ok(current) => current,
@@ -1004,6 +1040,44 @@ mod tests {
             t.path().join("v1").display()
         );
         assert!(late.is_err(), "shut down store created a bucket");
+        // A late registration would also survive the drain that already happened, leaving
+        // an entry no later shutdown cleans up.
+        assert!(
+            store.active_dirs.lock().is_empty(),
+            "shut down store registered a late bucket"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_store_rejects_writes_through_a_cached_bucket() {
+        let t = tempfile::tempdir().unwrap();
+        let cancel_token = CancellationToken::new();
+        let store = FileStore::new(cancel_token.clone(), t.path());
+
+        // Take the bucket before shutdown and hold it, the way a discovery registration
+        // does: dropping it from `active_dirs` does not take it away from that caller.
+        let bucket = store.get_or_create_bucket("v1/cached", None).await.unwrap();
+
+        store.shutdown();
+        let late = bucket
+            .insert(&Key::new("late".to_string()), "late".into(), 0)
+            .await;
+        cancel_token.cancel();
+
+        // Any file here, including a leftover temp file, is what makes removing the root
+        // fail with ENOTEMPTY.
+        let residue: Vec<_> = fs::read_dir(t.path().join("v1").join("cached"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "shut down store left {residue:?} on disk"
+        );
+        assert!(
+            late.is_err(),
+            "cached bucket accepted a write after shutdown"
+        );
     }
 
     #[tokio::test]
