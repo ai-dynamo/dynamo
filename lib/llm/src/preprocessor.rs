@@ -1829,6 +1829,13 @@ impl OpenAIPreprocessor {
                     serde_json::json!(metadata_upload),
                 );
             }
+            // Backends read this from extra_args.nvext; there is no other channel.
+            if let Some(routed_experts_start_len) = nvext.routed_experts_start_len {
+                nvext_passthrough.insert(
+                    "routed_experts_start_len".to_string(),
+                    serde_json::json!(routed_experts_start_len),
+                );
+            }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
             }
