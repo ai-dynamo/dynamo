@@ -4,9 +4,9 @@
 from collections.abc import Mapping
 from typing import Any
 
-from dynamo.llm.exceptions import InvalidArgument
-
 from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+from dynamo.llm.exceptions import InvalidArgument
 
 _U32_MAX = 2**32 - 1
 
