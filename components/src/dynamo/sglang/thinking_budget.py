@@ -12,7 +12,6 @@ _U32_MAX = 2**32 - 1
 
 
 def extract_thinking_budget(request: Mapping[str, Any]) -> int | None:
-    """Return the validated budget, preferring canonical over legacy request fields."""
     stop_conditions = request.get("stop_conditions")
     if (
         isinstance(stop_conditions, Mapping)
@@ -40,7 +39,6 @@ def extract_thinking_budget(request: Mapping[str, Any]) -> int | None:
 
 
 def thinking_budget_requested(request: Mapping[str, Any]) -> bool:
-    """Return whether a canonical, root-level, or legacy budget was supplied."""
     return extract_thinking_budget(request) is not None
 
 
@@ -127,7 +125,6 @@ def apply_thinking_budget(
     *,
     engine: Any | None = None,
 ) -> dict[str, Any]:
-    """Translate Dynamo's canonical budget to SGLang sampling parameters."""
     result = dict(sampling_params)
     budget = extract_thinking_budget(request)
     if budget is None:
