@@ -92,11 +92,35 @@ LoRA requires a vLLM build containing
 NIXL prefill/decode also requires the gRPC numeric-conversion fix in
 [vllm-project/vllm#54814](https://github.com/vllm-project/vllm/pull/54814).
 
+For local LoRA serving, use [`launch/agg_lora.sh`](launch/agg_lora.sh) or
+[`launch/disagg_lora.sh`](launch/disagg_lora.sh). Both print adapter loading examples
+and accept `--help` for GPU, port, and cache settings. Load each adapter on both
+workers before sending prefill/decode traffic.
+
+S3 downloads use your existing AWS configuration. To use a local MinIO server,
+set its connection details explicitly (also applies to `disagg_lora.sh`):
+
+```bash
+AWS_ENDPOINT_URL_S3=http://localhost:9000 \
+AWS_ACCESS_KEY_ID=minioadmin \
+AWS_SECRET_ACCESS_KEY=minioadmin \
+AWS_REGION=us-east-1 \
+AWS_ALLOW_HTTP=true \
+    lib/sidecar/vllm/launch/agg_lora.sh
+```
+
+The disaggregated launcher uses a private local IPC socket for KV events, with one
+data-parallel rank per engine. Custom multi-rank deployments must set
+`VLLM_PREFILL_KV_EVENT_ENDPOINT`, replacing `VLLM_PREFILL_KV_EVENT_PORT`.
+For TCP, this vLLM publisher requires a wildcard bind address such as
+`tcp://*:20081`; a concrete IP makes it connect instead of listen. Restrict access
+to that port to trusted consumers because KV events contain request token IDs.
+
 ## Run
 
 ### Native Generate compatibility
 
-`vllm-proto 0.1.0` does not include the native sampling JSON extension proposed
+`vllm-proto 0.3.0` does not include the native sampling JSON extension proposed
 in [vLLM #56421](https://github.com/vllm-project/vllm/pull/56421). The sidecar
 therefore does not advertise `vllm_inference_v1_generate`. Aggregated and decode
 requests from v1.4 frontends can still use the legacy
@@ -185,7 +209,7 @@ The RL endpoint, engine routes, and raw HTTP compatibility surface are administr
 
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
-The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
+For hybrid data parallelism, run one vLLM gRPC frontend and sidecar per node with `--data-parallel-hybrid-lb` and the node's local DP size and starting rank. Point each sidecar's `--grpc-endpoint` at its local frontend. This requires a vLLM build that reports local DP size.
 
 Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
 
