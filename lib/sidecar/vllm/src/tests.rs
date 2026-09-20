@@ -1231,13 +1231,13 @@ fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
 fn native_generate_rejects_unrepresentable_sampling_controls() {
     let mut defaults = request();
     defaults.sampling_options.temperature = None;
-    let error = build_generate_request(
+    let wire = build_generate_request(
         defaults,
         "defaults".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect_err("omitted temperature cannot preserve model defaults over proto 0.3");
-    assert!(error.to_string().contains("temperature"));
+    .expect("omitted rendered temperature resolves to the vLLM default");
+    assert_eq!(wire.temperature, Some(1.0));
 
     for top_k in [-1, 0] {
         let mut disabled = request();
@@ -1296,6 +1296,52 @@ fn compatibility_envelope_rejects_disabled_token_ids() {
                 .to_string()
                 .contains("sampling_params.return_token_ids must be true")
         );
+    }
+}
+
+#[test]
+fn rendered_null_passthrough_fields_are_ignored() {
+    const NULLABLE_RENDERER_FIELDS: [&str; 5] = [
+        "assistant_tokens_mask",
+        "token_offsets",
+        "content_parts",
+        "return_token_ids",
+        "ec_transfer_params",
+    ];
+
+    let mut defaults_request = request();
+    defaults_request.extra_args = Some(json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "assistant_tokens_mask": null,
+            "token_offsets": null,
+            "content_parts": null,
+            "return_token_ids": null,
+            "ec_transfer_params": null
+        }
+    }));
+    build_generate_request(
+        defaults_request,
+        "renderer-defaults".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("nullable stock-renderer metadata should be ignored");
+
+    for field in NULLABLE_RENDERER_FIELDS {
+        let mut request = request();
+        request.extra_args = Some(json!({
+            "vllm_tito": {
+                "sampling_params": {},
+                field: true
+            }
+        }));
+        let error = build_generate_request(
+            request,
+            format!("unsupported-{field}"),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("non-null renderer metadata must not be discarded");
+        assert!(error.to_string().contains(field));
     }
 }
 
@@ -3774,6 +3820,26 @@ fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
     );
     assert_eq!((feature.offset, feature.length), (1, 2));
     assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+    assert!(feature.is_embed.is_empty());
+}
+
+#[test]
+fn preprocessed_sparse_embedding_mask_is_forwarded_to_vllm_grpc() {
+    let mut features = image_features(VALID_MM_KWARGS_BASE64);
+    features["mm_placeholders"]["image"][0]["offset"] = json!(0);
+    features["mm_placeholders"]["image"][0]["length"] = json!(3);
+    features["mm_placeholders"]["image"][0]["is_embed"] = json!([false, true, false]);
+    let wire = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("sparse embedding mask should be forwarded");
+
+    let Some(pb::media_item::Source::Features(feature)) = wire.media[0].source.as_ref() else {
+        panic!("expected preprocessed features")
+    };
+    assert_eq!(feature.is_embed, vec![false, true, false]);
 }
 
 #[test]

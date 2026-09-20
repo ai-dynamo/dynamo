@@ -471,8 +471,8 @@ fn consume_vllm_tito(
             "extra_args.vllm_tito must be a JSON object",
         ));
     };
-    for key in envelope.keys() {
-        if !matches!(
+    for (key, value) in &envelope {
+        let supported = matches!(
             key.as_str(),
             "request_id"
                 | "sampling_params"
@@ -483,7 +483,17 @@ fn consume_vllm_tito(
                 | "priority"
                 | "kv_transfer_params"
                 | "features"
-        ) {
+        );
+        let nullable_renderer_metadata = value.is_null()
+            && matches!(
+                key.as_str(),
+                "assistant_tokens_mask"
+                    | "token_offsets"
+                    | "content_parts"
+                    | "return_token_ids"
+                    | "ec_transfer_params"
+            );
+        if !supported && !nullable_renderer_metadata {
             return Err(client::invalid_argument(format!(
                 "extra_args.vllm_tito.{key} is not supported by vLLM gRPC"
             )));
@@ -845,6 +855,8 @@ fn build_preprocessed_media(
                     "preprocessed modality `{modality_name}` item {index} placeholder exceeds the prompt"
                 )));
             }
+            // An empty mask is vLLM's dense-placeholder representation. Sparse
+            // layouts require a renderer that preserves `is_embed` on the wire.
             let is_embed = placeholder.is_embed.clone().unwrap_or_default();
             if !is_embed.is_empty() && is_embed.len() as u64 != placeholder.length {
                 return Err(client::invalid_argument(format!(
@@ -1210,11 +1222,6 @@ fn validate_request(
         return Err(client::invalid_argument("beam search is not supported"));
     }
     if !mode.is_prefill() && !mode.is_encode() {
-        if sampling.temperature.is_none() {
-            return Err(client::invalid_argument(
-                "temperature must be explicit because vllm-proto 0.3 cannot preserve model defaults",
-            ));
-        }
         if matches!(sampling.top_k, Some(-1 | 0)) {
             return Err(client::invalid_argument(
                 "top_k=-1 or top_k=0 cannot be represented by vllm-proto 0.3",
