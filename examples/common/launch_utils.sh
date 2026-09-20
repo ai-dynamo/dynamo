@@ -137,9 +137,8 @@ wait_any_exit() {
         echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
         exit 1
     fi
-    # Snapshot pid -> command before waiting: once `wait -n` reaps the child,
-    # neither `ps` nor `jobs` can still say what it was, and an exit code on its
-    # own does not name which of several workers died.
+    # Snapshot before waiting: once `wait -n` reaps the child, neither `ps` nor
+    # `jobs` can still say which command that pid was.
     local _jobs_snapshot
     _jobs_snapshot=$(jobs -l)
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.

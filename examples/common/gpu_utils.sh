@@ -109,26 +109,8 @@ build_trtllm_override_args_with_mem() {
 
     local gpu_mem_json=""
 
-    # This override reaches the worker as a plain dict and replaces the engine
-    # config's whole kv_cache_config object, so every key it does not name falls
-    # back to a TensorRT-LLM default. With only max_tokens set,
-    # free_gpu_memory_fraction lands on the engine default 0.9 rather than on
-    # the value the launch config's YAML declares, so state it here and keep a
-    # profiled launch on a chosen number.
-    #
-    # Stating it does not make the pool independent of co-tenants. The engine
-    # takes the MINIMUM of max_tokens and free_gpu_memory_fraction * headroom,
-    # and that headroom term already has co-tenant memory subtracted from it, so
-    # the fraction scales a contended reading. The token cap binds in every
-    # profiled test configuration here; the fraction only decides how much
-    # headroom stays unclaimed when it does not.
-    #
-    # 0.85 is what examples/backends/trtllm/engine_configs/qwen3/agg.yaml
-    # declares, and it is at or below the 0.9 default, so no caller of this
-    # helper claims more of a shared card than the default already gave it.
-    # TensorRT-LLM engine configs in this tree declare 0.10 to 0.85, so one
-    # constant cannot match them all; honouring each caller's own YAML needs the
-    # worker-side override to stop replacing kv_cache_config wholesale.
+    # This override replaces kv_cache_config wholesale, so any key it omits falls
+    # back to a TensorRT-LLM default; 0.85 is qwen3 agg.yaml's and is under the 0.9 default.
     local kv_mem_fraction=0.85
 
     # Token-based (preferred, simpler to reason about)
