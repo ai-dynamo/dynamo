@@ -20,7 +20,7 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
-from dynamo.common.http import HttpError, fetch_media_bytes
+from dynamo.common.http import HttpConfigurationError, HttpError, fetch_media_bytes
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.protocols import sanitize_media_passthrough
@@ -396,13 +396,20 @@ class AudioGenerationHandler:
                     timeout=self.config.tts_ref_audio_timeout,
                     max_bytes=self.config.tts_ref_audio_max_bytes,
                 )
+            except HttpConfigurationError:
+                # An operator fault, not a verdict on the caller's URL. It must
+                # keep its type: this contract reports client faults as
+                # ValueError, which py_err_to_dynamo maps to InvalidArgument,
+                # and a misconfigured egress proxy is not the caller's bad
+                # request. Must precede HttpError, its base.
+                raise
             except HttpError as exc:
                 # A blocked destination or an oversized body raises
                 # UrlValidationError, which is already a ValueError carrying a
-                # bounded message, so it stays the client error it is. The
-                # HttpError family covers status and transport faults, which
-                # this contract reports as ValueError too; their messages are
-                # bounded by the fetch layer.
+                # bounded message, so it stays the client error it is. The rest
+                # of the HttpError family is a status or transport fault against
+                # a caller-supplied URL, which this contract reports as
+                # ValueError; those messages are bounded by the fetch layer.
                 raise ValueError(f"Failed to download ref_audio: {exc}") from exc
         elif ref_audio_str.startswith("data:"):
             max_bytes = self.config.tts_ref_audio_max_bytes

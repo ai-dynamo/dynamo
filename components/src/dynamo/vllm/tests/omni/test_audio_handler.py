@@ -709,3 +709,68 @@ class TestResolveRefAudio:
         handler = _make_audio_handler()
         with pytest.raises(ValueError, match="must be a URL"):
             asyncio.run(handler._resolve_ref_audio("ftp://example.com/a.wav"))
+
+    # -- the http(s) branch, which fetches through the shared media path -------
+
+    def test_forwards_the_tts_bound_and_deadline_to_the_shared_fetch(self, monkeypatch):
+        # The TTS knobs stay authoritative: this path must not silently pick up
+        # the generic media bound in place of tts_ref_audio_max_bytes.
+        import dynamo.vllm.omni.audio_handler as ah
+
+        handler = _make_audio_handler()
+        seen = {}
+
+        async def fake_fetch(url, **kwargs):
+            seen.update(kwargs)
+            return self._wav_bytes()
+
+        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
+        asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
+
+        assert seen["max_bytes"] == handler.config.tts_ref_audio_max_bytes
+        assert seen["timeout"] == handler.config.tts_ref_audio_timeout
+
+    def test_keeps_a_blocked_destination_a_client_error(self, monkeypatch):
+        # UrlValidationError is a ValueError, and has to stay one so the
+        # frontend still answers 4xx rather than 500.
+        import dynamo.vllm.omni.audio_handler as ah
+        from dynamo.common.http.url_validator import UrlValidationError
+
+        handler = _make_audio_handler()
+
+        async def fake_fetch(url, **kwargs):
+            raise UrlValidationError("blocked destination")
+
+        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
+        with pytest.raises(ValueError, match="blocked destination"):
+            asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
+
+    def test_does_not_turn_an_operator_fault_into_a_client_error(self, monkeypatch):
+        # HttpConfigurationError is an HttpError, so a bare `except HttpError`
+        # here would convert a deployment misconfiguration (an egress proxy the
+        # operator has not trusted) into a ValueError -> InvalidArgument, and
+        # blame the caller for a URL that is fine.
+        import dynamo.vllm.omni.audio_handler as ah
+        from dynamo.common.http import HttpConfigurationError
+
+        handler = _make_audio_handler()
+
+        async def fake_fetch(url, **kwargs):
+            raise HttpConfigurationError("egress proxy is not trusted")
+
+        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
+        with pytest.raises(HttpConfigurationError):
+            asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))
+
+    def test_reports_a_transport_failure_as_a_client_error(self, monkeypatch):
+        import dynamo.vllm.omni.audio_handler as ah
+        from dynamo.common.http import HttpTimeoutError
+
+        handler = _make_audio_handler()
+
+        async def fake_fetch(url, **kwargs):
+            raise HttpTimeoutError("timed out")
+
+        monkeypatch.setattr(ah, "fetch_media_bytes", fake_fetch)
+        with pytest.raises(ValueError, match="Failed to download ref_audio"):
+            asyncio.run(handler._resolve_ref_audio("https://example.com/voice.wav"))

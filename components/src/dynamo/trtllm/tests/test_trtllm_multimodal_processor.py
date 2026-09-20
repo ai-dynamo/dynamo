@@ -88,7 +88,7 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
     )
     fetch = AsyncMock(return_value=b"video bytes")
     load_video = AsyncMock(return_value=object())
-    monkeypatch.setattr(mmp, "fetch_media_bytes", fetch, raising=False)
+    monkeypatch.setattr(mmp, "fetch_media_bytes", fetch)
     monkeypatch.setattr(mmp, "async_load_video", load_video)
     url = "http://169.254.169.254/latest/meta-data/"
 
@@ -101,7 +101,12 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
         ep_disaggregated_params=None,
     )
 
-    fetch.assert_awaited_once_with(url, 30.0, policy=processor._url_policy)
+    fetch.assert_awaited_once_with(
+        url,
+        policy=processor._url_policy,
+        timeout=30.0,
+        max_bytes=processor.max_file_size_bytes,
+    )
     assert load_video.await_args.args[0] != url
 
 
@@ -338,7 +343,7 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
     load_video = AsyncMock(
         side_effect=ImportError("OpenCV (cv2) is required for video decoding")
     )
-    monkeypatch.setattr(mmp, "fetch_media_bytes", fetch, raising=False)
+    monkeypatch.setattr(mmp, "fetch_media_bytes", fetch)
     monkeypatch.setattr(mmp, "async_load_video", load_video)
 
     with pytest.raises(HttpStatusError) as exc_info:
