@@ -280,6 +280,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_startup_resync_of_the_same_set_leaves_the_runtime_configs_unchanged() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let mut configs = base_runtime_config_watch(stream, CancellationToken::new());
+        let mut base = ModelDeploymentCard::default();
+        base.runtime_config.data_parallel_start_rank = 3;
+        base.runtime_config.data_parallel_size = 2;
+        let base_instance = model_instance(7, None, &base);
+
+        // The startup burst: the Added event, then the snapshot of the same set.
+        tx.send(Ok(DiscoveryEvent::Added(base_instance.clone())))
+            .unwrap();
+        configs.changed().await.unwrap();
+        assert_eq!(configs.borrow().get(&7).unwrap().data_parallel_size, 2);
+        tx.send(Ok(DiscoveryEvent::Resync(vec![base_instance.clone()])))
+            .unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !configs.has_changed().unwrap(),
+            "a snapshot of the known set must not republish the configs"
+        );
+
+        // A change after the snapshot still applies.
+        tx.send(Ok(DiscoveryEvent::Removed(base_instance.id())))
+            .unwrap();
+        configs.changed().await.unwrap();
+        assert!(configs.borrow().is_empty());
+    }
+
+    #[tokio::test]
     async fn invalid_data_parallel_ranges_are_ignored_before_runtime_config_watch() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let stream: DiscoveryStream =

@@ -1027,6 +1027,7 @@ mod tests {
     };
     use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use futures::future::try_join_all;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A backend whose watch producer, like the Kubernetes watcher, parks on its own feed and ends
     /// only when the token it was given cancels. A test sends events to a watch through `feeds`.
@@ -1034,6 +1035,7 @@ mod tests {
         inner: MockDiscovery,
         producers: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
         feeds: StdMutex<Vec<tokio::sync::mpsc::UnboundedSender<Result<DiscoveryEvent>>>>,
+        lists: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -1051,6 +1053,7 @@ mod tests {
         }
 
         async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            self.lists.fetch_add(1, Ordering::Relaxed);
             self.inner.list(query).await
         }
 
@@ -1179,6 +1182,7 @@ mod tests {
             inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
             producers: StdMutex::default(),
             feeds: StdMutex::default(),
+            lists: AtomicUsize::new(0),
         };
 
         let source = Client::spawn_dynamic_discovery_source(
@@ -1235,6 +1239,7 @@ mod tests {
             inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
             producers: StdMutex::default(),
             feeds: StdMutex::default(),
+            lists: AtomicUsize::new(0),
         };
 
         let source = Client::spawn_dynamic_discovery_source(
@@ -1271,6 +1276,77 @@ mod tests {
             instances == std::slice::from_ref(&second)
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_fresh_stream_after_a_reconnect_converges_without_a_list() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_discovery_source_reconnect".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string());
+        let discovery = ParkedProducerDiscovery {
+            inner: MockDiscovery::new(Some(1), SharedMockRegistry::new()),
+            producers: StdMutex::default(),
+            feeds: StdMutex::default(),
+            lists: AtomicUsize::new(0),
+        };
+
+        let source = Client::spawn_dynamic_discovery_source(
+            &endpoint,
+            &discovery,
+            drt.primary_token().child_token(),
+        )
+        .await
+        .unwrap();
+        let feed = discovery
+            .feeds
+            .lock()
+            .unwrap()
+            .pop()
+            .expect("the source established no backend watch");
+        let mut instances = source.instance_receiver();
+
+        // The first connection shows A and B.
+        let a = endpoint_instance(&endpoint, 1);
+        let b = endpoint_instance(&endpoint, 2);
+        for instance in [&a, &b] {
+            feed.send(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(
+                instance.clone(),
+            ))))
+            .unwrap();
+        }
+        feed.send(Ok(DiscoveryEvent::Resync(vec![
+            DiscoveryInstance::Endpoint(a.clone()),
+            DiscoveryInstance::Endpoint(b.clone()),
+        ])))
+        .unwrap();
+        wait_for_watch_state(&mut instances, |instances| instances.len() == 2).await;
+
+        // B left during the connection gap. The fresh stream's startup burst names only A, and
+        // its snapshot drops B without a list.
+        feed.send(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(
+            a.clone(),
+        ))))
+        .unwrap();
+        feed.send(Ok(DiscoveryEvent::Resync(vec![
+            DiscoveryInstance::Endpoint(a.clone()),
+        ])))
+        .unwrap();
+        wait_for_watch_state(&mut instances, |instances| {
+            instances == std::slice::from_ref(&a)
+        })
+        .await;
+        assert_eq!(
+            discovery.lists.load(Ordering::Relaxed),
+            0,
+            "the source must converge from the stream alone"
+        );
     }
 
     #[tokio::test]

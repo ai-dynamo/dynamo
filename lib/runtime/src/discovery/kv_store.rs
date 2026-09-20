@@ -1357,6 +1357,38 @@ mod tests {
         assert_eq!(event, DiscoveryEvent::Resync(vec![]));
     }
 
+    #[tokio::test]
+    async fn memory_backend_keeps_the_startup_contract() {
+        use crate::discovery::startup_contract as contract;
+
+        let discovery = || KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        contract::empty_registry_sends_one_empty_resync(&discovery()).await;
+        contract::non_empty_registry_sends_added_events_then_one_resync(&discovery()).await;
+        contract::changes_after_establishment_follow_the_snapshot(&discovery()).await;
+        contract::an_update_after_establishment_follows_the_snapshot(&discovery()).await;
+    }
+
+    #[tokio::test]
+    async fn file_backend_keeps_the_startup_contract() {
+        use crate::discovery::startup_contract as contract;
+
+        let cancel_token = CancellationToken::new();
+        let discovery = || {
+            let root = tempfile::tempdir().unwrap();
+            let store = kv::Manager::file(cancel_token.clone(), root.path());
+            (KVStoreDiscovery::new(store, cancel_token.clone()), root)
+        };
+        let (client, _root) = discovery();
+        contract::empty_registry_sends_one_empty_resync(&client).await;
+        let (client, _root) = discovery();
+        contract::non_empty_registry_sends_added_events_then_one_resync(&client).await;
+        let (client, _root) = discovery();
+        contract::changes_after_establishment_follow_the_snapshot(&client).await;
+        let (client, _root) = discovery();
+        contract::an_update_after_establishment_follows_the_snapshot(&client).await;
+        cancel_token.cancel();
+    }
+
     fn model_spec(taint: &str) -> DiscoverySpec {
         DiscoverySpec::Model {
             namespace: "ns".to_string(),

@@ -335,6 +335,17 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     #[tokio::test]
+    async fn mock_backend_keeps_the_startup_contract() {
+        use crate::discovery::startup_contract as contract;
+
+        let discovery = || MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        contract::empty_registry_sends_one_empty_resync(&discovery()).await;
+        contract::non_empty_registry_sends_added_events_then_one_resync(&discovery()).await;
+        contract::changes_after_establishment_follow_the_snapshot(&discovery()).await;
+        contract::an_update_after_establishment_follows_the_snapshot(&discovery()).await;
+    }
+
+    #[tokio::test]
     async fn watch_emits_same_id_endpoint_update() {
         let client = MockDiscovery::new(Some(1), SharedMockRegistry::new());
         let query = DiscoveryQuery::Endpoint {
