@@ -29,6 +29,8 @@ from functools import lru_cache, wraps
 from types import ModuleType
 from typing import Any
 
+from dynamo.llm.exceptions import InvalidArgument
+
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
 except ModuleNotFoundError as exc:
@@ -366,14 +368,28 @@ def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
     return kwargs
 
 
-def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+def require_reasoning_kwargs(
+    engine: Any,
+    request: Mapping[str, Any],
+    *,
+    thinking_budget_requested: bool = False,
+) -> dict[str, Any]:
     """Build the optional SGLang per-request reasoning-gate argument."""
     require_reasoning = bool(request.get("require_reasoning", False))
+    if thinking_budget_requested and not require_reasoning:
+        raise InvalidArgument(
+            "thinking_token_budget requires reasoning to be enabled for the request"
+        )
     kwargs = filter_supported_async_generate_kwargs(
         engine,
         {"require_reasoning": require_reasoning},
     )
     if require_reasoning and "require_reasoning" not in kwargs:
+        if thinking_budget_requested:
+            raise InvalidArgument(
+                "thinking_token_budget requires an SGLang engine that supports "
+                "per-request require_reasoning"
+            )
         _warn_require_reasoning_unsupported()
     return kwargs
 

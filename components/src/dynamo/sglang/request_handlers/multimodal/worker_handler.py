@@ -16,6 +16,7 @@ from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferReque
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm.exceptions import InvalidArgument
+from dynamo.sglang._compat import require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
@@ -23,6 +24,10 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.thinking_budget import (
+    apply_thinking_budget,
+    thinking_budget_requested,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +82,11 @@ class SglangUtils:
     """General SGLang utilities (not multimodal-specific)"""
 
     @staticmethod
-    def build_sampling_params(request: SglangMultimodalRequest) -> dict:
+    def build_sampling_params(
+        request: SglangMultimodalRequest,
+        server_args: Any | None = None,
+        engine: Any | None = None,
+    ) -> dict:
         """Build sampling parameters for SGLang engine (generic functionality)"""
         sampling_params = {}
 
@@ -99,6 +108,13 @@ class SglangUtils:
             sampling_params["min_new_tokens"] = stop_conditions.min_tokens
         if stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = stop_conditions.ignore_eos
+
+        sampling_params = apply_thinking_budget(
+            request.request.model_dump(),
+            sampling_params,
+            server_args,
+            engine=engine,
+        )
 
         logger.debug(f"Sampling params: {sampling_params}")
         return sampling_params
@@ -538,8 +554,13 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         if not input_ids:
             raise ValueError("input_ids is required")
 
-        sampling_params = SglangUtils.build_sampling_params(request)
-        validate_disagg_parallel_sampling({"sampling_params": sampling_params})
+        request_data = request.request.model_dump()
+        validate_disagg_parallel_sampling(
+            {"sampling_params": {"n": request.request.sampling_options.n}}
+        )
+        sampling_params = SglangUtils.build_sampling_params(
+            request, self.config.server_args, self.engine
+        )
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -555,6 +576,11 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             input_ids=input_ids,
             sampling_params=sampling_params,
             stream=True,
+            **require_reasoning_kwargs(
+                self.engine,
+                request_data,
+                thinking_budget_requested=thinking_budget_requested(request_data),
+            ),
             bootstrap_host=bootstrap_info["bootstrap_host"],
             bootstrap_port=bootstrap_info["bootstrap_port"],
             bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -587,8 +613,11 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         if not input_ids:
             raise ValueError("input_ids is required")
         tensor_id: int | None = None
+        request_data = request.request.model_dump()
         try:
-            sampling_params = SglangUtils.build_sampling_params(request)
+            sampling_params = SglangUtils.build_sampling_params(
+                request, self.config.server_args, self.engine
+            )
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
                 (
                     image_mm_items,
@@ -617,6 +646,13 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 "external_trace_header": trace_header,
                 "rid": context.trace_id if context else None,
             }
+            gen_params.update(
+                require_reasoning_kwargs(
+                    self.engine,
+                    request_data,
+                    thinking_budget_requested=thinking_budget_requested(request_data),
+                )
+            )
             if image_mm_items:
                 gen_params["image_data"] = image_mm_items
             if video_data:
@@ -880,7 +916,16 @@ class MultimodalPrefillWorkerHandler(
         # Get the SglangMultimodalRequest from the DisaggSglangMultimodalRequest
         request = disagg_request.request
         input_ids = request.request.token_ids
-        sampling_params = disagg_request.sampling_params
+        model_dump = getattr(request.request, "model_dump", None)
+        request_data = model_dump() if callable(model_dump) else vars(request.request)
+        has_thinking_budget = thinking_budget_requested(request_data)
+        config = getattr(self, "config", None)
+        sampling_params = apply_thinking_budget(
+            request_data,
+            disagg_request.sampling_params,
+            getattr(config, "server_args", None),
+            engine=self.engine,
+        )
         tensor_id: int | None = None
 
         # Process embeddings from encode worker using our embeddings processor
@@ -909,6 +954,13 @@ class MultimodalPrefillWorkerHandler(
                     "external_trace_header": trace_header,
                     "rid": rid,
                 }
+                gen_params.update(
+                    require_reasoning_kwargs(
+                        self.engine,
+                        request_data,
+                        thinking_budget_requested=has_thinking_budget,
+                    )
+                )
 
                 if image_mm_items:
                     gen_params["image_data"] = image_mm_items

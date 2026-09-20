@@ -15,6 +15,7 @@ import torch
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.protocol import (
+    DisaggSglangMultimodalRequest,
     MultiModalGroup,
     MultiModalInput,
     PreprocessedRequest,
@@ -315,6 +316,88 @@ async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
         await handler._start_prefill_generation(request, 17)
 
     assert released == [23]
+
+
+def _thinking_budget_prefill_request(sampling_params, budget=32):
+    return DisaggSglangMultimodalRequest(
+        request=SglangMultimodalRequest(
+            request=PreprocessedRequest(
+                token_ids=[1, 2, 3],
+                require_reasoning=True,
+                stop_conditions=StopConditions(max_thinking_tokens=budget),
+                sampling_options=SamplingOptions(),
+            )
+        ),
+        sampling_params=sampling_params,
+    )
+
+
+def _thinking_budget_prefill_handler(engine):
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+    handler.engine = engine
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        )
+    )
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_overwrites_forwarded_thinking_budget(monkeypatch):
+    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
+
+    captured = {}
+
+    class RecordingEngine:
+        async def async_generate(self, require_reasoning=False, **kwargs):
+            captured.update(kwargs)
+            captured["require_reasoning"] = require_reasoning
+            return iter(())
+
+    async def build_mm_items(request, embeddings_processor):
+        return [], [], None, None
+
+    handler = _thinking_budget_prefill_handler(RecordingEngine())
+    monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
+    request = _thinking_budget_prefill_request(
+        {"custom_params": {"thinking_budget": -1}, "max_new_tokens": 1}
+    )
+
+    await handler._start_prefill_generation(request, 17)
+
+    assert captured["sampling_params"]["custom_params"] == {"thinking_budget": 32}
+    assert captured["require_reasoning"] is True
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_custom_logit_processor():
+    handler = _thinking_budget_prefill_handler(SimpleNamespace())
+    request = _thinking_budget_prefill_request(
+        {"custom_logit_processor": "serialized-processor"}
+    )
+
+    with pytest.raises(InvalidArgument, match="custom_logit_processor"):
+        await handler._start_prefill_generation(request, 17)
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_forwarded_budget_without_canonical_value():
+    handler = _thinking_budget_prefill_handler(SimpleNamespace())
+    request = _thinking_budget_prefill_request(
+        {"custom_params": {"thinking_budget": 32}},
+        budget=None,
+    )
+
+    with pytest.raises(InvalidArgument, match="requires a canonical"):
+        await handler._start_prefill_generation(request, 17)
 
 
 @pytest.mark.asyncio
