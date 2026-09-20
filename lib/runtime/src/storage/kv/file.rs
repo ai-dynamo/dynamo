@@ -147,9 +147,8 @@ impl Store for FileStore {
             return Ok(dir.clone());
         };
 
-        // A shut down store must not create directories. Callers can still reach us after
-        // `shutdown` returns, and re-creating a bucket under a root the caller is deleting
-        // makes that removal fail with ENOTEMPTY.
+        // Re-creating a bucket under a root the caller is deleting makes that removal
+        // fail with ENOTEMPTY.
         if self.is_shutdown.load(Ordering::Acquire) {
             return Err(StoreError::FilesystemError(format!(
                 "FileStore is shut down, refusing to create bucket '{bucket_name}'"
