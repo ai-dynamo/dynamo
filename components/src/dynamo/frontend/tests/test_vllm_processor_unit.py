@@ -1686,8 +1686,6 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # One annotated envelope per iteration carries both data and typed
-        # llm_metrics; serde skips the internal field before SSE serialization.
         assert len(chunks) == 1
         envelope = chunks[0]
 
