@@ -103,13 +103,25 @@ check_workers_alive() {
     return 0
 }
 
+# Transfer timeout for one readiness probe, given an absolute ${1} deadline.
+# Without it a peer that accepts the connection and then never answers blocks
+# curl forever, and the poll loop only tests the deadline between probes, so the
+# whole startup budget could be overrun. Capped well below the budget so one
+# hung probe cannot suppress the worker liveness scan either.
+probe_timeout() {
+    local remaining=$(( $1 - SECONDS ))
+    if (( remaining > 10 )); then remaining=10; fi
+    if (( remaining < 1 )); then remaining=1; fi
+    echo "${remaining}"
+}
+
 # Poll ${url} until ready, giving up at the absolute ${deadline} (a SECONDS
 # value) or as soon as any worker dies, so the worker's own error is reported.
 wait_ready() {
     local url="$1" name="$2" deadline="$3"
     echo "Waiting for ${name} ..."
     while (( SECONDS < deadline )); do
-        if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
+        if curl -fsS --max-time "$(probe_timeout "${deadline}")" "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
             echo "${name} is ready"
             return 0
         fi
@@ -186,6 +198,7 @@ echo "Waiting for frontend to accept requests ..."
 FRONTEND_READY=false
 while (( SECONDS < STARTUP_DEADLINE )); do
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+        --max-time "$(probe_timeout "${STARTUP_DEADLINE}")" \
         -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
