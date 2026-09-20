@@ -787,10 +787,8 @@ class TestToolCallingProtocol:
             ],
             tools=TOOLS_WEATHER + TOOLS_SEARCH + TOOLS_CALCULATOR,
             parallel_tool_calls=True,
-            # Keep these pinned: unpinned, the worker samples and a 0.6B model
-            # sometimes answers in prose instead of calling tools, ending the
-            # stream with finish_reason='stop'. This test checks the streaming
-            # tool-call protocol, not the sampler.
+            # Keep pinned: with sampling this 0.6B model sometimes answers in
+            # prose instead of calling tools, ending the stream with 'stop'.
             temperature=0,
             seed=0,
         )
