@@ -256,23 +256,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         );
 
         // Map backend finish reasons to OpenAI's finish reasons.
-        let finish_reason = match delta.finish_reason.as_ref() {
-            Some(common::FinishReason::EoS) => Some(dynamo_protocols::types::FinishReason::Stop),
-            Some(common::FinishReason::Stop) => Some(dynamo_protocols::types::FinishReason::Stop),
-            Some(common::FinishReason::Length) => {
-                Some(dynamo_protocols::types::FinishReason::Length)
-            }
-            Some(common::FinishReason::Cancelled) => {
-                Some(dynamo_protocols::types::FinishReason::Stop)
-            }
-            Some(common::FinishReason::ContentFilter) => {
-                Some(dynamo_protocols::types::FinishReason::ContentFilter)
-            }
-            Some(common::FinishReason::Error(err_msg)) => {
-                return Err(anyhow::anyhow!(err_msg.clone()));
-            }
-            None => None,
-        };
+        let finish_reason = delta
+            .finish_reason
+            .as_ref()
+            .map(common::FinishReason::to_openai_chat_finish_reason)
+            .transpose()?;
         let stop_reason = delta.stop_reason.clone();
 
         // Create the streaming response.

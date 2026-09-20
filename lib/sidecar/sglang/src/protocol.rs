@@ -6,13 +6,13 @@
 use std::collections::HashMap;
 
 use dynamo_backend_common::{
-    DisaggregationMode, DynamoError, LLMEngineOutput, LLMEngineOutputExt, PreprocessedRequest,
-    StopReason, TopLogprob, usage,
+    DisaggregationMode, DynamoError, LLMEngineOutput, PreprocessedRequest, TopLogprob, usage,
 };
 use serde_json::{Map, Value};
 
 use crate::client;
 use crate::proto as pb;
+use crate::response::{self, FinishKind, NumericStopReason};
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
@@ -365,50 +365,23 @@ pub(crate) fn terminal_from_meta(
 ) -> Result<LLMEngineOutput, DynamoError> {
     let finish = meta_value(meta, "finish_reason")
         .ok_or_else(|| client::protocol_error("SGLang terminal is missing finish_reason"))?;
-    let finish_type = finish
-        .get("type")
-        .and_then(Value::as_str)
-        .or_else(|| finish.as_str())
-        .ok_or_else(|| client::protocol_error("SGLang finish_reason is missing a type"))?;
-    let mut output = match finish_type {
-        "stop" => LLMEngineOutput::stop(),
-        "length" => LLMEngineOutput::length(),
-        "cancelled" => LLMEngineOutput::cancelled(),
-        "abort" | "error" => return Err(terminal_failure(finish_type, &finish)),
-        other => {
+    let parsed = response::parse_finish(&finish)?;
+    let mut output = match parsed.kind {
+        FinishKind::Stop => LLMEngineOutput::stop(),
+        FinishKind::Length => LLMEngineOutput::length(),
+        FinishKind::Cancelled => LLMEngineOutput::cancelled(),
+        FinishKind::Abort if parsed.finish_type == "abort" => return Err(parsed.failure()),
+        FinishKind::Error => return Err(parsed.failure()),
+        _ => {
             return Err(client::protocol_error(format!(
-                "SGLang returned unsupported finish_reason type `{other}`"
+                "SGLang returned unsupported finish_reason type `{}`",
+                parsed.finish_type
             )));
         }
-    }
-    .with_usage(usage(prompt_tokens, generated));
-    output.stop_reason = finish.get("matched").and_then(|matched| match matched {
-        Value::String(value) => Some(StopReason::String(value.clone())),
-        Value::Number(value) => value.as_i64().map(StopReason::Int),
-        _ => None,
-    });
+    };
+    output.completion_usage = Some(usage(prompt_tokens, generated));
+    output.stop_reason = parsed.stop_reason(NumericStopReason::Any);
     Ok(output)
-}
-
-pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
-    let message = finish
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("SGLang generation failed");
-    let status_code = finish.get("status_code").and_then(Value::as_i64);
-    let err_type = finish.get("err_type").and_then(Value::as_str);
-    let detail = format!(
-        "SGLang generation {finish_type}: {message} (status_code={}, err_type={})",
-        status_code
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "unknown".to_string()),
-        err_type.unwrap_or("unknown")
-    );
-    if matches!(status_code, Some(400..=499)) {
-        client::invalid_arg(detail)
-    } else {
-        client::protocol_error(detail)
-    }
 }
 
 pub(crate) fn engine_data_from_meta(
@@ -754,11 +727,16 @@ mod tests {
     #[test]
     fn malformed_terminal_is_rejected() {
         assert!(terminal_from_meta(&HashMap::new(), 4, 0).is_err());
-        let meta = HashMap::from([(
-            "finish_reason".to_string(),
-            json!({"type": "mystery"}).to_string(),
-        )]);
-        assert!(terminal_from_meta(&meta, 4, 0).is_err());
+        for finish in [
+            json!({}),
+            json!({"type": "mystery"}),
+            json!({"type": "eos"}),
+            json!({"type": "content_filter"}),
+            json!({"type": "abort_worker"}),
+        ] {
+            let meta = HashMap::from([("finish_reason".to_string(), finish.to_string())]);
+            assert!(terminal_from_meta(&meta, 4, 0).is_err());
+        }
     }
 
     #[test]
