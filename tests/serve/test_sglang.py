@@ -156,9 +156,8 @@ sglang_configs = {
     ),
     "thinking_token_budget": SGLangConfig(
         # Exercise the full frontend-to-SGLang translation with the native
-        # strict-thinking grammar enabled. The unit suite checks the exact
-        # SamplingParams shape; this request proves the deployed configuration
-        # accepts the public OpenAI field.
+        # strict-thinking grammar enabled. The worker log assertion proves
+        # the deployed worker receives SGLang's custom thinking budget.
         name="thinking_token_budget",
         directory=sglang_dir,
         script_name="agg.sh",
@@ -180,6 +179,7 @@ sglang_configs = {
         ],
         env={
             "DYN_CHAT_PROCESSOR": "sglang",
+            "DYN_LOG": "debug",
             "DYN_REASONING_PARSER": "qwen3",
         },
         frontend_port=DefaultPort.FRONTEND.value,
@@ -188,6 +188,9 @@ sglang_configs = {
                 "Return a short answer for this synthetic prompt.",
                 repeat_count=1,
                 expected_response=[],
+                expected_log=[
+                    r"SGLang sampling params: .*['\"]thinking_budget['\"]: 32"
+                ],
                 max_tokens=128,
                 extra_body={"thinking_token_budget": 32},
             )
