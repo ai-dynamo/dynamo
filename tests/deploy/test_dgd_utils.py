@@ -3,6 +3,7 @@
 
 """Unit tests for schema-aware DynamoGraphDeployment helpers."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ import pytest
 import requests
 import yaml
 
+from tests.deploy import dgd_utils
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
@@ -231,3 +233,62 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
         previous=True,
         tail_lines=50000,
     )
+
+
+@pytest.mark.parametrize(
+    ("failed", "capture_behavior", "expected_events"),
+    [
+        (False, "complete", ["service-logs", "delete"]),
+        (
+            True,
+            "complete",
+            ["capture-start", "capture-done", "service-logs", "delete"],
+        ),
+        (True, "timeout", ["capture-start", "service-logs", "delete"]),
+        (True, "cancel", ["capture-start", "service-logs", "delete"]),
+    ],
+    ids=["success", "failure", "capture-timeout", "capture-cancelled"],
+)
+async def test_discovery_capture_and_cleanup(
+    monkeypatch, tmp_path, failed, capture_behavior, expected_events
+):
+    deployment = managed_deployment(tmp_path)
+    events = []
+
+    # Isolate teardown from Kubernetes startup.
+    monkeypatch.setattr(
+        ManagedDeployment, "__aenter__", AsyncMock(return_value=deployment)
+    )
+    deployment._get_service_logs = MagicMock(
+        side_effect=lambda: events.append("service-logs")
+    )
+    snapshot_timeout = 1 if capture_behavior == "cancel" else 0.01
+    monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", snapshot_timeout)
+
+    async def capture():
+        events.append("capture-start")
+        if capture_behavior in {"timeout", "cancel"}:
+            await asyncio.Event().wait()
+        await asyncio.sleep(0)
+        events.append("capture-done")
+
+    async def delete():
+        events.append("delete")
+
+    deployment._capture_discovery_state = capture
+    deployment._delete_deployment = delete
+
+    if capture_behavior == "cancel":
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.01):
+                async with deployment:
+                    raise ValueError("inference failed")
+    elif failed:
+        with pytest.raises(ValueError, match="inference failed"):
+            async with deployment:
+                raise ValueError("inference failed")
+    else:
+        async with deployment:
+            pass
+
+    assert events == expected_events
