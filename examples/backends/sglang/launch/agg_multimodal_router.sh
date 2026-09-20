@@ -83,12 +83,9 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
-# Non-zero as soon as any launched worker has died, naming it and its exit
-# status. Every startup poll checks all of WORKER_PIDS, not just the process it
-# happens to be waiting on: the waits are sequential, so a worker that dies
-# while a different one is still loading would otherwise go unnoticed until the
-# shared deadline — the slow, diagnostics-free failure this startup path exists
-# to avoid.
+# The readiness waits are sequential, so every worker has to be checked on each
+# poll: one that dies while a different worker is still loading is otherwise
+# only noticed at the shared deadline.
 check_workers_alive() {
     local i pid status
     for i in "${!WORKER_PIDS[@]}"; do
@@ -103,11 +100,9 @@ check_workers_alive() {
     return 0
 }
 
-# Transfer timeout for one readiness probe, given an absolute ${1} deadline.
-# Without it a peer that accepts the connection and then never answers blocks
-# curl forever, and the poll loop only tests the deadline between probes, so the
-# whole startup budget could be overrun. Capped well below the budget so one
-# hung probe cannot suppress the worker liveness scan either.
+# Remaining budget for one probe, capped: the poll loops test the deadline only
+# between probes, so a peer that accepts the connection and never answers would
+# otherwise block past the budget, and stall the liveness scan with it.
 probe_timeout() {
     local remaining=$(( $1 - SECONDS ))
     if (( remaining > 10 )); then remaining=10; fi
@@ -115,8 +110,7 @@ probe_timeout() {
     echo "${remaining}"
 }
 
-# Poll ${url} until ready, giving up at the absolute ${deadline} (a SECONDS
-# value) or as soon as any worker dies, so the worker's own error is reported.
+# ${deadline} is an absolute SECONDS value, not a duration.
 wait_ready() {
     local url="$1" name="$2" deadline="$3"
     echo "Waiting for ${name} ..."
