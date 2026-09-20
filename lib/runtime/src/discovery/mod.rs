@@ -1193,13 +1193,14 @@ pub enum DiscoveryEvent {
     ModelTaintsUpdated(ModelTaintsUpdate),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
-    /// The backend resynchronized. The payload holds every instance that matches the query at
-    /// that moment.
+    /// The full set of instances that match the query at one moment.
     ///
-    /// The stream sends this event after the incremental events of the same resync. A consumer
-    /// that builds its state only from this stream can ignore this event. A consumer
-    /// that holds state from another source, such as a [`Discovery::list`] call, must replace its
-    /// state with the payload.
+    /// Every stream sends this event once at startup, after the `Added` events of the same
+    /// snapshot, and empty when nothing matches. The stream sends it again after the backend
+    /// fell behind and resynchronized, after the incremental events of that resync. A consumer
+    /// that builds its state only from this stream can ignore this event. A consumer that holds
+    /// state from another source, such as a [`Discovery::list`] call or an earlier stream, must
+    /// replace its state with the payload.
     Resync(Vec<DiscoveryInstance>),
 }
 
@@ -1670,17 +1671,26 @@ pub trait Discovery: Send + Sync {
 
     /// Returns a stream of discovery events for the given discovery query
     ///
-    /// An implementation establishes the watch before it returns. The stream reports the state at
-    /// that moment as `Added` events, and then every change that follows.
+    /// An implementation establishes the watch before it returns. A backend that has not
+    /// completed its own initialization waits for it, and returns an error when that
+    /// initialization ends without completing, instead of opening a stream over an empty set.
+    ///
+    /// The stream starts with the state at establishment: one `Added` event per matching
+    /// instance, then exactly one [`DiscoveryEvent::Resync`] that holds the same set. An empty
+    /// set gives no `Added` event and one empty `Resync`. Every change that follows establishment
+    /// comes after that `Resync`, so the snapshot never replays over a newer change.
     ///
     /// A backend can fall behind and resynchronize from an authoritative snapshot. The stream then
     /// reports the changes between its own state and that snapshot, and after them one
     /// [`DiscoveryEvent::Resync`] that holds the full set. A change that started and ended inside
     /// the gap is not reported as a change.
     ///
-    /// A caller that also needs a [`Discovery::list`] snapshot calls `list_and_watch` first, and
-    /// replaces its state on every `Resync`. A `list` before the watch can show an instance that
-    /// an unregister removes before the snapshot, and no event reports that removal.
+    /// A consumer that reopens a watch after losing one replaces its state with the first
+    /// `Resync` of the new stream: an instance that left during the gap is absent from that
+    /// snapshot, and no `Removed` event reports it. No [`Discovery::list`] call is needed. A
+    /// caller that also needs a `list` snapshot calls `list_and_watch` first, and replaces its
+    /// state on every `Resync`. A `list` before the watch can show an instance that an
+    /// unregister removes before the snapshot, and no event reports that removal.
     ///
     /// The optional cancellation token can be used to stop the watch stream
     async fn list_and_watch(
