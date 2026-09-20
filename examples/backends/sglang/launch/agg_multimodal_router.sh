@@ -32,6 +32,15 @@ SGLANG_SYSTEM_PORT_BASE="${SGLANG_SYSTEM_PORT_BASE:-18091}"
 # Differs from agg_router.sh's 5557 so the two variants can co-run.
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-29090}"
 
+# One absolute budget for the whole startup: workers first, then frontend.
+# Shared rather than split per phase, so no phase gets an arbitrary share and
+# NUM_WORKERS cannot multiply the wait. It has to stay below the caller's own
+# budget — the serve tests give this topology 400s, see
+# tests/serve/multimodal_profiles/sglang.py — so that a startup which stalls
+# ends here, with the logs, instead of being killed from outside with no
+# diagnostics. A healthy startup is well under a minute.
+STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-330}"
+
 DYN_LOG_VAL="${DYN_LOG:-info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug}"
 
 # Pass-through extra args for `python -m dynamo.sglang`.
@@ -78,17 +87,29 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
+# Poll ${url} until ready, giving up at the absolute ${deadline} (a SECONDS
+# value) or as soon as ${pid} dies. The liveness check matters as much as the
+# deadline: without it a worker that dies during model load or CUDA-graph
+# capture is polled at its corpse until the caller kills the whole tree, which
+# reports a bare timeout and discards the engine error that explains it.
+# Returning non-zero exits the script under `set -e`.
 wait_ready() {
-    local url="$1" name="$2" timeout_s="${3:-900}"
-    local deadline=$((SECONDS + timeout_s))
+    local url="$1" name="$2" deadline="$3" pid="${4:-}"
     echo "Waiting for ${name} ..."
     while (( SECONDS < deadline )); do
         if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
             echo "${name} is ready"
             return 0
         fi
+        if [[ -n "${pid}" ]] && ! kill -0 "${pid}" 2>/dev/null; then
+            local status=0
+            wait "${pid}" 2>/dev/null || status=$?
+            echo "${name} (pid ${pid}) exited with status ${status} before becoming ready" >&2
+            return 1
+        fi
         sleep 1
     done
+    echo "${name} did not become ready within the ${STARTUP_TIMEOUT}s startup budget" >&2
     return 1
 }
 
@@ -109,6 +130,8 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 # with adjacent test slots.
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
+WORKER_PIDS=()
+STARTUP_DEADLINE=$((SECONDS + STARTUP_TIMEOUT))
 for i in $(seq 1 "${NUM_WORKERS}"); do
     DEFAULT_WORKER_PORT=$((SGLANG_SYSTEM_PORT_BASE + (i - 1) * 2))
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
@@ -136,10 +159,12 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --disable-piecewise-cuda-graph \
         "${MAMBA_ARGS[@]}" \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+    WORKER_PIDS+=("$!")
 done
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "SGLang backend $i"
+    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "SGLang backend $i" \
+        "${STARTUP_DEADLINE}" "${WORKER_PIDS[i-1]}"
 done
 
 echo "=== Starting frontend (KV router, MM-aware routing) ==="
@@ -152,8 +177,7 @@ python -m dynamo.frontend \
 
 echo "Waiting for frontend to accept requests ..."
 FRONTEND_READY=false
-DEADLINE=$((SECONDS + 300))
-while (( SECONDS < DEADLINE )); do
+while (( SECONDS < STARTUP_DEADLINE )); do
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
         -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
         -H "Content-Type: application/json" \
@@ -163,7 +187,7 @@ while (( SECONDS < DEADLINE )); do
     sleep 2
 done
 if [[ "$FRONTEND_READY" != true ]]; then
-    echo "Frontend did not become ready within 300s" >&2
+    echo "Frontend did not become ready within the ${STARTUP_TIMEOUT}s startup budget" >&2
     exit 1
 fi
 
