@@ -196,6 +196,7 @@ Dynamo forwards `thinking_token_budget` to vLLM's `SamplingParams.thinking_token
 ```bash
 python -m dynamo.vllm \
   --model Qwen/Qwen3-0.6B \
+  --reasoning-parser qwen3 \
   --dyn-reasoning-parser qwen3
 ```
 
@@ -203,7 +204,7 @@ Use a vLLM release that provides the built-in thinking-budget logits processor. 
 
 ### SGLang
 
-SGLang requires strict thinking, an SGLang reasoning parser, an initialized tokenizer, and a grammar backend. Run the SGLang chat processor in the frontend so Dynamo can preserve the canonical preprocessed request state.
+SGLang requires strict thinking, an SGLang reasoning parser with an active reasoning-token filter, an initialized tokenizer, and a grammar backend. Run the SGLang chat processor in the frontend so Dynamo can preserve the canonical preprocessed request state.
 
 ```bash
 python -m dynamo.frontend \
