@@ -15,7 +15,15 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+# Each test runs in well under a second. The timeout is sized above the 60s
+# subprocess timeout below so a stuck helper surfaces as the subprocess error,
+# which names the harness output, rather than as a bare pytest timeout.
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(90),
+]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LAUNCH_UTILS = REPO_ROOT / "examples" / "common" / "launch_utils.sh"

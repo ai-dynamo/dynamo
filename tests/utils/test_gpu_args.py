@@ -18,7 +18,14 @@ import pytest
 
 from tests.utils import gpu_args
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+# The helper shells out through subprocess.run without a timeout of its own, so
+# this marker is the only bound on a bash call that fails to return.
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(60),
+]
 
 
 def _env_without_profile_overrides() -> dict[str, str]:
