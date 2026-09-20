@@ -42,6 +42,7 @@ def _install_ray_stub(
     raises=None,
     delay=0.0,
     thread_log=None,
+    gate=None,
 ):
     """Register a fake ``ray`` package tree covering everything the handler imports.
 
@@ -49,13 +50,20 @@ def _install_ray_stub(
                     path never touches Ray, or assert how a failure is reported.
     ``delay``    -- seconds each query blocks for, to model a slow GCS.
     ``thread_log`` -- list that each query appends its thread ident to.
+    ``gate``     -- threading.Event each query blocks on instead of sleeping, so a
+                    test can hold a GCS query outstanding for exactly as long as it
+                    needs rather than betting on a wall-clock margin.
     """
     idle = dict(idle_by_node_id or {})
 
     def _enter():
         if thread_log is not None:
             thread_log.append(threading.get_ident())
-        if delay:
+        if gate is not None:
+            # Capped so a test that never opens its gate fails on its own bound
+            # instead of stranding this thread for the life of the interpreter.
+            gate.wait(30.0)
+        elif delay:
             time.sleep(delay)
         if raises is not None:
             raise raises
@@ -219,28 +227,42 @@ def test_ray_queries_run_off_the_event_loop(monkeypatch):
 
 def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
     monkeypatch.setattr(vllm_handlers, "_EP_CAPACITY_RAY_TIMEOUT_S", 0.05)
+    # The gate stays shut for the whole call, so the snapshot cannot finish on its
+    # own and the endpoint's deadline is the only thing that can return a result.
+    gate = threading.Event()
     _install_ray_stub(
         monkeypatch,
         nodes=[_node("n1", "10.0.0.1", 4.0)],
         idle_by_node_id={"n1": {"GPU": 4.0}},
-        delay=0.2,
+        gate=gate,
     )
+    handler = _make_self(dp=3, tp=2, backend="ray")
 
-    async def _timed():
-        started = time.monotonic()
-        res = await BaseWorkerHandler.get_ep_capacity(
-            _make_self(dp=3, tp=2, backend="ray"), {}
-        )
-        return res, time.monotonic() - started
+    async def _call():
+        try:
+            # Generous outer bound -- a hundred times the patched deadline. It is
+            # not the claim under test, only a guard so a caller that is never
+            # released fails here instead of hanging the suite.
+            return await asyncio.wait_for(
+                BaseWorkerHandler.get_ep_capacity(handler, {}), timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            pytest.fail("caller was never released from the stalled GCS query")
 
-    r, elapsed = asyncio.run(_timed())
+    try:
+        r = asyncio.run(_call())
 
-    assert r["status"] == "error"
-    assert "timed out" in r["message"].lower()
-    # The caller is released at the timeout instead of waiting out the GCS stall.
-    # Timed around the await, not around asyncio.run: the timeout frees the caller,
-    # not the thread, so loop shutdown still joins the orphaned executor thread.
-    assert elapsed < 0.15, f"caller waited {elapsed:.2f}s, expected to bail at 0.05s"
+        assert r["status"] == "error"
+        assert "timed out" in r["message"].lower()
+        # The caller was released while the GCS query was still outstanding: the
+        # gate has not been opened yet, so the snapshot cannot have completed.
+        assert handler._ep_capacity_inflight is not None
+        assert not handler._ep_capacity_inflight.done()
+    finally:
+        # Release the blocked query before disposing of the executor it runs on.
+        gate.set()
+        _shutdown(handler)
+
     # dp/tp still reported even though the GPU query timed out.
     assert r["data_parallel_size"] == 3
     assert r["tensor_parallel_size"] == 2
