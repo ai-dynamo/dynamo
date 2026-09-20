@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests import conftest as tests_conftest
 from tests.utils import vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
@@ -391,6 +392,7 @@ def test_effective_cpu_budget_caps_num_cpus_at_detected_quota(monkeypatch):
 
 def test_xdist_auto_workers_uses_visible_gpu_vram(request, monkeypatch):
     monkeypatch.setattr(request.config.option, "max_vram_gib", 10.0)
+    monkeypatch.setattr(request.config.option, "numprocesses", "auto", raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
     monkeypatch.setattr(
         vram_utils,
@@ -401,9 +403,23 @@ def test_xdist_auto_workers_uses_visible_gpu_vram(request, monkeypatch):
         ],
     )
 
-    workers = request.config.hook.pytest_xdist_auto_num_workers(config=request.config)
+    workers = tests_conftest.pytest_xdist_auto_num_workers(request.config)
 
     assert workers == 2
+
+
+def test_xdist_logical_workers_bypass_vram_scheduler(request, monkeypatch):
+    monkeypatch.setattr(request.config.option, "max_vram_gib", 10.0)
+    monkeypatch.setattr(request.config.option, "numprocesses", "logical", raising=False)
+    monkeypatch.setattr(request.config.option, "dist", "load", raising=False)
+    monkeypatch.setattr(vram_utils, "detect_gpus", lambda: [])
+
+    workers = tests_conftest.pytest_xdist_auto_num_workers(request.config)
+    tests_conftest.pytest_configure(request.config)
+
+    assert workers is None
+    assert request.config.option.numprocesses == "logical"
+    assert request.config.option.dist == "load"
 
 
 @pytest.mark.parametrize("invalid_budget", ["bogus", "inf", "1e309", "0", "-1"])

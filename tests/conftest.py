@@ -223,6 +223,9 @@ logging.basicConfig(
 @pytest.hookimpl(tryfirst=True, optionalhook=True)
 def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
     """Resolve ``-n auto`` from the GPU budget before xdist consumes it."""
+    if config.getoption("numprocesses", default=None) != "auto":
+        return None
+
     vram_limit = config.getoption("max_vram_gib", default=None)
     if vram_limit is None:
         return None
@@ -300,7 +303,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # xdist's pytest_configure(trylast=True) checks _is_distribution_mode()
     # which reads dist/tx (not numprocesses), so we must also clear dist.
     numproc = config.getoption("numprocesses", default=None)
-    if numproc is not None and numproc != 0:
+    if numproc not in (None, 0, "logical"):
         if isinstance(numproc, str) or numproc == -1:
             config.stash[_gpu_slots_key] = (
                 auto_worker_count(selected_gpus, vram_limit) if selected_gpus else 1
