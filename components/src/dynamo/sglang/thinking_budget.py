@@ -1,19 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
-from sglang.srt.parser.reasoning_parser import ReasoningParser
-
 from dynamo.llm.exceptions import InvalidArgument
+
+from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 _U32_MAX = 2**32 - 1
 
 
 def extract_thinking_budget(request: Mapping[str, Any]) -> int | None:
-    """Read and validate a thinking budget from supported request shapes."""
+    """Return the validated budget, preferring canonical over legacy request fields."""
     stop_conditions = request.get("stop_conditions")
     if (
         isinstance(stop_conditions, Mapping)
@@ -41,7 +40,7 @@ def extract_thinking_budget(request: Mapping[str, Any]) -> int | None:
 
 
 def thinking_budget_requested(request: Mapping[str, Any]) -> bool:
-    """Return whether the request contains a valid thinking budget."""
+    """Return whether a canonical, root-level, or legacy budget was supplied."""
     return extract_thinking_budget(request) is not None
 
 
@@ -91,10 +90,11 @@ def _validate_server_config(server_args: Any, engine: Any | None) -> None:
 
 
 def _token_filter_is_active(reasoning_parser: str) -> bool:
-    """Mirror SGLang 0.5.18/0.5.19 reasoner-grammar activation."""
-    if int(os.getenv("SGLANG_MAX_THINK_TOKENS", "-1")) >= 0:
-        return True
+    """Return whether SGLang's parser activates the per-request token filter.
 
+    ``SGLANG_MAX_THINK_TOKENS`` configures a default budget, but it does not
+    activate the filter for parsers without excluded reasoning tokens.
+    """
     try:
         parser = ReasoningParser(model_type=reasoning_parser)
     except (TypeError, ValueError) as exc:

@@ -385,6 +385,8 @@ def require_reasoning_kwargs(
         {"require_reasoning": require_reasoning},
     )
     if require_reasoning and "require_reasoning" not in kwargs:
+        # The XPU SGLang 0.5.11 pin predates ``require_reasoning``. Keep
+        # non-budget requests compatible until that pin is upgraded to 0.5.16+.
         if thinking_budget_requested:
             raise InvalidArgument(
                 "thinking_token_budget requires an SGLang engine that supports "

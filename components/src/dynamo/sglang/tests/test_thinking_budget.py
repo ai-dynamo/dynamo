@@ -213,10 +213,10 @@ def test_apply_thinking_budget_rejects_non_object_custom_params():
         )
 
 
-def test_apply_thinking_budget_rejects_parser_without_active_token_filter(
+def test_apply_thinking_budget_rejects_global_default_without_active_token_filter(
     monkeypatch,
 ):
-    monkeypatch.delenv("SGLANG_MAX_THINK_TOKENS", raising=False)
+    monkeypatch.setenv("SGLANG_MAX_THINK_TOKENS", "32")
 
     with pytest.raises(InvalidArgument, match="cannot enforce per-request"):
         apply_thinking_budget(

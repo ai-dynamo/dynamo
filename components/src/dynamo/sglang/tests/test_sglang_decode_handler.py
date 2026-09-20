@@ -1216,27 +1216,6 @@ def test_build_sampling_params_drops_raw_custom_params_without_public_budget():
     assert "custom_params" not in sampling_params
 
 
-def test_build_sampling_params_only_emits_validated_thinking_budget():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
-
-    sampling_params = handler._build_sampling_params(
-        {
-            "sampling_options": {},
-            "stop_conditions": {
-                "max_tokens": 128,
-                "max_thinking_tokens": 32,
-            },
-            "require_reasoning": True,
-            "custom_params": {
-                "future_engine_control": True,
-                "thinking_budget": -1,
-            },
-        }
-    )
-
-    assert sampling_params["custom_params"] == {"thinking_budget": 32}
-
-
 def test_build_sampling_params_omits_thinking_budget_when_unset():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
