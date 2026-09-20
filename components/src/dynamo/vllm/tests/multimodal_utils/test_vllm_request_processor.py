@@ -3,7 +3,7 @@
 
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import numpy as np
 import pytest
@@ -695,7 +695,13 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
 
     assert is_cached == {"vision_chunk": [True]}
     assert missing_items is empty_items
-    parse_mm_data.assert_called_once_with({"vision_chunk": []}, validate=False)
+    # vLLM 0.29 preserves the empty modality key; nightly elides it.  Both
+    # forms mean all UUID-addressed items were cache hits, so Dynamo must not
+    # depend on either representation when issuing a UUID-only request.
+    assert parse_mm_data.call_args_list in (
+        [call({"vision_chunk": []}, validate=False)],
+        [call({}, validate=False)],
+    )
 
     cache.is_cached.return_value = [False]
     parse_mm_data.reset_mock()
