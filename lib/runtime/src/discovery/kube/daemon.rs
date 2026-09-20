@@ -13,7 +13,7 @@ use kube::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc, watch};
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
@@ -23,6 +23,41 @@ mod state;
 use state::{BatchChanges, CachedCrMetadata, JoinTable, ReadinessIndex, ReadyEntry, StateChange};
 
 const SOURCE_CHANNEL_CAPACITY: usize = 1024;
+
+/// The daemon's progress toward its first complete view of the cluster.
+///
+/// A list or watch on [`super::KubeDiscoveryClient`] waits for `Ready`. `Stopped` and `Failed`
+/// end that wait with an error, so a caller never takes an empty `list_state` for an empty
+/// cluster.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum DaemonState {
+    /// A reflector has not completed its initial list.
+    Pending,
+    /// Both reflectors completed their initial list, and `list_state` holds the result.
+    Ready,
+    /// The daemon's cancellation token fired.
+    Stopped,
+    /// The daemon ended with this error.
+    Failed(String),
+}
+
+/// The instances the daemon has joined from the cluster, by instance id.
+pub(super) type ListState = Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>;
+
+/// What the daemon publishes: the list state, the event broadcast, and its own state.
+pub(super) struct DaemonOutputs {
+    pub(super) list_state: ListState,
+    pub(super) event_tx: broadcast::Sender<DiscoveryEvent>,
+    pub(super) state_tx: watch::Sender<DaemonState>,
+}
+
+/// The reflector-fed inputs of the daemon's event loop.
+struct DaemonSources {
+    source: DiscoverySource,
+    cr_reader: reflector::Store<DynamoWorkerMetadata>,
+    readiness_rx: mpsc::Receiver<ReadinessEvent>,
+    cr_rx: mpsc::Receiver<CrEvent>,
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReadinessEvent {
@@ -217,20 +252,21 @@ impl DiscoveryDaemon {
         })
     }
 
-    pub async fn run(
-        self,
-        list_state: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
-        event_tx: broadcast::Sender<DiscoveryEvent>,
-    ) -> Result<()> {
+    /// Run the daemon until its cancellation token fires or a reflector stream ends.
+    ///
+    /// The daemon reports `DaemonState::Ready` on `outputs.state_tx` after both reflectors
+    /// completed their initial list and `list_state` holds the result, and reports the terminal
+    /// state when it ends.
+    pub async fn run(self, outputs: DaemonOutputs) {
         tracing::info!("Discovery daemon starting");
 
-        let (readiness_tx, mut readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
         let source = DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
 
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
         let (cr_reader, cr_writer) = reflector::store();
-        let (cr_tx, mut cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
 
         tracing::info!(
             "Daemon watching DynamoWorkerMetadata CRs in namespace: {}",
@@ -257,65 +293,110 @@ impl DiscoveryDaemon {
             }
         });
 
-        let mut join_table = JoinTable::new();
-        let mut readiness_index = ReadinessIndex::default();
-        let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
-
-        loop {
-            let mut changes = BatchChanges::default();
-
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    tracing::info!("Discovery daemon received cancellation");
-                    break;
-                }
-                event = readiness_rx.recv() => {
-                    let Some(event) = event else {
-                        anyhow::bail!("Readiness reflector stream stopped");
-                    };
-                    apply_readiness_event(
-                        event,
-                        &source,
-                        &mut readiness_index,
-                        &mut join_table,
-                        &mut changes,
-                    );
-                }
-                event = cr_rx.recv() => {
-                    let Some(event) = event else {
-                        anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
-                    };
-                    apply_cr_event(
-                        event,
-                        &cr_reader,
-                        &mut valid_cr_cache,
-                        &mut join_table,
-                        &mut changes,
-                    );
-                }
+        let sources = DaemonSources {
+            source,
+            cr_reader,
+            readiness_rx,
+            cr_rx,
+        };
+        let state = match event_loop(sources, &outputs, &self.cancel_token).await {
+            Ok(()) => {
+                tracing::info!("Discovery daemon stopped");
+                DaemonState::Stopped
             }
+            Err(error) => {
+                tracing::error!(%error, "Discovery daemon failed");
+                DaemonState::Failed(error.to_string())
+            }
+        };
+        outputs.state_tx.send_replace(state);
+    }
+}
 
-            let publication = changes.finish(&join_table);
-            if !publication.state_changes.is_empty() || !publication.events.is_empty() {
-                let mut state = list_state.write().await;
-                for change in publication.state_changes {
-                    match change {
-                        StateChange::Upsert(instance_id, metadata) => {
-                            state.insert(instance_id, metadata);
-                        }
-                        StateChange::Remove(instance_id) => {
-                            state.remove(&instance_id);
-                        }
-                    }
+/// Apply every reflector event to the join table and publish the result.
+///
+/// Each reflector sends one `Rebuild` after its initial list. The loop reports
+/// `DaemonState::Ready` once both have, because only then does the join table hold every
+/// instance the cluster had at start. Returns `Ok` when `cancel_token` fires and an error when
+/// a reflector stream ends.
+async fn event_loop(
+    mut sources: DaemonSources,
+    outputs: &DaemonOutputs,
+    cancel_token: &CancellationToken,
+) -> Result<()> {
+    let mut join_table = JoinTable::new();
+    let mut readiness_index = ReadinessIndex::default();
+    let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
+    let mut has_readiness_list = false;
+    let mut has_cr_list = false;
+
+    loop {
+        let mut changes = BatchChanges::default();
+
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                tracing::info!("Discovery daemon received cancellation");
+                return Ok(());
+            }
+            event = sources.readiness_rx.recv() => {
+                let Some(event) = event else {
+                    anyhow::bail!("Readiness reflector stream stopped");
+                };
+                if matches!(event, ReadinessEvent::Rebuild) {
+                    has_readiness_list = true;
                 }
-                for event in publication.events {
-                    event_tx.send(event).ok();
+                apply_readiness_event(
+                    event,
+                    &sources.source,
+                    &mut readiness_index,
+                    &mut join_table,
+                    &mut changes,
+                );
+            }
+            event = sources.cr_rx.recv() => {
+                let Some(event) = event else {
+                    anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
+                };
+                if matches!(event, CrEvent::Rebuild) {
+                    has_cr_list = true;
                 }
+                apply_cr_event(
+                    event,
+                    &sources.cr_reader,
+                    &mut valid_cr_cache,
+                    &mut join_table,
+                    &mut changes,
+                );
             }
         }
 
-        tracing::info!("Discovery daemon stopped");
-        Ok(())
+        let publication = changes.finish(&join_table);
+        if !publication.state_changes.is_empty() || !publication.events.is_empty() {
+            let mut state = outputs.list_state.write().await;
+            for change in publication.state_changes {
+                match change {
+                    StateChange::Upsert(instance_id, metadata) => {
+                        state.insert(instance_id, metadata);
+                    }
+                    StateChange::Remove(instance_id) => {
+                        state.remove(&instance_id);
+                    }
+                }
+            }
+            for event in publication.events {
+                outputs.event_tx.send(event).ok();
+            }
+        }
+
+        // Ready follows the list_state write above, so a caller that waits for Ready and then
+        // reads list_state sees every instance of the initial lists.
+        if has_readiness_list && has_cr_list && *outputs.state_tx.borrow() == DaemonState::Pending {
+            tracing::info!(
+                instances = join_table.known.len(),
+                "Discovery daemon completed its initial sync"
+            );
+            outputs.state_tx.send_replace(DaemonState::Ready);
+        }
     }
 }
 
@@ -526,9 +607,176 @@ mod tests {
     use super::*;
     use crate::component::{Instance, TransportType};
     use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ManagedFieldsEntry, OwnerReference};
+    use k8s_openapi::api::core::v1::{ContainerStatus, PodStatus};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+        ManagedFieldsEntry, ObjectMeta, OwnerReference,
+    };
+    use std::time::Duration;
 
     const TEST_POD_UID: &str = "pod-uid-test";
+    const TEST_POD_NAME: &str = "worker-a";
+
+    /// A ready pod in container mode, and the CR its main container publishes.
+    fn ready_pod_and_cr() -> (Pod, DynamoWorkerMetadata, DiscoveryInstance) {
+        let target = super::super::utils::KubeDiscoveryTarget::Container(
+            TEST_POD_NAME.to_string(),
+            "main".to_string(),
+        );
+        let instance = DiscoveryInstance::Endpoint(Instance {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: target.instance_id(),
+            transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        });
+        let mut metadata = DiscoveryMetadata::new();
+        metadata.register_endpoint(instance.clone()).unwrap();
+        let cr =
+            super::super::crd::build_cr(&target.cr_name(), TEST_POD_NAME, TEST_POD_UID, &metadata)
+                .unwrap();
+        let pod = Pod {
+            metadata: ObjectMeta {
+                name: Some(TEST_POD_NAME.to_string()),
+                uid: Some(TEST_POD_UID.to_string()),
+                ..Default::default()
+            },
+            status: Some(PodStatus {
+                container_statuses: Some(vec![ContainerStatus {
+                    name: "main".to_string(),
+                    ready: true,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        (pod, cr, instance)
+    }
+
+    struct EventLoopHarness {
+        readiness_tx: mpsc::Sender<ReadinessEvent>,
+        cr_tx: mpsc::Sender<CrEvent>,
+        list_state: ListState,
+        state_rx: watch::Receiver<DaemonState>,
+        cancel_token: CancellationToken,
+        task: tokio::task::JoinHandle<Result<()>>,
+    }
+
+    /// Run the event loop over reflector stores that hold `pods` and `crs`, with no cluster.
+    fn spawn_event_loop(pods: Vec<Pod>, crs: Vec<DynamoWorkerMetadata>) -> EventLoopHarness {
+        let (pod_reader, mut pod_writer) = reflector::store();
+        for pod in pods {
+            pod_writer.apply_watcher_event(&watcher::Event::Apply(pod));
+        }
+        let (cr_reader, mut cr_writer) = reflector::store();
+        for cr in crs {
+            cr_writer.apply_watcher_event(&watcher::Event::Apply(cr));
+        }
+        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let list_state: ListState = Arc::new(RwLock::new(HashMap::new()));
+        let (event_tx, _) = broadcast::channel(16);
+        let (state_tx, state_rx) = watch::channel(DaemonState::Pending);
+        let cancel_token = CancellationToken::new();
+        let task = tokio::spawn({
+            let outputs = DaemonOutputs {
+                list_state: list_state.clone(),
+                event_tx,
+                state_tx,
+            };
+            let cancel_token = cancel_token.clone();
+            let sources = DaemonSources {
+                source: DiscoverySource::Pod(pod_reader),
+                cr_reader,
+                readiness_rx,
+                cr_rx,
+            };
+            async move { event_loop(sources, &outputs, &cancel_token).await }
+        });
+        EventLoopHarness {
+            readiness_tx,
+            cr_tx,
+            list_state,
+            state_rx,
+            cancel_token,
+            task,
+        }
+    }
+
+    async fn wait_for_state(
+        state_rx: &mut watch::Receiver<DaemonState>,
+        expected: impl Fn(&DaemonState) -> bool,
+    ) -> DaemonState {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let state = state_rx.borrow_and_update().clone();
+                if expected(&state) {
+                    return state;
+                }
+                state_rx
+                    .changed()
+                    .await
+                    .expect("the event loop dropped its state sender");
+            }
+        })
+        .await
+        .expect("the event loop did not reach the expected state")
+    }
+
+    #[tokio::test]
+    async fn event_loop_reports_ready_after_both_initial_lists_with_the_state_written() {
+        let (pod, cr, instance) = ready_pod_and_cr();
+        let mut harness = spawn_event_loop(vec![pod], vec![cr]);
+
+        // One reflector done is not enough: the join table cannot hold every instance yet.
+        harness
+            .readiness_tx
+            .send(ReadinessEvent::Rebuild)
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(*harness.state_rx.borrow(), DaemonState::Pending);
+
+        harness.cr_tx.send(CrEvent::Rebuild).await.unwrap();
+        wait_for_state(&mut harness.state_rx, |state| *state == DaemonState::Ready).await;
+        // Ready follows the list_state write, so the instance is visible now.
+        let listed: Vec<_> = harness
+            .list_state
+            .read()
+            .await
+            .values()
+            .flat_map(|metadata| metadata.get_all_endpoints())
+            .collect();
+        assert_eq!(listed, vec![instance]);
+
+        harness.cancel_token.cancel();
+        harness.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_loop_ends_with_an_error_when_a_reflector_stream_ends() {
+        let harness = spawn_event_loop(vec![], vec![]);
+
+        // The readiness reflector task ending drops its sender.
+        drop(harness.readiness_tx);
+        let error = tokio::time::timeout(Duration::from_secs(1), harness.task)
+            .await
+            .expect("the event loop did not end")
+            .unwrap()
+            .expect_err("a reflector stream ending must end the loop with an error");
+        assert!(
+            error
+                .to_string()
+                .contains("Readiness reflector stream stopped"),
+            "error: {error}"
+        );
+        assert_eq!(*harness.state_rx.borrow(), DaemonState::Pending);
+        drop(harness.cr_tx);
+    }
 
     fn make_cached(uid: &str) -> CachedCrMetadata {
         CachedCrMetadata {
