@@ -19,6 +19,7 @@ ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_GPU_MEMORY_SERVICE
 ARG VLLM_OMNI_REF
+ARG ENABLE_VLLM_OMNI
 ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
 ARG NIXL_REF
@@ -188,10 +189,14 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 {% set vllm_rs_plugins = "modelexpress" if context.vllm.enable_modelexpress == "true" else "" %}
 
 # Align Transformers and tokenizers before freezing Omni's protected dependencies.
+# Text-only framework profiles keep the dependency solution supplied by the
+# upstream vLLM image instead.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    export UV_CACHE_DIR=/root/.cache/uv && \
-    uv pip install {{ pip_target }} --no-deps \
-        "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        export UV_CACHE_DIR=/root/.cache/uv; \
+        uv pip install {{ pip_target }} --no-deps \
+            "transformers==${TRANSFORMERS_VERSION}" "tokenizers==${TOKENIZERS_VERSION}"; \
+    fi
 
 {% if device != "cuda" %}
 # NIXL meta package always tries to find a cuda-backend
@@ -261,14 +266,17 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
-# constraining packages already solved in the upstream vLLM image.
+# constraining packages already solved in the upstream vLLM image.  Omit this
+# optional stack for text-only framework profiles.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
     --mount=type=bind,source=./container/deps/vllm/install_vllm_omni.sh,target=/tmp/install_vllm_omni.sh \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
-    set -eux; \
-    export UV_CACHE_DIR=/root/.cache/uv; \
-    export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
-    bash /tmp/install_vllm_omni.sh
+    if [ "${ENABLE_VLLM_OMNI}" = "true" ]; then \
+        set -eux; \
+        export UV_CACHE_DIR=/root/.cache/uv; \
+        export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
+        bash /tmp/install_vllm_omni.sh; \
+    fi
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -527,14 +535,15 @@ assert eps, 'modelexpress vllm.general_plugins entry point not found'; \
 {% endif %}
 
 # Check that later package layers preserve the Omni-compatible versions.
-RUN {{ python_executable }} - "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
+RUN {{ python_executable }} - "${ENABLE_VLLM_OMNI}" "${TRANSFORMERS_VERSION}" "${TOKENIZERS_VERSION}" <<'PY'
 import importlib.metadata as md
 import sys
 
-for package, expected in zip(("transformers", "tokenizers"), sys.argv[1:]):
-    actual = md.version(package)
-    if actual != expected:
-        raise RuntimeError(f"expected {package} {expected}, found {actual}")
+if sys.argv[1] == "true":
+    for package, expected in zip(("transformers", "tokenizers"), sys.argv[2:]):
+        actual = md.version(package)
+        if actual != expected:
+            raise RuntimeError(f"expected {package} {expected}, found {actual}")
 PY
 
 # Use the packaged binary to match the installed vLLM version.

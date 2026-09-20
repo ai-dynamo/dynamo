@@ -81,6 +81,10 @@ vllm:
     # multi-architecture nightly image so the Dynamo runtime tracks the
     # latest official model support until it lands in a numbered release.
     runtime_image_tag: nightly
+    # DeepSeek V4.1 Flash is text-only.  Its day-0 image must retain the
+    # dependency solution supplied by vLLM nightly, rather than installing the
+    # separately released Omni stack with its incompatible Transformers pin.
+    enable_vllm_omni: "false"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -105,6 +109,7 @@ vllm:
     runtime_image_tag: v0.29.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.29.0rc1"
+  enable_vllm_omni: "true"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
