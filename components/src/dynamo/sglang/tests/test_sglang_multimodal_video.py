@@ -663,7 +663,7 @@ async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
         return b"vp9-bytes"
 
     monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
-    monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ewh, "fetch_media_bytes", fake_fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(ewh.importlib, "import_module", _selective_import(set()))
@@ -691,7 +691,7 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
         return b"vp9-bytes"
 
     monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
-    monkeypatch.setattr(ewh, "fetch_bytes", fake_fetch)
+    monkeypatch.setattr(ewh, "fetch_media_bytes", fake_fetch)
     monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
     monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
     monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))

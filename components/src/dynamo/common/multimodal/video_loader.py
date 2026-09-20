@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpStatusError, fetch_media_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -170,8 +170,8 @@ class VideoLoader:
         # revalidated; vLLM's own fetcher honors redirects without re-checking.
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
-            content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+            content = await fetch_media_bytes(
+                normalized_url, policy=self._url_policy, timeout=self._http_timeout
             )
             return await self._decode_video_bytes(content, media_io)
 

@@ -80,10 +80,10 @@ def cache_handler(monkeypatch) -> MultimodalEncodeWorkerHandler:
     # corresponding fetch stub
     async def _no_network(*_args, **_kwargs):
         raise AssertionError(
-            "unit tests must not fetch over the network; stub fetch_bytes"
+            "unit tests must not fetch over the network; stub fetch_media_bytes"
         )
 
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", _no_network)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", _no_network)
 
     class _DummyEncoder:
         def __init__(self) -> None:
@@ -642,7 +642,9 @@ async def test_maybe_nvdec_decoder_wraps_h264_only(nvdec_handler, monkeypatch) -
         f"{_HANDLER_MOD}.validate_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+    )
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
     seen: dict = {}
@@ -678,7 +680,7 @@ async def test_maybe_nvdec_decoder_returns_bytes_for_non_hw_codec(
         AsyncMock(return_value="https://x/clip.webm"),
     )
     fetch = AsyncMock(return_value=b"vp9-bytes")
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "vp9")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda c: c == "h264")
     # The passthrough contract now holds only when SGLang can actually decode
@@ -709,7 +711,7 @@ async def test_maybe_nvdec_decoder_rejects_non_http_scheme(
         AsyncMock(return_value="ftp://example.invalid/clip.mp4"),
     )
     fetch = AsyncMock()
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
     assert (
         await nvdec_handler._maybe_nvdec_decoder("ftp://example.invalid/clip.mp4")
         is None
@@ -739,7 +741,7 @@ async def test_fetch_failure_is_terminal(nvdec_handler, monkeypatch, error) -> N
     )
     fetch = AsyncMock(side_effect=error)
     decode = Mock()
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", decode)
 
     with pytest.raises(type(error)) as exc_info:
@@ -770,7 +772,7 @@ async def test_policy_rejection_is_not_swallowed_into_url_passthrough(
         AsyncMock(side_effect=error),
     )
     fetch = AsyncMock()
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", fetch)
+    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_media_bytes", fetch)
 
     # The error also propagates through the batch builder rather than being
     # mapped back to the URL there. Returning None from the inner adapter
@@ -802,7 +804,9 @@ async def test_decode_failure_falls_back_to_the_fetched_bytes(
         f"{_HANDLER_MOD}.validate_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+    )
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
 
@@ -860,7 +864,9 @@ async def test_decode_failure_without_software_decoder_is_actionable(
         f"{_HANDLER_MOD}.validate_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+    )
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", lambda _b: "h264")
     monkeypatch.setattr(f"{_HANDLER_MOD}.should_use_nvdec", lambda _c: True)
 
@@ -889,7 +895,9 @@ async def test_codec_probe_failure_is_not_retried(nvdec_handler, monkeypatch) ->
         f"{_HANDLER_MOD}.validate_media_url",
         AsyncMock(return_value="https://x/clip.mp4"),
     )
-    monkeypatch.setattr(f"{_HANDLER_MOD}.fetch_bytes", AsyncMock(return_value=b"bytes"))
+    monkeypatch.setattr(
+        f"{_HANDLER_MOD}.fetch_media_bytes", AsyncMock(return_value=b"bytes")
+    )
     probe_error = RuntimeError("codec probe failed")
     probe = Mock(side_effect=probe_error)
     monkeypatch.setattr(f"{_HANDLER_MOD}.probe_video_codec", probe)

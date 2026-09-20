@@ -29,7 +29,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.utils import async_load_video
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpStatusError, fetch_media_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -587,8 +587,14 @@ class MultimodalRequestProcessor:
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
                     if urlparse(normalized_url).scheme in ("http", "https"):
-                        content = await fetch_bytes(
-                            normalized_url, 30.0, policy=self._url_policy
+                        # This backend already has an operator-configured file
+                        # limit, so pass it rather than take the shared media
+                        # default: an explicit bound wins over the env one.
+                        content = await fetch_media_bytes(
+                            normalized_url,
+                            policy=self._url_policy,
+                            timeout=30.0,
+                            max_bytes=self.max_file_size_bytes,
                         )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.

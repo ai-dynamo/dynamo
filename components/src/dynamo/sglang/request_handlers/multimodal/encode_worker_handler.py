@@ -23,7 +23,7 @@ from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
 
 from dynamo._core import Client, Context
-from dynamo.common.http import fetch_bytes
+from dynamo.common.http import fetch_media_bytes
 from dynamo.common.http.url_validator import UrlValidationPolicy, validate_media_url
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
@@ -614,7 +614,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         normalized = await validate_media_url(url, self._url_policy)
         scheme = urlparse(normalized).scheme
         if scheme in ("http", "https"):
-            content = await fetch_bytes(normalized, 30.0, policy=self._url_policy)
+            content = await fetch_media_bytes(
+                normalized, policy=self._url_policy, timeout=30.0
+            )
         elif is_local_media_url(normalized):
             content = await read_local_media_bytes(normalized, self._url_policy)
         else:
