@@ -378,14 +378,20 @@ def _merge_benchmark_rank_results(
         if reference_engine is not None and not _engine_degraded(data.get("engine")):
             data_engine_identity = _benchmark_engine_identity(data) or {}
             if data_engine_identity != reference_engine:
-                mismatched_field = sorted(
+                mismatched = sorted(
                     key
                     for key in set(data_engine_identity) | set(reference_engine)
                     if data_engine_identity.get(key) != reference_engine.get(key)
-                )[0]
+                )
+                # The two dicts can differ (`!=`) even when every key's
+                # .get() agrees, e.g. a top-level key present-with-None on
+                # one rank and absent on the other: .get() returns None
+                # either way, so no single key explains it. Name the whole
+                # block instead of indexing into a possibly empty list.
+                field = mismatched[0] if mismatched else "<top-level key set>"
                 raise RuntimeError(
                     f"Self-benchmark engine provenance mismatch at {path}: "
-                    f"field={mismatched_field} "
+                    f"field={field} "
                     f"reference_rank={reference_engine_rank}: the ranks of "
                     "one run must share an engine configuration"
                 )
@@ -610,7 +616,7 @@ def _make_engine_probe() -> Callable[[Any], dict]:
                 continue
             prefill = getattr(layer, "prefill_backend", None)
             if prefill is not None:
-                # MLA layers hold the backend class; tolerate an instance.
+                # MLA layers hold a backend instance; tolerate a bare class.
                 prefill_backends.append(
                     getattr(prefill, "__name__", None) or type(prefill).__name__
                 )

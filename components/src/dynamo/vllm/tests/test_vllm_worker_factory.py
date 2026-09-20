@@ -14,6 +14,7 @@ import pytest
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
+    ENGINE_PROBE_TIMEOUT_SECONDS,
     EngineSetupResult,
     SnapshotEngineSetupResult,
     WorkerFactory,
@@ -2092,6 +2093,29 @@ def test_merge_rejects_engine_provenance_mismatch(tmp_path):
         )
 
 
+def test_merge_engine_provenance_mismatch_with_absent_vs_none_key_still_raises(
+    tmp_path,
+):
+    """A top-level engine key present-with-None on one rank and absent on
+    the other makes every key's .get() comparison agree (None either way),
+    even though the two identity dicts are still != as a whole (one has the
+    key, one doesn't): the generator that looks for the differing field is
+    empty. Before the fix this raised IndexError instead of the descriptive
+    RuntimeError (M1)."""
+    engine_0 = _engine_block(0, "FLASH_ATTN")
+    engine_0["extra"] = None
+    engine_1 = _engine_block(1, "FLASH_ATTN")  # no "extra" key at all
+
+    with pytest.raises(RuntimeError, match="engine provenance mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (0, tmp_path / "rank0.json", _engine_rank_payload(0, engine_0)),
+                (1, tmp_path / "rank1.json", _engine_rank_payload(1, engine_1)),
+            ],
+            tmp_path / "merged.json",
+        )
+
+
 def test_merge_carries_engine_capture_error_without_raising(tmp_path, caplog):
     """A rank whose engine capture raised (``_bench_capture_engine`` fails
     soft into ``capture_error``, AIC-1950 Task 1) must not fail the whole
@@ -2244,7 +2268,9 @@ class _FakeAttentionBackend:
 
 
 class _FakePrefillBackend:
-    """A class object, which is how vLLM stores MLAAttention.prefill_backend."""
+    """A stand-in prefill backend class. vLLM actually stores an *instance*
+    of it on MLAAttention.prefill_backend, but the probe tolerates a bare
+    class too -- see test_engine_probe_reads_backends_off_the_attention_layers."""
 
 
 class _FakeAttentionLayer:
@@ -2313,11 +2339,13 @@ class _ExplodingAttentionLayer:
 def test_engine_probe_reads_backends_off_the_attention_layers():
     probe = _make_engine_probe()
     layers = {
+        # vLLM stores an *instance* on MLAAttention.prefill_backend (layer
+        # 1); the probe must also tolerate a bare class (layer 0).
         "model.layers.0.self_attn.attn": _FakeAttentionLayer(
             "FLASHINFER_MLA", _FakePrefillBackend
         ),
         "model.layers.1.self_attn.attn": _FakeAttentionLayer(
-            "FLASHINFER_MLA", _FakePrefillBackend
+            "FLASHINFER_MLA", _FakePrefillBackend()
         ),
         # A standard (non-MLA) attention layer: it has no prefill_backend
         # attribute at all, the same as real vLLM's non-MLA Attention layers.
@@ -2339,7 +2367,8 @@ def test_engine_probe_reads_backends_off_the_attention_layers():
     assert "model.layers.3.self_attn.attn" not in result["attention_backends"]
     # Only the MLA layers contribute a prefill backend; the standard layer
     # does not dilute or clear it, and the exploding layer never reaches its
-    # own prefill_backend attribute.
+    # own prefill_backend attribute. Both the class (layer 0) and the
+    # instance (layer 1) resolve to the same name.
     assert result["mla_prefill_backend"] == "_FakePrefillBackend"
     assert result["cudagraph_mode_resolved"] == "FULL_DECODE_ONLY"
     assert result["cudagraph_capture_sizes_resolved"] == [1, 2, 8]
@@ -2395,6 +2424,11 @@ def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
 
     asyncio.run(_attach_engine_resolved(merged, engine_client))
 
+    engine_client.collective_rpc.assert_awaited_once()
+    assert (
+        engine_client.collective_rpc.call_args.kwargs["timeout"]
+        == ENGINE_PROBE_TIMEOUT_SECONDS
+    )
     assert merged["engine"]["resolved"] == probe_result
     assert merged["engine"]["resolution"] == "worker_probe"
     assert merged["engine"]["attention"]["backend_resolved"] == "FLASHINFER_MLA"

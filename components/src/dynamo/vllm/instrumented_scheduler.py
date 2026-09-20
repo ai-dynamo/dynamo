@@ -266,6 +266,21 @@ def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, 
     return block
 
 
+def _bench_engine_kv_cache_spec(spec: Any) -> dict[str, Any]:
+    """One kv_cache_spec's identity: its class name plus dtype/head facts."""
+    entry: dict[str, Any] = {
+        "type": type(spec).__name__,
+        "dtype": _json_safe(getattr(spec, "dtype", None)),
+        "head_size": _json_safe(getattr(spec, "head_size", None)),
+        "num_kv_heads": _json_safe(getattr(spec, "num_kv_heads", None)),
+        "block_size": _json_safe(getattr(spec, "block_size", None)),
+    }
+    kv_quant_mode = getattr(spec, "kv_quant_mode", None)
+    if kv_quant_mode is not None:
+        entry["kv_quant_mode"] = _json_safe(kv_quant_mode)
+    return entry
+
+
 def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str, Any]:
     """KV-cache facts, including the per-group specs the workers reported.
 
@@ -279,16 +294,16 @@ def _bench_engine_kv_cache(cache_config: Any, kv_cache_config: Any) -> dict[str,
         spec = getattr(group, "kv_cache_spec", None)
         if spec is None:
             continue
-        entry: dict[str, Any] = {
-            "type": type(spec).__name__,
-            "dtype": _json_safe(getattr(spec, "dtype", None)),
-            "head_size": _json_safe(getattr(spec, "head_size", None)),
-            "num_kv_heads": _json_safe(getattr(spec, "num_kv_heads", None)),
-            "block_size": _json_safe(getattr(spec, "block_size", None)),
-        }
-        kv_quant_mode = getattr(spec, "kv_quant_mode", None)
-        if kv_quant_mode is not None:
-            entry["kv_quant_mode"] = _json_safe(kv_quant_mode)
+        entry = _bench_engine_kv_cache_spec(spec)
+        # vLLM's UniformTypeKVCacheSpecs wraps several same-kind specs that
+        # differ in per-layer attributes; its own dtype/head_size/
+        # num_kv_heads are always None, so fan out the wrapped specs too.
+        wrapped_specs = getattr(spec, "kv_cache_specs", None)
+        if isinstance(wrapped_specs, dict):
+            entry["specs"] = [
+                _bench_engine_kv_cache_spec(wrapped)
+                for wrapped in wrapped_specs.values()
+            ]
         groups.append(entry)
     block: dict[str, Any] = {
         "cache_dtype": _json_safe(getattr(cache_config, "cache_dtype", None)),
@@ -415,10 +430,13 @@ def _bench_capture_engine(
             ),
         }
         engine["model"] = {
-            # scheduler_config.max_model_len is an InitVar and is never
-            # stored; model_config is the only readable source.
+            # max_model_len is deliberately NOT recorded here: vLLM's
+            # ``--max-model-len -1`` auto-fit lets each engine-core process
+            # resolve it from its own workers' available GPU memory, so it
+            # is rank-varying data, not engine identity -- the same
+            # reasoning that excludes kv_cache's num_gpu_blocks above. It is
+            # already recorded per rank at ``limits.max_model_len``.
             "dtype": _json_safe(getattr(model_config, "dtype", None)),
-            "max_model_len": _json_safe(getattr(model_config, "max_model_len", None)),
             "model_type": _json_safe(getattr(hf_config, "model_type", None)),
             "architectures": _json_safe(
                 getattr(model_config, "architectures", None) or []
@@ -2876,9 +2894,9 @@ class InstrumentedScheduler(AsyncScheduler):
             )
 
         # Engine provenance: one snapshot of what this engine was configured
-        # with. Worker-resolved facts will be attached later by the
-        # launcher's one-shot worker probe (AIC-1950 task 3) -- that code
-        # does not exist yet, this is a forward reference.
+        # with. Worker-resolved facts (engine["resolved"]) are filled in
+        # later, out of process, by the launcher's one-shot worker probe:
+        # worker_factory._attach_engine_resolved.
         self._bench_engine = _bench_capture_engine(
             vllm_config,
             getattr(self, "kv_cache_config", None),

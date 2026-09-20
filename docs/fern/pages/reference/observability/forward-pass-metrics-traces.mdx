@@ -149,7 +149,7 @@ while True:
 
 Before encoding, the publisher stamps `counter_id` with its own send-time sequence number (`metrics = msgspec.structs.replace(metrics, counter_id=seq)`), the same value carried in the sequence frame: it is a per-publisher sequence, not a group step id, stamped from one `itertools.count()` per `_FpmPublisherThread`, and it drifts across data-parallel ranks because each rank's publisher counts from 0 independently. An idle publisher emits a heartbeat once per second, which also advances the sequence. Sends are non-blocking and are dropped rather than queued when the ZMQ send buffer is full, so this raw stream's `counter_id` can show the same kind of gap already described for the trace schema above. The self-benchmark (`--benchmark-mode`) is a separate path: while it runs, this publisher is paused and forward-pass metrics go into the benchmark artifact instead of the socket, with `counter_id` set to the benchmark point id rather than a publisher sequence; see [FPM self-benchmark collection](environment-variables.mdx#fpm-self-benchmark-collection) and Engine Provenance in the Self-Benchmark Artifact below.
 
-Each data-parallel rank binds `DYN_FORWARDPASS_METRIC_PORT + dp_rank`, defaulting to base port `20380`. Under attention data parallelism (`dp_size > 1`), the self-benchmark synchronizer additionally binds `DYN_FORWARDPASS_METRIC_PORT + dp_size`, but only rank 0 (the data-parallel master) binds it, as a ROUTER socket that every other rank's DEALER socket connects to as a client. The occupied block (the base port alone at `dp_size <= 1`, or through `base + dp_size` once the synchronizer also binds) must sit outside the kernel's ephemeral port range, which Dynamo reads from `/proc/sys/net/ipv4/ip_local_port_range` (commonly starting at `32768`). A port inside that range can be claimed by an unrelated outbound connection before the publisher binds it, so the bind then fails with `Address already in use` intermittently and only under load. Dynamo checks this once at startup and logs one warning when the block overlaps the range, staying silent when the proc file cannot be read, such as on a non-Linux host: `FPM ports <first>-<last> overlap this host's ephemeral port range <low>-<high>; an outbound connection can take one of them first and the publisher bind then fails intermittently. Set DYN_FORWARDPASS_METRIC_PORT to a base below <low>.`
+Each data-parallel rank binds `DYN_FORWARDPASS_METRIC_PORT + dp_rank`, defaulting to base port `20380`. Under attention data parallelism (`dp_size > 1`), the self-benchmark synchronizer additionally binds `DYN_FORWARDPASS_METRIC_PORT + dp_size`, but only rank 0 (the data-parallel master) binds it, as a ROUTER socket that every other rank's DEALER socket connects to as a client. The occupied block (the base port alone at `dp_size <= 1`, or through `base + dp_size` once the synchronizer also binds) must sit outside the kernel's ephemeral port range, which Dynamo reads from `/proc/sys/net/ipv4/ip_local_port_range` (commonly starting at `32768`). A port inside that range can be claimed by an unrelated outbound connection before the publisher binds it, so the bind then fails with `Address already in use` intermittently and only under load. Dynamo checks this once per engine-core process and logs one warning when the block overlaps the range, staying silent when the proc file cannot be read, such as on a non-Linux host: `FPM ports <first>-<last> overlap this host's ephemeral port range <low>-<high>; an outbound connection can take one of them first and the publisher bind then fails intermittently. Set DYN_FORWARDPASS_METRIC_PORT to a base below <low>.`
 
 ## Engine Provenance in the Self-Benchmark Artifact
 
@@ -166,14 +166,14 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
       "use_trtllm_attention": false,
       "indexer_kv_dtype": "fp8",
       "indexer_kv_dtype_configured": "auto",
+      "backend_resolved": "FLASH_ATTN_MLA",
+      "mla_prefill_backend_resolved": "FlashAttnPrefillBackend",
+      "resolution": "worker_probe",
       "indexer": {
         "index_topk": 2048,
         "index_n_heads": 1,
         "index_head_dim": 128
-      },
-      "backend_resolved": "FLASH_ATTN_MLA",
-      "mla_prefill_backend_resolved": "FlashAttentionImpl",
-      "resolution": "worker_probe"
+      }
     },
     "kv_cache": {
       "cache_dtype": "auto",
@@ -189,7 +189,7 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
           "kv_quant_mode": "NONE"
         }
       ],
-      "kv_cache_layout": "HND"
+      "kv_cache_layout": "LBHNC"
     },
     "quantization": {
       "method": "fp8",
@@ -208,7 +208,6 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
     },
     "model": {
       "dtype": "bfloat16",
-      "max_model_len": 32768,
       "model_type": "deepseek_v3",
       "architectures": ["DeepseekV3ForCausalLM"],
       "model": "deepseek-ai/DeepSeek-V3"
@@ -221,7 +220,16 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
       "enable_expert_parallel": true,
       "enable_eplb": false,
       "all2all_backend": "deepep_high_throughput",
-      "eplb_config": null
+      "eplb_config": {
+        "window_size": 1000,
+        "step_interval": 3000,
+        "num_redundant_experts": 0,
+        "log_balancedness": false,
+        "log_balancedness_interval": 1,
+        "use_async": true,
+        "policy": "default",
+        "communicator": null
+      }
     },
     "speculative": null,
     "graph": {
@@ -242,7 +250,7 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
       "attention_backends": {
         "model.layers.0.self_attn": "FLASH_ATTN_MLA"
       },
-      "mla_prefill_backend": "FlashAttentionImpl",
+      "mla_prefill_backend": "FlashAttnPrefillBackend",
       "cudagraph_mode_resolved": "FULL",
       "cudagraph_capture_sizes_resolved": [1, 2, 4, 8, 16, 32]
     },
@@ -252,9 +260,9 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
 ```
 
 - `attention` records what the engine-core process asked for. vLLM resolves the real attention backend inside the model workers and never writes it back into the engine-core config, so `backend_requested` and `mla_prefill_backend_requested` stay `null` whenever selection was automatic, and `backend_per_kind` stays `{}` unless a per-attention-kind override was set. `indexer` is present only for sparse-indexer models; `indexer_kv_dtype` is the resolved value and `indexer_kv_dtype_configured` is the raw configured one (`"auto"` resolves to the DeepSeek indexer default, `"fp8"`). `backend_resolved`, `mla_prefill_backend_resolved`, and this sub-block's own `resolution` start `null`, `null`, and `"pending_worker_probe"`, and are filled in by the worker probe described below.
-- `kv_cache.groups` has one entry per KV-cache group the workers reported (`type` is the spec class name, plus `dtype`, `head_size`, `num_kv_heads`, `block_size`, and `kv_quant_mode` when set). `num_gpu_blocks` is deliberately not here: it is decided per engine-core process after profiling with no cross-rank reduction, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.num_gpu_blocks`. `kv_cache_layout` is present starting vLLM 0.29.0 and simply absent on 0.28.0, which keeps it in a worker-process global the engine-core process cannot read.
+- `kv_cache.groups` has one entry per KV-cache group the workers reported (`type` is the spec class name, plus `dtype`, `head_size`, `num_kv_heads`, `block_size`, and `kv_quant_mode` when set). `num_gpu_blocks` is deliberately not here: it is decided per engine-core process after profiling with no cross-rank reduction, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.num_gpu_blocks`. `kv_cache_layout` is present starting vLLM 0.29.0 and simply absent on 0.28.0, which keeps it in a worker-process global the engine-core process cannot read. When vLLM reports a group as a `UniformTypeKVCacheSpecs` wrapper (several same-kind specs that differ only in per-layer attributes), the group's own `dtype`, `head_size`, and `num_kv_heads` stay `null`, and the entry additionally carries a `specs` list with one entry of this same shape per wrapped spec.
 - `quantization.checkpoint_config` is the normalized quantization dict the checkpoint itself declared, not the user-facing online-quantization spec (`model_config.quantization_config`, deliberately not read here). `method` is the kernel family vLLM resolved, and `quant_config_class` is that resolved config object's class name.
-- `scheduler` and `model` are read directly from the engine's own `scheduler_config` and `model_config` at startup and need no further resolution.
+- `scheduler` and `model` are read directly from the engine's own `scheduler_config` and `model_config` at startup and need no further resolution. `model.max_model_len` is deliberately not here: vLLM's `--max-model-len -1` auto-fit can resolve it differently per rank depending on each rank's free GPU memory, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.max_model_len`.
 - `parallel.data_parallel_rank` is the one field in this whole block that legitimately differs per rank of the same run; every other field must be identical across ranks, which is exactly what the cross-rank check described below enforces before a merge.
 - `speculative` is `null` unless speculative decoding is configured, in which case it is a four-field summary: `method`, `model`, `num_speculative_tokens`, `draft_tensor_parallel_size`.
 - `graph` freezes what the engine-core process believed about CUDA graphs before the model worker re-resolved them, tagged `"resolution": "pre_resolution"`. Under a multiprocess executor the engine-core process never sees that rewrite, so this sub-block is never updated after capture; the authoritative post-resolution values live only in the top-level `resolved` block, not here.

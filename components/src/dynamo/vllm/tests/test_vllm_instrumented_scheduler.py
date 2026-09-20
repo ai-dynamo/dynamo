@@ -6540,6 +6540,13 @@ class MLAAttentionSpec(SimpleNamespace):
     ``type(spec).__name__`` for every KV cache group."""
 
 
+class UniformTypeKVCacheSpecs(SimpleNamespace):
+    """Stands in for vLLM's wrapper spec: same class name as the real type,
+    so ``type(spec).__name__`` reports it accurately. Its own dtype/
+    head_size/num_kv_heads stay unset -- real values live in the wrapped
+    ``kv_cache_specs``."""
+
+
 class _ExplodingConfig:
     """Any attribute read raises, which getattr(..., default) does not
     swallow: exercises the capture_error path."""
@@ -6721,7 +6728,6 @@ def test_bench_capture_engine_records_requested_engine_facts():
     }
     assert engine["model"] == {
         "dtype": "bfloat16",
-        "max_model_len": 163840,
         "model_type": "deepseek_v32",
         "architectures": ["DeepseekV32ForCausalLM"],
         "model": "/weights/dsv32",
@@ -6773,6 +6779,67 @@ def test_bench_capture_engine_omits_absent_optional_blocks():
     assert "kv_cache_layout" not in engine["kv_cache"]
     assert "indexer" not in engine["attention"]
     assert engine["attention"]["indexer_kv_dtype"] is None
+
+
+def test_bench_capture_engine_fans_out_uniform_type_kv_cache_specs_wrapper():
+    """A group whose spec is vLLM's UniformTypeKVCacheSpecs wrapper has no
+    dtype/head_size/num_kv_heads of its own; fan out the wrapped specs into
+    a ``specs`` list instead of just recording nulls (M5)."""
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    wrapped_a = MLAAttentionSpec(
+        dtype=_ProvenanceDtype(),
+        head_size=576,
+        num_kv_heads=1,
+        block_size=64,
+        kv_quant_mode=_ProvenanceQuantMode.FP8_PER_TENSOR,
+    )
+    wrapped_b = MLAAttentionSpec(
+        dtype=_ProvenanceDtype(),
+        head_size=512,
+        num_kv_heads=2,
+        block_size=64,
+    )
+    wrapper = UniformTypeKVCacheSpecs(
+        block_size=64,
+        kv_cache_specs={"layer.0": wrapped_a, "layer.1": wrapped_b},
+    )
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=wrapper)]
+
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        dp_rank=7,
+    )
+
+    assert engine["kv_cache"]["groups"] == [
+        {
+            "type": "UniformTypeKVCacheSpecs",
+            "dtype": None,
+            "head_size": None,
+            "num_kv_heads": None,
+            "block_size": 64,
+            "specs": [
+                {
+                    "type": "MLAAttentionSpec",
+                    "dtype": "bfloat16",
+                    "head_size": 576,
+                    "num_kv_heads": 1,
+                    "block_size": 64,
+                    "kv_quant_mode": "FP8_PER_TENSOR",
+                },
+                {
+                    "type": "MLAAttentionSpec",
+                    "dtype": "bfloat16",
+                    "head_size": 512,
+                    "num_kv_heads": 2,
+                    "block_size": 64,
+                },
+            ],
+        }
+    ]
+    json.dumps(engine)
 
 
 def test_bench_capture_engine_records_capture_error_instead_of_raising():
