@@ -204,7 +204,7 @@ Use a vLLM release that provides the built-in thinking-budget logits processor. 
 
 ### SGLang
 
-SGLang requires strict thinking, an SGLang reasoning parser with an active reasoning-token filter, an initialized tokenizer, and a grammar backend. Run the SGLang chat processor in the frontend so Dynamo can preserve the canonical preprocessed request state.
+SGLang requires strict thinking, an SGLang reasoning parser with an active reasoning-token filter, an initialized tokenizer, and a grammar backend. Budgeted requests must also enable reasoning through the model's request-level control. For templates that use `enable_thinking`, send `"chat_template_kwargs": {"enable_thinking": true}`; do not disable thinking on a request with `thinking_token_budget`. Run the SGLang chat processor in the frontend so Dynamo can preserve the canonical preprocessed request state.
 
 ```bash
 python -m dynamo.frontend \
