@@ -74,6 +74,7 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from dynamo.trtllm.utils.model_path import resolve_model_path
 from dynamo.trtllm.utils.trtllm_utils import (
     deep_update,
     get_spec_decode_runtime_data,
@@ -340,8 +341,11 @@ async def init_llm_worker(
             f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
         ).client()
 
-    # Convert model path to Path object if it's a local path, otherwise keep as string
-    model_path = str(config.model)
+    # Convert model path to Path object if it's a local path, otherwise keep as string.
+    # A repository id is kept as-is unless the local cache reference for it is
+    # broken, in which case the resolver substitutes the cached snapshot
+    # directory so the engine does not repeat the lookup that produced it.
+    model_path = resolve_model_path(str(config.model), config.revision)
 
     if config.gpus_per_node is None:
         gpus_per_node = device_count()
