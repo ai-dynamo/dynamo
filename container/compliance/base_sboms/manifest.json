@@ -56,13 +56,13 @@
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:3309c2e1f7b1048fea9f392423afd91080c9f9e63796692872cff477e2562220",
+      "baseline_digest": "sha256:96db42e248d48760a4937eb3d04c4878b39d13a9814efea95d510393e097a901",
       "baseline_image": "vllm/vllm-openai-xpu",
-      "baseline_sbom": "vllm-openai-xpu@3309c2e1-amd64.cdx.json",
-      "baseline_tag": "v0.27.1",
-      "from_digest": "sha256:3309c2e1f7b1048fea9f392423afd91080c9f9e63796692872cff477e2562220",
+      "baseline_sbom": "vllm-openai-xpu@96db42e2-amd64.cdx.json",
+      "baseline_tag": "v0.29.0",
+      "from_digest": "sha256:96db42e248d48760a4937eb3d04c4878b39d13a9814efea95d510393e097a901",
       "from_image": "vllm/vllm-openai-xpu",
-      "from_tag": "v0.27.1",
+      "from_tag": "v0.29.0",
       "platform": "linux/amd64"
     },
     {
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-09-08T22:54:27+00:00",
+  "generated_at": "2026-09-18T02:12:55+00:00",
   "schema_version": 2
 }

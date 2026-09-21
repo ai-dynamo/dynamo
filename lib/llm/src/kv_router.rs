@@ -26,6 +26,7 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
+        RequestClassifier, RequestClassifierContext, RequestClassifierWorker,
         WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
@@ -59,6 +60,7 @@ pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
+pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
@@ -68,9 +70,13 @@ pub mod sequence;
 pub mod shared_cache;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
-pub use embedded::{install_worker_selection_policy_registry, worker_selection_policy_registry};
+// TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
+pub use plugins::{
+    install_router_plugin_registry as install_worker_selection_policy_registry,
+    router_plugin_registry as worker_selection_policy_registry,
+};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
@@ -525,6 +531,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
+        scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -533,6 +540,14 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     let error = DynamoError::builder()
         .error_type(error_type)
         .message(message.clone());
+    let error = if error_type == ErrorType::DeadlineExceeded {
+        error.reason(
+            dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                .expect("registered queue deadline reason"),
+        )
+    } else {
+        error
+    };
     if overloaded {
         error
             .cause(PipelineError::ServiceOverloaded(message))
@@ -899,6 +914,56 @@ impl KvRouter {
         registration: dynamo_runtime::discovery::EndpointRegistrationLease,
     ) {
         self.endpoint_registration = Some(registration);
+    }
+
+    /// Attach a request classifier before placing this router into service.
+    /// Classifier lifecycles belong to decode/aggregated routing; prefill hops bypass them.
+    pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        self.install_request_classifier(Box::new(classifier))?;
+        Ok(self)
+    }
+
+    /// Attach a catalog-created request classifier before placing this router into service.
+    pub fn install_request_classifier(&self, classifier: Box<dyn RequestClassifier>) -> Result<()> {
+        if !self
+            .selection
+            .scheduler()
+            .install_request_classifier(classifier, self.cancellation_token.child_token())
+        {
+            anyhow::bail!("request classifier is already configured");
+        }
+        tracing::info!(model = %self.tracking_model_name, "installed linked request classifier");
+        Ok(())
+    }
+
+    /// Cached per-rank capacity and registration state for this router's classifier.
+    pub fn request_classifier_context(&self) -> RequestClassifierContext {
+        let workers = self.workers_with_configs.clone();
+        RequestClassifierContext::new(self.block_size, move || {
+            workers
+                .borrow()
+                .iter()
+                .flat_map(|(&worker_id, config)| {
+                    let start = config.data_parallel_start_rank();
+                    let end = start.saturating_add(config.data_parallel_size());
+                    (start..end).map(move |rank| {
+                        RequestClassifierWorker::new(
+                            WorkerWithDpRank::new(worker_id, rank),
+                            config.total_kv_blocks(),
+                        )
+                    })
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+        self.selection
+            .scheduler()
+            .begin_request_lifecycle(request_id)
     }
 
     pub(crate) fn set_teardown_task_guard(
@@ -1951,6 +2016,19 @@ mod tests {
     }
 
     #[test]
+    fn queue_deadline_keeps_its_reason_through_serialization() {
+        let error = map_scheduler_error(KvSchedulerError::DeadlineExceeded);
+        let error = error.downcast_ref::<DynamoError>().unwrap();
+        let decoded: DynamoError =
+            serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+        assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
+        assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
+        assert!(crate::http::service::metrics::request_deadline_exceeded(
+            &decoded
+        ));
+    }
+
+    #[test]
     fn worker_selection_receives_complete_session_context() {
         use crate::protocols::common::extensions::{AgentContext, InputTrigger};
         use dynamo_kv_router::WorkerSelectionInputTrigger;
@@ -2223,6 +2301,55 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn classifier_context_tracks_capacity_and_registered_ranks() {
+        let mut router = make_router_without_membership(Some(WorkerType::Decode))
+            .await
+            .unwrap();
+        let (tx, workers) = watch::channel(HashMap::from([
+            (
+                7,
+                ModelRuntimeConfig {
+                    total_kv_blocks: Some(100),
+                    data_parallel_start_rank: 2,
+                    data_parallel_size: 2,
+                    ..Default::default()
+                },
+            ),
+            (8, ModelRuntimeConfig::default()),
+        ]));
+        router.workers_with_configs = workers;
+        let context = router.request_classifier_context();
+        assert_eq!(context.block_size(), 16);
+        let mut snapshot = context.workers();
+        snapshot.sort_by_key(RequestClassifierWorker::worker);
+        assert_eq!(
+            snapshot,
+            vec![
+                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 2), Some(100)),
+                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 3), Some(100)),
+                RequestClassifierWorker::new(WorkerWithDpRank::new(8, 0), None),
+            ]
+        );
+        tx.send(HashMap::from([(
+            8,
+            ModelRuntimeConfig {
+                total_kv_blocks: Some(200),
+                ..Default::default()
+            },
+        )]))
+        .unwrap();
+        assert_eq!(
+            context.workers(),
+            vec![RequestClassifierWorker::new(
+                WorkerWithDpRank::new(8, 0),
+                Some(200)
+            ),]
+        );
+        tx.send(HashMap::new()).unwrap();
+        assert!(context.workers().is_empty());
     }
 
     #[tokio::test]
