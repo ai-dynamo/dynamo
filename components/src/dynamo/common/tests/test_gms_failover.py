@@ -10,6 +10,7 @@ import pytest
 from dynamo.common.gms_failover import (
     _requiesce_after_activation_error,
     acquire_gms_failover_lock_before_init,
+    lease_transition_serving_enabled,
     prepare_gms_failover,
     release_attached_gms_failover_lock,
     release_attached_gms_failover_lock_nowait,
@@ -152,6 +153,114 @@ async def test_activation_barrier_runs_before_shadow_resume(monkeypatch):
 
     assert events == ["all-ranks-fenced"]
     assert owner._quiesce_controller.resume_calls == [["kv_cache"]]
+
+
+def test_lease_transition_serving_validates_prerequisites(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", raising=False)
+    assert not lease_transition_serving_enabled("vllm", mapped_standby=False)
+
+    monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", "1")
+    with pytest.raises(RuntimeError, match="mapped sleeping standby"):
+        lease_transition_serving_enabled("vllm", mapped_standby=False)
+
+    monkeypatch.setenv("GMS_KV_LEASES", "0")
+    with pytest.raises(RuntimeError, match="requires vllm KV leases"):
+        lease_transition_serving_enabled("vllm", mapped_standby=True)
+
+    monkeypatch.setenv("GMS_KV_LEASES", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "off")
+    with pytest.raises(RuntimeError, match="requires the GMS KV directory"):
+        lease_transition_serving_enabled("vllm", mapped_standby=True)
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "shadow")
+    assert lease_transition_serving_enabled("vllm", mapped_standby=True)
+
+
+@pytest.mark.asyncio
+async def test_lease_transition_resumes_before_background_stabilization(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("ENGINE_ID", "1")
+    events = []
+    stabilization_started = asyncio.Event()
+    allow_stabilization = asyncio.Event()
+
+    class OrderedController(_Controller):
+        async def quiesce(self, tags):
+            events.append("quiesce")
+            return await super().quiesce(tags)
+
+        async def resume(self, tags):
+            events.append("resume")
+            return await super().resume(tags)
+
+    owner = _Owner()
+    owner._quiesce_controller = OrderedController()
+
+    async def barrier():
+        events.append("barrier")
+
+    async def stabilize(*, backend_name, role):
+        events.append("stabilize")
+        stabilization_started.set()
+        await allow_stabilization.wait()
+
+    monkeypatch.setattr(
+        "dynamo.common.gms_failover.run_gms_failover_post_lock_fence",
+        stabilize,
+    )
+
+    activation = await prepare_gms_failover(
+        owner,
+        _Runtime(),
+        backend_name="test",
+        tags=["kv_cache"],
+        lock_factory=_BusyOnTryLock,
+        activation_barrier=barrier,
+        lease_transition_serving=True,
+    )
+    await stabilization_started.wait()
+
+    assert events == ["quiesce", "resume", "barrier", "stabilize"]
+    assert activation.stabilization_task is owner._gms_failover_stabilization_task
+    assert not activation.stabilization_task.done()
+
+    allow_stabilization.set()
+    await activation.stabilization_task
+
+
+@pytest.mark.asyncio
+async def test_lease_transition_stabilization_failure_fail_stops(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("ENGINE_ID", "1")
+    runtime = _Runtime()
+    killed = []
+
+    async def fail_stabilization(*, backend_name, role):
+        raise RuntimeError("retirement failed")
+
+    monkeypatch.setattr(
+        "dynamo.common.gms_failover.run_gms_failover_post_lock_fence",
+        fail_stabilization,
+    )
+    monkeypatch.setattr(
+        "dynamo.common.gms_failover.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    activation = await prepare_gms_failover(
+        _Owner(),
+        runtime,
+        backend_name="test",
+        tags=["kv_cache"],
+        lock_factory=_BusyOnTryLock,
+        lease_transition_serving=True,
+    )
+    with pytest.raises(RuntimeError, match="retirement failed"):
+        await activation.stabilization_task
+    await asyncio.sleep(0)
+
+    assert runtime.health[-1] is False
+    assert killed == [(os.getpid(), signal.SIGTERM)]
 
 
 @pytest.mark.asyncio

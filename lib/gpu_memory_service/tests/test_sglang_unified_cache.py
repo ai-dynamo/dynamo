@@ -482,6 +482,37 @@ def test_steady_state_publication_skips_digest_vote(monkeypatch):
     assert content_hash not in cache._gms_recovery_candidates
 
 
+def test_transition_publication_stays_native_until_writer_visible(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    key = _key(1, 2)
+    cache.insert(InsertParams(key=key, value=torch.tensor([6, 7])))
+    directory = _Directory()
+    directory.authoritative = False
+    cache._gms_directory = directory
+    lease = KVLease(3, 12)
+    allocator._gms_kv_leases_by_page = {3: lease}
+    retained = []
+
+    def retain(_allocator, pages):
+        retained.extend(int(page) for page in pages)
+        return [lease]
+
+    monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", "1")
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
+
+    cache._publish_finished_prefix(key)
+
+    assert directory.published == []
+    assert retained == []
+    assert allocator._gms_kv_leases_by_page == {3: lease}
+
+    directory.authoritative = True
+    cache._publish_finished_prefix(key)
+
+    assert retained == [3]
+    assert len(directory.published) == 1
+
+
 @pytest.mark.parametrize("operation", ["publish", "adopt"])
 def test_tp_logical_layout_agrees_with_rank_local_generations(monkeypatch, operation):
     import threading

@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FAILOVER_LOCK_PATH = "/shared/failover.lock"
 DEFAULT_FAILOVER_TAGS = ("kv_cache", "weights")
 KEEP_SHADOW_READY_ENV = "DYN_GMS_FAILOVER_KEEP_SHADOW_READY"
+LEASE_TRANSITION_SERVING_ENV = "DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING"
 _gpu_quiescence_tasks: set[asyncio.Task[None]] = set()
 
 
@@ -161,10 +162,13 @@ class GmsFailoverActivation:
 
     enabled: bool = False
     lock: Any | None = None
+    stabilization_task: asyncio.Task[None] | None = None
 
     def attach_to(self, target: Any) -> None:
         if self.lock is not None:
             setattr(target, "_gms_failover_lock", self.lock)
+        if self.stabilization_task is not None:
+            setattr(target, "_gms_failover_stabilization_task", self.stabilization_task)
 
 
 def release_attached_gms_failover_lock_nowait(
@@ -237,6 +241,36 @@ def _normalize_lease_engine_name(backend_name: str) -> str:
     if normalized in {"trt", "trt_llm", "tensorrt_llm"}:
         return "trtllm"
     return normalized
+
+
+def lease_transition_serving_enabled(
+    backend_name: str, *, mapped_standby: bool
+) -> bool:
+    """Validate the opt-in mode that serves before predecessor retirement.
+
+    In this mode the new owner may allocate only atomically FREE lease slots and
+    may reuse predecessor KV only through exact-generation SEALED read pins.
+    The directory remains read-only until background stabilization completes.
+    """
+
+    if not _truthy_env(LEASE_TRANSITION_SERVING_ENV):
+        return False
+    if not mapped_standby:
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires a mapped sleeping standby"
+        )
+    from gpu_memory_service.integrations.common.kv_lease_client import kv_leases_enabled
+
+    engine = _normalize_lease_engine_name(backend_name)
+    if not kv_leases_enabled(engine):
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires {engine} KV leases"
+        )
+    if os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower() == "off":
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires the GMS KV directory"
+        )
+    return True
 
 
 def _directory_socket(backend_name: str) -> str:
@@ -589,6 +623,59 @@ async def run_gms_failover_post_lock_fence(
         )
 
 
+def start_gms_failover_stabilization(
+    owner: Any,
+    runtime: Any,
+    *,
+    backend_name: str,
+    role: str = "shadow",
+) -> asyncio.Task[None]:
+    """Finish writer retirement and promotion after lease-safe activation."""
+
+    previous = getattr(owner, "_gms_failover_stabilization_task", None)
+    if previous is not None and not previous.done():
+        raise RuntimeError("GMS failover stabilization is already running")
+
+    async def stabilize() -> None:
+        await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
+
+    task = asyncio.create_task(
+        stabilize(), name=f"gms-{backend_name}-failover-stabilization"
+    )
+    setattr(owner, "_gms_failover_stabilization_task", task)
+
+    def finished(completed: asyncio.Task[None]) -> None:
+        if completed.cancelled():
+            error: BaseException | None = RuntimeError(
+                "GMS failover stabilization was cancelled"
+            )
+        else:
+            error = completed.exception()
+        if error is None:
+            logger.info(
+                "[GMS failover] %s %s lease transition stabilized",
+                backend_name,
+                role,
+            )
+            return
+        logger.critical(
+            "[GMS failover] %s %s stabilization failed; fail-stopping owner",
+            backend_name,
+            role,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+        set_health_status = getattr(runtime, "set_health_status", None)
+        if callable(set_health_status):
+            try:
+                set_health_status(False)
+            except BaseException:
+                logger.exception("[GMS failover] failed to mark owner unhealthy")
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    task.add_done_callback(finished)
+    return task
+
+
 def _controller_from(owner: Any) -> Any:
     controller = getattr(owner, "_quiesce_controller", owner)
     if controller is None:
@@ -811,6 +898,7 @@ async def prepare_gms_failover(
     promotion_warmup: Callable[[], Awaitable[None]] | None = None,
     warm_standby_before_quiesce: bool = False,
     activation_barrier: Callable[[], Awaitable[None]] | None = None,
+    lease_transition_serving: bool = False,
 ) -> GmsFailoverActivation:
     """Gate model registration until this engine owns the shared GMS namespace.
 
@@ -896,10 +984,12 @@ async def prepare_gms_failover(
         role,
     )
     resume_started = False
+    stabilization_task = None
     try:
-        await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
-        if activation_barrier is not None:
-            await activation_barrier()
+        if not lease_transition_serving:
+            await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
+            if activation_barrier is not None:
+                await activation_barrier()
 
         resume_started = True
         await controller.resume(tag_list)
@@ -907,11 +997,28 @@ async def prepare_gms_failover(
         if mark_resumed is not None:
             mark_resumed()
 
+        if lease_transition_serving and activation_barrier is not None:
+            await activation_barrier()
+
         if promotion_warmup is not None and not standby_prewarmed:
             await promotion_warmup()
 
         if not keep_shadow_ready and set_health_status is not None:
             set_health_status(True)
+
+        if lease_transition_serving:
+            stabilization_task = start_gms_failover_stabilization(
+                owner,
+                runtime,
+                backend_name=backend_name,
+                role=role,
+            )
+            logger.info(
+                "[GMS failover] %s %s serving from FREE and read-pinned "
+                "SEALED leases while predecessor retirement completes",
+                backend_name,
+                role,
+            )
     except BaseException:
         safe_to_release = not resume_started
         cleanup_cancelled = None
@@ -952,4 +1059,5 @@ async def prepare_gms_failover(
     return GmsFailoverActivation(
         enabled=True,
         lock=lock,
+        stabilization_task=stabilization_task,
     )
