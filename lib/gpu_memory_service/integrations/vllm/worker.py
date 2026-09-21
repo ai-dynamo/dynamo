@@ -215,7 +215,7 @@ class GMSWorker(_BaseWorker):
                 backend_name="vllm",
                 device=device,
                 cohort=cohort,
-                rank=max(0, int(self.local_rank)),
+                rank=max(0, int(self.rank)),
             )
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).

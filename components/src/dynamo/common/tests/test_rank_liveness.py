@@ -567,3 +567,30 @@ def test_noisy_ack_socket_cannot_starve_leader_timeout(monkeypatch, caplog):
     assert sock.closed
     assert "local scheduling gap" in caplog.text
     assert "writer fencing still required" in caplog.text
+
+
+def test_gpu_crash_marker_bypasses_heartbeat_timeout(tmp_path):
+    from gpu_memory_service.common.gpu_failure_marker import (
+        gpu_failure_marker_path,
+        publish_gpu_failure_marker,
+    )
+
+    cohort = tmp_path / "cohort"
+    cohort.touch(mode=0o600)
+    marker = gpu_failure_marker_path(cohort)
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=_endpoint(),
+        timeout_ms_override=5_000,
+        failure_marker_path=str(marker),
+    )
+
+    monitor.start()
+    try:
+        publish_gpu_failure_marker(cohort, rank=7, pid=1234, source="signal-11")
+        assert fired.wait(0.5), "monitor waited for the heartbeat deadline"
+        assert calls == [(7, "gpu-crash-interlock")]
+    finally:
+        monitor.stop()
