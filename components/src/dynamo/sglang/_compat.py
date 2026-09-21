@@ -62,6 +62,24 @@ except ImportError:
     # portion when minimum supported SGLang is 0.5.19+.
     _sglang_publish = None
 
+try:
+    from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
+except ImportError:
+    # Fail closed for downstream SGLang builds that omit request-time
+    # statistics or dispatch timestamps.
+    APIServerReqTimeStats = None
+
+
+def supports_disagg_prefill_cancel_anytime(engine: Any) -> bool:
+    """Return whether aborts can be ordered after scheduler dispatch."""
+    tokenizer_manager = getattr(engine, "tokenizer_manager", None)
+    if not isinstance(getattr(tokenizer_manager, "rid_to_state", None), Mapping):
+        return False
+    if APIServerReqTimeStats is None:
+        return False
+    fields = getattr(APIServerReqTimeStats, "__dataclass_fields__", {})
+    return "api_server_dispatch_finish_time" in fields
+
 
 def get_sglang_model_config(server_args: Any) -> Any:
     """Return the resolved model config across SGLang ServerArgs APIs.
