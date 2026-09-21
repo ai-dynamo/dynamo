@@ -231,6 +231,8 @@ operator:
   - 'components/src/dynamo/common/snapshot/**'
 
 snapshot:
+  # Keep the removed path covered while the deletion is part of this PR's diff.
+  - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
   - 'deploy/operator/internal/controller/*checkpoint*'
@@ -311,6 +313,8 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
+  # Keep the removed path covered while the deletion is part of this PR's diff.
+  - 'deploy/checkpoint-placeholder/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
