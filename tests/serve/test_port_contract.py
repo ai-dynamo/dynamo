@@ -274,6 +274,8 @@ _ASSIGNMENT = re.compile(r"\w+=\S*|\$\{?\S*")
 # A prefix command runs the rest of the segment, so the service is still launched.
 # `env` carries its own flags and their arguments, as in `env -u DYN_SYSTEM_PORT`.
 _PREFIX_COMMAND = re.compile(r"env|exec|nohup|setsid|stdbuf|time|sudo")
+# These reserved words introduce commands in a compound statement or pipeline.
+_COMMAND_RESERVED_WORD = re.compile(r"if|then|elif|else|while|until|do|!")
 
 
 class _Command(NamedTuple):
@@ -518,7 +520,14 @@ def _calls_wait_any_exit(script: str) -> bool:
 def _in_command_position(command: _Command, start: int) -> bool:
     """Report whether a match is the command word of its pipeline segment."""
     segment = max(offset for offset in command.segments if offset <= start)
-    for word in command.text[segment:start].split():
+    for match in re.finditer(r"\S+", command.text[segment:start]):
+        word = match.group()
+        if (
+            _COMMAND_RESERVED_WORD.fullmatch(word)
+            and "q"
+            not in command.quoted[segment + match.start() : segment + match.end()]
+        ):
+            continue
         if _ASSIGNMENT.fullmatch(word):
             continue
         # A prefix command consumes the rest of the segment as its own command
@@ -634,6 +643,20 @@ def test_only_a_segment_command_word_counts_as_a_launch() -> None:
     assert _service_launches(_ARGUMENT_SAMPLE) == [
         (4, "python3 -m dynamo.sglang", True),
         (5, "python -m dynamo.vllm", True),
+    ]
+
+
+def test_compound_command_keywords_expose_service_launches() -> None:
+    """Reserved words introduce commands; quoted words remain command names."""
+    script = (
+        "if condition; then python -m dynamo.vllm; "
+        "else python -m dynamo.frontend; fi\n"
+        "'then' python -m dynamo.fake\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [
+        (1, "python -m dynamo.vllm", False),
+        (1, "python -m dynamo.frontend", False),
     ]
 
 
