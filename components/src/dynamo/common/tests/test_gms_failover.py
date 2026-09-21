@@ -160,6 +160,8 @@ def test_lease_transition_serving_validates_prerequisites(monkeypatch):
     assert not lease_transition_serving_enabled("vllm", mapped_standby=False)
 
     monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", "1")
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
     with pytest.raises(RuntimeError, match="mapped sleeping standby"):
         lease_transition_serving_enabled("vllm", mapped_standby=False)
 
@@ -173,16 +175,51 @@ def test_lease_transition_serving_validates_prerequisites(monkeypatch):
         lease_transition_serving_enabled("vllm", mapped_standby=True)
 
     monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "shadow")
+    with pytest.raises(RuntimeError, match="GMS_KV_DIRECTORY_MANIFEST"):
+        lease_transition_serving_enabled("vllm", mapped_standby=True)
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model-layout-v1")
+    with pytest.raises(RuntimeError, match="directory socket"):
+        lease_transition_serving_enabled("vllm", mapped_standby=True)
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+
     assert lease_transition_serving_enabled("vllm", mapped_standby=True)
 
 
+def test_lease_transition_serving_allows_non_mapped_primary(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", "1")
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("GMS_KV_LEASES", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model-layout-v1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+
+    assert lease_transition_serving_enabled("sglang", mapped_standby=False)
+
+
+def test_lease_transition_serving_rejects_writable_shadow_directory(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", "1")
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("GMS_KV_LEASES", "1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MODE", "authoritative")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_MANIFEST", "model-layout-v1")
+    monkeypatch.setenv("GMS_KV_DIRECTORY_SOCKET", "/tmp/directory.sock")
+
+    with pytest.raises(RuntimeError, match="remain read-only"):
+        lease_transition_serving_enabled("sglang", mapped_standby=True)
+
+    monkeypatch.setenv("GMS_KV_DIRECTORY_STANDBY", "1")
+    assert lease_transition_serving_enabled("sglang", mapped_standby=True)
+
+
 @pytest.mark.asyncio
-async def test_lease_transition_resumes_before_background_stabilization(monkeypatch):
+async def test_lease_transition_classifies_before_shadow_admission(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
     monkeypatch.setenv("ENGINE_ID", "1")
     events = []
-    stabilization_started = asyncio.Event()
-    allow_stabilization = asyncio.Event()
 
     class OrderedController(_Controller):
         async def quiesce(self, tags):
@@ -199,17 +236,15 @@ async def test_lease_transition_resumes_before_background_stabilization(monkeypa
     async def barrier():
         events.append("barrier")
 
-    async def stabilize(*, backend_name, role):
-        events.append("stabilize")
-        stabilization_started.set()
-        await allow_stabilization.wait()
+    async def classify(*, backend_name, role):
+        events.append("classify")
 
     monkeypatch.setattr(
         "dynamo.common.gms_failover.run_gms_failover_post_lock_fence",
-        stabilize,
+        classify,
     )
 
-    activation = await prepare_gms_failover(
+    await prepare_gms_failover(
         owner,
         _Runtime(),
         backend_name="test",
@@ -218,49 +253,41 @@ async def test_lease_transition_resumes_before_background_stabilization(monkeypa
         activation_barrier=barrier,
         lease_transition_serving=True,
     )
-    await stabilization_started.wait()
 
-    assert events == ["quiesce", "resume", "barrier", "stabilize"]
-    assert activation.stabilization_task is owner._gms_failover_stabilization_task
-    assert not activation.stabilization_task.done()
-
-    allow_stabilization.set()
-    await activation.stabilization_task
+    assert events == ["quiesce", "classify", "barrier", "resume"]
 
 
 @pytest.mark.asyncio
-async def test_lease_transition_stabilization_failure_fail_stops(monkeypatch):
+async def test_lease_transition_classification_failure_blocks_admission(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
     monkeypatch.setenv("ENGINE_ID", "1")
     runtime = _Runtime()
     killed = []
 
-    async def fail_stabilization(*, backend_name, role):
-        raise RuntimeError("retirement failed")
+    async def fail_classification(*, backend_name, role):
+        raise RuntimeError("classification failed")
 
     monkeypatch.setattr(
         "dynamo.common.gms_failover.run_gms_failover_post_lock_fence",
-        fail_stabilization,
+        fail_classification,
     )
     monkeypatch.setattr(
         "dynamo.common.gms_failover.os.kill",
         lambda pid, sig: killed.append((pid, sig)),
     )
 
-    activation = await prepare_gms_failover(
-        _Owner(),
-        runtime,
-        backend_name="test",
-        tags=["kv_cache"],
-        lock_factory=_BusyOnTryLock,
-        lease_transition_serving=True,
-    )
-    with pytest.raises(RuntimeError, match="retirement failed"):
-        await activation.stabilization_task
-    await asyncio.sleep(0)
+    with pytest.raises(RuntimeError, match="classification failed"):
+        await prepare_gms_failover(
+            _Owner(),
+            runtime,
+            backend_name="test",
+            tags=["kv_cache"],
+            lock_factory=_BusyOnTryLock,
+            lease_transition_serving=True,
+        )
 
     assert runtime.health[-1] is False
-    assert killed == [(os.getpid(), signal.SIGTERM)]
+    assert killed == []
 
 
 @pytest.mark.asyncio
