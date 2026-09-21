@@ -564,6 +564,8 @@ class TopologyConfig:
     gpu_marker: Optional[str] = None  # override profile-level gpu_marker
     single_gpu: bool = False  # append --single-gpu to script_args
     two_gpu: bool = False  # append --two-gpu to script_args (epd only)
+    health_check_workers: bool = False
+    health_check_worker_count: int = 2
     env: dict[str, str] = field(default_factory=dict)  # extra env vars for subprocess
     tests: list[MmCase] = field(default_factory=list)
 
@@ -673,6 +675,8 @@ def make_multimodal_configs(
                 script_args=list(base_script_args) + list(case.extra_script_args),
                 marks=marks,
                 delayed_start=topo_cfg.delayed_start,
+                health_check_workers=topo_cfg.health_check_workers,
+                health_check_worker_count=topo_cfg.health_check_worker_count,
                 request_payloads=[case.payload, *case.followup_payloads],
                 env={**topo_env, **case.env},
             )

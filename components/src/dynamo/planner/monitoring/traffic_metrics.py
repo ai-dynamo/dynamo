@@ -176,9 +176,8 @@ class PrometheusAPIClient:
         use underscores, so dashes are normalized before building the PromQL filter.
 
         When model_name is provided (frontend source): queries per-model metrics
-        via increase(metric_sum)/increase(metric_count), filtered by model and
-        dynamo_namespace labels. The dynamo_frontend_ prefix is prepended
-        automatically if absent.
+        by summing histogram increases per model and dynamo_namespace before
+        dividing. The dynamo_frontend_ prefix is prepended automatically if absent.
 
         Returns:
             Average metric value, or 0 if no data/error.
@@ -213,7 +212,13 @@ class PrometheusAPIClient:
                     full_metric_name = (
                         f"{prometheus_names.name_prefix.FRONTEND}_{full_metric_name}"
                     )
-                query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
+                # Aggregate observations, not per-instance averages: idle
+                # instances contribute zero count increases, and busy instances
+                # retain their weight. Keep model/namespace labels for filtering.
+                query = (
+                    f"sum by (model, dynamo_namespace) (increase({full_metric_name}_sum[{interval}])) / "
+                    f"sum by (model, dynamo_namespace) (increase({full_metric_name}_count[{interval}]))"
+                )
                 result = self.prom.custom_query(query=query)
                 if not result:
                     logger.warning(
@@ -221,7 +226,6 @@ class PrometheusAPIClient:
                     )
                     return 0
                 metrics_containers = parse_frontend_metric_containers(result)
-                values = []
                 for container in metrics_containers:
                     # Frontend lowercases model names for Prometheus labels so we need to do case-insensitive comparison
                     if (
@@ -229,13 +233,15 @@ class PrometheusAPIClient:
                         and container.metric.model.lower() == model_name.lower()
                         and container.metric.dynamo_namespace == self.dynamo_namespace
                     ):
-                        values.append(container.value[1])
-                if not values:
-                    logger.warning(
-                        f"No prometheus metric data available for {full_metric_name} with model {model_name} and dynamo namespace {self.dynamo_namespace}, use 0 instead"
-                    )
-                    return 0
-                return sum(values) / len(values)
+                        return container.value[1]
+                logger.warning(
+                    "No prometheus metric data available for %s with model %s "
+                    "and dynamo namespace %s, use 0 instead",
+                    full_metric_name,
+                    model_name,
+                    self.dynamo_namespace,
+                )
+                return 0
         except Exception as e:
             logger.error(f"Error getting {operation_name}: {e}")
             return 0

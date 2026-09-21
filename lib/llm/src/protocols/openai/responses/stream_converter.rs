@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
-use super::ResponseParams;
+use super::{ResponseParams, responses_incomplete_reason};
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
 use crate::protocols::unified::ResponsesContext;
 
@@ -63,8 +63,9 @@ pub struct ResponseStreamConverter {
     next_output_index: u32,
     // Usage stats from the backend's final chunk
     usage: Option<ResponseUsage>,
-    // The backend exhausted the output budget.
-    output_limit_reached: bool,
+    // The backend ended with a terminal reason that is not success-like.
+    incomplete_reason: Option<&'static str>,
+    terminal_failure_emitted: bool,
 }
 
 struct ReasoningState {
@@ -132,7 +133,8 @@ impl ResponseStreamConverter {
             function_call_items: Vec::new(),
             next_output_index: 0,
             usage: None,
-            output_limit_reached: false,
+            incomplete_reason: None,
+            terminal_failure_emitted: false,
         }
     }
 
@@ -158,7 +160,11 @@ impl ResponseStreamConverter {
             None => {
                 // Resumed reasoning proves pending tool calls completed, even if
                 // this chunk reports that the new reasoning exhausted the budget.
-                self.append_pending_function_call_done_events(events, OutputStatus::Completed);
+                self.append_pending_function_call_done_events(
+                    events,
+                    OutputStatus::Completed,
+                    false,
+                );
 
                 let output_index = self.next_output_index;
                 self.next_output_index += 1;
@@ -269,7 +275,6 @@ impl ResponseStreamConverter {
     }
 
     fn make_response(&self, status: Status, output: Vec<OutputItem>) -> Response {
-        let is_incomplete = status == Status::Incomplete;
         let completed_at = if status == Status::Completed {
             Some(
                 SystemTime::now()
@@ -315,8 +320,8 @@ impl ResponseStreamConverter {
             billing: None,
             conversation: None,
             error: None,
-            incomplete_details: is_incomplete.then(|| IncompleteDetails {
-                reason: "max_output_tokens".to_string(),
+            incomplete_details: self.incomplete_reason.map(|reason| IncompleteDetails {
+                reason: reason.to_string(),
             }),
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
@@ -368,11 +373,16 @@ impl ResponseStreamConverter {
     }
 
     /// Process a single chat completion stream chunk and append zero or more SSE events.
+    /// Returns `true` after appending a terminal failure so the caller can drop the upstream stream.
     pub fn append_chunk_events(
         &mut self,
         chunk: &NvCreateChatCompletionStreamResponse,
         events: &mut Vec<Result<Event, anyhow::Error>>,
-    ) {
+    ) -> bool {
+        if self.terminal_failure_emitted {
+            return false;
+        }
+
         // Capture usage stats from the final chunk (sent when stream_options.include_usage=true)
         if let Some(ref u) = chunk.inner.usage {
             self.usage = Some(ResponseUsage {
@@ -400,8 +410,8 @@ impl ResponseStreamConverter {
         for choice in &chunk.inner.choices {
             let delta = &choice.delta;
 
-            if choice.finish_reason == Some(FinishReason::Length) {
-                self.output_limit_reached = true;
+            if let Some(reason) = responses_incomplete_reason(choice.finish_reason) {
+                self.incomplete_reason = Some(reason);
             }
 
             if let Some(reasoning) = delta.reasoning_content.as_deref()
@@ -489,15 +499,9 @@ impl ResponseStreamConverter {
                 // allocating converter state so suppressed calls cannot emit
                 // any Responses API events at finish or EOF.
                 let enforce_single_tool_call = self.params.parallel_tool_calls == Some(false);
-                let mut tool_calls = tool_calls
+                let tool_calls = tool_calls
                     .iter()
-                    .filter(|tc| !enforce_single_tool_call || tc.index == 0)
-                    .peekable();
-                if tool_calls.peek().is_some() {
-                    // Starting a tool call is also an explicit reasoning phase
-                    // boundary, independent of this chunk's finish reason.
-                    self.append_active_reasoning_done_events(events, OutputStatus::Completed);
-                }
+                    .filter(|tc| !enforce_single_tool_call || tc.index == 0);
                 for tc in tool_calls {
                     let tc_index = tc.index as usize;
 
@@ -544,10 +548,32 @@ impl ResponseStreamConverter {
                     // a monotonically increasing index, so indices are not interleaved today;
                     // keying state by `tc_index` would handle interleaving too, but that path
                     // is defensive rather than exercised by any current backend.
-                    let should_start = {
+                    let (should_start, disallowed_name) = {
                         let state = &self.function_call_items[tc_index];
-                        !state.started && state.has_identity()
+                        let has_identity = state.has_identity();
+                        let is_allowed = self.params.function_is_allowed(&state.name);
+                        (
+                            !state.started && has_identity && is_allowed,
+                            (has_identity && !is_allowed).then(|| state.name.clone()),
+                        )
                     };
+                    if let Some(name) = disallowed_name {
+                        let error = ErrorObject {
+                            code: "server_error".to_string(),
+                            message: format!(
+                                "Backend returned function '{name}' outside allowed_tools"
+                            ),
+                        };
+                        let terminal_event = self.append_error_events(error, events);
+                        events.push(terminal_event);
+                        self.terminal_failure_emitted = true;
+                        return true;
+                    }
+                    if should_start {
+                        // Starting an allowed tool call is an explicit reasoning
+                        // phase boundary, independent of the finish reason.
+                        self.append_active_reasoning_done_events(events, OutputStatus::Completed);
+                    }
                     let new_output_index = should_start.then(|| {
                         let output_index = self.next_output_index;
                         self.next_output_index += 1;
@@ -638,23 +664,46 @@ impl ResponseStreamConverter {
 
         if should_finish_function_calls {
             let output_status = self.output_status();
-            self.append_pending_function_call_done_events(events, output_status);
+            self.append_pending_function_call_done_events(events, output_status, true);
         }
+
+        false
     }
 
     fn append_pending_function_call_done_events(
         &mut self,
         events: &mut Vec<Result<Event, anyhow::Error>>,
         output_status: OutputStatus,
+        only_terminal_is_incomplete: bool,
     ) {
         // `started` is set only after `has_identity()` observes both required
         // fields, matching Anthropic's `is_emit_ready()` identity requirement.
+        let terminal_output_index = (only_terminal_is_incomplete
+            && output_status == OutputStatus::Incomplete)
+            .then(|| {
+                self.function_call_items
+                    .iter()
+                    .filter_map(|call| call.output_index)
+                    .chain(self.message_started.then_some(self.message_output_index))
+                    .max()
+            })
+            .flatten();
         let mut pending: Vec<_> = self
             .function_call_items
             .iter_mut()
             .filter(|fc| fc.started && fc.output_status.is_none())
             .map(|fc| {
-                fc.output_status = Some(output_status);
+                fc.output_status = Some(
+                    if Some(
+                        fc.output_index
+                            .expect("started function call is missing an output index"),
+                    ) == terminal_output_index
+                    {
+                        output_status
+                    } else {
+                        OutputStatus::Completed
+                    },
+                );
                 (
                     fc.item_id.clone(),
                     fc.call_id.clone(),
@@ -663,12 +712,16 @@ impl ResponseStreamConverter {
                     fc.output_index
                         .expect("started function call is missing an output index"),
                     fc.accumulated_args.clone(),
+                    fc.output_status
+                        .expect("finished function call is missing output status"),
                 )
             })
             .collect();
-        pending.sort_unstable_by_key(|(_, _, _, _, output_index, _)| *output_index);
+        pending.sort_unstable_by_key(|(_, _, _, _, output_index, _, _)| *output_index);
 
-        for (item_id, call_id, fc_name, namespace, output_index, accumulated_args) in pending {
+        for (item_id, call_id, fc_name, namespace, output_index, accumulated_args, call_status) in
+            pending
+        {
             let args_done = ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
                 ResponseFunctionCallArgumentsDoneEvent {
                     sequence_number: self.next_seq(),
@@ -690,7 +743,7 @@ impl ResponseStreamConverter {
                         namespace,
                         name: fc_name,
                         arguments: accumulated_args,
-                        status: Some(output_status),
+                        status: Some(call_status),
                     }),
                 });
             events.push(self.make_sse_event(&item_done));
@@ -698,7 +751,23 @@ impl ResponseStreamConverter {
     }
 
     fn output_status(&self) -> OutputStatus {
-        if self.output_limit_reached {
+        if self.incomplete_reason.is_some() {
+            OutputStatus::Incomplete
+        } else {
+            OutputStatus::Completed
+        }
+    }
+
+    fn terminal_output_index(&self) -> Option<u32> {
+        self.function_call_items
+            .iter()
+            .filter_map(|call| call.output_index)
+            .chain(self.message_started.then_some(self.message_output_index))
+            .max()
+    }
+
+    fn item_output_status(&self, output_index: u32) -> OutputStatus {
+        if self.incomplete_reason.is_some() && Some(output_index) == self.terminal_output_index() {
             OutputStatus::Incomplete
         } else {
             OutputStatus::Completed
@@ -706,7 +775,7 @@ impl ResponseStreamConverter {
     }
 
     fn terminal_status(&self) -> Status {
-        if self.output_limit_reached {
+        if self.incomplete_reason.is_some() {
             Status::Incomplete
         } else {
             Status::Completed
@@ -732,6 +801,8 @@ impl ResponseStreamConverter {
     }
 
     fn output_with_status(&self, output_status: OutputStatus) -> Vec<OutputItem> {
+        let terminal_only =
+            self.incomplete_reason.is_some() && output_status == OutputStatus::Incomplete;
         let mut output = Vec::new();
         for reasoning in &self.reasoning_items {
             output.push((
@@ -740,13 +811,23 @@ impl ResponseStreamConverter {
             ));
         }
         if self.message_started {
+            let message_status = if terminal_only {
+                self.item_output_status(self.message_output_index)
+            } else {
+                output_status
+            };
             output.push((
                 self.message_output_index,
-                OutputItem::Message(self.message_output(output_status)),
+                OutputItem::Message(self.message_output(message_status)),
             ));
         }
         for function_call in &self.function_call_items {
             if let Some(output_index) = function_call.output_index {
+                let function_status = if terminal_only {
+                    self.item_output_status(output_index)
+                } else {
+                    output_status
+                };
                 output.push((
                     output_index,
                     OutputItem::FunctionCall(FunctionToolCall {
@@ -755,7 +836,7 @@ impl ResponseStreamConverter {
                         namespace: function_call.namespace.clone(),
                         name: function_call.name.clone(),
                         arguments: function_call.accumulated_args.clone(),
-                        status: Some(function_call.output_status.unwrap_or(output_status)),
+                        status: Some(function_call.output_status.unwrap_or(function_status)),
                     }),
                 ));
             }
@@ -814,15 +895,22 @@ impl ResponseStreamConverter {
 
     /// Append remaining output completion events and `response.completed` at stream end.
     pub fn append_end_events(&mut self, events: &mut Vec<Result<Event, anyhow::Error>>) {
+        if self.terminal_failure_emitted {
+            return;
+        }
+
         let output_status = self.output_status();
         // Without a later output item, the response finish reason determines
         // whether the still-open reasoning item completed or was truncated.
         self.append_active_reasoning_done_events(events, output_status);
 
-        self.close_open_message_item(events, output_status);
+        // Only the terminal item was cut short, and the terminal response reports it
+        // that way. The `output_item.done` event has to agree, or a client sees one
+        // item marked incomplete in the stream and completed in the final response.
+        self.close_open_message_item(events, self.item_output_status(self.message_output_index));
 
         // Fallback for backends that end the transport without a finish-reason chunk.
-        self.append_pending_function_call_done_events(events, output_status);
+        self.append_pending_function_call_done_events(events, output_status, true);
 
         let terminal_status = self.terminal_status();
         let response = self.make_response(terminal_status.clone(), self.completed_output());
@@ -858,7 +946,7 @@ impl ResponseStreamConverter {
         let output_status = OutputStatus::Incomplete;
         self.append_active_reasoning_done_events(events, output_status);
         self.close_open_message_item(events, output_status);
-        self.append_pending_function_call_done_events(events, output_status);
+        self.append_pending_function_call_done_events(events, output_status, false);
 
         let mut response =
             self.make_response(Status::Failed, self.output_with_status(output_status));
@@ -1414,6 +1502,59 @@ mod tests {
     }
 
     #[test]
+    fn disallowed_function_call_fails_without_splitting_reasoning() {
+        let params = ResponseParams {
+            tool_choice: Some(
+                serde_json::from_value(serde_json::json!({
+                    "type": "allowed_tools",
+                    "mode": "auto",
+                    "tools": [{"type": "function", "name": "read_file"}]
+                }))
+                .unwrap(),
+            ),
+            ..reasoning_params()
+        };
+        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let reasoning_events = conv.process_chunk(&reasoning_chunk("still thinking"));
+        assert_eq!(
+            event_types(&reasoning_events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.reasoning_text.delta".to_string(),
+            ]
+        );
+
+        let tool_events = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("delete_file"),
+            Some("{\"path\":\"notes.txt\"}"),
+        ));
+        assert_eq!(
+            event_types(&tool_events),
+            vec![
+                "response.reasoning_text.done".to_string(),
+                "response.content_part.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.failed".to_string(),
+            ]
+        );
+        assert_eq!(
+            conv.reasoning_items[0].output_status,
+            Some(OutputStatus::Incomplete)
+        );
+
+        assert!(
+            conv.process_chunk(&reasoning_chunk(" must be ignored"))
+                .is_empty()
+        );
+        assert!(conv.emit_end_events().is_empty());
+        assert_eq!(conv.reasoning_items.len(), 1);
+        assert_eq!(conv.reasoning_items[0].accumulated_text, "still thinking");
+    }
+
+    #[test]
     fn test_backend_error_preserves_completed_function_call_status() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
         let _ = conv.process_chunk(&tool_call_chunk(
@@ -1596,6 +1737,35 @@ mod tests {
     }
 
     #[test]
+    fn test_content_filter_emits_incomplete_terminal_response() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&with_finish_reason(
+            text_chunk("blocked"),
+            FinishReason::ContentFilter,
+        ));
+
+        let end_events = conv.emit_end_events();
+        assert_eq!(
+            event_types(&end_events).last().map(String::as_str),
+            Some("response.incomplete")
+        );
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(
+            response
+                .incomplete_details
+                .as_ref()
+                .map(|details| details.reason.as_str()),
+            Some("content_filter")
+        );
+        let OutputItem::Message(message) = &response.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
+    }
+
+    #[test]
     fn test_length_finish_reason_marks_reasoning_item_incomplete() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
 
@@ -1645,6 +1815,71 @@ mod tests {
             panic!("expected message output");
         };
         assert_eq!(message.status, OutputStatus::Incomplete);
+    }
+
+    /// The message item is not the terminal item here, so the terminal response reports
+    /// it completed. `append_end_events` now closes it with this same per-item status,
+    /// so the `output_item.done` event cannot disagree with the final response.
+    #[test]
+    fn test_length_leaves_a_non_terminal_message_item_completed() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&text_chunk("here you go "));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some(r#"{"city":"Par"#),
+        ));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Length));
+
+        assert_eq!(
+            conv.item_output_status(conv.message_output_index),
+            OutputStatus::Completed,
+            "only the terminal item was cut short"
+        );
+
+        let _ = conv.emit_end_events();
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        let OutputItem::Message(message) = &response.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Completed);
+    }
+
+    #[test]
+    fn test_length_marks_only_the_terminal_stream_tool_call_incomplete() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("first"),
+            Some(r#"{"done":"yes"}"#),
+        ));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            1,
+            Some("call-2"),
+            Some("second"),
+            Some(r#"{"done":"no","tail":"cut"#),
+        ));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Length));
+        let _ = conv.emit_end_events();
+
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        let statuses: Vec<_> = response
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::FunctionCall(call) => Some(call.status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                Some(OutputStatus::Completed),
+                Some(OutputStatus::Incomplete)
+            ]
+        );
     }
 
     #[test]

@@ -506,13 +506,13 @@ The Go alignment applies to the `inference-gateway/epp`, `operator` and `snapsho
 
 #### Summary
 
-Dynamo v1.4.2 is a patch release on top of v1.4.1. It fixes **NIXL loader-path resolution** in the Frontend and SGLang Runtime images, where the Rust NIXL bindings silently ran against non-functional stubs instead of the real library. It also **removes an unused profiling plugin** from the shipped images and tightens dependency pins in the Frontend and Planner images. With this release, Dynamo also introduces **Dynamo Enterprise**: a curated set of release artifacts published for NVIDIA Enterprise Support.
+Dynamo v1.4.2 is a patch release on top of v1.4.1. It fixes **NIXL loader-path resolution** in the Frontend and SGLang Runtime images, where the Rust NIXL bindings silently ran against non-functional stubs instead of the real library. It also **removes an unused profiling plugin** from the shipped images and tightens dependency pins in the Frontend and Planner images. With this release, Dynamo also introduces **Dynamo Enterprise Support**: a curated set of release artifacts published for enterprise support.
 
 **Base Branch**: `release/1.4.2`
 
-#### Dynamo Enterprise
+#### Dynamo Enterprise Support
 
-Starting with v1.4.2, a curated set of Dynamo release artifacts is also published under the `-enterprise` suffix in the [Dynamo Enterprise collection](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise) on NGC. These artifacts are eligible for NVIDIA Enterprise Support under an active NVIDIA AI Enterprise subscription and carry no functional or binary differences from their open-source counterparts. See [Dynamo Enterprise](../../../enterprise/overview.mdx) for scope, supported artifacts, and coverage terms.
+Starting with v1.4.2, a curated set of Dynamo release artifacts is also published under the `-enterprise` suffix in the [Dynamo Enterprise collection](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise) on NGC. These artifacts are eligible for enterprise support under an active NVIDIA AI Enterprise subscription and carry no functional or binary differences from their open-source counterparts. See [Dynamo Enterprise Support](../../../enterprise/overview.mdx) for scope, supported artifacts, and coverage terms.
 
 #### Bug Fixes
 

@@ -50,6 +50,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // request. Quarantine it, or a migration retry can reselect the same
         // worker before discovery removal catches up.
         ErrorType::Backend(BackendError::StreamIncomplete),
+        // The addressed server has no handler for this instance: discovery is
+        // stale or the worker is shutting down. Same reasoning as above.
+        ErrorType::WorkerUnavailable,
     ];
     match_error_chain(err, INHIBITED, &[])
 }
@@ -440,7 +443,9 @@ fn spawn_instance_removal_watcher<T, U>(
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 dispatch.on_instance_added(&eid).await;
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -531,7 +536,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
                                 indexer.remove_worker(eid.instance_id);
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Removed(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -2498,6 +2506,15 @@ mod tests {
             !is_inhibited(&cancelled),
             "client cancellation is not a worker fault"
         );
+    }
+
+    #[test]
+    fn worker_unavailable_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build();
+        assert!(is_inhibited(&err));
     }
 
     #[test]

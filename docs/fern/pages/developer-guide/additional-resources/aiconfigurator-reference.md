@@ -71,7 +71,7 @@ Use Python 3.11 through 3.13.
 
 ```bash
 # Install the distribution that provides the compatibility command
-python3 -m pip install "aisimulate==0.1.0.dev2"
+python3 -m pip install "aisimulate==0.12.0"
 
 # Optional: check whether the model/system/backend is covered
 aiconfigurator cli support \
@@ -313,10 +313,10 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           imagePullPolicy: IfNotPresent
 
-    VLLMWorker:
+    worker:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 4
@@ -333,7 +333,7 @@ spec:
           value: /opt/models
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           workingDir: /workspace
           imagePullPolicy: IfNotPresent
           command:

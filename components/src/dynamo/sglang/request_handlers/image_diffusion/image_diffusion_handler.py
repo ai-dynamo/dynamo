@@ -8,12 +8,16 @@ import logging
 import random
 import time
 import uuid
+from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Optional
 
 import torch
 from PIL import Image
 
 from dynamo._core import Context
+from dynamo.common.http.base import HttpStatusError
+from dynamo.common.http.media_reference import local_media_reference
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
 from dynamo.llm.exceptions import InvalidArgument
@@ -170,16 +174,43 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
-        # Add image_path for I2I/TI2I if provided
-        if input_reference is not None:
-            if not input_reference.strip():
-                raise InvalidArgument("input_reference must be a non-empty string")
-            args["image_path"] = input_reference
+        # Add image_path for I2I/TI2I if provided. A URL is fetched through the
+        # SSRF-safe client (revalidating each redirect hop) into a temp file, so
+        # the generator only ever opens a trusted local path — never a URL it
+        # would fetch and redirect itself.
+        async with AsyncExitStack() as stack:
+            if input_reference is not None:
+                if not input_reference.strip():
+                    raise InvalidArgument("input_reference must be a non-empty string")
+                try:
+                    args["image_path"] = await stack.enter_async_context(
+                        local_media_reference(
+                            input_reference, UrlValidationPolicy.from_env()
+                        )
+                    )
+                except UrlValidationError as exc:
+                    # A policy verdict on a client-supplied reference is a bad
+                    # request. UrlValidationError is a ValueError, which the
+                    # binding already maps to InvalidArgument
+                    # (backend.rs py_err_to_dynamo) — this says so at the call
+                    # site rather than relying on that fallback.
+                    raise InvalidArgument(str(exc)) from exc
+                except HttpStatusError as exc:
+                    if not 400 <= exc.status < 500:
+                        raise
+                    # The origin the client picked answered 4xx. image_loader
+                    # takes the same line for an unreachable user-supplied URL
+                    # ("a client error (400) rather than an internal server
+                    # fault"). The URL is not echoed back: the client sent it,
+                    # and it has no length limit.
+                    raise InvalidArgument(
+                        f"input_reference could not be fetched (HTTP {exc.status})"
+                    ) from exc
 
-        result = await asyncio.to_thread(
-            self.generator.generate,
-            sampling_params_kwargs=args,
-        )
+            result = await asyncio.to_thread(
+                self.generator.generate,
+                sampling_params_kwargs=args,
+            )
 
         # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
