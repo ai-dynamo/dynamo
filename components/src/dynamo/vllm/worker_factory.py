@@ -1349,7 +1349,13 @@ class WorkerFactory:
             # process-owned lock is released.
             os.kill(os.getpid(), signal.SIGTERM)
 
-        monitor_kwargs = {"expected_ranks": range(1, nnodes)}
+        mapped_standby = os.environ.get(
+            "DYN_VLLM_GMS_MAPPED_STANDBY", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        monitor_kwargs = {
+            "expected_ranks": range(1, nnodes),
+            "broadcast_fence": mapped_standby,
+        }
         if handler is None:
             # Model/process startup can starve Python heartbeat threads for
             # hundreds of milliseconds. Use the conservative default until the

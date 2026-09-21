@@ -383,6 +383,48 @@ def test_lost_rank_does_not_force_terminate_healthy_survivors():
         monitor.stop()
 
 
+def test_opt_in_fence_broadcast_fail_stops_healthy_survivors():
+    endpoint = _endpoint()
+    leader_fired = threading.Event()
+    survivor_fired = threading.Event()
+    survivor_calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: leader_fired.set(),
+        bind_addr=endpoint,
+        timeout_ms_override=80,
+        expected_ranks={1, 2},
+        startup_grace_ms_override=1_000,
+        broadcast_fence=True,
+    )
+    survivor = rl.RankLivenessClient(
+        "unused",
+        1,
+        interval_ms=20,
+        connect_addr=endpoint,
+        on_leader_lost=lambda rank, reason: (
+            survivor_calls.append((rank, reason)),
+            survivor_fired.set(),
+        ),
+        timeout_ms_override=1_000,
+        startup_grace_ms_override=1_000,
+    )
+    failed = rl.RankLivenessClient("unused", 2, interval_ms=20, connect_addr=endpoint)
+
+    monitor.start()
+    survivor.start()
+    failed.start()
+    try:
+        assert monitor.wait_for_ranks({1, 2}, timeout=1.0)
+        failed.stop()
+        _wait(leader_fired)
+        assert survivor_fired.wait(0.15)
+        assert survivor_calls == [(0, "peer-rank-lost")]
+    finally:
+        failed.stop()
+        survivor.stop()
+        monitor.stop()
+
+
 def test_worker_detects_leader_that_never_appears():
     fired = threading.Event()
     calls: list[tuple[int, str]] = []
