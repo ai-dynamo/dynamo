@@ -55,6 +55,7 @@ DEFAULT_HEARTBEAT_MS = 250
 DEFAULT_TIMEOUT_MS = 750
 DEFAULT_LIVENESS_PORT = 29555
 DEFAULT_STARTUP_GRACE_MS = 30_000
+DEFAULT_STARTUP_TIMEOUT_MS = 5_000
 # Limit receive work per poll so a busy peer cannot starve lost-rank deadlines.
 _MAX_HEARTBEATS_PER_POLL = 64
 
@@ -78,6 +79,17 @@ def startup_grace_ms() -> int:
     return max(
         timeout_ms(),
         _int_env("DYN_GMS_RANK_LIVENESS_STARTUP_GRACE_MS", DEFAULT_STARTUP_GRACE_MS),
+    )
+
+
+def startup_timeout_ms() -> int:
+    """Deadline for already-connected peers until serving is armed."""
+
+    return max(
+        timeout_ms(),
+        _int_env(
+            "DYN_GMS_RANK_LIVENESS_STARTUP_TIMEOUT_MS", DEFAULT_STARTUP_TIMEOUT_MS
+        ),
     )
 
 
@@ -136,6 +148,7 @@ class RankLivenessClient:
         on_leader_lost: Callable[[int, str], None] | None = None,
         timeout_ms_override: Optional[int] = None,
         startup_grace_ms_override: Optional[int] = None,
+        startup_timeout_ms_override: Optional[int] = None,
     ):
         self._leader_host = leader_host
         self._rank = int(rank)
@@ -154,6 +167,14 @@ class RankLivenessClient:
             else max(0, startup_grace_ms_override)
         )
         self._startup_grace = grace_value / 1000.0
+        startup_timeout_value = (
+            startup_timeout_ms()
+            if startup_timeout_ms_override is None
+            else max(1, startup_timeout_ms_override)
+        )
+        self._startup_timeout = startup_timeout_value / 1000.0
+        self._runtime_armed = False
+        self._runtime_armed_event = threading.Event()
         self._fired = False
 
     def start(self) -> None:
@@ -172,9 +193,16 @@ class RankLivenessClient:
 
     def stop(self) -> None:
         self._stop.set()
+        self._runtime_armed_event.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
             self._thread = None
+
+    def wait_for_runtime_arm(self, timeout: float | None = None) -> bool:
+        """Wait until the leader releases this rank into serving runtime."""
+
+        self._runtime_armed_event.wait(timeout)
+        return self._runtime_armed and not self._stop.is_set() and not self._fired
 
     def _run(self) -> None:
         import zmq
@@ -217,7 +245,17 @@ class RankLivenessClient:
                             frame = sock.recv(flags=zmq.NOBLOCK)
                         except zmq.Again:
                             break
-                        if frame == b"ack":
+                        if frame == b"fence":
+                            logger.warning(
+                                "[GMS liveness] leader fenced the TP cohort after "
+                                "a peer-rank failure"
+                            )
+                            self._fire(0, "peer-rank-lost")
+                            return
+                        if frame in (b"startup-ack", b"ack"):
+                            if frame == b"ack":
+                                self._runtime_armed = True
+                                self._runtime_armed_event.set()
                             if last_ack is None:
                                 logger.info(
                                     "[GMS liveness] rank %d received leader acknowledgement",
@@ -228,13 +266,16 @@ class RankLivenessClient:
                     if last_ack is None and now - started > self._startup_grace:
                         self._fire(0, "startup-timeout")
                         return
-                    if last_ack is not None and now - last_ack > self._timeout:
+                    deadline = (
+                        self._timeout if self._runtime_armed else self._startup_timeout
+                    )
+                    if last_ack is not None and now - last_ack > deadline:
                         logger.warning(
                             "[GMS liveness] leader silent %.0fms (deadline %.0fms); "
                             "local scheduling gap %.0fms, poll cycle %.0fms; "
                             "suspected failure, writer fencing still required",
                             (now - last_ack) * 1000,
-                            self._timeout * 1000,
+                            deadline * 1000,
                             scheduling_gap_ms,
                             (now - cycle_started) * 1000,
                         )
@@ -279,6 +320,7 @@ class RankLivenessMonitor:
         timeout_ms_override: Optional[int] = None,
         expected_ranks: Optional[Iterable[int]] = None,
         startup_grace_ms_override: Optional[int] = None,
+        runtime_armed: bool = True,
     ):
         self._on_rank_lost = on_rank_lost
         self._bind_addr = bind_addr or leader_bind_addr()
@@ -297,6 +339,7 @@ class RankLivenessMonitor:
             else max(0, startup_grace_ms_override)
         )
         self._startup_grace = grace_value / 1000.0
+        self._runtime_armed = bool(runtime_armed)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._fired = False
@@ -352,6 +395,12 @@ class RankLivenessMonitor:
         after the serving handler is attached.
         """
         self._timeout = max(1, int(value)) / 1000.0
+        self.arm_runtime()
+
+    def arm_runtime(self) -> None:
+        """Release registered ranks from startup fencing into serving runtime."""
+
+        self._runtime_armed = True
 
     def wait_for_ranks(
         self, expected_ranks: Iterable[int], timeout: float | None = None
@@ -430,7 +479,8 @@ class RankLivenessMonitor:
                             self._seen_ranks.add(rank)
                             self._seen_changed.notify_all()
                         try:
-                            sock.send_multipart([frames[0], b"ack"], flags=zmq.NOBLOCK)
+                            ack = b"ack" if self._runtime_armed else b"startup-ack"
+                            sock.send_multipart([frames[0], ack], flags=zmq.NOBLOCK)
                         except zmq.ZMQError:
                             logger.debug(
                                 "[GMS liveness] leader acknowledgement failed for rank %d",
