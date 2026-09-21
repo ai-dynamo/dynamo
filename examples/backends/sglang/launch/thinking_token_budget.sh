@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Start `dynamo.frontend --dyn-chat-processor sglang --reasoning-parser qwen3`
+# Start `python -m dynamo.frontend --dyn-chat-processor sglang --reasoning-parser qwen3`
 # and an SGLang worker with `--enable-strict-thinking --reasoning-parser qwen3`
 # and an enabled grammar backend before running this script.
 
@@ -23,6 +23,9 @@ curl --fail-with-body --silent --show-error \
         \"content\": \"Return a short answer for this synthetic prompt.\"
       }
     ],
+    \"chat_template_kwargs\": {
+      \"enable_thinking\": true
+    },
     \"max_completion_tokens\": 128,
     \"thinking_token_budget\": ${THINKING_TOKEN_BUDGET}
   }"
