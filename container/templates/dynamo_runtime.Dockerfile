@@ -116,9 +116,12 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
+# Local wheel names are reused across source revisions. Read their contents
+# directly: shared cache entries have produced installed files that differ from
+# the shipped wheel. Keep the cache mount for the separate KVBM install below.
 RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
-    uv pip install \
+    uv pip install --no-cache \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \

@@ -74,7 +74,7 @@ vllm = [
 
 sglang = [
     "uvloop",
-    "sglang[diffusion]==0.5.19",
+    "sglang[diffusion]==0.5.20",
     # sglang[diffusion] dropped accelerate in 0.5.12; diffusers still needs it.
     "accelerate>=0.17.0",
     "blake3>=1.0.0,<2.0.0",
@@ -253,6 +253,8 @@ filterwarnings = [
     "ignore:The cuda\\..*module is deprecated:FutureWarning",
     # SGLang GGUF quantization emits UserWarning on non-CUDA platforms (arm64 CPU-only CI)
     "ignore:Only CUDA.*support GGUF quantization:UserWarning",
+    # SGLang 0.5.20 still subclasses its deprecated MultiPlatformOp internally.
+    "ignore:MultiPlatformOp is deprecated; subclass sglang\\.kernels\\.fused_op\\.BaseFusedOp instead:DeprecationWarning",
     # protobuf C extension warning
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning",
     # unclosed socket/event loop warnings

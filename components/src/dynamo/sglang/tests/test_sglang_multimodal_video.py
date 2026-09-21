@@ -762,3 +762,59 @@ async def test_multimodal_prefill_rejects_parallel_sampling_before_generation():
 
     with pytest.raises(StopAsyncIteration):
         await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_multimodal_decode_preserves_position_metadata_without_embeddings():
+    """Decode needs M-RoPE grids/timing even though only prefill receives features."""
+    from unittest.mock import AsyncMock
+
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.enable_trace = False
+    handler._get_bootstrap_from_prefill = AsyncMock(
+        return_value={
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1,
+            "bootstrap_room": 42,
+        }
+    )
+
+    async def output():
+        yield {"output_ids": [7], "meta_info": {"finish_reason": {"type": "stop"}}}
+
+    handler.engine = SimpleNamespace(async_generate=AsyncMock(return_value=output()))
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=1),
+            sampling_options=SamplingOptions(),
+        ),
+        multimodal_inputs=[
+            MultiModalGroup(image_grid_thw=[1, 4, 4], num_mm_tokens=4),
+            MultiModalGroup(image_grid_thw=[1, 6, 6], num_mm_tokens=9),
+            MultiModalGroup(
+                video_grid_thw=[2, 4, 4],
+                num_mm_tokens=8,
+                second_per_grid_ts=0.5,
+                video_timestamps=[0.0, 0.5],
+            ),
+        ],
+    )
+    result = [
+        item async for item in handler._generate_disaggregated(request, lambda: None)
+    ]
+    assert result
+    kwargs = handler.engine.async_generate.call_args.kwargs
+    assert kwargs["input_ids"] == request.request.token_ids
+    image = kwargs["image_data"][0]
+    video = kwargs["video_data"][0]
+    assert image["image_grid_thw"].tolist() == [[1, 4, 4], [1, 6, 6]]
+    assert video["video_grid_thw"].tolist() == [[2, 4, 4]]
+    assert video["second_per_grid_ts"].tolist() == [0.5]
+    assert video["video_timestamps"] == [[0.0, 0.5]]
+    for item in (image, video):
+        assert item["format"] == "processor_output"
+        assert "precomputed_embeddings" not in item
+        assert "feature" not in item
+        assert isinstance(item["hash"], int)
+    assert image["hash"] != video["hash"]
