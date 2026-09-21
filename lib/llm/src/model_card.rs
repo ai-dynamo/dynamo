@@ -20,7 +20,6 @@ use crate::common::checked_file::CheckedFile;
 use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{
     ModelRuntimeConfig, TokenizerBackend, VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
@@ -1260,20 +1259,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
-                // The frontend constructs one video routing preprocessor from
-                // the cohort's representative card. Partition workers when a
-                // processor contract is missing or differs so every admitted
-                // worker uses the same model-visible prompt expansion.
-                for key in [
-                    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                // The Qwen video contract is resolved per cohort, not per card.
+                // Nemotron contracts still partition WorkerSets by checksum.
+                append_runtime_contract_checksum(
+                    &mut bytes_to_hash,
+                    &self.runtime_config,
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-                ] {
-                    append_runtime_contract_checksum(
-                        &mut bytes_to_hash,
-                        &self.runtime_config,
-                        key,
-                    );
-                }
+                );
 
                 // TODO: Do we want any other user_data or runtime_config?
 
@@ -3255,7 +3247,57 @@ mod ownership_tests {
     }
 
     #[test]
-    fn video_processor_runtime_contracts_isolate_worker_sets() {
+    fn qwen_video_processor_contract_stays_out_of_the_checksum() {
+        use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
+        // `mdcsum()` caches via `OnceLock`, so each case uses a fresh card.
+
+        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+            card
+        }
+
+        fn legacy_ceil() -> serde_json::Value {
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+            })
+        }
+
+        let withheld = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(
+            withheld.mdcsum(),
+            card_with_contract(legacy_ceil()).mdcsum(),
+            "a worker that predates the contract must still join the WorkerSet of one that publishes it"
+        );
+
+        assert_eq!(
+            card_with_contract(legacy_ceil()).mdcsum(),
+            card_with_contract(serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+            }))
+            .mdcsum(),
+            "two workers publishing different contracts must still serve as one group"
+        );
+
+        // Negative control: a deployment that never carries this key is
+        // unaffected, so its cache directory and reported checksum do not move.
+        let bare = ModelDeploymentCard::with_name_only("model");
+        let mut unrelated = ModelDeploymentCard::with_name_only("model");
+        unrelated
+            .runtime_config
+            .runtime_data
+            .insert("some_unrelated_runtime_key".to_string(), true.into());
+        assert_eq!(bare.mdcsum(), unrelated.mdcsum());
+    }
+
+    #[test]
+    fn video_processor_runtime_contract_checksum_boundaries() {
         use crate::local_model::runtime_config::{
             VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
             VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -3302,9 +3344,9 @@ mod ownership_tests {
         let unrelated = card_with_contract("unrelated_runtime_metadata", serde_json::json!(true));
 
         assert_eq!(missing.mdcsum(), unrelated.mdcsum());
-        assert_ne!(missing.mdcsum(), qwen.mdcsum());
+        assert_eq!(missing.mdcsum(), qwen.mdcsum());
         assert_eq!(qwen.mdcsum(), same_qwen.mdcsum());
-        assert_ne!(qwen.mdcsum(), different_qwen.mdcsum());
+        assert_eq!(qwen.mdcsum(), different_qwen.mdcsum());
         assert_ne!(missing.mdcsum(), nemotron.mdcsum());
         assert_ne!(nemotron.mdcsum(), different_nemotron.mdcsum());
         assert_ne!(qwen.mdcsum(), nemotron.mdcsum());

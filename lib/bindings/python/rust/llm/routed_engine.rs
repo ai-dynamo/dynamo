@@ -65,7 +65,7 @@ impl RoutedEngine {
             request_context.id(),
         );
 
-        pyo3_async_runtimes::tokio::future_into_py(
+        crate::future_into_py(
             py,
             async move {
                 let mut stream = inner.generate(request_context).await.map_err(to_pyerr)?;

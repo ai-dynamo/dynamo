@@ -116,12 +116,9 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Install dynamo wheels (runtime packages only, no test dependencies)
 # uv handles its own locking for the cache, no need to add sharing=locked
 ARG ENABLE_KVBM
-RUN --mount=type=bind,source=./container/deps/overrides.aisimulate-review.txt,target=/tmp/overrides.aisimulate-review.txt \
-    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv && \
     uv pip install \
-    --overrides /tmp/overrides.aisimulate-review.txt \
-    --find-links /opt/dynamo/wheelhouse \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \

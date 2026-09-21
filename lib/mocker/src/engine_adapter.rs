@@ -158,6 +158,7 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
+        kv_eviction_policy: Default::default(),
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
         // Mocker arguments reach this boundary with a concrete capacity,
@@ -195,6 +196,7 @@ pub(crate) fn disaggregated_replay_setup(
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
+        kv_eviction_policy: Default::default(),
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
         num_gpu_blocks_is_explicit: Some(true),

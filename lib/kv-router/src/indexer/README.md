@@ -10,6 +10,7 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 |------|-------------|
 | `mod.rs` | Module declarations and re-exports |
 | `traits.rs` | `KvIndexerInterface` (async trait) and `SyncIndexer` (sync trait for thread-pool backends) |
+| `delegate.rs` | Construction-time delegates for first-owner and last-owner notifications |
 | `types.rs` | `KvRouterError`, `MatchRequest`, `WorkerTask`, channel message types |
 | `metrics.rs` | `KvIndexerMetrics` — Prometheus counters and histograms |
 | `kv_indexer.rs` | `KvIndexer` — single-threaded async wrapper around `RadixTree` with tokio mpsc channels |
@@ -22,6 +23,50 @@ The concurrent indexers achieve a combined throughput of over **10 million event
 | `pruning.rs` | `PruneManager` — TTL-based approximate expiration via 100ms buckets and per-worker pruning queues |
 | `naive.rs` | Brute-force baseline indexers (bench-only, behind `bench` feature flag) |
 | `tests.rs` | Integration tests for all indexer variants |
+
+## Ownership delegate
+
+`KvIndexerDelegate` receives `on_create(hash)` when a sequence hash gains its first owner. It receives `on_remove(hash)` when the last owner releases that hash. Owners include each worker's data-parallel ranks. Duplicate events produce no notifications. Reinsertion after the final removal produces another create notification.
+
+Provide the delegate during construction. The running indexer has no delegate setter or removal API.
+
+```rust
+use std::sync::Arc;
+use dynamo_kv_router::indexer::{KvIndexer, KvIndexerDelegate, KvIndexerMetrics};
+use dynamo_kv_router::protocols::ExternalSequenceBlockHash;
+use tokio_util::sync::CancellationToken;
+
+struct Observer;
+impl KvIndexerDelegate for Observer {
+    fn on_create(&self, hash: ExternalSequenceBlockHash) {
+        // Record the newly owned hash.
+    }
+
+    fn on_remove(&self, hash: ExternalSequenceBlockHash) {
+        // Record the hash with no remaining owners.
+    }
+}
+
+let indexer = KvIndexer::builder(
+    CancellationToken::new(),
+    32,
+    Arc::new(KvIndexerMetrics::new_unregistered()),
+)
+.delegate(Arc::new(Observer))
+.build();
+```
+
+`RadixTree`, `ConcurrentRadixTree`, `ConcurrentRadixTreeCompressed`, `PositionalIndexer`, and `LowerTierIndexer` expose `new_with_delegate`. Construct the backend before passing it to `ThreadPoolIndexer`. `LocalKvIndexer::new_with_delegate` observes its primary device index. Lower-tier delegates observe one tier index, including cache-owner residency when present.
+
+`BranchShardedIndexer::new_with_delegate` constructs local compressed shards with one shared ownership tracker. Router prefixes and shard suffixes participate in the same lifecycle. Synthetic anchors do not count as owners. Remote shard handles cannot transport an in-process delegate. Install delegates at the process that owns the index.
+
+`DcCkfState::new_with_delegate` and `LocalCkfAdapter::new_with_delegate` accept `KvIndexerDelegate<CanonicalSequenceBlockHash>`. These callbacks describe exact canonical ownership, including hashes omitted from the physical filter for capacity. Transactional rank replacement reports only the committed difference. Failed replacement emits nothing. The global fingerprint replica cannot recover exact hash identities and does not expose delegate registration.
+
+Notifications follow committed ownership updates, including clears, rank resets, explicit removals, and approximate eviction. They do not describe tree-node allocation or an atomic snapshot of concurrent query results. Destroying an indexer does not emit removals.
+
+Callbacks run synchronously on mutation threads. Calls for a hash are serialized. Different hashes can invoke the delegate concurrently. Callbacks must return promptly, must not panic, and must not mutate the indexer or wait for another indexer operation. A delegate can forward notifications to its own queue for slower processing.
+
+Delegates are optional. Without a delegate, the backend allocates no ownership tracker. With a delegate, radix and positional backends track hash-owner pairs behind sharded locks. This adds memory and mutation cost. Query traversal is unchanged. Run `cargo bench -p dynamo-kv-router --bench indexer_delegate` to measure the compressed backend with notifications enabled and disabled.
 
 ## Motivation: The Four Block Identifiers
 

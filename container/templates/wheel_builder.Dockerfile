@@ -632,20 +632,23 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target in ("runtime", "planner", "frontend") %}
+{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# TODO(GH-14355): while the Weka importer is pinned to its public review
-# revision, build only that distribution from the immutable VCS requirement.
-# Replace this with the published-wheel download path when matching PyPI and
-# crates.io dev releases are available. Runtime images continue to own
-# dependency installation through their requirements files and local wheels.
+# AI Simulate is released separately as an abi3 wheel. Its public PyPI artifact
+# is a small resolver sdist because the full wheel is too large for that registry;
+# stage the actual wheel directly from NVIDIA's package index. Download only this
+# distribution; runtime images own dependency installation through their
+# requirements files and local wheels.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    python -m pip wheel \
+    python -m pip download \
+        --only-binary=:all: \
         --no-deps \
-        --wheel-dir /opt/dynamo/dist \
+        --no-index \
+        --find-links https://pypi.nvidia.com/aisimulate/ \
+        --dest /opt/dynamo/dist \
         --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
 {% endif %}
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep Dynamo on one immutable public AISimulate revision."""
+"""Keep Dynamo on one published AISimulate release."""
 
 from __future__ import annotations
 
@@ -36,8 +36,6 @@ LOCKFILES = (
     ROOT / "lib/bindings/python/Cargo.lock",
     ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
-AISIMULATE_REPOSITORY = "https://github.com/ai-dynamo/aisimulate.git"
-AISIMULATE_REVISION = "d71203e489541bc98c5f4a616dcec3b225b8fb72"
 
 
 def _root_configs() -> tuple[dict, dict]:
@@ -61,12 +59,8 @@ def _python_requirement(pyproject: dict) -> Requirement:
 def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
     matches: list[Requirement] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        requirement = line.strip()
-        if (
-            not requirement
-            or requirement.startswith("#")
-            or requirement.startswith("--")
-        ):
+        requirement = line.split("#", 1)[0].strip()
+        if not requirement or requirement.startswith("--"):
             continue
         parsed = Requirement(requirement)
         if canonicalize_name(parsed.name) == "aisimulate":
@@ -84,34 +78,23 @@ def _exact_version(requirement: Requirement) -> Version:
     return Version(specifiers[0].version)
 
 
-def _vcs_revision(requirement: Requirement) -> str:
-    prefix = f"git+{AISIMULATE_REPOSITORY}@"
-    suffix = "#subdirectory=python/aisimulate"
-    assert requirement.url is not None, "AISimulate review source must use VCS"
-    assert requirement.url.startswith(prefix)
-    assert requirement.url.endswith(suffix)
-    revision = requirement.url.removeprefix(prefix).removesuffix(suffix)
-    assert re.fullmatch(r"[0-9a-f]{40}", revision)
-    return revision
-
-
-def _locked_cargo_source(path: Path) -> tuple[Version, str]:
+def _locked_cargo_version(path: Path) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
     matches = [package for package in packages if package["name"] == "aisimulate-core"]
     assert len(matches) == 1, f"expected one aisimulate-core package in {path}"
 
     package = matches[0]
-    expected_source = (
-        f"git+{AISIMULATE_REPOSITORY}?rev={AISIMULATE_REVISION}"
-        f"#{AISIMULATE_REVISION}"
-    )
-    assert package.get("source") == expected_source
-    assert "checksum" not in package
-    return Version(str(package["version"])), AISIMULATE_REVISION
+    assert package.get("source") == (
+        "registry+https://github.com/rust-lang/crates.io-index"
+    ), f"aisimulate-core must resolve from crates.io in {path}"
+    assert re.fullmatch(
+        r"[0-9a-f]{64}", str(package.get("checksum", ""))
+    ), f"aisimulate-core must have a registry checksum in {path}"
+    return Version(str(package["version"]))
 
 
-def test_dynamo_pins_matching_public_aisimulate_revision() -> None:
+def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
     python_version = _exact_version(python_requirement)
@@ -132,45 +115,46 @@ def test_dynamo_pins_matching_public_aisimulate_revision() -> None:
     environment["python_version"] = "3.14"
     assert not python_requirement.marker.evaluate(environment)
     assert container_requirement.marker is None
-    assert _vcs_revision(container_requirement) == AISIMULATE_REVISION
-
-    uv_source = pyproject["tool"]["uv"]["sources"]["aisimulate"]
-    assert uv_source == {
-        "git": AISIMULATE_REPOSITORY,
-        "rev": AISIMULATE_REVISION,
-        "subdirectory": "python/aisimulate",
-    }
-
-    cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
-    assert cargo_dependency == {
-        "git": AISIMULATE_REPOSITORY,
-        "rev": AISIMULATE_REVISION,
-    }
-
-    assert all(
-        version == python_version and revision == AISIMULATE_REVISION
-        for version, revision in map(_locked_cargo_source, LOCKFILES)
+    assert _exact_version(container_requirement) == python_version
+    with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
+        benchmarks = tomllib.load(handle)
+    assert _exact_version(_python_requirement(benchmarks)) == python_version
+    assert "aisimulate" not in pyproject.get("tool", {}).get("uv", {}).get(
+        "sources", {}
     )
 
+    cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
+    assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
+    cargo_requirement = str(cargo_dependency["version"])
+    assert cargo_requirement.startswith(
+        "="
+    ), "aisimulate-core must use one exact crates.io version"
+    cargo_version = Version(cargo_requirement.removeprefix("="))
 
-def test_container_stages_the_public_aisimulate_revision() -> None:
+    assert cargo_version == python_version
+    assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
+
+
+def test_container_stages_the_published_aisimulate_wheel() -> None:
     pyproject, _ = _root_configs()
     python_version = _exact_version(_python_requirement(pyproject))
-    container_revision = _vcs_revision(
+    container_version = _exact_version(
         _requirements_file_aisimulate_requirement(AISIMULATE_REQUIREMENTS)
     )
     wheel_builder = (ROOT / "container/templates/wheel_builder.Dockerfile").read_text(
         encoding="utf-8"
     )
 
-    assert python_version == Version("0.12.0")
-    assert container_revision == AISIMULATE_REVISION
+    assert container_version == python_version
     assert "requirements.aisimulate.txt" in wheel_builder
     assert (
         "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
         in wheel_builder
     )
+    assert "--only-binary=:all:" in wheel_builder
     assert "--no-deps" in wheel_builder
+    assert "--no-index" in wheel_builder
+    assert "--find-links https://pypi.nvidia.com/aisimulate/" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()

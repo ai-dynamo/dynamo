@@ -397,7 +397,7 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["num_decode_workers"] == 4
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics["output_throughput_tok_s"] == 99.0
 
 
 def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
@@ -431,7 +431,7 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
     assert seen["request_count"] == 200
     assert seen["replay_concurrency"] is None
     assert seen["arrival_interval_ms"] == 50.0
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics["output_throughput_tok_s"] == 99.0
 
 
 @pytest.mark.parametrize("request_rate", [0.0, -1.0])

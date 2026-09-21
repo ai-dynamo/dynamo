@@ -1206,6 +1206,7 @@ mod tests {
         let mut request = request(1, 7);
         request.replay_context = Some(ReplayRequestContext {
             authored_id: "length-only".into(),
+            agentic: None,
             session_id: None,
             turn_index: None,
             metadata: Value::Null,
