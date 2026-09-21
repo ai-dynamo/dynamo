@@ -273,7 +273,9 @@ _SERVICE = re.compile(
 _ASSIGNMENT = re.compile(r"\w+=\S*|\$\{?\S*")
 # A prefix command runs the rest of the segment, so the service is still launched.
 # `env` carries its own flags and their arguments, as in `env -u DYN_SYSTEM_PORT`.
-_PREFIX_COMMAND = re.compile(r"env|exec|nohup|setsid|stdbuf|time|sudo")
+_PREFIX_COMMAND = re.compile(
+    r"env|exec|nohup|setsid|stdbuf|time|sudo|timeout|srun|mpirun|numactl|taskset|uv"
+)
 # These reserved words introduce commands in a compound statement or pipeline.
 _COMMAND_RESERVED_WORD = re.compile(r"if|then|elif|else|while|until|do|!")
 _FUNCTION_HEADER = re.compile(
@@ -687,6 +689,7 @@ echo python -m dynamo.frontend
 echo "starting" | grep python -m dynamo.vllm
 env ${GPU_PIN:+"$GPU_PIN"} python3 -m dynamo.sglang &
 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm &
+timeout 300 python -m dynamo.vllm
 wait_any_exit
 """
 
@@ -696,6 +699,7 @@ def test_only_a_segment_command_word_counts_as_a_launch() -> None:
     assert _service_launches(_ARGUMENT_SAMPLE) == [
         (4, "python3 -m dynamo.sglang", True),
         (5, "python -m dynamo.vllm", True),
+        (6, "python -m dynamo.vllm", False),
     ]
 
 
