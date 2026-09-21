@@ -596,8 +596,7 @@ fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
         .collect::<Result<Vec<_>, _>>()
         .ok()?;
 
-    if buckets.is_empty()
-        || buckets.len() > MAX_BUCKET_COUNT
+    if buckets.len() > MAX_BUCKET_COUNT
         || buckets
             .iter()
             .any(|bucket| !bucket.is_finite() || *bucket < 0.0)
@@ -1118,7 +1117,6 @@ impl Metrics {
         )
         .unwrap();
 
-        // Explicit ITL boundaries take precedence over the legacy log-spaced configuration.
         let inter_token_latency_buckets = inter_token_latency_buckets(env);
 
         let inter_token_latency = HistogramVec::new(
@@ -2964,7 +2962,13 @@ mod tests {
 
     #[test]
     fn invalid_explicit_itl_buckets_fall_back_to_defaults() {
-        for value in ["", "0.01,nope", "-0.01,0.02", "0.02,0.01", "0.01,0.01"] {
+        for value in [
+            "0.01,nope",
+            "0.01,NaN",
+            "-0.01,0.02",
+            "0.02,0.01",
+            "0.01,0.01",
+        ] {
             let pairs = [("DYN_METRICS_ITL_BUCKETS", value)];
             let env = fake_env(&pairs);
             assert_eq!(inter_token_latency_buckets(&env), DEFAULT_ITL_BUCKETS);
