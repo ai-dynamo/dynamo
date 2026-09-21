@@ -61,28 +61,10 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 # LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
 # (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
 # NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
-#
-# The MPI entries pick the Open MPI the worker can actually start under. TRT-LLM
-# spawns its executor ranks with MPI.COMM_SELF.Spawn, through mpi4py's
-# MpiPoolSession. 1.3.0rc27 repointed /opt/hpcx/ompi and /usr/local/mpi from
-# ompi4 to ompi5, and that spawn fails there: as root it stops at dpm.c:2141
-# with MPI_ERR_UNKNOWN, and with PRTE_ALLOW_RUN_AS_ROOT set it stops at
-# dpm.c:667 with "Server not available", as a singleton and under mpirun alike.
-# The worker never binds its gRPC port, so every serving test waits out its
-# deadline. The image still carries /opt/hpcx/ompi4, which is 4.1.9a1, the exact
-# build 1.3.0rc26 shipped as its default and served on. Both trees export
-# libmpi.so.40, so mpi4py loads whichever the path names: with these entries it
-# reports 4.1.9a1 rather than 5.0.10rc2.
-#
-# Transitional. Delete the four MPI entries when upstream's ompi5 can spawn, and
-# re-measure rather than assume: run MPI.COMM_SELF.Spawn in the base image.
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/opt/hpcx/ompi4/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    LD_LIBRARY_PATH=/opt/hpcx/ompi4/lib:${LD_LIBRARY_PATH} \
-    OPAL_PREFIX=/opt/hpcx/ompi4 \
-    PRTE_PREFIX= \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 
@@ -783,31 +765,21 @@ RUN set -eu; \
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
 # dev/local-dev create their own venv in a later stage, so the venv ENV is left
 # out for them — keeps this config identical to the unsquashed dev path.
-#
-# This is the block the shipped image carries, so a variable that exists only in
-# runtime_full is inert at run time. The MPI entries are here for that reason,
-# and the note above them in runtime_full explains what they select.
 {% if target in ("dev", "local-dev") %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/opt/hpcx/ompi4/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    LD_LIBRARY_PATH=/opt/hpcx/ompi4/lib:${LD_LIBRARY_PATH} \
-    OPAL_PREFIX=/opt/hpcx/ompi4 \
-    PRTE_PREFIX= \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/opt/hpcx/ompi4/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
-    LD_LIBRARY_PATH=/opt/hpcx/ompi4/lib:${LD_LIBRARY_PATH} \
-    OPAL_PREFIX=/opt/hpcx/ompi4 \
-    PRTE_PREFIX= \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% endif %}
