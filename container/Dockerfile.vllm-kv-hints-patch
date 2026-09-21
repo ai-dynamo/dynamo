@@ -1,10 +1,12 @@
-FROM nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-55667792-vllm
+# This sentinel is a valid image reference for Dockerfile validation but is not
+# published. Builds must pass the branch-built Dynamo image from BUILD.md.
+ARG DYNAMO_IMAGE=dynamo-image-must-be-set
+FROM ${DYNAMO_IMAGE}
 
 ENV VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver
 
-# Overlay vLLM branch karenc/kv-hints-g1-actions (cherry-picked onto v0.29.0)
-# over the base image's vLLM installation.
-# Build context must be ~/vllm checked out to karenc/kv-hints-g1-actions @ 9b6e116be2.
+# Overlay a v0.29.0-compatible vLLM patch commit over the Dynamo image's vLLM
+# installation. The build context must be the vLLM checkout at VLLM_COMMIT.
 # Only the files changed by the feature branch are copied — no .so files touched.
 
 ARG VLLM_SITE=/usr/local/lib/python3.12/dist-packages/vllm
