@@ -10,7 +10,7 @@ This experiment selects two real root requests and one completed 11-turn subagen
 ## Build the fixture
 
 ```bash
-python experiments/continuum-kv-hints/weka-correctness/build_fixture.py \
+python experiments/continuum-kv-hints/unit-tests-and-microbenches/weka-correctness/build_fixture.py \
   --source /tmp/weka-traces.jsonl \
   --output-dir /tmp/continuum-weka-correctness/fixture
 ```
@@ -20,7 +20,7 @@ python experiments/continuum-kv-hints/weka-correctness/build_fixture.py \
 Start the capture endpoint:
 
 ```bash
-python experiments/continuum-kv-hints/weka-correctness/capture_server.py \
+python experiments/continuum-kv-hints/unit-tests-and-microbenches/weka-correctness/capture_server.py \
   --output /tmp/continuum-weka-correctness/captured-requests.jsonl
 ```
 
@@ -62,7 +62,7 @@ The command uses the fixed InferenceX protocol and replay flags with concurrency
 Validate the captured lifecycle contract:
 
 ```bash
-python experiments/continuum-kv-hints/weka-correctness/check_headers.py \
+python experiments/continuum-kv-hints/unit-tests-and-microbenches/weka-correctness/check_headers.py \
   /tmp/continuum-weka-correctness/captured-requests.jsonl
 ```
 
@@ -71,7 +71,7 @@ python experiments/continuum-kv-hints/weka-correctness/check_headers.py \
 `run_networked.sh` launches Dynamo and vLLM from the experiment branches, enables G1 KV events and SessionPrefixIndexer, and sends the fixture through the public Dynamo endpoint. The policy emits deferred retention for continuing sessions and deferred eviction for final sessions. Its log records the number of lineage blocks resolved for each hint.
 
 ```bash
-bash experiments/continuum-kv-hints/weka-correctness/run_networked.sh
+bash experiments/continuum-kv-hints/unit-tests-and-microbenches/weka-correctness/run_networked.sh
 ```
 
 Results are written under `/tmp/continuum-weka-correctness/networked` by default. The output directory retains its legacy name.
@@ -80,7 +80,7 @@ To run the same replay against the pinned container instead of source worktrees:
 
 ```bash
 CONTINUUM_IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-3c5a01b513-vllm-9b6e116be2 \
-  bash experiments/continuum-kv-hints/weka-correctness/run_container.sh
+  bash experiments/continuum-kv-hints/unit-tests-and-microbenches/weka-correctness/run_container.sh
 ```
 
 Container results are written under `/tmp/continuum-weka-correctness/container-networked` by default. The output directory retains its legacy name.

@@ -21,7 +21,7 @@ members = [
     "examples/router/custom-policy-example/epp",
     "examples/router/custom-policy-example/simple-stacked-score-pick",
     "experiments/continuum-kv-hints/policy",
-    "experiments/continuum-kv-hints/session-prefix-indexer",
+    "experiments/continuum-kv-hints/unit-tests-and-microbenches/session-prefix-indexer",
     "lib/memory",
     "lib/kvbm-common",
     "lib/kvbm-config",
