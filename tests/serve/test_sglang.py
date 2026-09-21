@@ -279,7 +279,7 @@ sglang_configs = {
                     "n": 2,
                     "max_tokens": 1,
                 },
-                expected_response=["supports only n=1"],
+                expected_response=["Invalid request"],
                 expected_log=[],
                 endpoint="/v1/chat/completions",
                 timeout=10,
