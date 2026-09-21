@@ -110,6 +110,12 @@ The same shape can be supplied as a JSON override, for example through vLLM's `k
 }
 ```
 
+The S3 client uses the AWS SDK credential provider chain. Configure credentials through the standard AWS SDK mechanisms or the IAM role available to the worker; the KVBM object configuration does not define separate access-key or secret-key fields.
+
+<Note>
+  The `nixl` variant is present in the configuration schema, but the current KVBM engine does not implement that backend. Use `type = "s3"` for the supported object client.
+</Note>
+
 ## Distributed (leader/worker)
 
 In multi-worker deployments, one KVBM leader coordinates the worker cache tiers over ZMQ.
@@ -215,7 +221,7 @@ Nested sections without an env prefix (offload policies, onboard mode, object st
 
 - **Offload policies** (`offload.g1_to_g2`, `offload.g2_to_g3`): a `policies` list of `pass_all` / `presence` / `presence_lfu`, evaluated with AND logic. `presence_lfu.min_lfu_count` defaults to `8`.
 - **Onboard mode** (`onboard.mode`): `inter` (async, default) or `intra` (synchronous layer-wise).
-- **Object storage** (`object.client`): `s3` or `nixl` client; S3 fields `bucket` (`kvbm-blocks`), `region` (`us-east-1`), `endpoint_url`, `force_path_style`, `max_concurrent_requests` (16).
+- **Object storage** (`object.client`): the supported client is `s3`; S3 fields are `bucket` (`kvbm-blocks`), `region` (`us-east-1`), `endpoint_url`, `force_path_style`, and `max_concurrent_requests` (16). The `nixl` variant is defined in the schema but is not implemented by the current engine.
 
 ### TOML example
 
