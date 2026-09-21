@@ -24,8 +24,7 @@ pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
 /// Enables request-level router/worker cache reuse stage telemetry.
 /// Disabled by default.
-pub const CACHE_REUSE_METRICS_ENABLED_ENV: &str =
-    "DYN_ROUTER_CACHE_REUSE_METRICS";
+pub const CACHE_REUSE_METRICS_ENABLED_ENV: &str = "DYN_ROUTER_CACHE_REUSE_METRICS";
 
 static CACHE_REUSE_METRICS_ENABLED: LazyLock<bool> =
     LazyLock::new(|| dynamo_truthy::env_is_truthy(CACHE_REUSE_METRICS_ENABLED_ENV));
@@ -1105,9 +1104,9 @@ pub struct WorkerSelectionResult {
     /// Approximate cached-token count derived from the weighted cache hit.
     pub cached_tokens: usize,
 
-    /// Greatest router-visible cached-token count among eligible workers when
-    /// worker-stage telemetry is enabled.
-    pub max_cached_tokens: Option<usize>,
+    /// Greatest raw router-visible overlap among eligible workers, in tokens,
+    /// when worker-stage telemetry is enabled.
+    pub max_raw_cached_tokens: Option<usize>,
 
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
