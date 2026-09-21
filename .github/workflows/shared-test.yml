@@ -392,6 +392,9 @@ jobs:
             pre_merge_gpu_parallel ${{ steps.gpu-parallel-tests.outcome }}
             pre_merge_gpu ${{ steps.gpu-sequential-tests.outcome }}
         run: |
+          # Runs inside the job's test container. The planner image is
+          # distroless and ships only the binaries listed in
+          # container/Dockerfile.test, so this stays on bash builtins.
           set -uo pipefail
           status_dir="${GITHUB_WORKSPACE}/test-results/status"
           failed=0
@@ -420,11 +423,23 @@ jobs:
                   echo "   Its script did not run to completion, so the result is"
                   echo "   unknown and cannot be treated as a pass."
                   failed=1
-                elif [[ "$(cat "${exitcode_file}")" != "0" ]]; then
-                  echo "❌ ${stage}: pytest exited $(cat "${exitcode_file}")"
-                  failed=1
                 else
-                  echo "✅ ${stage}: pytest exited 0"
+                  # An empty file means the stage created it on entry and never
+                  # reached the line that records an exit code. read is a
+                  # builtin and returns non-zero on an empty file.
+                  code=""
+                  read -r code < "${exitcode_file}" || true
+                  if [[ -z "${code}" ]]; then
+                    echo "❌ ${stage}: reported success but recorded no exit code."
+                    echo "   Its script was cut off mid-run, so the result is"
+                    echo "   unknown and cannot be treated as a pass."
+                    failed=1
+                  elif [[ "${code}" != "0" ]]; then
+                    echo "❌ ${stage}: pytest exited ${code}"
+                    failed=1
+                  else
+                    echo "✅ ${stage}: pytest exited 0"
+                  fi
                 fi
                 ;;
               *)
@@ -438,7 +453,8 @@ jobs:
           # A stage added above but not listed here would escape this check.
           shopt -s nullglob
           for f in "${status_dir}"/*.exitcode; do
-            stage=$(basename "${f}" .exitcode)
+            stage="${f##*/}"
+            stage="${stage%.exitcode}"
             if [[ " ${checked} " != *" ${stage} "* ]]; then
               echo "❌ ${stage}: ran but is not listed in STAGE_OUTCOMES, so its"
               echo "   result is unverified. Add it to this step."

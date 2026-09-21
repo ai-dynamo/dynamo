@@ -180,10 +180,14 @@ runs:
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-        # Cleared up front so the file read at the end of the job can only have
-        # come from this run of this stage.
+        # Emptied up front so the file read at the end of the job can only have
+        # come from this run of this stage. Truncated rather than removed: the
+        # distroless planner test image ships no rm (see the tool list in
+        # container/Dockerfile.test), and an empty file is the better signal
+        # anyway - absent means the stage never started, empty means it started
+        # and was cut off before recording an exit code.
         STATUS_FILE="${TEST_RESULTS_DIR}/status/${STR_TEST_TYPE}.exitcode"
-        rm -f "${STATUS_FILE}"
+        : > "${STATUS_FILE}"
 
         # NVMe guard: GPU runners mount ${NVME_DIR} (nvme-scratch emptyDir, NVMe-backed via
         # instanceStorePolicy: RAID0). CPU/ARM runners have no ${NVME_DIR} mount.
