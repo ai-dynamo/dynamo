@@ -1137,11 +1137,14 @@ impl RouterRequestMetrics {
                             extra_labels,
                         )
                         .expect("failed to create router_cache_loss_funnel_tokens_total");
-                    for stage in ["f0", "f1"] {
-                        funnel_tokens_total.with_label_values(&[stage]);
-                    }
                     let f0_tokens_total = funnel_tokens_total.with_label_values(&["f0"]);
-                    let f1_tokens_total = funnel_tokens_total.with_label_values(&["f1"]);
+                    let f1_tokens_total = metrics
+                        .create_intcounter(
+                            &router_metric(frontend_service::CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL),
+                            "Prompt-prefix tokens previously seen in this router's bounded history",
+                            extra_labels,
+                        )
+                        .expect("failed to create router_cache_loss_history_prefix_tokens_total");
                     let observations_total = metrics
                         .create_intcountervec(
                             &router_metric(frontend_service::CACHE_LOSS_OBSERVATIONS_TOTAL),

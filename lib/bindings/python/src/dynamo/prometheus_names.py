@@ -133,6 +133,8 @@ class frontend_service:
     )
     # Raw token observations at each cache-reuse funnel stage
     CACHE_LOSS_FUNNEL_TOKENS_TOTAL = "cache_loss_funnel_tokens_total"
+    # Prompt-prefix tokens previously seen in this router's bounded history
+    CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL = "cache_loss_history_prefix_tokens_total"
     # Cache-reuse observations by completion status
     CACHE_LOSS_OBSERVATIONS_TOTAL = "cache_loss_observations_total"
     # Distinct canonical block hashes retained by cache history

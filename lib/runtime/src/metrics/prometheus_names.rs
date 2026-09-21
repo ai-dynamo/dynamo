@@ -227,6 +227,10 @@ pub mod frontend_service {
     /// Raw token observations at each cache-reuse funnel stage
     pub const CACHE_LOSS_FUNNEL_TOKENS_TOTAL: &str = "cache_loss_funnel_tokens_total";
 
+    /// Prompt-prefix tokens previously seen in this router's bounded history
+    pub const CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL: &str =
+        "cache_loss_history_prefix_tokens_total";
+
     /// Cache-reuse observations by completion status
     pub const CACHE_LOSS_OBSERVATIONS_TOTAL: &str = "cache_loss_observations_total";
 
@@ -1025,6 +1029,17 @@ pub fn clamp_u64_to_i64(value: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cache_history_prefix_metric_name() {
+        assert_eq!(
+            build_component_metric_name(&format!(
+                "router_{}",
+                frontend_service::CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL
+            )),
+            "dynamo_component_router_cache_loss_history_prefix_tokens_total"
+        );
+    }
 
     #[test]
     fn test_sanitize_frontend_prometheus_prefix() {
