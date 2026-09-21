@@ -377,6 +377,8 @@ Send the same `curl` request from a fourth terminal. The frontend log records se
 
 Filters, scorers, and pickers can read `context.prompt_tokens()` for the exact input token count. This returns the existing request value without a prompt copy or allocation. Use `context.request_blocks()` when the policy needs rounded KV blocks instead. For example, at 16 tokens per block, a 17-token prompt has 2 blocks.
 
+The union of component declarations controls routing cache setup. Without `WorkerInputs::CACHE`, no routing indexer, KV event subscription, or shared-cache client is started, regardless of score weights or worker role. With `CACHE`, router settings select event-backed, approximate, or remote indexing. Serving an indexer or enabling the session prefix index requires a policy that declares `CACHE`.
+
 Request-level cache information also requires `WorkerInputs::CACHE`: `context.cache()` returns `None` without that declaration. With it, the borrowed view exposes `has_tier_matches()` and `shared_hits()`. The former is false when the snapshot has no tier matches; the latter is `None` when no shared-cache result was supplied. A policy can call `shared_hits().map(|hits| hits.hits_beyond(prefix))` to calculate shared hits after its chosen prefix, only when needed.
 
 Scorers receive a `WorkerCandidates` view with `iter()`, `get(row)`, `len()`, and `is_empty()`. Filters receive one borrowed `WorkerCandidate`. Both expose `cache()`, `load()`, and `preferred_taint_multiplier()` only when that component declares the corresponding `CACHE`, `LOAD`, or `PREFERRED_TAINT` group. The same rule applies to picker inputs. Another component requesting a group does not grant access. Views share the host's stored rows without allocating or copying a candidate table.

@@ -433,6 +433,8 @@ The disaggregated prefill hop and query-only probes do not run classifiers. Stat
 
 Worker identity and ordinary request metadata are always available. Request-level cache context requires `WorkerInputs::CACHE`. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
+The combined `WorkerInputs` declarations also control cache setup. Without `CACHE`, the router creates no routing indexer, KV event subscription, or shared-cache client. With `CACHE`, cache settings choose event-backed, approximate, or remote indexing. Worker role, conditional disaggregation, and scoring weights do not enable or disable this setup. `serve_indexer` and `enable_session_prefix_index` require a policy that declares `CACHE`; incompatible configurations fail before cache resources start.
+
 ### Request Context
 
 | Accessor | Meaning |
@@ -662,7 +664,7 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. The default plugin uses configured parameters and does not apply per-request score or temperature overrides. Plain disaggregated decode remains load-only when prefill tracking is off and conditional disaggregation is disabled.
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. The default scorer declares `CACHE`, including when its device credit is zero; select a policy without `CACHE` to omit routing cache setup. The default plugin uses configured parameters and does not apply per-request score or temperature overrides. Plain disaggregated decode remains load-only when prefill tracking is off and conditional disaggregation is disabled.
 
 `WorkerCacheInput::accounting_cache_estimate()` returns the host's weighted block estimate and rounded token estimate. Missing estimates are zero. These estimates are not clamped to prompt length and do not measure physical GPU residency. The plugin can use them without changing the load that the host records. `WorkerLoadInput::is_available()` distinguishes a missing load observation from an observed idle worker. Both values describe the current selection snapshot.
 
