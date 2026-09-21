@@ -135,7 +135,9 @@ pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
 const DYN_MIGRATION_FAILOVER_WAIT_MS: &str = "DYN_MIGRATION_FAILOVER_WAIT_MS";
 const DYN_HTTP_MODEL_FAILOVER_WAIT_MS: &str = "DYN_HTTP_MODEL_FAILOVER_WAIT_MS";
 const DYN_MIGRATION_FAILOVER_POLL_MS: &str = "DYN_MIGRATION_FAILOVER_POLL_MS";
+const DYN_MIGRATION_REPLAY_PRIORITY_JUMP_S: &str = "DYN_MIGRATION_REPLAY_PRIORITY_JUMP_S";
 const DEFAULT_FAILOVER_POLL_MS: u64 = 50;
+const DEFAULT_REPLAY_PRIORITY_JUMP_S: f64 = 3600.0;
 
 fn migration_failover_wait() -> Duration {
     static WAIT: OnceLock<Duration> = OnceLock::new();
@@ -163,6 +165,36 @@ fn migration_failover_poll() -> Duration {
         let value = std::env::var(DYN_MIGRATION_FAILOVER_POLL_MS).ok();
         failover_poll_from_value(value.as_deref())
     })
+}
+
+fn replay_priority_jump_from_value(value: Option<&str>) -> f64 {
+    value
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(DEFAULT_REPLAY_PRIORITY_JUMP_S)
+}
+
+fn migration_replay_priority_jump() -> f64 {
+    static PRIORITY_JUMP: OnceLock<f64> = OnceLock::new();
+    *PRIORITY_JUMP.get_or_init(|| {
+        replay_priority_jump_from_value(
+            std::env::var(DYN_MIGRATION_REPLAY_PRIORITY_JUMP_S)
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn prioritize_inflight_replay(
+    request: &mut PreprocessedRequest,
+    completed_tokens: usize,
+    jump: f64,
+) {
+    if completed_tokens == 0 || jump == 0.0 {
+        return;
+    }
+    let routing = request.routing.get_or_insert_default();
+    routing.priority_jump = Some(routing.priority_jump.unwrap_or_default().max(jump));
 }
 
 async fn wait_for_failover_poll(
@@ -586,12 +618,20 @@ where
             if let Some(link) = self.last_worker_link.as_ref() {
                 self.request.migration_link = Some(link.clone());
             }
+            let migration = self.pending_migration.take();
+            let mut attempt_request = self.request.clone();
+            if migration.is_some() {
+                prioritize_inflight_replay(
+                    &mut attempt_request,
+                    self.completed_tokens,
+                    migration_replay_priority_jump(),
+                );
+            }
             let mut request = Context::with_id_and_metadata(
-                self.request.clone(),
+                attempt_request,
                 self.context.id().to_string(),
                 self.metadata.clone(),
             );
-            let migration = self.pending_migration.take();
             let attempt = self.next_attempt;
             self.next_attempt += 1;
             let route_trace = attach_route_trace_context(
@@ -1211,6 +1251,51 @@ mod tests {
             failover_poll_from_value(Some("17")),
             Duration::from_millis(17)
         );
+    }
+
+    #[test]
+    fn replay_priority_jump_rejects_invalid_values() {
+        assert_eq!(
+            replay_priority_jump_from_value(None),
+            DEFAULT_REPLAY_PRIORITY_JUMP_S
+        );
+        assert_eq!(
+            replay_priority_jump_from_value(Some("invalid")),
+            DEFAULT_REPLAY_PRIORITY_JUMP_S
+        );
+        assert_eq!(
+            replay_priority_jump_from_value(Some("NaN")),
+            DEFAULT_REPLAY_PRIORITY_JUMP_S
+        );
+        assert_eq!(replay_priority_jump_from_value(Some("0")), 0.0);
+        assert_eq!(replay_priority_jump_from_value(Some("17.5")), 17.5);
+    }
+
+    #[test]
+    fn replay_priority_is_internal_and_only_applies_after_output() {
+        let mut request = create_mock_request(5);
+        prioritize_inflight_replay(&mut request, 0, 3600.0);
+        assert!(request.routing.is_none());
+
+        prioritize_inflight_replay(&mut request, 1, 3600.0);
+        assert_eq!(
+            request
+                .routing
+                .as_ref()
+                .and_then(|hints| hints.priority_jump),
+            Some(3600.0)
+        );
+    }
+
+    #[test]
+    fn replay_priority_preserves_a_larger_caller_jump() {
+        let mut request = create_mock_request(5);
+        request.routing = Some(RoutingHints {
+            priority_jump: Some(7200.0),
+            ..Default::default()
+        });
+        prioritize_inflight_replay(&mut request, 1, 3600.0);
+        assert_eq!(request.routing.unwrap().priority_jump, Some(7200.0));
     }
 
     fn migration_duration_count(metrics: &Metrics, migration_type: &str, outcome: &str) -> u64 {
