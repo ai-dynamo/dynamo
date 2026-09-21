@@ -167,12 +167,8 @@ class WorkerProcess(ManagedProcess):
             "--served-model-name",
             MODEL_NAME,
             "--trust-remote-code",
-            # Without this flag SGLang picks the torch.distributed rendezvous
-            # port itself via get_free_port(), which binds port 0, reads the
-            # number and closes the socket well before init_process_group binds
-            # it for real. Nothing holds the port in between, and the number
-            # comes from the kernel's ephemeral range, so a concurrent listener
-            # can take it and startup dies with an address-in-use error.
+            # SGLang's default picks this port by binding port 0 and closing it,
+            # so another listener can take it before init_process_group binds it.
             "--nccl-port",
             str(nccl_port),
         ]
@@ -288,9 +284,8 @@ def tool_calling_services(
     """
     topology: str = request.param
     frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
-    # DynamoPortRange.NCCL is the base the suite reserves for torch.distributed
-    # rendezvous ports; it sits below the kernel's ephemeral range and the
-    # allocator's flock registry keeps concurrent test containers off it.
+    # Reserved base for torch.distributed rendezvous ports: below the kernel's
+    # ephemeral range, and the flock registry keeps other containers off it.
     nccl_port = allocate_port(DynamoPortRange.NCCL.value)
     allocated_ports = [frontend_port, system_port, fpm_port, nccl_port]
 
