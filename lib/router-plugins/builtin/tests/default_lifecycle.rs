@@ -96,7 +96,7 @@ async fn preparation_error_does_not_book_and_allows_retry() {
     use std::sync::Arc;
 
     struct FailOnce(bool);
-    impl WorkerScorer for FailOnce {
+    impl FailOnce {
         fn prepare(
             &mut self,
             _: &WorkerSelectionContext<'_>,
@@ -107,12 +107,20 @@ async fn preparation_error_does_not_book_and_allows_retry() {
             }
             Ok(())
         }
+    }
+
+    impl WorkerScorer for FailOnce {
         fn score(
             &mut self,
-            _: &WorkerSelectionContext<'_>,
-            _: &WorkerCandidate,
-        ) -> Result<f64, WorkerSelectionPolicyError> {
-            Ok(0.0)
+            context: &WorkerSelectionContext<'_>,
+            candidates: &[WorkerCandidate],
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            self.prepare(context, candidates)?;
+            for (_candidate, cost) in candidates.iter().zip(costs) {
+                *cost = 0.0;
+            }
+            Ok(())
         }
     }
     struct First;

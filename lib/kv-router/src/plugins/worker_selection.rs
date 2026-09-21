@@ -128,27 +128,19 @@ pub trait WorkerScorer: Send {
         WorkerInputs::NONE
     }
 
-    /// Prepare once for this selection using every candidate that survived host eligibility
-    /// and policy filters. All scorers prepare before any candidate is scored. This is not
-    /// called for an empty candidate set; returning an error stops selection before picking.
+    /// Score every candidate that survived host eligibility and policy filters in one call.
+    /// The borrowed snapshot and its row order remain fixed for this selection. Empty candidate
+    /// sets skip scoring. Scorers run in declaration order; an error stops before picking.
     ///
-    /// The slice borrows the same request snapshot and declared worker inputs used by `score`.
-    /// Its order is unspecified, and it cannot be retained after this call. Reset request-local
-    /// aggregates here rather than carrying them between selections. The default does no work.
-    fn prepare(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        _candidates: &[WorkerCandidate],
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        Ok(())
-    }
-
-    /// Return one finite, lower-is-better cost contribution for an eligible worker row.
+    /// `costs` has the same length as `candidates` and is initialized to NaN before each call.
+    /// Write one finite, lower-is-better contribution to every slot. The host validates and adds
+    /// each contribution to that row's total. Neither slice may be retained after this call.
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError>;
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError>;
 }
 
 /// Filters run in declaration order for each candidate. Callback order across different

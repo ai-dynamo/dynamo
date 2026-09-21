@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compile old plugin implementations against the canonical registry and contracts.
+//! Compile legacy plugin import paths against the canonical registry and contracts.
+//! Scorer implementations use the current batch signature; old scalar signatures must migrate.
 //! TODO(v1.7): Remove the legacy import coverage when the compatibility exports are removed.
 
 use std::sync::Arc;
@@ -41,12 +42,16 @@ impl WorkerScorer for LegacyPolicy {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let _: u64 = context.request_blocks();
-        let _: u32 = context.block_size();
-        let load = candidate.load().expect("requested load inputs");
-        Ok(load.active_requests() as f64 + load.decode_cost_blocks())
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let _: u64 = context.request_blocks();
+            let _: u32 = context.block_size();
+            let load = candidate.load().expect("requested load inputs");
+            *cost = load.active_requests() as f64 + load.decode_cost_blocks();
+        }
+        Ok(())
     }
 }
 

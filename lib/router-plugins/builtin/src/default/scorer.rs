@@ -122,13 +122,9 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     }
 }
 
-impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
-    for DefaultScorer<REQUEST_COST, SHARED_CREDIT>
+impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
+    DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
-    }
-
     fn prepare(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -163,7 +159,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
         Ok(())
     }
 
-    fn score(
+    fn score_worker(
         &mut self,
         context: &WorkerSelectionContext<'_>,
         candidate: &WorkerCandidate,
@@ -228,6 +224,27 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
         };
         let cost = logit * candidate.preferred_taint_multiplier().unwrap_or(1.0);
         Ok(cost)
+    }
+}
+
+impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
+    for DefaultScorer<REQUEST_COST, SHARED_CREDIT>
+{
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
+    }
+
+    fn score(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        self.prepare(context, candidates)?;
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            *cost = self.score_worker(context, candidate)?;
+        }
+        Ok(())
     }
 }
 

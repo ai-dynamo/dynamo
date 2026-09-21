@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercise scorer preparation from an external crate using only public plugin inputs.
+//! Exercise batch scoring and private preparation using only public plugin inputs.
 mod support;
 
 use std::sync::{Arc, Mutex};
@@ -25,12 +25,7 @@ struct RelativeLoadScorer {
     minimum: usize,
     calls: Arc<Mutex<Vec<Call>>>,
 }
-
-impl WorkerScorer for RelativeLoadScorer {
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
-    }
-
+impl RelativeLoadScorer {
     fn prepare(
         &mut self,
         context: &WorkerSelectionContext<'_>,
@@ -51,14 +46,25 @@ impl WorkerScorer for RelativeLoadScorer {
             .unwrap();
         Ok(())
     }
+}
+
+impl WorkerScorer for RelativeLoadScorer {
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
 
     fn score(
         &mut self,
-        _: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        self.calls.lock().unwrap().push(Call::Score(self.index));
-        Ok((candidate.load().unwrap().active_requests() - self.minimum) as f64)
+        context: &WorkerSelectionContext<'_>,
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        self.prepare(context, candidates)?;
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            self.calls.lock().unwrap().push(Call::Score(self.index));
+            *cost = (candidate.load().unwrap().active_requests() - self.minimum) as f64;
+        }
+        Ok(())
     }
 }
 
@@ -101,7 +107,7 @@ impl WorkerPicker for InspectCosts {
 }
 
 #[test]
-fn prepares_all_scorers_from_surviving_workers_and_resets_each_selection() {
+fn scores_batches_from_surviving_workers_and_resets_each_selection() {
     let (workers, mut request) = fixture(4, 17);
     request.allowed_worker_ids = Some([1, 2, 3].into_iter().collect());
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -147,11 +153,13 @@ fn prepares_all_scorers_from_surviving_workers_and_resets_each_selection() {
         } else {
             vec![2, 2, 3, 3]
         };
-        assert_eq!(calls[0], Call::Prepare(0, expected.clone()));
-        assert_eq!(calls[1], Call::Prepare(1, expected.clone()));
         assert_eq!(calls.len(), 2 + expected.len() * 2 + 1);
-        for pair in calls[2..calls.len() - 1].chunks_exact(2) {
-            assert_eq!(pair, [Call::Score(0), Call::Score(1)]);
+        for index in 0..2 {
+            let start = index * (expected.len() + 1);
+            assert_eq!(calls[start], Call::Prepare(index, expected.clone()));
+            for call in &calls[start + 1..start + 1 + expected.len()] {
+                assert_eq!(*call, Call::Score(index));
+            }
         }
         assert_eq!(calls.last(), Some(&Call::Pick));
         calls.clear();
@@ -159,7 +167,7 @@ fn prepares_all_scorers_from_surviving_workers_and_resets_each_selection() {
 }
 
 struct FailPreparation(Arc<Mutex<usize>>);
-impl WorkerScorer for FailPreparation {
+impl FailPreparation {
     fn prepare(
         &mut self,
         _: &WorkerSelectionContext<'_>,
@@ -168,11 +176,16 @@ impl WorkerScorer for FailPreparation {
         *self.0.lock().unwrap() += 1;
         Err(WorkerSelectionPolicyError::failed("prepare failed"))
     }
+}
+
+impl WorkerScorer for FailPreparation {
     fn score(
         &mut self,
-        _: &WorkerSelectionContext<'_>,
-        _: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
+        context: &WorkerSelectionContext<'_>,
+        candidates: &[WorkerCandidate],
+        _costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        self.prepare(context, candidates)?;
         panic!("preparation failure must stop scoring")
     }
 }
@@ -232,9 +245,13 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            _: &WorkerCandidate,
-        ) -> Result<f64, WorkerSelectionPolicyError> {
-            Ok(self.0)
+            candidates: &[WorkerCandidate],
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            for (_candidate, cost) in candidates.iter().zip(costs) {
+                *cost = self.0;
+            }
+            Ok(())
         }
     }
     let (workers, request) = fixture(1, 17);
@@ -274,13 +291,17 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            candidate: &WorkerCandidate,
-        ) -> Result<f64, WorkerSelectionPolicyError> {
-            self.0 += 1;
-            if self.0 == 2 {
-                return Err(WorkerSelectionPolicyError::failed("score failed"));
+            candidates: &[WorkerCandidate],
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            for (candidate, cost) in candidates.iter().zip(costs) {
+                self.0 += 1;
+                if self.0 == 2 {
+                    return Err(WorkerSelectionPolicyError::failed("score failed"));
+                }
+                *cost = candidate.load().unwrap().active_requests() as f64;
             }
-            Ok(candidate.load().unwrap().active_requests() as f64)
+            Ok(())
         }
     }
     struct CheckColumns;
@@ -333,4 +354,71 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
     assert!([3, 4].contains(&select(&request).unwrap().worker.worker_id));
     request.allowed_worker_ids = None;
     assert_ne!(select(&request).unwrap().worker.worker_id, 1);
+}
+
+#[test]
+fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
+    struct Fill;
+    impl WorkerScorer for Fill {
+        fn score(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: &[WorkerCandidate],
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            costs.fill(7.0);
+            Ok(())
+        }
+    }
+    struct OmitOnSecondCall(bool);
+    impl WorkerScorer for OmitOnSecondCall {
+        fn score(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            _: &[WorkerCandidate],
+            costs: &mut [f64],
+        ) -> Result<(), WorkerSelectionPolicyError> {
+            if std::mem::replace(&mut self.0, false) {
+                costs.fill(1.0);
+            }
+            Ok(())
+        }
+    }
+    struct First;
+    impl WorkerPicker for First {
+        fn pick(
+            &mut self,
+            _: &WorkerSelectionContext<'_>,
+            input: WorkerInputView<'_>,
+        ) -> Result<usize, WorkerSelectionPolicyError> {
+            assert!(input.candidates().iter().all(|c| c.cost() == 8.0));
+            Ok(0)
+        }
+    }
+    let (workers, request) = fixture(2, 17);
+    let policy = WorkerSelectionPolicy::new(
+        KvRouterConfig::default(),
+        "test",
+        vec![Box::new(Fill), Box::new(OmitOnSecondCall(true))],
+        Box::new(First),
+    );
+    let select = || {
+        policy.select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            request.eligibility(),
+            16,
+        ))
+    };
+    select().unwrap();
+    let error = select().unwrap_err();
+    assert!(matches!(
+        error,
+        dynamo_kv_router::KvSchedulerError::WorkerSelectionPolicy(
+            WorkerSelectionPolicyError::NonFiniteCost {
+                scorer_index: 1,
+                row: 0
+            }
+        )
+    ));
 }

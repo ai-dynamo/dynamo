@@ -18,19 +18,23 @@ impl WorkerScorer for PrefillLoadScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let active_prefill_blocks =
-            load.active_prefill_tokens() as f64 / context.block_size() as f64;
-        let uncached_request_blocks =
-            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-        Ok(active_prefill_blocks + uncached_request_blocks)
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let active_prefill_blocks =
+                load.active_prefill_tokens() as f64 / context.block_size() as f64;
+            let uncached_request_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            *cost = active_prefill_blocks + uncached_request_blocks;
+        }
+        Ok(())
     }
 }
 
@@ -47,11 +51,15 @@ impl WorkerScorer for DecodeLoadScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        Ok(load.decode_cost_blocks())
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            *cost = load.decode_cost_blocks();
+        }
+        Ok(())
     }
 }

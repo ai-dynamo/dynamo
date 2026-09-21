@@ -12,14 +12,7 @@ use dynamo_kv_router::plugins::worker_selection::{
 pub(crate) struct ActiveRequestsScorer {
     minimum: usize,
 }
-
-impl WorkerScorer for ActiveRequestsScorer {
-    /// Requests load inputs for the active-request count.
-    fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::LOAD
-    }
-
-    /// Prepare a request-local minimum after all filters have run.
+impl ActiveRequestsScorer {
     fn prepare(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
@@ -34,16 +27,28 @@ impl WorkerScorer for ActiveRequestsScorer {
         }
         Ok(())
     }
+}
 
-    /// Return a relative load cost. Subtracting the minimum preserves the ranking.
+impl WorkerScorer for ActiveRequestsScorer {
+    /// Requests load inputs for the active-request count.
+    fn required_worker_inputs(&self) -> WorkerInputs {
+        WorkerInputs::LOAD
+    }
+
+    /// Prepare the batch minimum and write one relative load cost per worker.
     fn score(
         &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        Ok((load.active_requests() - self.minimum) as f64)
+        context: &WorkerSelectionContext<'_>,
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        self.prepare(context, candidates)?;
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            *cost = (load.active_requests() - self.minimum) as f64;
+        }
+        Ok(())
     }
 }

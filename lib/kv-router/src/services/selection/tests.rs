@@ -51,9 +51,13 @@ impl WorkerScorer for WorkerIdScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(candidate.worker().worker_id as f64)
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            *cost = candidate.worker().worker_id as f64;
+        }
+        Ok(())
     }
 }
 
@@ -81,9 +85,13 @@ impl WorkerScorer for NonFiniteScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(f64::NAN)
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (_candidate, cost) in candidates.iter().zip(costs) {
+            *cost = f64::NAN;
+        }
+        Ok(())
     }
 }
 

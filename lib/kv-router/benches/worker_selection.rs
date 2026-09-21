@@ -70,20 +70,25 @@ impl WorkerScorer for BenchScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let uncached_blocks =
-            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-        let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
-            + load.decode_cost_blocks()
-            + load.active_requests() as f64;
-        Ok((uncached_blocks + load_blocks) * candidate.preferred_taint_multiplier().unwrap_or(1.0))
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            let uncached_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.decode_cost_blocks()
+                + load.active_requests() as f64;
+            *cost = (uncached_blocks + load_blocks)
+                * candidate.preferred_taint_multiplier().unwrap_or(1.0);
+        }
+        Ok(())
     }
 }
 
@@ -99,20 +104,24 @@ impl WorkerScorer for IgnoringPreferenceScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let uncached_blocks =
-            (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
-        let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
-            + load.decode_cost_blocks()
-            + load.active_requests() as f64;
-        Ok(uncached_blocks + load_blocks)
+        candidates: &[WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let cache = candidate
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            let uncached_blocks =
+                (context.request_blocks() as f64 - cache.device_overlap_blocks()).max(0.0);
+            let load_blocks = load.active_prefill_tokens() as f64 / context.block_size() as f64
+                + load.decode_cost_blocks()
+                + load.active_requests() as f64;
+            *cost = uncached_blocks + load_blocks;
+        }
+        Ok(())
     }
 }
 

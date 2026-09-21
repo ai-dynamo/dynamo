@@ -42,6 +42,7 @@ pub(super) struct ComposedPolicyState {
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
     unscored_candidates: Vec<WorkerCandidate>,
+    score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheInput>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
@@ -102,6 +103,7 @@ impl WorkerSelectionPolicy {
                 scorer_picker_inputs,
                 picker_inputs,
                 unscored_candidates: Vec::new(),
+                score_contributions: Vec::new(),
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
@@ -180,6 +182,7 @@ impl ComposedPolicyState {
         let Self {
             scorers,
             unscored_candidates,
+            score_contributions,
             candidates,
             ..
         } = self;
@@ -187,38 +190,23 @@ impl ComposedPolicyState {
             return Ok(());
         }
         debug_assert_eq!(unscored_candidates.len(), candidates.len());
-        for scorer in scorers.iter_mut() {
-            scorer.prepare(context, unscored_candidates)?;
-        }
-        if let [scorer] = scorers.as_mut_slice() {
-            // One scorer needs neither a per-row scorer loop nor separate contribution/total
-            // checks. Keep the initial addition to preserve the sign of a zero total.
-            for (row, (candidate, scored)) in unscored_candidates.iter().zip(candidates).enumerate()
+        score_contributions.resize(candidates.len(), f64::NAN);
+        for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
+            score_contributions.fill(f64::NAN);
+            scorer.score(context, unscored_candidates, score_contributions)?;
+            for (row, (contribution, scored)) in score_contributions
+                .iter()
+                .zip(candidates.iter_mut())
+                .enumerate()
             {
-                let cost = scorer.score(context, candidate)?;
-                if !cost.is_finite() {
-                    return Err(WorkerSelectionPolicyError::NonFiniteCost {
-                        scorer_index: 0,
-                        row,
-                    }
-                    .into());
-                }
-                scored.cost = 0.0 + cost;
-            }
-            return Ok(());
-        }
-        for (row, (candidate, scored)) in unscored_candidates.iter().zip(candidates).enumerate() {
-            let mut cost = 0.0;
-            for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
-                let contribution = scorer.score(context, candidate)?;
-                cost += contribution;
+                let cost = scored.cost + contribution;
                 if !contribution.is_finite() || !cost.is_finite() {
                     return Err(
                         WorkerSelectionPolicyError::NonFiniteCost { scorer_index, row }.into(),
                     );
                 }
+                scored.cost = cost;
             }
-            scored.cost = cost;
         }
         Ok(())
     }
@@ -509,10 +497,14 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidate: &WorkerCandidate,
-            ) -> Result<f64, WorkerSelectionPolicyError> {
-                assert!(candidate.preferred_taint_multiplier().is_some());
-                Ok(0.0)
+                candidates: &[WorkerCandidate],
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    assert!(candidate.preferred_taint_multiplier().is_some());
+                    *cost = 0.0;
+                }
+                Ok(())
             }
         }
 
@@ -814,8 +806,9 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidate: &WorkerCandidate,
-            ) -> Result<f64, WorkerSelectionPolicyError> {
+                _candidates: &[WorkerCandidate],
+                _costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
                 unreachable!("rejected worker must not reach scorers")
             }
         }
@@ -867,9 +860,13 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidate: &WorkerCandidate,
-            ) -> Result<f64, WorkerSelectionPolicyError> {
-                Ok(0.0)
+                candidates: &[WorkerCandidate],
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (_candidate, cost) in candidates.iter().zip(costs) {
+                    *cost = 0.0;
+                }
+                Ok(())
             }
         }
 

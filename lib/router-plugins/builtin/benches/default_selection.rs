@@ -132,9 +132,13 @@ impl dynamo_kv_router::WorkerScorer for LoadScorer {
     fn score(
         &mut self,
         _: &dynamo_kv_router::WorkerSelectionContext<'_>,
-        candidate: &dynamo_kv_router::WorkerCandidate,
-    ) -> Result<f64, dynamo_kv_router::WorkerSelectionPolicyError> {
-        Ok(candidate.load().unwrap().active_requests() as f64 * self.0)
+        candidates: &[dynamo_kv_router::WorkerCandidate],
+        costs: &mut [f64],
+    ) -> Result<(), dynamo_kv_router::WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            *cost = candidate.load().unwrap().active_requests() as f64 * self.0;
+        }
+        Ok(())
     }
 }
 
