@@ -28,10 +28,11 @@ import psutil
 import pytest
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import allocate_port, deallocate_ports
 
 openai = pytest.importorskip("openai")
 OpenAI = openai.OpenAI
@@ -270,7 +271,13 @@ def tool_calling_services(
     Yields the frontend HTTP port.
     """
     topology: str = request.param
-    frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
+    # Allocate from the disjoint bases in tests/utils/constants.py so this
+    # module cannot land on the window another suite allocates from.
+    allocated_ports: list[int] = []
+    system_port = allocate_port(DynamoPortRange.SERVE.value)
+    allocated_ports.append(system_port)
+    fpm_port = allocate_port(DynamoPortRange.FPM.value)
+    allocated_ports.append(fpm_port)
 
     try:
         with WorkerProcess(
@@ -278,6 +285,15 @@ def tool_calling_services(
         ):
             # Allow worker to register with discovery.
             time.sleep(2)
+            # allocate_port only probes a candidate and closes the socket
+            # again, so nothing owns the port between the probe and the moment
+            # the service binds it. The frontend port is taken here, not
+            # alongside the worker ports, so that window covers the frontend's
+            # own startup instead of also spanning the SGLang engine boot.
+            # Losing the port in that window makes the frontend exit 1 on
+            # "Failed to start HTTP server: port N already in use".
+            frontend_port = allocate_port(DynamoPortRange.FRONTEND.value)
+            allocated_ports.append(frontend_port)
             with ToolCallingFrontendProcess(
                 request, frontend_port=frontend_port, topology=topology
             ):
@@ -294,9 +310,12 @@ def tool_calling_services(
         # / frontend process is gone before the next topology boots — otherwise
         # the next worker would race against pinned GPU memory or a stale
         # discovery registration. Followed by a brief settle delay so the OS
-        # reclaims bound ports and the GPU frees its VRAM.
+        # reclaims bound ports and the GPU frees its VRAM. Only then are the
+        # registry entries released, so no other test can be handed a port
+        # this module might still hold.
         _cleanup_sglang_stragglers()
         time.sleep(3)
+        deallocate_ports(allocated_ports)
 
 
 @pytest.fixture(scope="module")
