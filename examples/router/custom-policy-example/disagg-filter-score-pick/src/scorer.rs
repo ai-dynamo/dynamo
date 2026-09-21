@@ -4,7 +4,8 @@
 //! Load scorers for prefill and decode routing partitions.
 
 use dynamo_kv_router::{
-    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
 };
 
 /// Scores prefill workers by active work and uncached request blocks.
@@ -18,7 +19,7 @@ impl WorkerScorer for PrefillLoadScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
@@ -51,7 +52,7 @@ impl WorkerScorer for DecodeLoadScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {

@@ -132,7 +132,7 @@ impl dynamo_kv_router::WorkerScorer for LoadScorer {
     fn score(
         &mut self,
         _: &dynamo_kv_router::WorkerSelectionContext<'_>,
-        candidates: &[dynamo_kv_router::WorkerCandidate],
+        candidates: dynamo_kv_router::WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), dynamo_kv_router::WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
@@ -202,5 +202,61 @@ fn stacked(c: &mut Criterion) {
         group.finish();
     }
 }
-criterion_group!(benches, bench, stacked);
+
+// Shared ranges exercise both tier-aware scoring and the accounting-only fallback.
+fn shared_cache(c: &mut Criterion) {
+    for tier_matches in [false, true] {
+        for range_count in [1, 5, 32] {
+            for credit in [0.0, 0.6] {
+                let mut group = c.benchmark_group(format!(
+                    "shared_cache/tiers{tier_matches}/ranges{range_count}/credit{credit}"
+                ));
+                group
+                    .warm_up_time(Duration::from_millis(200))
+                    .measurement_time(Duration::from_millis(500))
+                    .sample_size(30)
+                    .nresamples(1_000);
+                for count in [8, 1024, 4096] {
+                    let (workers, mut request) = support::fixture(count, 2048);
+                    if !tier_matches {
+                        request.overlap.tier_overlap_blocks = Default::default();
+                    }
+                    request.shared_cache_hits =
+                        Some(dynamo_kv_router::SharedCacheHits::from_ranges(
+                            (0..range_count).map(|i| i * 4..i * 4 + 2).collect(),
+                        ));
+                    let policy = default_policy(
+                        KvRouterConfig {
+                            shared_cache_multiplier: credit,
+                            overlap_score_credit_decay: 0.6,
+                            ..Default::default()
+                        },
+                        "prefill",
+                    );
+                    let mut select = || {
+                        black_box(
+                            policy
+                                .select_worker(WorkerSelectionInput::configured(
+                                    &workers,
+                                    &request,
+                                    request.eligibility(),
+                                    16,
+                                ))
+                                .unwrap(),
+                        );
+                    };
+                    let count_allocs = allocations(&mut select);
+                    eprintln!(
+                        "shared allocations per 100 warm selections: tiers={tier_matches} ranges={range_count} credit={credit} workers={count} allocations={count_allocs}"
+                    );
+                    group
+                        .bench_function(BenchmarkId::new("plugin", count), |b| b.iter(&mut select));
+                }
+                group.finish();
+            }
+        }
+    }
+}
+
+criterion_group!(benches, bench, stacked, shared_cache);
 criterion_main!(benches);

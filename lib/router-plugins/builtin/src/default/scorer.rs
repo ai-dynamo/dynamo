@@ -5,7 +5,8 @@
 
 use super::parameters::PolicyParameters;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidate, WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
 };
 
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
@@ -56,7 +57,7 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
 }
 
 /// Values shared by every worker score in one selection. Preparation keeps their conversions
-/// and role checks outside the per-worker trait call without changing floating-point arithmetic.
+/// and role checks outside the per-worker calculation without changing floating-point arithmetic.
 #[derive(Default)]
 struct PreparedRequest {
     min_prefill: usize,
@@ -129,7 +130,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     fn prepare(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         // Plain disaggregated decode is load-only. Conditional decode retains cache credit.
         let overlap_credit = if self.plain_decode && !context.tracks_prefill_tokens() {
@@ -140,8 +141,9 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         self.prepared = PreparedRequest {
             min_prefill: 0,
             has_tier_matches: context
-                .has_tier_matches()
-                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache context unavailable"))?,
+                .cache()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache context unavailable"))?
+                .has_tier_matches(),
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
             request_blocks: IntegerDivisor::new(context.request_blocks()),
             overlap_credit,
@@ -152,7 +154,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         };
         if self.prepared.use_decay {
             let mut minimum = usize::MAX;
-            for candidate in candidates {
+            for candidate in candidates.iter() {
                 let load = candidate
                     .load()
                     .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
@@ -166,7 +168,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     fn score_worker(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<f64, WorkerSelectionPolicyError> {
         let cache = candidate
             .cache()
@@ -181,13 +183,10 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             estimated_overlap
         };
         let shared_credit = if SHARED_CREDIT {
-            let shared = if self.prepared.has_tier_matches {
-                cache.shared_beyond_device_blocks()
-            } else {
-                context
-                    .shared_cache_hits()
-                    .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32))
-            };
+            let shared = context
+                .cache()
+                .and_then(|cache| cache.shared_hits())
+                .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
             self.shared_cache_multiplier * shared as f64
         } else {
             // Preserve signed zero when the configured weight is -0.0.
@@ -241,7 +240,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.prepare(context, candidates)?;

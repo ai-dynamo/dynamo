@@ -14,8 +14,8 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
 use dynamo_kv_router::{
-    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerFilter,
-    WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
+    DefaultWorkerSelector, KvRouterConfig, SchedulingRequest, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadProjection, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
     WorkerSelectionPolicyError, WorkerSelector,
 };
@@ -54,7 +54,7 @@ impl WorkerFilter for KeepAllFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
+        _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(true)
     }
@@ -70,7 +70,7 @@ impl WorkerScorer for BenchScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {
@@ -104,7 +104,7 @@ impl WorkerScorer for IgnoringPreferenceScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {

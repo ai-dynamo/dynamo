@@ -172,7 +172,7 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
         ) -> Result<usize, WorkerSelectionPolicyError> {
             assert_eq!(context.prompt_tokens(), 17);
             assert_eq!(context.request_blocks(), 2);
-            assert_eq!(context.has_tier_matches(), Some(true));
+            assert!(context.cache().unwrap().has_tier_matches());
             assert!(input.load().unwrap().iter().all(|load| load.is_available()));
             for cache in input.cache().unwrap() {
                 let (blocks, tokens) = cache.accounting_cache_estimate();

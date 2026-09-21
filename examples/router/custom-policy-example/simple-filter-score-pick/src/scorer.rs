@@ -4,7 +4,8 @@
 //! Active-request scorer for the `simple-filter-score-pick` policy.
 
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicyError,
 };
 
 /// Scores active requests above the least-loaded surviving candidate.
@@ -16,10 +17,10 @@ impl ActiveRequestsScorer {
     fn prepare(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.minimum = usize::MAX;
-        for candidate in candidates {
+        for candidate in candidates.iter() {
             let load = candidate
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
@@ -39,7 +40,7 @@ impl WorkerScorer for ActiveRequestsScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.prepare(context, candidates)?;

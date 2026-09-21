@@ -81,9 +81,9 @@ pub use selector::DefaultWorkerSelector;
 pub use selector::{WorkerSelectionInput, WorkerSelector};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    RequestCacheInput, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 pub use session_prefix_index::{
     LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,

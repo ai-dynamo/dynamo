@@ -16,8 +16,9 @@ use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    CandidateData, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext,
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -41,7 +42,7 @@ pub(super) struct ComposedPolicyState {
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
-    unscored_candidates: Vec<WorkerCandidate>,
+    unscored_candidates: Vec<CandidateData>,
     score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheInput>,
@@ -146,7 +147,7 @@ impl WorkerSelectionPolicy {
 
 #[inline(always)]
 fn push_picker_candidate(
-    candidate: &WorkerCandidate,
+    candidate: &CandidateData,
     cost: f64,
     picker_inputs: WorkerInputs,
     candidates: &mut Vec<ScoredWorkerCandidate>,
@@ -156,7 +157,11 @@ fn push_picker_candidate(
     candidates.push(ScoredWorkerCandidate {
         worker: candidate.worker,
         cost,
-        preferred_taint_multiplier: candidate.preferred_taint_multiplier,
+        preferred_taint_multiplier: if picker_inputs.contains(WorkerInputs::PREFERRED_TAINT) {
+            candidate.preferred_taint_multiplier
+        } else {
+            None
+        },
     });
     if picker_inputs.contains(WorkerInputs::CACHE) {
         cache_inputs.push(candidate.cache);
@@ -169,7 +174,7 @@ fn push_picker_candidate(
 impl ComposedPolicyState {
     // Keep row construction and storage together to avoid passing a full row through a call.
     #[inline(always)]
-    fn push_candidate(&mut self, candidate: WorkerCandidate) {
+    fn push_candidate(&mut self, candidate: CandidateData) {
         // Build the picker's rows alongside the input snapshot. The scoring loop then only
         // writes costs, without growing vectors or copying optional columns across trait calls.
         push_picker_candidate(
@@ -205,7 +210,11 @@ impl ComposedPolicyState {
         for (scorer_index, (inputs, scorer)) in scorers.iter_mut().enumerate() {
             score_contributions.fill(f64::NAN);
             let context = context.with_inputs(*inputs);
-            scorer.score(&context, unscored_candidates, score_contributions)?;
+            scorer.score(
+                &context,
+                WorkerCandidates::new(unscored_candidates, *inputs),
+                score_contributions,
+            )?;
             for (row, (contribution, scored)) in score_contributions
                 .iter()
                 .zip(candidates.iter_mut())
@@ -285,7 +294,10 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         );
         for (inputs, filter) in &mut state.filters {
             filter_context.inputs = *inputs;
-            match filter.keep(&filter_context, &filter_candidate) {
+            match filter.keep(
+                &filter_context,
+                WorkerCandidate::new(&filter_candidate, *inputs),
+            ) {
                 Ok(true) => {}
                 Ok(false) => return false,
                 Err(policy_error) => {
@@ -512,7 +524,7 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidates: &[WorkerCandidate],
+                candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (candidate, cost) in candidates.iter().zip(costs) {
@@ -802,7 +814,7 @@ mod tests {
             fn keep(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidate: &WorkerCandidate,
+                candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 assert!(candidate.cache().is_none());
                 assert!(candidate.load().is_none());
@@ -821,7 +833,7 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidates: &[WorkerCandidate],
+                _candidates: WorkerCandidates<'_>,
                 _costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 unreachable!("rejected worker must not reach scorers")
@@ -860,7 +872,7 @@ mod tests {
             fn keep(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidate: &WorkerCandidate,
+                _candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 Ok(true)
             }
@@ -875,7 +887,7 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidates: &[WorkerCandidate],
+                candidates: WorkerCandidates<'_>,
                 costs: &mut [f64],
             ) -> Result<(), WorkerSelectionPolicyError> {
                 for (_candidate, cost) in candidates.iter().zip(costs) {

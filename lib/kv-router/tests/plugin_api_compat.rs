@@ -10,9 +10,9 @@ use std::sync::Arc;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, request_classifier, worker_selection};
 use dynamo_kv_router::scheduling::{ClassifyFuture, ClassifyRequest, RequestClassifier};
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerType,
+    KvRouterConfig, RoutingPartitionRef, WorkerCandidate, WorkerCandidates, WorkerFilter,
+    WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerType,
 };
 
 struct LegacyPolicy;
@@ -25,7 +25,7 @@ impl WorkerFilter for LegacyPolicy {
     fn keep(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let _: Option<&dynamo_kv_router::SessionContext> = context.session_context();
         let _: Option<u32> = context.expected_output_tokens();
@@ -42,7 +42,7 @@ impl WorkerScorer for LegacyPolicy {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         for (candidate, cost) in candidates.iter().zip(costs) {

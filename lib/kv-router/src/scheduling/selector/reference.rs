@@ -10,7 +10,7 @@ use parking_lot::Mutex;
 
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
-    MaterializedSelectionInput, WorkerCandidate, WorkerInputs, WorkerSelectionContext,
+    CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
     WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
@@ -266,7 +266,7 @@ fn default_row(
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
-) -> WorkerCandidate {
+) -> CandidateData {
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
@@ -282,7 +282,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
-        row: &WorkerCandidate,
+        row: &CandidateData,
         formula_name: &'static str,
     ) -> f64 {
         let kv_router_config = self.kv_router_config.borrow();
@@ -292,7 +292,13 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let device_overlap_blocks = cache.device_overlap_blocks;
-        let shared_beyond_device_blocks = cache.shared_beyond_device_blocks;
+        let shared_beyond_device_blocks = context
+            .request
+            .shared_cache_hits
+            .as_ref()
+            .map_or(0, |hits| {
+                hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+            });
         let shared_overlap_blocks =
             weights.shared_cache_multiplier * shared_beyond_device_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
@@ -414,7 +420,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
-        row: &WorkerCandidate,
+        row: &CandidateData,
     ) -> f64 {
         let base_score = self.worker_logit(context, default_context, row, "Formula");
         match row.preferred_taint_multiplier {
@@ -1911,9 +1917,23 @@ mod tests {
         let default_row = default_row(&input, default_context, worker, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
-        assert_eq!(custom_row.cache.shared_beyond_device_blocks, 4);
+        assert_eq!(
+            request
+                .shared_cache_hits
+                .as_ref()
+                .unwrap()
+                .hits_beyond(custom_row.cache.device_overlap_blocks as u32),
+            4
+        );
         assert_eq!(default_row.cache.device_overlap_blocks, 2.0);
-        assert_eq!(default_row.cache.shared_beyond_device_blocks, 2);
+        assert_eq!(
+            request
+                .shared_cache_hits
+                .as_ref()
+                .unwrap()
+                .hits_beyond(default_row.cache.device_overlap_blocks as u32),
+            2
+        );
     }
 
     /// Without shared cache hits, the scoring should be unchanged.

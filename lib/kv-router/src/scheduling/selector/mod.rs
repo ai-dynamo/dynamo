@@ -12,12 +12,14 @@ pub use reference::DefaultWorkerSelector;
 
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    RequestCacheInput, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext,
 };
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
+use crate::plugins::worker_selection::CandidateData;
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
@@ -159,7 +161,7 @@ impl<'a> MaterializedSelectionInput<'a> {
         worker: WorkerWithDpRank,
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
-    ) -> WorkerCandidate {
+    ) -> CandidateData {
         self.row_with_device_overlap(
             worker,
             preferred_taint_multiplier,
@@ -175,10 +177,8 @@ impl<'a> MaterializedSelectionInput<'a> {
         preferred_taint_multiplier: Option<f64>,
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
-    ) -> WorkerCandidate {
-        let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
-            || (inputs.contains(WorkerInputs::LOAD) && self.request.track_prefill_tokens)
-        {
+    ) -> CandidateData {
+        let cached_tokens = if inputs.contains(WorkerInputs::CACHE) {
             self.request.effective_cached_tokens_for(worker)
         } else {
             0
@@ -201,12 +201,6 @@ impl<'a> MaterializedSelectionInput<'a> {
                 .unwrap_or(0.0);
             let device_overlap_blocks =
                 select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
-            let shared_beyond = |device_blocks: f64| {
-                self.request.shared_cache_hits.as_ref().map_or(0, |hits| {
-                    // `hits_beyond` expects the unweighted device prefix depth.
-                    hits.hits_beyond(device_blocks.round().max(0.0) as u32)
-                })
-            };
             WorkerCacheInput {
                 effective_overlap_blocks,
                 estimated_cached_tokens: cached_tokens,
@@ -227,7 +221,6 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .get(&worker)
                     .copied()
                     .unwrap_or(0) as f64,
-                shared_beyond_device_blocks: shared_beyond(device_overlap_blocks),
             }
         } else {
             WorkerCacheInput::default()
@@ -245,7 +238,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             WorkerLoadInput::default()
         };
 
-        WorkerCandidate {
+        CandidateData {
             worker,
             inputs,
             cache,

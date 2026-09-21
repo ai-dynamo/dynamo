@@ -20,7 +20,7 @@ policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 
 Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
 
-Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
+Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, that component receives `None`, even if another component requested it. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
 
 ## Pick a Starting Point
 
@@ -377,6 +377,8 @@ Send the same `curl` request from a fourth terminal. The frontend log records se
 
 Filters, scorers, and pickers can read `context.prompt_tokens()` for the exact input token count. This returns the existing request value without a prompt copy or allocation. Use `context.request_blocks()` when the policy needs rounded KV blocks instead. For example, at 16 tokens per block, a 17-token prompt has 2 blocks.
 
-Request-level cache information also requires `WorkerInputs::CACHE`: `context.has_tier_matches()` returns `None` without that declaration and `Some(false)` when declared but no tier matches were found. `context.shared_cache_hits()` returns `None` when cache was not requested or the request has no shared-cache ranges. Each filter, scorer, and picker declares its own inputs; another component requesting cache does not grant access.
+Request-level cache information also requires `WorkerInputs::CACHE`: `context.cache()` returns `None` without that declaration. With it, the borrowed view exposes `has_tier_matches()` and `shared_hits()`. The former is false when the snapshot has no tier matches; the latter is `None` when no shared-cache result was supplied. A policy can call `shared_hits().map(|hits| hits.hits_beyond(prefix))` to calculate shared hits after its chosen prefix, only when needed.
+
+Scorers receive a `WorkerCandidates` view with `iter()`, `get(row)`, `len()`, and `is_empty()`. Filters receive one borrowed `WorkerCandidate`. Both expose `cache()`, `load()`, and `preferred_taint_multiplier()` only when that component declares the corresponding `CACHE`, `LOAD`, or `PREFERRED_TAINT` group. The same rule applies to picker inputs. Another component requesting a group does not grant access. Views share the host's stored rows without allocating or copying a candidate table.
 
 The builtin default now uses the public policy API too. Rust hosts install `dynamo_custom_policy_builtin::default_registry()` before adding custom providers. This supplies default selection for roles that the custom configuration does not replace.

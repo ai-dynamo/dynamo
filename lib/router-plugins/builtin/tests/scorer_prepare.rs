@@ -7,9 +7,9 @@ mod support;
 use std::sync::{Arc, Mutex};
 
 use dynamo_kv_router::{
-    KvRouterConfig, WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerScorer, WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector,
+    KvRouterConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionInput,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
 };
 use support::fixture;
 
@@ -29,7 +29,7 @@ impl RelativeLoadScorer {
     fn prepare(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         assert_eq!(context.prompt_tokens(), 17);
         assert!(candidates.iter().all(|c| c.cache().is_none()));
@@ -56,7 +56,7 @@ impl WorkerScorer for RelativeLoadScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.prepare(context, candidates)?;
@@ -73,7 +73,7 @@ impl WorkerFilter for ExcludeWorkerOne {
     fn keep(
         &mut self,
         _: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != 1)
     }
@@ -171,7 +171,7 @@ impl FailPreparation {
     fn prepare(
         &mut self,
         _: &WorkerSelectionContext<'_>,
-        _: &[WorkerCandidate],
+        _: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         *self.0.lock().unwrap() += 1;
         Err(WorkerSelectionPolicyError::failed("prepare failed"))
@@ -182,7 +182,7 @@ impl WorkerScorer for FailPreparation {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         _costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.prepare(context, candidates)?;
@@ -245,7 +245,7 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            candidates: &[WorkerCandidate],
+            candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
             for (_candidate, cost) in candidates.iter().zip(costs) {
@@ -291,7 +291,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            candidates: &[WorkerCandidate],
+            candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
             for (candidate, cost) in candidates.iter().zip(costs) {
@@ -363,7 +363,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            _: &[WorkerCandidate],
+            _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
             costs.fill(7.0);
@@ -375,7 +375,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            _: &[WorkerCandidate],
+            _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
             if std::mem::replace(&mut self.0, false) {

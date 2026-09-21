@@ -90,7 +90,7 @@ async fn shared_core_books_and_releases_with_the_builtin_default() {
 #[tokio::test]
 async fn preparation_error_does_not_book_and_allows_retry() {
     use dynamo_kv_router::{
-        WorkerCandidate, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+        WorkerCandidates, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
         WorkerSelectionPolicy, WorkerSelectionPolicyError,
     };
     use std::sync::Arc;
@@ -100,7 +100,7 @@ async fn preparation_error_does_not_book_and_allows_retry() {
         fn prepare(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            _: &[WorkerCandidate],
+            _: WorkerCandidates<'_>,
         ) -> Result<(), WorkerSelectionPolicyError> {
             if std::mem::take(&mut self.0) {
                 return Err(WorkerSelectionPolicyError::failed("preparation failed"));
@@ -113,7 +113,7 @@ async fn preparation_error_does_not_book_and_allows_retry() {
         fn score(
             &mut self,
             context: &WorkerSelectionContext<'_>,
-            candidates: &[WorkerCandidate],
+            candidates: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
             self.prepare(context, candidates)?;

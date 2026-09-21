@@ -2210,9 +2210,17 @@ mod tests {
                 .iter()
                 .position(|candidate| candidate.worker() == self.worker)
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("fixed worker not eligible"))?;
-            let shared = input
+            let shared = _context
                 .cache()
-                .map(|cache| cache[row].shared_beyond_device_blocks())
+                .and_then(|cache| cache.shared_hits())
+                .map(|hits| {
+                    hits.hits_beyond(
+                        input.cache().unwrap()[row]
+                            .device_overlap_blocks()
+                            .round()
+                            .max(0.0) as u32,
+                    )
+                })
                 .filter(|blocks| *blocks > 0);
             assert_eq!(shared, self.expected_shared_blocks);
             Ok(row)
@@ -2225,7 +2233,7 @@ mod tests {
         fn keep(
             &mut self,
             _context: &WorkerSelectionContext<'_>,
-            _candidate: &WorkerCandidate,
+            _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             Ok(false)
         }

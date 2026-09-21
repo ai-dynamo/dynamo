@@ -126,7 +126,7 @@ impl WorkerFilter for MinimumDeviceOverlapFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         let cache = candidate
             .cache()
@@ -148,7 +148,7 @@ This scorer first finds the lowest active-request count among surviving workers,
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
+    WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
 /// Scores active requests above the least-loaded surviving candidate.
@@ -160,7 +160,7 @@ impl ActiveRequestsScorer {
     fn prepare(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.minimum = usize::MAX;
         for candidate in candidates {
@@ -183,7 +183,7 @@ impl WorkerScorer for ActiveRequestsScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidates: &[WorkerCandidate],
+        candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.prepare(context, candidates)?;
@@ -198,7 +198,7 @@ impl WorkerScorer for ActiveRequestsScorer {
 }
 ```
 
-Dynamo calls `score` once per scorer after filtering. The candidate slice borrows a fixed request snapshot; its order is unspecified and it cannot be retained. The output slice has the same length and starts with NaN in every slot. Write every cost; an unwritten slot or a non-finite contribution or total stops selection before picking or booking. Empty sets skip scoring. Any preparation helper belongs to the scorer implementation and runs inside its `score` call.
+Dynamo calls `score` once per scorer after filtering. The `WorkerCandidates` view borrows a fixed request snapshot; its order is unspecified and it cannot be retained. Use `iter()` to visit workers, `get(row)` to read one worker, and `len()` or `is_empty()` to inspect the batch. Each returned `WorkerCandidate` borrows the stored row and exposes only that scorer's declared inputs. Creating the view does not copy the worker table. The output slice has the same length and starts with NaN in every slot. Write every cost; an unwritten slot or a non-finite contribution or total stops selection before picking or booking. Empty sets skip scoring. Any preparation helper belongs to the scorer implementation and runs inside its `score` call.
 
 A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
 
@@ -439,8 +439,7 @@ Worker identity and ordinary request metadata are always available. Request-leve
 |---|---|
 | `prompt_tokens()` | Exact incoming prompt token count, borrowed from the request without allocation |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
-| `has_tier_matches()` | With `CACHE`, returns `Some(true)` if the lookup contains any tier-specific matches before filtering, or `Some(false)` otherwise; without `CACHE`, returns `None` |
-| `shared_cache_hits()` | With `CACHE`, returns the optional unweighted shared-cache ranges from the current lookup; without `CACHE`, returns `None` |
+| `cache()` | With `CACHE`, returns a borrowed `RequestCacheInput`; otherwise returns `None` |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
@@ -450,7 +449,16 @@ Worker identity and ordinary request metadata are always available. Request-leve
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
 
-Each filter, scorer, and picker must declare `WorkerInputs::CACHE` in its own `required_worker_inputs()` to read the two cache context accessors. Another component requesting cache does not enable them. The host borrows the existing lookup snapshot; reading these accessors adds no cache lookup or range copy.
+Each filter, scorer, and picker must declare `WorkerInputs::CACHE` in its own `required_worker_inputs()` to access `context.cache()`. Another component requesting cache does not enable it. The returned view exposes:
+
+| Accessor | Meaning |
+|---|---|
+| `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
+| `shared_hits()` | Optional unweighted shared-cache ranges from the current lookup, with `total_hits` and `hits_beyond(prefix)` |
+
+A declared cache view exists even when no shared-cache result was supplied; in that case, `shared_hits()` returns `None`. The host borrows the existing lookup snapshot. Reading the view adds no cache lookup, range copy, or allocation.
+
+Calculate shared-cache credit inside the policy from `shared_hits()` and the worker's cache data. For example, call `hits_beyond(device_prefix)` to count shared blocks beyond the GPU prefix. The default policy uses its accounting estimate as the prefix when tier matches are absent. It performs this calculation only when shared-cache credit is enabled.
 
 ### Session Context
 
@@ -500,17 +508,18 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `device_overlap_blocks()` | Device-resident prefix overlap in blocks |
 | `CACHE` | `host_overlap_blocks()` | Host-pinned prefix overlap in blocks |
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
-| `CACHE` | `shared_beyond_device_blocks()` | Shared-cache hits beyond the device-resident prefix |
+| `CACHE` | `accounting_cache_estimate()` | Host accounting estimate as weighted KV blocks and rounded tokens; not clamped to prompt length |
+| `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 
-The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
+The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-A filter or scorer reads requested groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every optional group that it reads.
+A filter or scorer reads requested groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every optional group that it reads. Candidate and context views enforce that declaration independently for every filter, scorer, and picker, including preferred-taint access. The host materializes the combined requirements once and shares borrowed views; it does not copy or rewrite every row for each scorer.
 
-`WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
+`WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 
 ## Link the Policy Into Dynamo
 
