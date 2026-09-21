@@ -18,6 +18,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -425,6 +426,187 @@ func TestLPXModelScaleDownRecreatesPodCliqueSet(t *testing.T) {
 	require.Equal(t, replacement.Spec, synced.Spec)
 	require.Equal(t, scaled.workloadDigest, synced.Annotations[lpx.WorkloadDigestAnnotation])
 	require.Less(t, len(synced.Spec.Template.PodCliqueScalingGroupConfigs[0].CliqueNames), originalCliqueCount)
+}
+
+func TestLPXPodCliqueSetReplacementPreservesReplicas(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		native      int32
+		explicit    *int32
+		speculative bool
+		want        int32
+	}{
+		{name: "external scale out", native: 3, want: 3},
+		{name: "external scale to zero", native: 0, want: 0},
+		{name: "explicit replicas win", native: 3, explicit: ptr.To(int32(2)), want: 2},
+		{name: "explicit zero wins", native: 3, explicit: ptr.To(int32(0)), want: 0},
+		{name: "each model retains external replicas", native: 3, speculative: true, want: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Publish a workload before an external scaler changes its native engine count")
+			ctx := t.Context()
+			child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			if tc.speculative {
+				child, source, registry = newLPXSpecDecodeTestDGD(t)
+			}
+			lpx.ServingComponent(source).Replicas = tc.explicit
+			r, initial := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+			objects := lpxMaterializedObjects(t, r, child, source, initial)
+			createLPXTestObjects(t, ctx, r.Client, objects...)
+			publishSelectedLPXForTest(t, ctx, r, child, initial)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			group := findLPXTestScalingGroup(t, objects, initial.plan.LPXScalingGroup)
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+			group.Spec.Replicas = tc.native
+			require.NoError(t, r.Update(ctx, group))
+
+			t.Log("Change immutable workload geometry while retaining the component's replica ownership")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(source), source))
+			if tc.speculative {
+				source.Spec.Components[1].Replicas = ptr.To(int32(1))
+			} else {
+				lpx.ServingComponent(source).LPX.BuildID = "replacement-build"
+				registry = newLPXTestRegistryWithPartitionsAndMode(t, "replacement-build", []int{7, 8}, manifestcapnpv2.CompilationMode_lpuOnly)
+				r.modelRegistry = registry
+			}
+			source.Generation++
+			require.NoError(t, r.Update(ctx, source))
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			var err error
+			child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
+			require.NoError(t, err)
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+
+			t.Log("Reconcile through retirement and simulate garbage collection of the old workload")
+			for range 2 {
+				_, err = r.Reconcile(ctx, request)
+				require.NoError(t, err)
+				if apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{})) {
+					break
+				}
+			}
+			require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{})))
+			for _, object := range objects[1:] {
+				require.NoError(t, r.Delete(ctx, object))
+			}
+			oldRequests, err := r.listLPXRequestCandidates(ctx, child)
+			require.NoError(t, err)
+			for index := range oldRequests.Items {
+				require.NoError(t, r.Delete(ctx, &oldRequests.Items[index]))
+			}
+
+			t.Log("Restart the reconciler with only persisted API state and create the replacement PCS")
+			r = &graphReconciler{
+				Client: r.Client, apiReader: r.apiReader, recorder: r.recorder,
+				Config: r.Config, runtimeConfig: r.runtimeConfig, modelRegistry: registry,
+			}
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			replacement := &grovev1alpha1.PodCliqueSet{}
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), replacement))
+			require.NotEqual(t, initial.workloadDigest, replacement.Annotations[lpx.WorkloadDigestAnnotation])
+			require.Equal(t, tc.want, *replacement.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas)
+			replacement.UID = "replacement-pcs"
+			require.NoError(t, r.Update(ctx, replacement))
+
+			t.Log("Materialize the replacement's Grove resources and publish every model for every engine")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+			selected, classification, err := r.prepareLPXMaterializing(ctx, child, source, replacement)
+			require.NoError(t, err)
+			require.Nil(t, classification)
+			require.Equal(t, tc.want, selected.plan.Replicas)
+			replacementObjects := lpxMaterializedObjects(t, r, child, source, selected)
+			replacementGroup := findLPXTestScalingGroup(t, replacementObjects, selected.plan.LPXScalingGroup)
+			replacementGroup.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(replacement, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
+			createLPXTestObjects(t, ctx, r.Client, replacementObjects[1:]...)
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			requests, err := r.listOwnedLPXRequests(ctx, child, replacement)
+			require.NoError(t, err)
+			require.Len(t, requests, int(tc.want)*len(selected.workload.ModelProjections()))
+			for _, request := range requests {
+				require.True(t, metav1.IsControlledBy(&request, replacement))
+			}
+
+			t.Log("Leave the authored source replica field untouched")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(source), source))
+			require.Equal(t, tc.explicit, lpx.ServingComponent(source).Replicas)
+		})
+	}
+}
+
+func TestLPXPodCliqueSetReplacementPersistsReplicasBeforeDeletion(t *testing.T) {
+	t.Log("Publish an externally scaled speculative workload and request a new shape")
+	ctx := t.Context()
+	child, source, registry := newLPXSpecDecodeTestDGD(t)
+	lpx.ServingComponent(source).Replicas = nil
+	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+	objects := lpxMaterializedObjects(t, r, child, source, selected)
+	createLPXTestObjects(t, ctx, r.Client, objects...)
+	publishSelectedLPXForTest(t, ctx, r, child, selected)
+	pcs := findLPXTestPodCliqueSet(t, objects)
+	group := findLPXTestScalingGroup(t, objects, selected.plan.LPXScalingGroup)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	group.Spec.Replicas = 3
+	require.NoError(t, r.Update(ctx, group))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(source), source))
+	source.Spec.Components[1].Replicas = ptr.To(int32(1))
+	source.Generation++
+	require.NoError(t, r.Update(ctx, source))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	var err error
+	child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
+	require.NoError(t, err)
+	child.Generation++
+	require.NoError(t, r.Update(ctx, child))
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+
+	t.Log("A failed status write must leave the PCS and its native scale intact")
+	persistErr := errors.New("status unavailable")
+	original := r.Client
+	r.Client = interceptor.NewClient(original.(client.WithWatch), interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, delegated client.Client, subresource string, object client.Object, opts ...client.SubResourceUpdateOption) error {
+			if subresource == "status" {
+				return persistErr
+			}
+			return delegated.SubResource(subresource).Update(ctx, object, opts...)
+		},
+	})
+	_, err = r.Reconcile(ctx, request)
+	require.ErrorIs(t, err, persistErr)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.True(t, pcs.DeletionTimestamp.IsZero())
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
+	require.Equal(t, int32(3), group.Spec.Replicas)
+	require.NoError(t, r.Get(ctx, request.NamespacedName, child))
+	require.Nil(t, child.Status.RetainedReplicas)
+
+	t.Log("Retry persists the native count before allowing any deletion")
+	r.Client = original
+	result, err := r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.NoError(t, r.Get(ctx, request.NamespacedName, child))
+	require.Equal(t, ptr.To(int32(3)), child.Status.RetainedReplicas)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.True(t, pcs.DeletionTimestamp.IsZero())
+
+	t.Log("Another external scale change refreshes the durable count before retirement")
+	group.Spec.Replicas = 5
+	require.NoError(t, r.Update(ctx, group))
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, request.NamespacedName, child))
+	require.Equal(t, ptr.To(int32(5)), child.Status.RetainedReplicas)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+	require.True(t, pcs.DeletionTimestamp.IsZero())
+
+	t.Log("Only a later reconcile with the persisted count can delete the old PCS")
+	_, err = r.Reconcile(ctx, request)
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(pcs), &grovev1alpha1.PodCliqueSet{})))
 }
 
 func TestLPXFailedScaleOutPreservesServingEngines(t *testing.T) {

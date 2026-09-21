@@ -1453,6 +1453,11 @@ func (in *LPXGraphDeploymentStatus) DeepCopyInto(out *LPXGraphDeploymentStatus) 
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.RetainedReplicas != nil {
+		in, out := &in.RetainedReplicas, &out.RetainedReplicas
+		*out = new(int32)
+		**out = **in
+	}
 	if in.ExpiredRequestUIDs != nil {
 		in, out := &in.ExpiredRequestUIDs, &out.ExpiredRequestUIDs
 		*out = make([]types.UID, len(*in))

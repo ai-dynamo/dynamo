@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -306,6 +307,7 @@ func (r *graphReconciler) prepareLPXMaterializing(
 			if !apierrors.IsNotFound(err) {
 				return nil, nil, err
 			}
+			plan.Replicas = ptr.Deref(deployment.Status.RetainedReplicas, plan.Replicas)
 		} else {
 			// Reject an unrelated PCS before consulting any group it happens to own.
 			if pcs != nil && !metav1.IsControlledBy(pcs, deployment) {
@@ -316,9 +318,9 @@ func (r *graphReconciler) prepareLPXMaterializing(
 				return nil, &lpxRetiring{retirementReason: "Waiting for the previous LPX scaling group to finish cleanup"}, nil
 			}
 			plan.Replicas = group.Spec.Replicas
-			if err := plan.ValidateReplicaCount(); err != nil {
-				return nil, &lpxRejected{reason: err.Error()}, nil
-			}
+		}
+		if err := plan.ValidateReplicaCount(); err != nil {
+			return nil, &lpxRejected{reason: err.Error()}, nil
 		}
 	}
 	workloadDigest := workload.Digest().String()

@@ -386,6 +386,60 @@ func TestLPXImplicitReplicaObservationWaitsForMatchingPodCliqueSet(t *testing.T)
 	}
 }
 
+func TestLPXRetainedReplicaPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		retained *int32
+		explicit *int32
+		native   *int32
+		want     int32
+		rejected bool
+	}{
+		{name: "first deployment defaults to one", want: 1},
+		{name: "retain scale out", retained: ptr.To(int32(3)), want: 3},
+		{name: "retain zero", retained: ptr.To(int32(0)), want: 0},
+		{name: "explicit scale wins", retained: ptr.To(int32(3)), explicit: ptr.To(int32(2)), want: 2},
+		{name: "explicit zero wins", retained: ptr.To(int32(3)), explicit: ptr.To(int32(0)), want: 0},
+		{name: "live scale wins", retained: ptr.To(int32(3)), native: ptr.To(int32(5)), want: 5},
+		{name: "live zero wins", retained: ptr.To(int32(3)), native: ptr.To(int32(0)), want: 0},
+		{name: "reject negative retained count", retained: ptr.To(int32(-1)), rejected: true},
+		{name: "reject excessive retained count", retained: ptr.To(int32(2497)), rejected: true},
+		{name: "live scale supersedes invalid retained count", retained: ptr.To(int32(-1)), native: ptr.To(int32(2)), want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Prepare an independently owned workload with optional retained and native capacity")
+			ctx := t.Context()
+			child, source, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+			r, initial := newPreparedLPXTestReconciler(t, registry, ctx, child, source)
+			child.Status.RetainedReplicas = tc.retained
+			lpx.ServingComponent(source).Replicas = tc.explicit
+			var pcs *grovev1alpha1.PodCliqueSet
+			if tc.native != nil {
+				objects := lpxMaterializedObjects(t, r, child, source, initial)
+				pcs = findLPXTestPodCliqueSet(t, objects)
+				group := findLPXTestScalingGroup(t, objects, initial.plan.LPXScalingGroup)
+				group.Spec.Replicas = *tc.native
+				createLPXTestObjects(t, ctx, r.Client, pcs, group)
+			}
+
+			t.Log("Resolve replicas and request fanout without changing the input objects")
+			beforeChild, beforeSource := child.DeepCopy(), source.DeepCopy()
+			selected, classification, err := r.prepareLPXMaterializing(ctx, child, source, pcs)
+			require.NoError(t, err)
+			if tc.rejected {
+				require.Nil(t, selected)
+				require.IsType(t, &lpxRejected{}, classification)
+			} else {
+				require.Nil(t, classification)
+				require.Equal(t, tc.want, selected.plan.Replicas)
+				require.Len(t, selected.requests, int(tc.want))
+			}
+			require.Equal(t, beforeChild, child)
+			require.Equal(t, beforeSource, source)
+		})
+	}
+}
+
 func TestLPXPublishedWorkloadFailureRetirement(t *testing.T) {
 	for _, test := range []struct {
 		name          string

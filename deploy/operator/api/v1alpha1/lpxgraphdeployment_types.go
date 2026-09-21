@@ -31,6 +31,12 @@ type LPXGraphDeploymentStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// retainedReplicas preserves the last selected complete-engine count across
+	// PodCliqueSet replacement. Explicit component replicas and an observed native
+	// scaling group take precedence; nil means no count has been retained yet.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	RetainedReplicas *int32 `json:"retainedReplicas,omitempty"`
 	// expiredRequestUIDs records requests selected for deadline cleanup until they disappear,
 	// even if their scheduler phase or the deployment input changes.
 	// +optional

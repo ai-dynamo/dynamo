@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -317,6 +318,20 @@ func (r *graphReconciler) reconcileWorkload(
 	if err := r.validateLPXPublicationSource(ctx, deployment); err != nil {
 		return state, ctrl.Result{}, err
 	}
+
+	// Persist externally managed capacity before deleting its only native owner.
+	if pcs != nil && pcs.DeletionTimestamp.IsZero() &&
+		pcs.Annotations[lpx.WorkloadDigestAnnotation] != selected.workloadDigest &&
+		lpx.ServingComponent(source).Replicas == nil &&
+		!ptr.Equal(deployment.Status.RetainedReplicas, &selected.plan.Replicas) {
+		if err := commoncontroller.CheckControllerOwnership(pcs, deployment, r.Scheme()); err != nil {
+			return state, ctrl.Result{}, err
+		}
+		deployment.Status.RetainedReplicas = ptr.To(selected.plan.Replicas)
+		retiring := &lpxRetiring{retirementReason: "Preserving native replica count before replacing the LPX workload"}
+		return lpxResult(retiring), projectLPXLifecycleStatus(retiring), nil
+	}
+
 	// Replica scale-down keeps the immutable PCS shape, so lower the live Grove
 	// group before deleting stale requests. A workload-shape change replaces the
 	// PCS instead and must not try to mutate its old group.
@@ -338,6 +353,10 @@ func (r *graphReconciler) reconcileWorkload(
 		state = lpxResult(classification)
 		return state, projectLPXLifecycleStatus(classification), nil
 	}
+
+	// Retain the selected count for replacement even when the current group is absent.
+	deployment.Status.RetainedReplicas = ptr.To(selected.plan.Replicas)
+
 	// The existing PCS template only seeds its PCSG; preserve that seed while
 	// the live group scales independently, including to zero.
 	if err := preserveLPXScalingGroupReplicaSeed(desired, pcs); err != nil {

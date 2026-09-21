@@ -292,6 +292,14 @@ spec:
                         - Unknown
                       type: string
                   type: object
+                retainedReplicas:
+                  description: |-
+                    retainedReplicas preserves the last selected complete-engine count across
+                    PodCliqueSet replacement. Explicit component replicas and an observed native
+                    scaling group take precedence; nil means no count has been retained yet.
+                  format: int32
+                  minimum: 0
+                  type: integer
               type: object
           required:
             - spec

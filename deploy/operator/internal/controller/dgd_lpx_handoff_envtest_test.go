@@ -330,6 +330,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 
 	t.Log("Project the observed download payload and its actionable failure")
 	child.Status.ObservedGeneration = child.Generation
+	child.Status.RetainedReplicas = ptr.To(int32(3))
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
 	child.Status.Conditions = []metav1.Condition{{Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation,
 		LastTransitionTime: metav1.Now(), Reason: "PublicationDenied", Message: "Check the namespace quota"}}
@@ -363,6 +364,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NotEqual(t, child.Spec.InputRevision, updated.Spec.InputRevision)
 	require.NoError(t, dynamo.ValidateLPXSource(updated, source))
 	require.Equal(t, child.Status.ObservedGeneration, updated.Status.ObservedGeneration)
+	require.Equal(t, ptr.To(int32(3)), updated.Status.RetainedReplicas)
 	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
 	projectLPXChildStatus(source, updated, result, &projected)
 	require.Equal(t, v1beta1.DGDStatePending, result.State)
@@ -394,4 +396,10 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NoError(t, env.Client().Status().Update(t.Context(), stored))
 	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(stored), stored))
 	require.Equal(t, 0.75, *stored.Status.Placement.Score)
+
+	t.Log("Retained zero replicas survives the real status schema without defaulting to an absent value")
+	stored.Status.RetainedReplicas = ptr.To(int32(0))
+	require.NoError(t, env.Client().Status().Update(t.Context(), stored))
+	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(stored), stored))
+	require.Equal(t, ptr.To(int32(0)), stored.Status.RetainedReplicas)
 }
