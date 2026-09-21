@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Startup registration for statically linked worker-selection policies.
+//! Startup registration for statically linked router plugins.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,14 +9,17 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::WorkerSelectionPolicyFactory;
+use super::request_classifier::RequestClassifierRegistry;
+use super::request_classifier::{
+    RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
+};
+use super::worker_selection::{WorkerSelectionPolicy, WorkerSelectionPolicyFactory};
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
 use crate::scheduling::config::WorkerSelectionPolicySelections;
 pub use crate::scheduling::config::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
 };
-use crate::scheduling::selector::WorkerSelectionPolicy;
 
 /// Parses one policy instance's YAML parameters and creates its partition factory.
 pub type WorkerSelectionPolicyProvider = Arc<
@@ -61,11 +64,16 @@ impl WorkerSelectionPolicyProviderError {
     }
 }
 
-/// A startup-only registry of policy types linked into a custom Dynamo image.
+/// A startup-only registry of worker-selection and request-classifier plugins linked into an image.
 #[derive(Clone, Default)]
-pub struct WorkerSelectionPolicyRegistry {
+pub struct RouterPluginRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
+    request_classifiers: RequestClassifierRegistry,
 }
+
+/// Existing catalogs can retain their worker-selection registration signature.
+// TODO(v1.7): Remove this compatibility alias; use RouterPluginRegistry.
+pub type WorkerSelectionPolicyRegistry = RouterPluginRegistry;
 
 /// An error from policy registration or startup resolution.
 #[derive(Debug, Error)]
@@ -90,14 +98,20 @@ pub enum WorkerSelectionPolicyRegistryError {
     },
 }
 
-impl WorkerSelectionPolicyRegistry {
-    /// Whether this image has no linked custom worker-selection policy types.
-    pub fn is_empty(&self) -> bool {
-        self.providers.is_empty()
+impl RouterPluginRegistry {
+    /// Resolve every configured plugin once before constructing any routers.
+    pub fn resolve_plugins(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
+        Ok(super::RouterPlugins {
+            worker_selection: self.resolve(config)?,
+            request_classifier: self.resolve_request_classifier(config)?,
+        })
     }
 
-    /// Register a policy type supplied by a linked policy crate.
-    pub fn register(
+    /// Register a worker-selection provider through the common plugin catalog.
+    pub fn register_worker_selection(
         &mut self,
         name: impl Into<String>,
         provider: WorkerSelectionPolicyProvider,
@@ -114,6 +128,38 @@ impl WorkerSelectionPolicyRegistry {
         }
         self.providers.insert(name, provider);
         Ok(())
+    }
+
+    /// Register a request-classifier type through the same catalog entry point as worker selection.
+    pub fn register_request_classifier(
+        &mut self,
+        name: impl Into<String>,
+        provider: RequestClassifierProvider,
+    ) -> Result<(), RequestClassifierRegistryError> {
+        self.request_classifiers.register(name, provider)
+    }
+
+    /// Resolve the configured request classifier once at frontend startup.
+    pub fn resolve_request_classifier(
+        &self,
+        config: &KvRouterConfig,
+    ) -> Result<Option<RequestClassifierFactory>, RequestClassifierRegistryError> {
+        self.request_classifiers.resolve(config)
+    }
+
+    /// Whether this image has no linked router plugin types.
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty() && self.request_classifiers.is_empty()
+    }
+
+    /// Compatibility entry point for worker-only catalogs.
+    // TODO(v1.7): Remove this compatibility method; use register_worker_selection.
+    pub fn register(
+        &mut self,
+        name: impl Into<String>,
+        provider: WorkerSelectionPolicyProvider,
+    ) -> Result<(), WorkerSelectionPolicyRegistryError> {
+        self.register_worker_selection(name, provider)
     }
 
     /// Resolve the configured policy instances once at process startup.
@@ -351,6 +397,57 @@ worker_selection:
         .worker_selection()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn classifier_only_catalog_resolves_through_common_bundle() {
+        struct PassThrough;
+        impl super::super::request_classifier::RequestClassifier for PassThrough {}
+
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = RouterPluginRegistry::default();
+        assert!(registry.is_empty());
+        registry
+            .register_request_classifier(
+                "test",
+                Arc::new({
+                    let provider_calls = provider_calls.clone();
+                    move |_| {
+                        provider_calls.fetch_add(1, Ordering::Relaxed);
+                        Ok(Arc::new(|_| Box::new(PassThrough)))
+                    }
+                }),
+            )
+            .unwrap();
+        assert!(!registry.is_empty());
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "request_classifier:\n  type: test\n").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        let plugins = registry.resolve_plugins(&config).unwrap();
+        assert!(!plugins.is_empty());
+        assert!(plugins.worker_selection().is_none());
+        let _first = plugins.request_classifier().unwrap()(
+            crate::plugins::request_classifier::RequestClassifierContext::new(16, Vec::new),
+        );
+        let _second = plugins.clone().request_classifier().unwrap()(
+            crate::plugins::request_classifier::RequestClassifierContext::new(16, Vec::new),
+        );
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            RouterPluginRegistry::default()
+                .resolve_plugins(&KvRouterConfig::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            RouterPluginRegistry::default().resolve_plugins(&config),
+            Err(super::super::RouterPluginRegistryError::RequestClassifier(
+                RequestClassifierRegistryError::UnknownType { .. }
+            ))
+        ));
     }
 
     #[test]

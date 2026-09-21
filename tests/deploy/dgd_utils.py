@@ -4,13 +4,16 @@
 """Helpers for live-cluster DynamoGraphDeployment tests."""
 
 import asyncio
+import json
 import logging
 import os
 import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from functools import partial
+from pathlib import Path
 from typing import Any, List, Literal, Optional
 
 import aiohttp
@@ -60,6 +63,8 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
 PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
+DISCOVERY_SNAPSHOT_TIMEOUT = 15
+DISCOVERY_RESOURCE_TIMEOUT = 3
 _KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
 
 
@@ -1909,8 +1914,90 @@ class ManagedDeployment:
 
         raise AssertionError("unreachable")
 
-    async def _cleanup(self):
+    async def _capture_discovery_state(self):
+        """Save namespace discovery resources while their owner objects still exist."""
+        if self._custom_api is None or self._core_api is None:
+            self._logger.warning(
+                "Discovery snapshot unavailable: Kubernetes clients not initialized"
+            )
+            return
+        directory = Path(self.log_dir) / "discovery"
+        directory.mkdir(parents=True, exist_ok=True)
+        api_client = self._core_api.api_client
+        discovery_api = client.DiscoveryV1Api(api_client)
+        resources = (
+            (
+                "dgd",
+                partial(
+                    self._custom_api.list_namespaced_custom_object,
+                    "nvidia.com",
+                    self.deployment_spec.api_version,
+                    self.namespace,
+                    "dynamographdeployments",
+                ),
+            ),
+            (
+                "dwm",
+                partial(
+                    self._custom_api.list_namespaced_custom_object,
+                    "nvidia.com",
+                    "v1alpha1",
+                    self.namespace,
+                    "dynamoworkermetadatas",
+                ),
+            ),
+            ("pods", partial(self._core_api.list_namespaced_pod, self.namespace)),
+            (
+                "services",
+                partial(self._core_api.list_namespaced_service, self.namespace),
+            ),
+            (
+                "endpointslices",
+                partial(discovery_api.list_namespaced_endpoint_slice, self.namespace),
+            ),
+        )
+        # DWM ownership is through Pod UIDs; a DGD label selector can miss it.
+        for name, read in resources:
+            record = {
+                "namespace": self.namespace,
+                "deployment": self._deployment_name,
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                async with asyncio.timeout(DISCOVERY_RESOURCE_TIMEOUT):
+                    response = await read(_request_timeout=DISCOVERY_RESOURCE_TIMEOUT)
+                record["response"] = api_client.sanitize_for_serialization(response)
+            except Exception as error:
+                record["error"] = f"{type(error).__name__}: {error}"
+                self._logger.warning(
+                    "Could not capture discovery resource %s: %s", name, error
+                )
+            try:
+                (directory / f"{name}.json").write_text(json.dumps(record, indent=2))
+            except (OSError, TypeError, ValueError) as error:
+                self._logger.warning(
+                    "Could not save discovery resource %s: %s", name, error
+                )
+
+    async def _cleanup(self, failed: bool = False):
+        pending_cancellation: asyncio.CancelledError | None = None
         try:
+            if failed:
+                try:
+                    async with asyncio.timeout(DISCOVERY_SNAPSHOT_TIMEOUT):
+                        await self._capture_discovery_state()
+                except asyncio.CancelledError as error:
+                    pending_cancellation = error
+                    self._logger.warning(
+                        "Discovery snapshot cancelled; finishing cleanup before "
+                        "propagating cancellation"
+                    )
+                except BaseException as error:
+                    # Snapshot capture is best-effort and must not replace the
+                    # existing setup or test failure.
+                    self._logger.warning(
+                        "Discovery snapshot failed; continuing cleanup: %s", error
+                    )
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
             self._get_service_logs()
             events = await self._get_pod_events()
@@ -1931,6 +2018,8 @@ class ManagedDeployment:
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment(fail_on_timeout=False)
+        if pending_cancellation is not None:
+            raise pending_cancellation
 
     async def __aenter__(self):
         try:
@@ -1950,13 +2039,15 @@ class ManagedDeployment:
             await self._wait_for_ready(timeout=self.readiness_timeout)
 
         except BaseException as error:
-            await self._cleanup_preserving_error(error)
+            await self._cleanup_preserving_error(
+                error, failed=not isinstance(error, pytest.skip.Exception)
+            )
             raise
         return self
 
-    async def _cleanup_preserving_error(self, primary):
+    async def _cleanup_preserving_error(self, primary, *, failed: bool = False):
         try:
-            await self._cleanup()
+            await self._cleanup(failed=failed)
         except Exception as error:
             self.cleanup_errors.append(error)
             if primary is None:
@@ -1964,7 +2055,10 @@ class ManagedDeployment:
             self._logger.error("Deployment cleanup also failed", exc_info=True)
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup_preserving_error(exc_val)
+        failed = exc_type is not None and not issubclass(
+            exc_type, pytest.skip.Exception
+        )
+        await self._cleanup_preserving_error(exc_val, failed=failed)
         return False
 
 
