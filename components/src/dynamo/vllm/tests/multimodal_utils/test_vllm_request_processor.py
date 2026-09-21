@@ -1391,13 +1391,13 @@ def test_qwen_handoff_computes_grid_for_pil_images():
             min_pixels=65536,
             max_pixels=16777216,
             vision_hidden_dim=2048,
-            decode_embedding_dim=2048,
+            decode_embedding_dim=8192,
         ),
     )
 
     assert result == {
         "image_grid_thw": [[1, 30, 40]],
-        "embeddings_shape": [300, 2048],
+        "embeddings_shape": [300, 8192],
     }
 
 
