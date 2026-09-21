@@ -16,8 +16,9 @@ environment.
 
 Shared provider Components apply to the backend-neutral `PrefillWorker` and
 `DecodeWorker` service keys. Model-specific images, mounts, and command
-configuration remain in local Components. The EFA leaf Component includes its
-AWS and libfabric parents and names the per-worker EFA request explicitly.
+configuration remain in local Components. The selected EFA instance inherits a
+shared AWS EFA template bundle. Its rendered Component includes the generic AWS
+and libfabric parents and names the per-worker EFA request explicitly.
 
 The vLLM command line reads provider-specific values from environment variables
 so overlays can patch individual values without replacing the shared argument
@@ -42,7 +43,7 @@ Neither path requires regeneration.
 | Rendered manifest | Provider fabric | Overlay |
 |-------------------|-----------------|---------|
 | `deploy-aks-ib.yaml` | Azure AKS InfiniBand | `kustomize/overlays/aks-ib/` |
-| `deploy-aws-p5.48xlarge.yaml` | AWS EFA + libfabric on `p5.48xlarge`, 16 EFA per worker | `kustomize/overlays/aws-p5.48xlarge/` |
+| `deploy-aws-p5.48xlarge.yaml` | AWS EFA + libfabric on `p5.48xlarge`, derived from each worker's GPU count | `kustomize/overlays/aws-p5.48xlarge/` |
 | `deploy-gke-roce.yaml` | GKE RoCE | `kustomize/overlays/gke-roce/` |
 | `deploy-nebius-ib.yaml` | Nebius InfiniBand | `kustomize/overlays/nebius-ib/` |
 | `deploy-nscale-ib.yaml` | Nscale InfiniBand | `kustomize/overlays/nscale-ib/` |
@@ -66,13 +67,14 @@ scripts/kustomize-matrix.py compose \
 
 For recipe contributors, the source of truth is
 [`.kustomize-matrix.yaml`](.kustomize-matrix.yaml), `kustomize/base/`, the
-recipe-local Components, plus the referenced shared Components under
-`recipes/kustomize/components/`. Only contributors update committed derived
-artifacts: public overlay `kustomization.yaml` files and `deploy-*.yaml` files
-are generated, committed for review, and must not be hand-edited. Regenerate
-them with:
+recipe-local Components, shared template sources, plus the referenced shared
+Components under `recipes/kustomize/components/`. Only contributors update
+committed derived artifacts: public overlay `kustomization.yaml` files,
+generated Components under their local `components/` directories, and
+`deploy-*.yaml` files are generated, committed for review, and must not be
+hand-edited. Regenerate them with:
 
 ```bash
-scripts/kustomize-matrix.py unfold .kustomize-matrix.yaml
-scripts/kustomize-matrix.py render .kustomize-matrix.yaml
+scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+scripts/kustomize-matrix.py render recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
 ```

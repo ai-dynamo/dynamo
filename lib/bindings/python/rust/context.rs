@@ -312,7 +312,7 @@ impl Context {
     fn async_killed_or_stopped<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
         let inner = self.inner.clone();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             tokio::select! {
                 _ = inner.killed() => {
                     Ok(true)
@@ -600,7 +600,7 @@ fn py_to_otel_value(v: &Bound<'_, PyAny>) -> PyResult<opentelemetry::Value> {
         Ok(Value::F64(f.extract::<f64>()?))
     } else if let Ok(s) = v.downcast::<PyString>() {
         // `to_cow` (not `to_str`) for abi3 compatibility: enabling the
-        // `aic-forward-pass` feature pulls in aiconfigurator-core, which sets
+        // `aic-forward-pass` pulls in AISimulate's consolidated perf-model core, which sets
         // pyo3 `abi3-py39`; under the <3.10 limited API `PyString::to_str` is
         // compiled out, while `to_cow` is always available. Same conversion.
         Ok(Value::String(s.to_cow()?.into_owned().into()))

@@ -19,6 +19,7 @@ import copy
 import logging
 import os
 from dataclasses import dataclass, field
+from stat import S_ISREG
 
 import pandas as pd
 
@@ -164,8 +165,19 @@ def resolve_model_path(dgdr: DynamoGraphDeploymentRequestSpec) -> str:
             dgdr.modelCache.pvcMountPath,
             dgdr.modelCache.pvcModelPath,
         )
-        if os.path.isfile(os.path.join(local_path, "config.json")):
-            return local_path
+        config_path = os.path.join(local_path, "config.json")
+        try:
+            if S_ISREG(os.stat(config_path).st_mode):
+                return local_path
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError as e:
+            raise RuntimeError(
+                f"Cannot inspect PVC model config {config_path!r}: {e}. "
+                "Check directory permissions and symlink ownership for the "
+                "profiler user, or set modelCache.pvcModelPath to an accessible "
+                "snapshot directory."
+            ) from e
     return dgdr.model
 
 
@@ -199,6 +211,15 @@ def is_mocker_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
         dgdr.features is not None
         and dgdr.features.mocker is not None
         and dgdr.features.mocker.enabled is True
+    )
+
+
+def is_kv_router_enabled(dgdr: DynamoGraphDeploymentRequestSpec) -> bool:
+    """True when the DGDR spec explicitly enables KV-cache-aware routing."""
+    return (
+        dgdr.features is not None
+        and dgdr.features.kvRouter is not None
+        and dgdr.features.kvRouter.enabled is True
     )
 
 

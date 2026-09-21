@@ -44,6 +44,24 @@ function formatDate(d, isAllDay) {
   return d.toLocaleDateString('en-US', { ...opts, timeZone: 'America/Los_Angeles' });
 }
 
+/**
+ * How many events the committed README table currently holds.
+ *
+ * Counted from the rows between the EVENTS markers, skipping the header, the
+ * separator, and the "No upcoming events" placeholder. A missing block counts
+ * as zero rather than failing; main()'s marker check reports that case.
+ */
+function countExistingEvents(md) {
+  const block = md.match(/<!-- EVENTS:START -->([\s\S]*?)<!-- EVENTS:END -->/);
+  if (!block) return 0;
+  return block[1]
+    .split('\n')
+    .filter(line => /^\s*\|/.test(line))
+    .filter(line => !/^\s*\|\s*Date\s*\|/.test(line))
+    .filter(line => !/^\s*\|[\s:|-]+\|\s*$/.test(line))
+    .filter(line => !/No upcoming events/.test(line)).length;
+}
+
 async function main() {
   const events = await ical.async.fromURL(ICS_URL);
   const now = new Date();
@@ -76,6 +94,27 @@ async function main() {
   const md = fs.readFileSync('README.md', 'utf8');
   const marker = /<!-- EVENTS:START -->[\s\S]*?<!-- EVENTS:END -->/;
   if (!marker.test(md)) throw new Error('EVENTS markers not found in README.md');
+
+  // Floor guard: never publish a table that has gone empty.
+  //
+  // node-ical turns a non-200 body into {} rather than throwing, so an
+  // unshared calendar or a transient Google serve parses cleanly into zero
+  // events and would render as "No upcoming events". This script's fetch is
+  // independent of generate-events.js's, so that generator's own floor guard
+  // does not cover this file. The refresh workflow commits README.md straight
+  // to main, so a blank table would blank the repo front door behind a commit
+  // titled like every other refresh. Fail the run and leave the last good
+  // table in place.
+  const existingCount = countExistingEvents(md);
+  if (selected.length === 0 && existingCount > 0) {
+    const veventCount = Object.values(events).filter(e => e.type === 'VEVENT').length;
+    throw new Error(
+      `Calendar fetch yielded no usable events (${veventCount} VEVENT(s) parsed) ` +
+        `while the README table currently holds ${existingCount}. ` +
+        'Refusing to overwrite it with an empty table.',
+    );
+  }
+
   const updated = md.replace(marker, `<!-- EVENTS:START -->\n${lines.join('\n')}\n<!-- EVENTS:END -->`);
   fs.writeFileSync('README.md', updated);
   console.log(`Updated README with ${selected.length} events (${past.length} past, ${future.length} upcoming).`);

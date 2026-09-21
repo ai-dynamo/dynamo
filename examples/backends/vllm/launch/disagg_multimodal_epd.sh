@@ -13,12 +13,23 @@ export DYN_REQUEST_PLANE=tcp
 
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
+FRONTEND_DECODING=false
+
+# Media processing can delay the P->D KV pull, especially when E/P/D workers
+# share GPUs. Keep the lease above the observed 75-77 second handoff window,
+# while allowing deployments to choose a shorter cleanup interval.
+DYN_VLLM_KV_LEASE_DURATION=${DYN_VLLM_KV_LEASE_DURATION:-100}
+if ! [[ "$DYN_VLLM_KV_LEASE_DURATION" =~ ^([6-9]|[1-9][0-9]+)$ ]]; then
+    echo "DYN_VLLM_KV_LEASE_DURATION must be an integer >= 6" >&2
+    exit 2
+fi
+KV_TRANSFER_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"kv_lease_duration\":${DYN_VLLM_KV_LEASE_DURATION}}}"
 
 # --single-gpu: Packs all 3 workers (encode, prefill, decode) onto a single GPU.
 # This is intended for functional testing with small models (e.g. 2B) where CI
 # only has 1 GPU available. It reduces performance by:
 #   - Enabling --enforce-eager (disables torch.compile and CUDA graph capture)
-#   - Hardcoding P/D KV cache to 512 MB (skips all memory profiling)
+#   - Capping P/D KV cache at 2 GiB for the default model (skips memory profiling)
 #   - Limiting --max-model-len to 4096 tokens on P/D workers
 #   - Limiting P/D workers to image=3,video=3,audio=0 (--limit-mm-per-prompt)
 #   - Using lower gpu-memory-utilization fractions to share the GPU
@@ -28,10 +39,10 @@ SINGLE_GPU=false
 # Layout: encode + prefill on GPU 0, decode on GPU 1. Preserves the disagg
 # semantic — prefill→decode KV transfer still crosses the GPU boundary via
 # NIXL — while halving the GPU footprint vs the default 3-GPU mode. Same
-# small-KV defaults as --single-gpu (enforce-eager, 512 MB KV, max-model-len
-# 4096, limit-mm-per-prompt 3/3/0) so it's a functional-testing knob, not a
-# perf config. Override _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES to grow the
-# KV cap when profiling.
+# packed-worker defaults as --single-gpu (enforce-eager, 2 GiB default KV cap,
+# max-model-len 4096, limit-mm-per-prompt 3/3/0) so it's a functional-testing
+# knob, not a perf config. Override _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES when
+# profiling another model.
 TWO_GPU=false
 
 # Parse command line arguments
@@ -49,6 +60,10 @@ while [[ $# -gt 0 ]]; do
             TWO_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -59,6 +74,7 @@ while [[ $# -gt 0 ]]; do
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Pack all 3 workers on 1 GPU (for small models, e.g. 2B)"
             echo "  --two-gpu                     Pack 3 workers on 2 GPUs (encode+prefill on GPU 0, decode on GPU 1)"
+            echo "  --frontend-decoding           Decode images in the Rust frontend and transfer pixels to the encode worker via NIXL"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "Examples:"
@@ -98,10 +114,8 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E/P/D ($GPU
 # Start frontend (no router mode)
 echo "Starting frontend..."
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python -m dynamo.frontend &
-
-# Each worker needs its own system port when tests inject DYN_SYSTEM_PORT{1,2,3}.
-unset DYN_SYSTEM_PORT
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 -u DYN_SYSTEM_PORT3 \
+    python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
@@ -157,15 +171,20 @@ if [[ "$SINGLE_GPU" == "true" || "$TWO_GPU" == "true" ]]; then
     EXTRA_ARGS="--enforce-eager"
     # Default KV cache cap for packed worker layouts.
     #
-    # vLLM has a preflight check: KV must hold at least one max-model-len
-    # request. For LLaVA-1.5-7b at max-model-len=4096, that's ~2 GiB
-    # minimum. 512 MB used to work for older vLLM / smaller max-model-len
-    # but vLLM 0.20+ rejects it.
+    # vLLM requires the KV cache to hold at least one max-model-len request.
+    # The default LLaVA-1.5-7b model needs approximately 2 GiB at
+    # max-model-len=4096. Smaller models may use lower profiled values.
     #
     # The profiler/test framework overrides via _PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES,
     # and gpu_utils.sh builds args.
     : "${_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES:=$((2 * 1024 * 1024 * 1024))}"
     PD_EXTRA_ARGS="--max-model-len 4096 --limit-mm-per-prompt {\"image\":3,\"video\":3,\"audio\":0}"
+fi
+
+# Frontend decoding participates in every E/P/D stage: Decode advertises the
+# media decoder, Prefill forwards decoded descriptors, and Encode reads pixels.
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --frontend-decoding"
 fi
 
 PD_GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
@@ -177,12 +196,15 @@ else
     DECODE_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_DECODE_GPU_MEM"
 fi
 
-VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE=${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}
-VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL=${VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL:-20098}
-VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE=${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}
-VLLM_ZMQ_PORT_ENCODE=${VLLM_ZMQ_PORT_ENCODE:-20080}
-VLLM_ZMQ_PORT_PREFILL=${VLLM_ZMQ_PORT_PREFILL:-20081}
-VLLM_ZMQ_PORT_DECODE=${VLLM_ZMQ_PORT_DECODE:-20082}
+VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}")"
+VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL:-20098}")"
+VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE="$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 3 "${VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE:-20099}")"
+VLLM_ZMQ_PORT_ENCODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-20080}")"
+VLLM_ZMQ_PORT_PREFILL="$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PREFILL:-20081}")"
+VLLM_ZMQ_PORT_DECODE="$(dyn_port DYN_VLLM_KV_EVENT_PORT 3 "${VLLM_ZMQ_PORT_DECODE:-20082}")"
+SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
+SYSTEM_PORT_PREFILL=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+SYSTEM_PORT_DECODE=$(dyn_port DYN_SYSTEM_PORT 3 8083)
 
 # Start encode worker.
 #
@@ -209,23 +231,23 @@ VLLM_ZMQ_PORT_DECODE=${VLLM_ZMQ_PORT_DECODE:-20082}
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
-python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_ENCODE}\"}" &
+python -m dynamo.vllm --enable-multimodal --disaggregation-mode encode --model $MODEL_NAME --gpu-memory-utilization $DYN_ENCODE_GPU_MEM $EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_ENCODE}\"}" &
 
 # Start prefill worker (also handles encode routing via --route-to-encoder)
 echo "Starting prefill worker on GPU $DYN_PREFILL_WORKER_GPU (${PREFILL_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PREFILL \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_PREFILL \
-CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_PREFILL_WORKER_GPU python -m dynamo.vllm --route-to-encoder --disaggregation-mode prefill --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $PREFILL_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_PREFILL}\"}" &
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_DECODE \
 VLLM_NIXL_SIDE_CHANNEL_PORT=$VLLM_NIXL_SIDE_CHANNEL_PORT_DECODE \
-CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
+CUDA_VISIBLE_DEVICES=$DYN_DECODE_WORKER_GPU python -m dynamo.vllm  --disaggregation-mode decode --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $DECODE_GPU_MEM_ARGS $EXTRA_ARGS $PD_EXTRA_ARGS --kv-transfer-config "$KV_TRANSFER_CONFIG" --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_ZMQ_PORT_DECODE}\"}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."

@@ -14,7 +14,7 @@ spec:
           containers:
             - name: main
               image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-    - name: VllmDecodeWorker
+    - name: worker
       type: decode
       replicas: 1
       modelRef:

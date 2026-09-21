@@ -13,7 +13,6 @@ pub mod config;
 pub mod controller;
 mod downloader;
 pub mod filter;
-pub mod filtered_router;
 pub mod load_estimator;
 pub mod predictor;
 pub mod routing;
@@ -25,7 +24,6 @@ pub use config::{LoraAllocationConfig, McfConfig};
 pub use controller::LoraController;
 pub use downloader::LoRADownloader;
 pub use filter::LoraFilter;
-pub use filtered_router::LoraFilteredRouter;
 pub use load_estimator::{LoadEstimator, LoadEstimatorConfig};
 pub use routing::{
     AllocationAlgorithmType, LoraAllocator, LoraReplicaConfig, LoraRoutingTable,
@@ -34,6 +32,9 @@ pub use routing::{
 };
 pub use source::{HuggingFaceLoRASource, LoRASource, LocalLoRASource, S3LoRASource};
 pub use state_tracker::LoraStateTracker;
+
+/// Worker runtime flag requiring an adapter registration before request routing.
+pub const LORA_REQUIRES_REGISTRATION: &str = "lora_requires_registration";
 
 /// Returns true when LoRA serving is enabled via a truthy `DYN_LORA_ENABLED` env var
 /// (`1`/`true`/`on`/`yes`, case-insensitive). This gates the request-time LoRA filter on

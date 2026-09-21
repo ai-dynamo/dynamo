@@ -48,6 +48,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_tracking_key_id",
     "router_prefill_load_model",
     "router_ttl_secs",
+    "router_approximate_cache_policy",
     "router_queue_threshold",
     "router_policy_config",
     "router_prefill_policy",
@@ -56,6 +57,7 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "router_queue_policy",
     "use_remote_indexer",
     "serve_indexer",
+    "enable_session_prefix_index",
     "shared_cache_multiplier",
     "shared_cache_type",
     "conditional_disagg_enabled",
@@ -208,6 +210,7 @@ class KvRouterConfigBase(ConfigBase):
     router_tracking_key_id: Optional[str] = None
     router_prefill_load_model: str
     router_ttl_secs: float
+    router_approximate_cache_policy: str = "ttl"
     router_queue_threshold: Optional[float]
     router_policy_config: Optional[str] = None
     router_prefill_policy: Optional[str] = None
@@ -216,6 +219,7 @@ class KvRouterConfigBase(ConfigBase):
     router_queue_policy: str
     use_remote_indexer: bool = False
     serve_indexer: bool = False
+    enable_session_prefix_index: bool = False
     shared_cache_multiplier: float = 0.0
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
@@ -519,6 +523,19 @@ class KvRouterArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--router-approximate-cache-policy",
+            env_var="DYN_ROUTER_APPROXIMATE_CACHE_POLICY",
+            default="ttl",
+            choices=["ttl", "lru"],
+            help=(
+                "[EXPERIMENTAL] KV Router: Retention policy for the local primary "
+                "approximate indexer used with --no-router-kv-events. 'ttl' keeps "
+                "the existing time-based behavior; 'lru' uses each worker rank's "
+                "advertised KV capacity. Side indexers remain TTL-only."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--router-queue-threshold",
             env_var="DYN_ROUTER_QUEUE_THRESHOLD",
             default=None,
@@ -641,6 +658,18 @@ class KvRouterArgGroup(ArgGroup):
                 "component via the request plane instead of maintaining a local radix tree."
             ),
             dest="use_remote_indexer",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--enable-session-prefix-index",
+            env_var="DYN_ENABLE_SESSION_PREFIX_INDEX",
+            default=False,
+            help=(
+                "[EXPERIMENTAL] KV Router: Track per-session block lineage in a logical "
+                "prefix index that outlives engine cache eviction. Nothing consumes the "
+                "index for routing decisions yet."
+            ),
+            dest="enable_session_prefix_index",
         )
         add_argument(
             g,

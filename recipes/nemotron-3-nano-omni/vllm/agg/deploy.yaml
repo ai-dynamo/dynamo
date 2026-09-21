@@ -53,7 +53,7 @@ spec:
               --no-kv-events
               --http-port 8000
 
-    VllmWorker:
+    worker:
       componentType: worker
       envFromSecret: hf-token-secret
       replicas: 1

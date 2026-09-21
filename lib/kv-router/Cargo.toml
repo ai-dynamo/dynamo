@@ -18,9 +18,11 @@ metrics = ["dep:prometheus"]
 runtime-protocols = ["dep:dynamo-runtime"]
 bench = []
 profile = []
-standalone-indexer = ["dep:axum", "dep:serde_json", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
-standalone-slot-tracker = ["dep:axum", "dep:serde_json", "dep:zmq"]
+standalone-indexer = ["dep:axum", "dep:reqwest", "dep:zmq", "dep:chrono", "dep:tracing-appender"]
+standalone-slot-tracker = ["dep:axum", "dep:zmq"]
 standalone-selection = ["standalone-indexer", "dep:once_cell"]
+# Test-only hooks consumed by dependent crates' tests; never enable in release.
+testing = []
 
 [dependencies]
 # repo
@@ -40,10 +42,11 @@ ordered-float = { workspace = true }
 once_cell = { version = "1", optional = true }
 derive_builder = { workspace = true }
 fastrand = "2"
+futures-util = { workspace = true }
 prometheus = { workspace = true, optional = true }
 seqlock = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
+serde_json = { workspace = true }
 serde_yaml = "0.9.34"
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -73,14 +76,13 @@ axum = { version = "=0.8.4", default-features = false, features = [
   "tracing",
 ], optional = true }
 chrono = { workspace = true, optional = true }
-reqwest = { version = "0.12.24", default-features = false, features = ["json"], optional = true }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"], optional = true }
 tracing-appender = { version = "0.2", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
 rstest = "0.18.2"
 rstest_reuse = "0.7.0"
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 dynamo-tokens = { workspace = true }
@@ -95,5 +97,14 @@ name = "tracking_hash"
 harness = false
 
 [[bench]]
+name = "indexer_delegate"
+harness = false
+
+[[bench]]
 name = "worker_selection"
 harness = false
+
+[[bench]]
+name = "selection_core"
+harness = false
+required-features = ["standalone-selection"]

@@ -23,8 +23,12 @@ from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
+    get_sglang_model_config,
     override_server_args,
+    publish_server_args,
     require_reasoning_kwargs,
+    resolved_server_args,
+    sglang_uses_mla_backend,
 )
 from dynamo.sglang.args import (
     _diffusion_generator_kwargs,
@@ -99,7 +103,27 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
     assert "master_port" not in kwargs
 
 
-def test_override_server_args_supports_legacy_xpu_pin():
+def test_override_server_args_uses_declarative_resolution(monkeypatch):
+    calls = []
+
+    def declare(server_args, source, **fields):
+        calls.append((server_args, source, fields))
+
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", declare)
+    server_args = SimpleNamespace()
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+    )
+
+    assert calls == [(server_args, "dynamo.test", {"enable_memory_saver": True})]
+    assert not hasattr(server_args, "enable_memory_saver")
+
+
+def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
     server_args = SimpleNamespace(enable_memory_saver=False)
 
     override_server_args(
@@ -111,6 +135,122 @@ def test_override_server_args_supports_legacy_xpu_pin():
 
     assert server_args.enable_memory_saver is True
     assert server_args.load_format == "legacy-loader"
+
+
+def test_publish_server_args_uses_runtime_context(monkeypatch):
+    calls = []
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "_sglang_publish",
+        lambda value, *, role: calls.append((value, role)),
+    )
+
+    publish_server_args(server_args, role="encoder")
+
+    assert calls == [(server_args, "encoder")]
+
+
+def test_resolved_server_args_uses_declarative_view(monkeypatch):
+    raw_server_args = SimpleNamespace(page_size=None)
+    resolved_server_args_view = SimpleNamespace(page_size=64)
+
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_resolved_view",
+        lambda server_args: resolved_server_args_view,
+    )
+
+    assert resolved_server_args(raw_server_args) is resolved_server_args_view
+    assert raw_server_args.page_size is None
+
+
+def test_compat_detects_ordered_cancellation_support(monkeypatch):
+    request_stats = SimpleNamespace(
+        __dataclass_fields__={"api_server_dispatch_finish_time": object()}
+    )
+    monkeypatch.setattr(sglang_compat, "APIServerReqTimeStats", request_stats)
+    engine = SimpleNamespace(tokenizer_manager=SimpleNamespace(rid_to_state={}))
+
+    assert sglang_compat.supports_disagg_prefill_cancel_anytime(engine)
+
+
+@pytest.mark.parametrize(
+    "engine",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(tokenizer_manager=SimpleNamespace(rid_to_state=[])),
+    ],
+)
+def test_compat_rejects_runtime_without_request_registry(monkeypatch, engine):
+    request_stats = SimpleNamespace(
+        __dataclass_fields__={"api_server_dispatch_finish_time": object()}
+    )
+    monkeypatch.setattr(sglang_compat, "APIServerReqTimeStats", request_stats)
+
+    assert not sglang_compat.supports_disagg_prefill_cancel_anytime(engine)
+
+
+def test_compat_uses_current_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=True)
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_model_config_of",
+        lambda value: expected if value is server_args else None,
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_legacy_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=False)
+    server_args = SimpleNamespace(get_model_config=lambda: expected)
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_model_config_of",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_current_sglang_mla_accessor(monkeypatch):
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_use_mla_backend",
+        lambda value: value is server_args,
+    )
+
+    assert sglang_uses_mla_backend(server_args) is True
+
+
+def test_compat_uses_legacy_sglang_mla_accessor(monkeypatch):
+    server_args = SimpleNamespace(use_mla_backend=lambda: True)
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_use_mla_backend",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert sglang_uses_mla_backend(server_args) is True
+
+
+def test_config_uses_resolved_server_args_after_runtime_init(monkeypatch):
+    raw_server_args = SimpleNamespace(page_size=None, disaggregation_mode="null")
+    resolved_server_args = SimpleNamespace(page_size=64, disaggregation_mode="null")
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_resolved_view",
+        lambda server_args: resolved_server_args,
+    )
+    config = sglang_args.Config(raw_server_args, SimpleNamespace())
+    runtime_server_args = config.use_resolved_server_args(raw_server_args)
+
+    assert raw_server_args.page_size is None
+    assert runtime_server_args is resolved_server_args
+    assert config.server_args.page_size == 64
 
 
 @pytest.fixture(autouse=True)
@@ -201,7 +341,14 @@ def test_engine_generate_capability_registration_gate(
 
 def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     handler = object.__new__(DecodeWorkerHandler)
-    handler.engine = SimpleNamespace()
+    handler.engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            pause_generation=lambda: None,
+            continue_generation=lambda: None,
+            release_memory_occupation=lambda: None,
+            resume_memory_occupation=lambda: None,
+        )
+    )
     handler.generate_endpoint = object()
     handler.config = SimpleNamespace(dynamo_args=SimpleNamespace(engine_routes=[]))
 
@@ -226,6 +373,10 @@ def test_builtin_engine_routes_include_model_taint_update(monkeypatch):
     assert {path for path, _ in registered_routes} >= {
         "control/start_profile",
         "control/stop_profile",
+        "pause_generation",
+        "continue_generation",
+        "release_memory_occupation",
+        "resume_memory_occupation",
     }
 
 
@@ -378,6 +529,179 @@ async def test_parse_args_enables_incremental_streaming_before_resolution(
     assert config.server_args.incremental_streaming_output is True
 
 
+def _dcp_server_args_stub(**overrides):
+    """Minimal resolved ServerArgs surface that parse_args reads."""
+    stub = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        dcp_size=1,
+        attention_backend=None,
+        prefill_attention_backend=None,
+        decode_attention_backend=None,
+        use_mla_backend=lambda: False,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+    for name, value in overrides.items():
+        setattr(stub, name, value)
+    return stub
+
+
+@pytest.mark.asyncio
+async def test_parse_args_rejects_dcp_on_backend_without_dcp_support(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(dcp_size=2, attention_backend="fa3"),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "'fa3'" in message
+    assert "--dcp-size 1" in message
+    assert "automatically" in message
+
+
+@pytest.mark.asyncio
+async def test_parse_args_rejects_dcp_on_decode_only_unsupported_backend(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(
+            dcp_size=2,
+            prefill_attention_backend="triton",
+            decode_attention_backend="fa3",
+        ),
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'fa3'" in message
+    assert "prefill attention backend" not in message
+
+
+@pytest.mark.asyncio
+async def test_parse_args_does_not_call_a_phase_flag_automatic(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args",
+        lambda _: _dcp_server_args_stub(dcp_size=2, decode_attention_backend="fa3"),
+    )
+    mock_sglang_cli(model=str(tmp_path), decode_attention_backend="fa3")
+
+    with pytest.raises(ValueError) as excinfo:
+        await parse_args(sys.argv[1:])
+
+    message = str(excinfo.value)
+    assert "decode attention backend 'fa3'" in message
+    assert "automatically" not in message
+
+
+@pytest.mark.asyncio
+async def test_resolved_server_args_rejects_an_automatic_unsupported_backend(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    """The backend SGLang chooses for itself is only readable from the engine.
+
+    On the pinned SGLang release ``ServerArgs`` still holds what the caller
+    asked for, so a launch that passes no attention backend reaches parse_args
+    with all three fields unset. The engine resolves fa3 afterwards, and the
+    check on its configuration is the one that catches it.
+    """
+    cli_server_args = _dcp_server_args_stub(dcp_size=2)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: cli_server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+    assert config.server_args is cli_server_args
+
+    engine_server_args = _dcp_server_args_stub(dcp_size=2, attention_backend="fa3")
+    with pytest.raises(ValueError) as excinfo:
+        config.use_resolved_server_args(engine_server_args)
+
+    message = str(excinfo.value)
+    assert "'fa3'" in message
+    assert "automatically" in message
+    assert config.server_args is cli_server_args
+
+
+@pytest.mark.asyncio
+async def test_prepare_snapshot_engine_rejects_dcp_before_warmup(monkeypatch):
+    """Snapshot mode warms the engine with a real request of its own.
+
+    That warmup runs before any init function reaches
+    ``use_resolved_server_args``, so the snapshot engine has to be checked
+    where it is built.
+    """
+    from dynamo.sglang import snapshot as sglang_snapshot
+
+    monkeypatch.setattr(
+        sglang_snapshot,
+        "SnapshotConfig",
+        SimpleNamespace(from_env=lambda: SimpleNamespace()),
+    )
+    monkeypatch.setattr(sglang_snapshot, "configure_snapshot_capture_env", lambda: None)
+    monkeypatch.setattr(sglang_snapshot, "override_server_args", lambda *a, **kw: None)
+
+    engine_server_args = _dcp_server_args_stub(dcp_size=2, attention_backend="fa3")
+    monkeypatch.setattr(
+        sglang_snapshot.sgl,
+        "Engine",
+        lambda server_args: SimpleNamespace(server_args=engine_server_args),
+    )
+
+    warmed = []
+
+    async def _warmup(engine, server_args):
+        warmed.append(engine)
+
+    monkeypatch.setattr(sglang_snapshot, "warmup_engine", _warmup)
+
+    config = sglang_args.Config(_dcp_server_args_stub(dcp_size=2), SimpleNamespace())
+
+    with pytest.raises(ValueError) as excinfo:
+        await sglang_snapshot.prepare_snapshot_engine(config)
+
+    assert "'fa3'" in str(excinfo.value)
+    assert warmed == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"dcp_size": 2, "attention_backend": "triton"},
+        {"dcp_size": 1, "attention_backend": "fa3"},
+        {"dcp_size": 2, "attention_backend": "fa3", "use_mla_backend": lambda: True},
+    ],
+    ids=["dcp-capable-backend", "dcp-disabled", "mla-model"],
+)
+async def test_parse_args_accepts_supported_dcp_configurations(
+    monkeypatch, mock_sglang_cli, tmp_path, overrides
+):
+    server_args = _dcp_server_args_stub(**overrides)
+    monkeypatch.setattr(
+        "dynamo.sglang.args.ServerArgs.from_cli_args", lambda _: server_args
+    )
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args is server_args
+    assert config.use_resolved_server_args(server_args) is not None
+
+
 @pytest.mark.asyncio
 async def test_parse_args_applies_dynamo_defaults_before_resolution(
     monkeypatch, mock_sglang_cli
@@ -401,6 +725,77 @@ async def test_parse_args_applies_dynamo_defaults_before_resolution(
     mock_sglang_cli("--model", "/tmp", "--dllm-algorithm", "dream")
 
     await parse_args(sys.argv[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot_enabled", "expected"),
+    [
+        (False, False),
+        (True, True),
+    ],
+)
+async def test_parse_args_sets_raw_memory_saver_before_resolution(
+    monkeypatch, mock_sglang_cli, tmp_path, snapshot_enabled, expected
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
+    )
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    if snapshot_enabled:
+        monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+        monkeypatch.setenv("NCCL_CUMEM_ENABLE", "0")
+    else:
+        monkeypatch.delenv(SNAPSHOT_CONTROL_DIR_ENV, raising=False)
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        # SGLang 0.5.19 copies this raw field unchanged; late resolution does
+        # not update it before the parent process launches the scheduler.
+        server_args.enable_memory_saver = parsed_args.enable_memory_saver
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_memory_saver is expected
+
+
+@pytest.mark.asyncio
+async def test_parse_args_disables_raw_fpm_for_snapshot_with_metric_port(
+    monkeypatch, mock_sglang_cli, tmp_path
+):
+    monkeypatch.setattr(
+        "dynamo.sglang.args.configure_snapshot_capture_env", lambda: None
+    )
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    monkeypatch.setenv(SNAPSHOT_CONTROL_DIR_ENV, str(tmp_path))
+    monkeypatch.setenv("DYN_FORWARDPASS_METRIC_PORT", "23456")
+    server_args = SimpleNamespace(
+        disaggregation_mode="null",
+        dllm_algorithm=None,
+        enable_forward_pass_metrics=False,
+        kv_events_config=None,
+        get_model_config=lambda: SimpleNamespace(is_multimodal=False),
+    )
+
+    def resolve(parsed_args):
+        assert parsed_args.enable_forward_pass_metrics is False
+        return server_args
+
+    monkeypatch.setattr("dynamo.sglang.args.ServerArgs.from_cli_args", resolve)
+    mock_sglang_cli(model=str(tmp_path))
+
+    config = await parse_args(sys.argv[1:])
+
+    assert config.server_args.enable_forward_pass_metrics is False
 
 
 def test_compat_filters_async_generate_kwargs_for_older_engines():
@@ -989,6 +1384,7 @@ async def test_invalid_fpm_trace_is_disabled_by_arg_parser(
     ("overrides", "role"),
     [
         ({"embedding_worker": True}, "embedding"),
+        ({"rerank_worker": True}, "rerank"),
         ({"multimodal_encode_worker": True}, "dedicated multimodal"),
         ({"multimodal_worker": True}, "dedicated multimodal"),
         ({"image_diffusion_worker": True}, "image diffusion"),
@@ -1462,6 +1858,7 @@ async def test_lora_registration_model_type_gate(
         str(captured["worker_type"]) == expected_worker_type
     ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
     assert captured["lora_name"] == "test_lora"
+    assert captured["ignore_weights"] is True
     assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config
     assert "token_budget" in captured["runtime_config"].runtime_data

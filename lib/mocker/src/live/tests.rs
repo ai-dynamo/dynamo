@@ -83,6 +83,34 @@ async fn wait_for_idle(engine: &LiveEngine) {
     .expect("live request state should return to idle");
 }
 
+#[test]
+fn failed_output_batch_reports_the_scheduler_id() {
+    let client_id = Uuid::from_u128(1);
+    let scheduler_id = Uuid::from_u128(2);
+    let routes = Arc::new(RequestRoutes::default());
+    let (output_tx, _output_rx) = mpsc::channel(1);
+    let route = Arc::new(RequestRoute::new(client_id, scheduler_id, output_tx));
+    routes.by_client.insert(client_id, Arc::clone(&route));
+    routes.by_scheduler.insert(scheduler_id, route);
+    let signal = |token_id| OutputSignal {
+        uuid: scheduler_id,
+        token_id: Some(token_id),
+        completed: false,
+        rejected: false,
+        handoff_delay_ms: None,
+        cached_tokens: None,
+    };
+
+    assert_eq!(
+        dispatch_output_batch(vec![signal(10)], &routes, &CancellationToken::new()).unwrap(),
+        Vec::<Uuid>::new()
+    );
+    assert_eq!(
+        dispatch_output_batch(vec![signal(20)], &routes, &CancellationToken::new()).unwrap(),
+        vec![scheduler_id]
+    );
+}
+
 async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     let mut request = engine
         .submit(DirectRequest {
@@ -103,8 +131,8 @@ async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     })
     .await
     .expect("request should complete");
-    // The ordered output lane acknowledges terminal delivery before the
-    // grouped pass dispatcher publishes its completion metrics. Wait for the
+    // Direct route delivery completes before the grouped pass dispatcher
+    // publishes its completion metrics. Wait for the
     // whole boundary so the assertion below observes the same semantic point
     // as the historical single-rank live boundary.
     engine.drain_completion_boundary().await.unwrap();
@@ -232,6 +260,86 @@ async fn attention_dp_live_handles_share_one_grouped_engine() {
 
     engines[0].shutdown().await.unwrap();
     engines[1].shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_one_attention_dp_rank_retires_its_native_requests() {
+    let mut grouped_args = args(EngineType::Vllm);
+    grouped_args.dp_size = 2;
+    let (gate_tx, gate_rx) = watch::channel(false);
+    let mut engines = LiveEngine::start_grouped_with_options(
+        grouped_args,
+        (0..2)
+            .map(|_| LiveEngineOptions {
+                output_gate: Some(gate_rx.clone()),
+                ..LiveEngineOptions::default()
+            })
+            .collect(),
+    )
+    .unwrap();
+    let rank1 = engines.pop().unwrap();
+    let rank0 = engines.pop().unwrap();
+    let mut rank1_metrics = rank1.metrics_receiver();
+
+    let rank0_request = rank0.submit(DirectRequest {
+        tokens: vec![1, 2, 3, 4],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![101]),
+        dp_rank: 0,
+        ..Default::default()
+    });
+    let rank1_request = rank1.submit(DirectRequest {
+        tokens: vec![5, 6, 7, 8],
+        max_output_tokens: 1,
+        output_token_ids: Some(vec![202]),
+        dp_rank: 1,
+        ..Default::default()
+    });
+    let (rank0_request, rank1_request) = tokio::join!(rank0_request, rank1_request);
+    let mut rank0_request = rank0_request.unwrap();
+    let mut rank1_request = rank1_request.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = rank1_metrics.borrow().clone();
+            if metrics.running_requests > 0 || metrics.waiting_requests > 0 {
+                break;
+            }
+            rank1_metrics.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the rank 1 request should reach the native scheduler");
+
+    drop(rank1);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), rank1_request.recv())
+            .await
+            .expect("dropping one rank should close its response stream")
+            .is_none()
+    );
+    gate_tx.send(true).unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), rank0_request.recv())
+            .await
+            .expect("the retained rank should continue")
+            .unwrap()
+            .token_id,
+        Some(101)
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let metrics = rank1_metrics.borrow().clone();
+            if metrics.running_requests == 0 && metrics.waiting_requests == 0 {
+                break;
+            }
+            rank1_metrics.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the dropped rank's native request should retire");
+
+    submit_and_finish(&rank0, vec![9, 10, 11, 12], Uuid::from_u128(303)).await;
+    rank0.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -689,7 +797,9 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
         args(EngineType::Vllm),
         0,
         LiveEngineOptions {
-            request_output_capacity: Some(NonZeroUsize::MIN),
+            request_output_buffering: RequestOutputBuffering::CancelOnOverflow {
+                capacity: NonZeroUsize::MIN,
+            },
             fpm_publisher: FpmPublisher::new(Some(Arc::clone(&fpm) as Arc<dyn FpmSink>)),
             ..LiveEngineOptions::default()
         },
@@ -913,50 +1023,7 @@ async fn aborting_a_deferred_submit_cleans_up_after_admission() {
 }
 
 #[tokio::test]
-async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
-    let (gate_tx, gate_rx) = watch::channel(false);
-    let engine = LiveEngine::start_with_output_gate(
-        args(EngineType::Vllm),
-        0,
-        Some(gate_rx),
-        DEFAULT_REQUEST_OUTPUT_CAPACITY,
-    )
-    .unwrap();
-    let mut request = engine
-        .submit(DirectRequest {
-            tokens: vec![1],
-            max_output_tokens: 3,
-            output_token_ids: Some(vec![7; 3]),
-            uuid: Some(Uuid::from_u128(12)),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    drop(gate_tx);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), request.recv())
-            .await
-            .expect("dispatcher failure should close request streams")
-            .is_none()
-    );
-    let error = engine
-        .submit(DirectRequest {
-            tokens: vec![2],
-            max_output_tokens: 1,
-            output_token_ids: Some(vec![22]),
-            uuid: Some(Uuid::from_u128(13)),
-            ..Default::default()
-        })
-        .await
-        .err()
-        .expect("dispatcher failure should stop new submissions");
-    assert!(error.to_string().contains("not running"));
-    assert_eq!(engine.active_request_count(), 0);
-}
-
-#[tokio::test]
-async fn ordered_lane_forwards_admission_before_releasing_output() {
+async fn direct_delivery_forwards_admission_before_releasing_output() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
     let engine = LiveEngine::start_internal(
@@ -964,9 +1031,9 @@ async fn ordered_lane_forwards_admission_before_releasing_output() {
         0,
         LiveEngineOptions {
             admission_tx: Some(admission_tx),
+            output_gate: Some(gate_rx),
             ..LiveEngineOptions::default()
         },
-        Some(gate_rx),
     )
     .unwrap();
     let uuid = Uuid::from_u128(20);
@@ -1000,12 +1067,12 @@ async fn ordered_lane_forwards_admission_before_releasing_output() {
 }
 
 #[tokio::test]
-async fn replay_options_allow_zero_output_and_full_response_buffering() {
+async fn replay_options_allow_zero_output() {
     let zero_engine = LiveEngine::start_with_options(
         args(EngineType::Sglang),
         0,
         LiveEngineOptions {
-            request_output_capacity: None,
+            request_output_buffering: RequestOutputBuffering::FullResponse,
             allow_zero_output: true,
             ..LiveEngineOptions::default()
         },
@@ -1024,45 +1091,56 @@ async fn replay_options_allow_zero_output_and_full_response_buffering() {
     assert!(terminal.completed);
     assert_eq!(terminal.token_id, None);
     zero_engine.shutdown().await.unwrap();
+}
 
-    let buffered_engine = LiveEngine::start_with_options(
+#[tokio::test]
+async fn full_response_buffering_preserves_concurrent_unread_requests() {
+    let buffered_engine = LiveEngine::start_with_config_and_request_output_buffering(
         args(EngineType::Vllm),
         0,
-        LiveEngineOptions {
-            request_output_capacity: None,
-            allow_zero_output: true,
-            ..LiveEngineOptions::default()
-        },
+        LiveEngineConfig::default(),
+        RequestOutputBuffering::FullResponse,
     )
     .unwrap();
-    let mut buffered = buffered_engine
-        .submit(DirectRequest {
-            tokens: vec![4, 5, 6],
-            max_output_tokens: 32,
-            output_token_ids: Some(vec![7; 32]),
-            uuid: Some(Uuid::from_u128(22)),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    let mut requests = Vec::new();
+    for ordinal in 0..4_u128 {
+        let token_id = 7 + ordinal as u32;
+        requests.push(
+            buffered_engine
+                .submit(DirectRequest {
+                    tokens: vec![4, 5, 6],
+                    max_output_tokens: 32,
+                    output_token_ids: Some(vec![token_id; 32]),
+                    uuid: Some(Uuid::from_u128(22 + ordinal)),
+                    ..Default::default()
+                })
+                .await
+                .unwrap(),
+        );
+    }
     tokio::time::timeout(Duration::from_secs(1), async {
         while buffered_engine.active_request_count() != 0 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("the full response should buffer without a receiver draining it");
-    let mut output_count = 0;
-    let mut saw_terminal = false;
-    while let Some(output) = buffered.recv().await {
-        output_count += usize::from(output.token_id.is_some());
-        if output.completed {
-            saw_terminal = true;
-            break;
+    .expect("full responses should buffer without any receiver draining them");
+    for (ordinal, mut request) in requests.into_iter().enumerate() {
+        let expected_token_id = 7 + ordinal as u32;
+        let mut output_count = 0;
+        let mut saw_terminal = false;
+        while let Some(output) = request.recv().await {
+            assert_eq!(output.token_id, Some(expected_token_id));
+            output_count += 1;
+            if output.completed {
+                saw_terminal = true;
+                break;
+            }
         }
+        assert_eq!(output_count, 32);
+        assert!(saw_terminal);
+        assert!(request.recv().await.is_none());
     }
-    assert_eq!(output_count, 32);
-    assert!(saw_terminal);
     assert_eq!(buffered_engine.active_request_count(), 0);
     buffered_engine.shutdown().await.unwrap();
 }

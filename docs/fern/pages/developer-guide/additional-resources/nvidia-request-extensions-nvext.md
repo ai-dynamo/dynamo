@@ -37,7 +37,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. vLLM and TensorRT-LLM also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
@@ -138,7 +138,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
-| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for due-time ordering within a tier. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
@@ -166,8 +166,10 @@ For layer-by-layer behavior and backend requirements, see
 
 `strict_priority` is an unsigned router-only tier for requests waiting in a
 router scheduler queue. The queue orders requests by
-`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
-requests within the same tier.
+`(strict_priority, due_at, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
+requests within the same tier; see
+[Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for how due-time
+ordering applies within a tier.
 
 This field does not change backend engine priority, preempt running work, or
 provide ordering across router replicas. It also does not prevent an eligible
@@ -248,9 +250,55 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Backend-specific routed expert capture payload returned by compatible vLLM and SGLang engines. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
+| `detailed_finish_reason` | `extra_fields: ["detailed_finish_reason"]` | Dynamo's internal finish reason before OpenAI conversion. Backend-specific values are normalized first. See [Detailed Finish Reason](#detailed-finish-reason). |
+| `prompt_token_ids` | `extra_fields: ["prompt_token_ids"]` | Effective single-prompt token sequence used after preprocessing, including pre-tokenized input supplied through the request. Emitted on the final response. |
 | `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs. Requires a single prompt and one generated choice. |
 | `prompt_logprobs` | `extra_fields: ["prompt_logprobs"]` | Prompt log probabilities requested with the top-level `prompt_logprobs` field. Emitted on the final response. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
+
+### Detailed Finish Reason
+
+The OpenAI-compatible API uses standard values in `finish_reason`.
+Dynamo maps an external cancellation to `stop` to keep this API compatible.
+
+The `nvext.detailed_finish_reason` field contains Dynamo's internal finish reason.
+Dynamo normalizes backend-specific values before it creates this field.
+For example, SGLang's `abort` becomes `cancelled`.
+The field supports these values:
+
+- `eos`
+- `length`
+- `stop`
+- `cancelled`
+- `content_filter`
+
+Add `detailed_finish_reason` to `nvext.extra_fields`:
+
+```json
+{
+    "nvext": {
+        "extra_fields": ["detailed_finish_reason"]
+    }
+}
+```
+
+If SGLang aborts the request, Dynamo returns this response data:
+
+```json
+{
+    "choices": [
+        {
+            "finish_reason": "stop"
+        }
+    ],
+    "nvext": {
+        "detailed_finish_reason": "cancelled"
+    }
+}
+```
+
+This response field is available for `/v1/chat/completions` and `/v1/completions`.
+Dynamo supports this field for requests with one choice.
 
 ### Example response `nvext`
 
@@ -275,7 +323,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Guide](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe gRPC configuration and integration |
+| [KServe gRPC Frontend](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../knowledge-base/modular-components/router/configuration-and-tuning.md) | Full router configuration and CLI arguments |
 | [Session IDs](../../use-cases/agents/session-ids.mdx) | Passive session identity |

@@ -22,8 +22,8 @@
 #   - RDMA/NIXL: engines need rdma/ib devices, IPC_LOCK, and shared memory; tune
 #     for your fabric (UCX_NET_DEVICES etc.). NIXL/UCX ship in sglang-runtime.
 #   - Model / served-model-name / TP must match between prefill and decode.
-#   - `main` runs the standalone dynamo-sglang-sidecar image (no GPU); build from
-#     lib/sidecar/sglang/Dockerfile (see README).
+#   - `main` runs the dynamo-sidecar image (no GPU); build from
+#     lib/sidecar/Dockerfile (see README); `command` runs dynamo-sglang-sidecar.
 
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -104,6 +104,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
           - --disaggregation-mode
           - prefill
           - --disaggregation-bootstrap-port
@@ -112,11 +113,11 @@ spec:
           - nixl
         containers:
         - name: main
-          image: <your-registry>/dynamo-sglang-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.3.0
           command:
           - dynamo-sglang-sidecar
           args:
-          - --sglang-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:30001
           env:
           # Advertise this pod's IP as the bootstrap host decode workers dial.
@@ -192,6 +193,7 @@ spec:
           - "30000"
           - --grpc-port
           - "30001"
+          - --incremental-streaming-output
           - --disaggregation-mode
           - decode
           - --disaggregation-bootstrap-port
@@ -200,11 +202,11 @@ spec:
           - nixl
         containers:
         - name: main
-          image: <your-registry>/dynamo-sglang-sidecar:1.3.0
+          image: <your-registry>/dynamo-sidecar:1.3.0
           command:
           - dynamo-sglang-sidecar
           args:
-          - --sglang-endpoint
+          - --grpc-endpoint
           - 127.0.0.1:30001
           envFrom:
           - secretRef:

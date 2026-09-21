@@ -551,6 +551,101 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         assert json.loads(tc[0]["function"]["arguments"]) == {"city": "NYC"}
         assert choice["finish_reason"] == "tool_calls"
 
+    def test_named_zero_arg_reparse(self, tokenizer):
+        """A named zero-argument regex response becomes the requested call."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            named_zero_arg_tool="get_weather",
+        )
+
+        choice = post.process_output(
+            {"token_ids": tokenizer.encode("{}"), "finish_reason": "stop"}
+        )
+
+        assert choice is not None
+        assert choice["delta"].get("content") is None
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": "{}",
+        }
+
+    def test_named_zero_arg_reparse_across_chunks(self, tokenizer):
+        """The exact regex response remains a tool call across stream boundaries."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            named_zero_arg_tool="get_weather",
+        )
+        token_ids = tokenizer.encode("{}")
+        choices = [
+            post.process_output({"token_ids": [token_id], "finish_reason": None})
+            for token_id in token_ids[:-1]
+        ]
+        choices.append(
+            post.process_output({"token_ids": token_ids[-1:], "finish_reason": "stop"})
+        )
+
+        assert all(
+            "content" not in choice.get("delta", {})
+            for choice in choices
+            if choice is not None
+        )
+        final = choices[-1]
+        assert final is not None
+        assert final["finish_reason"] == "tool_calls"
+        assert final["delta"]["tool_calls"][0]["function"] == {
+            "name": "get_weather",
+            "arguments": "{}",
+        }
+
+    def test_named_zero_arg_preserves_unconstrained_fallback_text(self, tokenizer):
+        """An engine that ignores the regex must not lose its ordinary response."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            named_zero_arg_tool="get_weather",
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": tokenizer.encode("The service is unavailable."),
+                "finish_reason": "stop",
+            }
+        )
+
+        assert choice is not None
+        assert choice["delta"]["content"] == "The service is unavailable."
+        assert "tool_calls" not in choice["delta"]
+        assert choice["finish_reason"] == "stop"
+
+    def test_named_zero_arg_rejects_other_tool_fallback(self, tokenizer):
+        """A named choice must not recover native syntax for another tool."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=JsonArrayParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+            tool_call_parser_name="qwen25",
+            named_zero_arg_tool="get_weather",
+        )
+        text = '[{"name": "search_gutenberg_books", "parameters": {}}]'
+
+        choice = post.process_output(
+            {"token_ids": tokenizer.encode(text), "finish_reason": "stop"}
+        )
+
+        assert choice is not None
+        assert choice["delta"]["content"] == text
+        assert "tool_calls" not in choice["delta"]
+
     def test_multiple_calls_reparse(self, tokenizer):
         """Multiple calls in one chunk; re-parse must recover all."""
         text = (

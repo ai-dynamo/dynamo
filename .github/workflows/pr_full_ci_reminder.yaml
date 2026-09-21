@@ -47,7 +47,7 @@ jobs:
           fi
       - name: Reminder to run full CI on PR
         if: steps.contributor_check.outputs.is_trusted != 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           REPOSITORY: ${{ github.repository }}
           CONTRIBUTOR: ${{ github.actor }}
@@ -66,7 +66,7 @@ jobs:
                 '🚀'
             })
       - name: Add contribution labels to PR
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         env:
           IS_TRUSTED: ${{ steps.contributor_check.outputs.is_trusted }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

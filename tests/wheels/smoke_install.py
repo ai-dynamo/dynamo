@@ -406,7 +406,7 @@ package_root = Path(aiconfigurator_core.__file__).resolve().parent
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(
-    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.19.0/*.parquet")
+    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.24.0/*.parquet")
 )
 assert parquet_files
 for path in parquet_files:
@@ -419,7 +419,7 @@ model = RustForwardPassPerfModel.from_native(
         "model_name": "Qwen/Qwen3-32B",
         "system_name": "h200_sxm",
         "backend": "vllm",
-        "backend_version": "0.19.0",
+        "backend_version": "0.24.0",
         "kv_block_size": None,
         "tp_size": 1,
         "pp_size": 1,
@@ -494,18 +494,18 @@ def install_core(
         shutil.rmtree(venv_python.parent.parent, ignore_errors=True)
 
 
-def install_mocker_extra(wheelhouse: Path, python_spec: str) -> None:
+def install_mocker_support(wheelhouse: Path, python_spec: str) -> None:
     ai_dynamo = require_one_wheel(wheelhouse, "ai-dynamo")
     runtime = require_one_wheel(wheelhouse, "ai-dynamo-runtime")
 
     venv_python = create_venv(python_spec)
     try:
-        # The wheelhouse contains Dynamo-produced artifacts. Third-party optional
-        # dependencies such as aiconfigurator-core resolve from their package index.
+        # AISimulate is a direct ai-dynamo dependency on supported Python versions
+        # and provides the retained AIC compatibility imports used by Mocker.
         pip_install(
             venv_python,
             wheelhouse,
-            [str(runtime), f"{ai_dynamo}[mocker]"],
+            [str(runtime), str(ai_dynamo)],
         )
         pip_check(venv_python)
         assert_dynamo_local_install(venv_python, wheelhouse, ai_dynamo, runtime)

@@ -46,6 +46,17 @@ def test_invalid_environment():
         )
 
 
+def test_max_throughput_scaling_replicas_defaults_to_eight():
+    config = PlannerConfig(namespace="test-ns")
+
+    assert config.max_throughput_scaling_replicas == 8
+
+
+def test_max_throughput_scaling_replicas_must_be_positive():
+    with pytest.raises(ValidationError):
+        PlannerConfig(namespace="test-ns", max_throughput_scaling_replicas=0)
+
+
 # ---------------------------------------------------------------------------
 # Power-awareness validator (DGD-owned caps; read-only)
 # ---------------------------------------------------------------------------
