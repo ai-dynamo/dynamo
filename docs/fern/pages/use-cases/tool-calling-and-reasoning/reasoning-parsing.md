@@ -187,7 +187,7 @@ Set the optional root-level `thinking_token_budget` field on an OpenAI-compatibl
 }
 ```
 
-The budget must be a non-negative integer. A value of `0` prevents additional reasoning-token generation while leaving the request valid.
+The budget must be an integer from `0` through `4294967295`. A value of `0` prevents additional reasoning-token generation while leaving the request valid.
 
 ### vLLM
 
