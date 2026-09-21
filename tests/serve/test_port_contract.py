@@ -311,6 +311,7 @@ def _split_commands(script: str) -> list[_Command]:
     segments: list[int] = [0]
     prev = ""  # last character added, for comment detection
     prev_code = ""  # last non-blank character added, for redirection detection
+    pending = False  # an operator still needs its next command
     line = 1
     start = 1
     group = 0  # index in commands of the first member of the open AND-OR list
@@ -318,7 +319,7 @@ def _split_commands(script: str) -> list[_Command]:
     size = len(script)
 
     def add(chunk: str, quoted: bool) -> None:
-        nonlocal prev, prev_code
+        nonlocal prev, prev_code, pending
         if not chunk:
             return
         parts.append(chunk)
@@ -327,6 +328,7 @@ def _split_commands(script: str) -> list[_Command]:
         trimmed = chunk.rstrip()
         if trimmed:
             prev_code = trimmed[-1]
+            pending = False
 
     def flush(terminator: str) -> None:
         nonlocal prev, prev_code, start, group
@@ -391,7 +393,9 @@ def _split_commands(script: str) -> list[_Command]:
                 index = match.end()
                 continue
         if char == "\n":
-            flush("\n")
+            continued = pending
+            if not continued:
+                flush("\n")
             line += 1
             index += 1
             while heredocs:
@@ -408,7 +412,8 @@ def _split_commands(script: str) -> list[_Command]:
                     line += 1
                     if done:
                         break
-            start = line
+            if not continued or not "".join(parts).strip():
+                start = line
             continue
         if char == ";":
             flush(";")
@@ -416,6 +421,7 @@ def _split_commands(script: str) -> list[_Command]:
             continue
         if script.startswith("&&", index) or script.startswith("||", index):
             flush(script[index : index + 2])
+            pending = True
             index += 2
             continue
         if char == "&":
@@ -429,6 +435,7 @@ def _split_commands(script: str) -> list[_Command]:
         if char == "|":
             add(" ", False)  # a pipeline is backgrounded as a whole
             segments.append(sum(map(len, parts)))
+            pending = True
             index += 1
             continue
         add(char, False)
@@ -581,6 +588,36 @@ def test_heredoc_body_ends_only_at_the_bash_delimiter() -> None:
     assert _service_launches(_HEREDOC_SAMPLE) == [
         (10, "python -m dynamo.frontend", True),
     ]
+
+
+@pytest.mark.parametrize("operator", ["&&", "||", "|"])
+@pytest.mark.parametrize("gap", ["\n", "  \n\n    # keep waiting\n"])
+@pytest.mark.parametrize("terminator", ["&", ";"])
+def test_operator_continues_across_newlines(
+    operator: str, gap: str, terminator: str
+) -> None:
+    """Continuation lines preserve the whole list's background status."""
+    script = (
+        f"python -m dynamo.frontend {operator}{gap}    echo ready {terminator}\n"
+        "python -m dynamo.vllm\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [
+        (1, "python -m dynamo.frontend", terminator == "&"),
+        (gap.count("\n") + 2, "python -m dynamo.vllm", False),
+    ]
+
+
+def test_continued_pipeline_still_skips_heredoc_body() -> None:
+    """A continuation newline also starts any pending heredoc body."""
+    script = (
+        "cat <<EOF |\n"
+        "python -m dynamo.fake\n"
+        "EOF\n"
+        "    python -m dynamo.frontend &\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [(1, "python -m dynamo.frontend", True)]
 
 
 def test_launch_scripts_background_the_services_wait_any_exit_watches() -> None:
