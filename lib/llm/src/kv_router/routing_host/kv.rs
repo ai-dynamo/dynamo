@@ -346,7 +346,7 @@ where
         let chooser = self.kv_router();
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
-        let cache_loss_tracking = if !is_query_only && self.cache_reuse_funnel_f2_onward_enabled {
+        let cache_loss_tracking = if !is_query_only {
             selection
                 .max_raw_cached_tokens
                 .zip(selection.selected_raw_cached_tokens)

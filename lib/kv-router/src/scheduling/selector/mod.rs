@@ -23,10 +23,7 @@ use policy::{
 use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
-use crate::protocols::{
-    WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
-    cache_reuse_funnel_f2_onward_enabled,
-};
+use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 
 /// Low-level selector used by routing hosts.
 ///
@@ -152,7 +149,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             request,
             block_size,
             weights,
-            cache_reuse_funnel_f2_onward_enabled() && request.mode.is_tracked(),
+            request.mode.is_tracked(),
         )
     }
 
@@ -596,8 +593,11 @@ mod worker_stage_tests {
     }
 
     #[test]
-    fn enabled_worker_stage_tracking_accumulates_during_materialization() {
+    fn worker_stage_tracking_is_enabled_for_tracked_requests() {
         let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
         let first = WorkerWithDpRank::from_worker_id(1);
         let second = WorkerWithDpRank::from_worker_id(2);
         request.overlap.effective_cached_tokens.insert(first, 120);
@@ -610,12 +610,7 @@ mod worker_stage_tests {
             .insert(first, 1);
         request.overlap.tier_overlap_blocks.device.insert(second, 4);
         request.overlap.tier_overlap_blocks.disk.insert(second, 2);
-        let input = MaterializedSelectionInput::new_with_worker_stage_tracking(
-            &request,
-            16,
-            weights(),
-            true,
-        );
+        let input = MaterializedSelectionInput::new(&request, 16, weights());
 
         input.row(first, None, WorkerInputs::NONE);
         input.row(second, None, WorkerInputs::NONE);
@@ -624,16 +619,12 @@ mod worker_stage_tests {
     }
 
     #[test]
-    fn disabled_worker_stage_tracking_keeps_optional_result_empty() {
+    fn query_only_worker_stage_tracking_keeps_optional_result_empty() {
         let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::QueryOnly { request_id: None };
         let worker = WorkerWithDpRank::from_worker_id(1);
         request.overlap.effective_cached_tokens.insert(worker, 96);
-        let input = MaterializedSelectionInput::new_with_worker_stage_tracking(
-            &request,
-            16,
-            weights(),
-            false,
-        );
+        let input = MaterializedSelectionInput::new(&request, 16, weights());
 
         input.row(worker, None, WorkerInputs::NONE);
 

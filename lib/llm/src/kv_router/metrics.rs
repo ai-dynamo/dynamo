@@ -64,15 +64,12 @@ use prometheus::{
 
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
-use dynamo_kv_router::{
-    indexer::ApproximateLruStats, protocols::cache_reuse_funnel_f2_onward_enabled,
-};
+use dynamo_kv_router::indexer::ApproximateLruStats;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
-const CACHE_LOSS_FUNNEL_STAGES: [&str; 4] = ["f2", "f3", "f4", "f5"];
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -860,14 +857,68 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    pub(crate) cache_loss_worker_stages: Option<CacheLossWorkerStageMetrics>,
+    pub(crate) cache_loss_worker_stages: CacheLossWorkerStageMetrics,
 }
 
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct CacheLossWorkerStageMetrics {
-    funnel_tokens_total: [IntCounter; CACHE_LOSS_FUNNEL_STAGES.len()],
+    max_eligible_cached_prefix_tokens_total: IntCounter,
+    selected_cached_prefix_tokens_total: IntCounter,
+    worker_lookup_tokens_total: IntCounter,
+    worker_reused_tokens_total: IntCounter,
     complete_observations_total: IntCounter,
     incomplete_observations_total: IntCounter,
+}
+
+impl CacheLossWorkerStageMetrics {
+    pub(crate) fn new(
+        mut counter: impl FnMut(&str, &str) -> IntCounter,
+        observations: IntCounterVec,
+    ) -> Self {
+        Self {
+            max_eligible_cached_prefix_tokens_total: counter(
+                "cache_loss_max_eligible_cached_prefix_tokens_total",
+                "Raw cached prefix tokens on the best eligible worker at selection time",
+            ),
+            selected_cached_prefix_tokens_total: counter(
+                "cache_loss_selected_cached_prefix_tokens_total",
+                "Raw cached prefix tokens on the selected worker and DP rank",
+            ),
+            worker_lookup_tokens_total: counter(
+                "cache_loss_worker_lookup_tokens_total",
+                "Worker-reported local cache hits plus external lookup tokens",
+            ),
+            worker_reused_tokens_total: counter(
+                "cache_loss_worker_reused_tokens_total",
+                "Worker-reported local plus successful external cache-hit tokens",
+            ),
+            complete_observations_total: observations.with_label_values(&["complete"]),
+            incomplete_observations_total: observations.with_label_values(&["incomplete"]),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(registry: &prometheus::Registry) -> Self {
+        let observations = IntCounterVec::new(
+            Opts::new(
+                "dynamo_component_router_cache_loss_observations_total",
+                "test",
+            ),
+            &["result"],
+        )
+        .unwrap();
+        registry.register(Box::new(observations.clone())).unwrap();
+        Self::new(
+            |name, help| {
+                let counter =
+                    IntCounter::new(format!("dynamo_component_{}", router_metric(name)), help)
+                        .unwrap();
+                registry.register(Box::new(counter.clone())).unwrap();
+                counter
+            },
+            observations,
+        )
+    }
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -989,15 +1040,7 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_overlap_blocks_lost");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                let cache_loss_worker_stages = cache_reuse_funnel_f2_onward_enabled().then(|| {
-                    let funnel_tokens = metrics
-                        .create_intcountervec(
-                            &router_metric("cache_loss_funnel_tokens_total"),
-                            "Tokens observed at each cache-loss stage; later stages may exceed earlier stages",
-                            &["stage"],
-                            extra_labels,
-                        )
-                        .expect("failed to create router_cache_loss_funnel_tokens_total");
+                let cache_loss_worker_stages = {
                     let observations = metrics
                         .create_intcountervec(
                             &router_metric("cache_loss_observations_total"),
@@ -1006,15 +1049,12 @@ impl RouterRequestMetrics {
                             extra_labels,
                         )
                         .expect("failed to create router_cache_loss_observations_total");
-                    CacheLossWorkerStageMetrics {
-                        funnel_tokens_total: CACHE_LOSS_FUNNEL_STAGES
-                            .map(|stage| funnel_tokens.with_label_values(&[stage])),
-                        complete_observations_total: observations
-                            .with_label_values(&["complete"]),
-                        incomplete_observations_total: observations
-                            .with_label_values(&["incomplete"]),
-                    }
-                });
+                    CacheLossWorkerStageMetrics::new(
+                        |name, help| metrics.create_intcounter(&router_metric(name), help, extra_labels)
+                            .expect("failed to create cache-loss token counter"),
+                        observations,
+                    )
+                };
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -1057,26 +1097,26 @@ impl RouterRequestMetrics {
     }
 
     pub fn observe_cache_loss_route(&self, best_tokens: u64, selected_tokens: u64) {
-        let Some(metrics) = &self.cache_loss_worker_stages else {
-            return;
-        };
-        metrics.funnel_tokens_total[0].inc_by(best_tokens);
-        metrics.funnel_tokens_total[1].inc_by(selected_tokens);
+        let metrics = &self.cache_loss_worker_stages;
+        metrics
+            .max_eligible_cached_prefix_tokens_total
+            .inc_by(best_tokens);
+        metrics
+            .selected_cached_prefix_tokens_total
+            .inc_by(selected_tokens);
     }
 
     pub fn observe_cache_loss_worker(&self, [lookup_tokens, hit_tokens]: [u64; 2]) {
-        let Some(metrics) = &self.cache_loss_worker_stages else {
-            return;
-        };
-        metrics.funnel_tokens_total[2].inc_by(lookup_tokens);
-        metrics.funnel_tokens_total[3].inc_by(hit_tokens);
+        let metrics = &self.cache_loss_worker_stages;
+        metrics.worker_lookup_tokens_total.inc_by(lookup_tokens);
+        metrics.worker_reused_tokens_total.inc_by(hit_tokens);
         metrics.complete_observations_total.inc();
     }
 
     pub fn observe_cache_loss_incomplete(&self) {
-        if let Some(metrics) = &self.cache_loss_worker_stages {
-            metrics.incomplete_observations_total.inc();
-        }
+        self.cache_loss_worker_stages
+            .incomplete_observations_total
+            .inc();
     }
 }
 
@@ -1315,6 +1355,37 @@ impl RemoteIndexerMetrics {
 mod tests {
     use super::*;
     use prometheus::{Encoder, TextEncoder};
+
+    #[test]
+    fn cache_loss_counters_have_descriptive_names_without_stage_labels() {
+        let registry = prometheus::Registry::new();
+        let metrics = CacheLossWorkerStageMetrics::for_test(&registry);
+        metrics.max_eligible_cached_prefix_tokens_total.inc_by(96);
+        metrics.selected_cached_prefix_tokens_total.inc_by(64);
+        metrics.worker_lookup_tokens_total.inc_by(80);
+        metrics.worker_reused_tokens_total.inc_by(72);
+        metrics.complete_observations_total.inc();
+        metrics.incomplete_observations_total.inc();
+
+        let output = gather_pef(&registry);
+        for (name, value) in [
+            ("max_eligible_cached_prefix", 96),
+            ("selected_cached_prefix", 64),
+            ("worker_lookup", 80),
+            ("worker_reused", 72),
+        ] {
+            assert!(
+                output.contains(&format!(
+                    "dynamo_component_router_cache_loss_{name}_tokens_total {value}\n"
+                )),
+                "{output}"
+            );
+        }
+        assert!(!output.contains("stage="));
+        assert!(!output.contains("cache_loss_funnel_tokens_total"));
+        assert!(output.contains("cache_loss_observations_total{result=\"complete\"} 1"));
+        assert!(output.contains("cache_loss_observations_total{result=\"incomplete\"} 1"));
+    }
 
     fn gather_pef(registry: &prometheus::Registry) -> String {
         let encoder = TextEncoder::new();
