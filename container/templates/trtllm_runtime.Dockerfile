@@ -453,16 +453,20 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # This deliberately overrides a dependency of TensorRT-LLM's, which is why the
 # build log carries a pip resolver complaint here:
 #
-#     tensorrt-llm 1.3.0rc24 requires PyNvVideoCodec~=2.1.0,
-#     but you have pynvvideocodec 2.2.0 which is incompatible
+#     tensorrt-llm 1.3.0rc27 requires PyNvVideoCodec~=2.1.0,
+#     but you have pynvvideocodec 2.2.3 which is incompatible
 #
 # The complaint is expected and the override is deliberate. `~=2.1.0` excludes
-# 2.2.0 by construction, and 2.1.0 is the version that bundles the libavcodec.
+# everything above 2.1.x by construction, and 2.1.0 is the version that bundles
+# the libavcodec. The floor here takes the newest release on purpose, which is
+# 2.2.3 at this build, so read the second version in that quote as whatever the
+# build resolved rather than as a fixed number.
 # tensorrt_llm/media/decoding.py is the only consumer; it uses CreateDemuxer,
-# CreateDecoder, PyNvVCException and OutputColorType, all of which 2.2.0 still
+# CreateDecoder, PyNvVCException and OutputColorType, all of which 2.2.x still
 # exports, and it imports PyNvVideoCodec function-locally so `import
 # tensorrt_llm` does not touch it. Re-check that list when this base image moves:
-# if upstream relaxes the pin to allow 2.2.0, this note is the thing to delete.
+# if upstream relaxes its own specifier to admit 2.2.x, this note is the thing
+# to delete.
 #
 # System interpreter for the same reason as the opencv removal and the DALI
 # upgrade above: with VIRTUAL_ENV set, plain pip targets the venv and leaves the
