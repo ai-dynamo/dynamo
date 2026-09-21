@@ -18,12 +18,15 @@ import sys
 import tempfile
 import threading
 import types
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 import sglang as sgl
 
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
+
+if TYPE_CHECKING:
+    from dynamo.common.utils.worker_shutdown import WorkerShutdown
 
 ENV_PARENT_PID = "DYN_SGLANG_GATEWAY_PARENT_PID"
 ENV_CHILD_INDEX = "DYN_SGLANG_GATEWAY_CHILD_INDEX"
@@ -322,6 +325,7 @@ async def serve_via_gateway_children(
     count: int,
     shutdown_event: asyncio.Event,
     load_time: Optional[float] = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     from sglang.srt.managers.multi_tokenizer_mixin import write_data_for_multi_tokenizer
 
@@ -337,6 +341,28 @@ async def serve_via_gateway_children(
         )
     argv = sys.argv[1:]
     procs: list[subprocess.Popen] = []
+    notified = False
+
+    def notify_children():
+        nonlocal notified
+        if notified:
+            return
+        notified = True
+        for proc in procs:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except ProcessLookupError:
+                    continue  # The child exited between poll and signal.
+
+    async def wait_for_children():
+        while any(proc.poll() is None for proc in procs):
+            await asyncio.sleep(0.05)
+
+    if shutdown is not None:
+        shutdown.prefill = False  # Each serving child owns its KV-transfer wait.
+        shutdown.notify_children = notify_children
+        shutdown.wait_for_children = wait_for_children
     try:
         for index in range(count):
             procs.append(
@@ -354,14 +380,12 @@ async def serve_via_gateway_children(
         while not shutdown_event.is_set():
             await asyncio.sleep(2)
             dead = [p for p in procs if p.poll() is not None]
-            if dead and not shutdown_event.is_set():
+            if dead and not notified and not shutdown_event.is_set():
                 raise RuntimeError(
                     f"gateway child pid={dead[0].pid} exited rc={dead[0].returncode}"
                 )
     finally:
-        for p in procs:
-            if p.poll() is None:
-                p.terminate()
+        notify_children()
         await asyncio.gather(*(asyncio.to_thread(_reap, p) for p in procs))
         if owns_shm:
             try:

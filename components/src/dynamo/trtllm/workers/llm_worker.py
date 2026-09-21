@@ -49,6 +49,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import (
     KvEventPublisher,
     MediaDecoder,
@@ -314,6 +315,7 @@ async def init_llm_worker(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
     engine_holder: Optional[list] = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize and run the LLM worker.
 
@@ -324,8 +326,8 @@ async def init_llm_worker(
         config: Configuration parsed from command line.
         shutdown_event: Event to signal shutdown.
         shutdown_endpoints: Optional list to populate with endpoints for graceful shutdown.
-        engine_holder: Optional mutable list; when provided, the TensorRTLLMEngine
-            is appended so that the drain callback can reference it at shutdown time.
+        engine_holder: Optional mutable list populated with the initialized engine.
+        shutdown: Coordinator for request admission and ordered engine teardown.
     """
 
     encode_client = None
@@ -729,8 +731,6 @@ async def init_llm_worker(
         config.disaggregation_mode,
         component_gauges=component_gauges,
     ) as engine:
-        # Expose engine to the drain callback installed by main.py.
-        # The callback uses this to poll active request count during shutdown.
         if engine_holder is not None:
             engine_holder.append(engine)
 
@@ -1058,8 +1058,10 @@ async def init_llm_worker(
                         model_name=model_name_for_metrics,
                         component_name=config.component,
                     )
-                await endpoint.serve_endpoint(
+                await serve_endpoint(
+                    endpoint,
                     handler.generate,
+                    shutdown=shutdown,
                     metrics_labels=metrics_labels,
                     health_check_payload=health_check_payload,
                 )
@@ -1071,6 +1073,9 @@ async def init_llm_worker(
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
-            await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
+            await serve_endpoint(
+                endpoint,
+                handler.generate,
+                health_check_payload=health_check_payload,
+                shutdown=shutdown,
             )

@@ -25,6 +25,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.model_fetch import fetch_model
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
@@ -32,7 +33,6 @@ from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.env import env_bool
-from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
@@ -40,6 +40,7 @@ from dynamo.common.utils.prometheus import (
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.common.utils.topology import apply_topology_config
+from dynamo.common.utils.worker_shutdown import WorkerShutdown
 from dynamo.llm import (
     KvEventPublisher,
     ModelInput,
@@ -94,7 +95,6 @@ from .state_agent import (
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
-shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
@@ -224,6 +224,7 @@ async def worker(argv: list[str] | None = None) -> None:
         return
 
     shutdown_event = asyncio.Event()
+    shutdown_endpoints: list = []
     state_agent_lifecycle = StateAgentLifecycle()
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
@@ -237,14 +238,12 @@ async def worker(argv: list[str] | None = None) -> None:
         # kernel releases it when the process exits.
         await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
-    # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
-    # there
-    wait_for_shutdown = install_signal_handlers(
-        loop,
+    shutdown = WorkerShutdown(
         runtime,
         shutdown_endpoints,
         shutdown_event,
-        pre_shutdown_callback=state_agent_lifecycle.close,
+        prefill=config.disaggregation_mode == DisaggregationMode.PREFILL,
+        pre_shutdown=state_agent_lifecycle.close,
     )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
@@ -256,20 +255,17 @@ async def worker(argv: list[str] | None = None) -> None:
         setup_fpm_relay_fn=setup_fpm_relay,
         setup_metrics_collection_fn=setup_metrics_collection,
         state_agent_lifecycle=state_agent_lifecycle,
+        shutdown=shutdown,
     )
-    try:
-        await factory.create(
+    await shutdown.run(
+        factory.create(
             runtime,
             config,
             shutdown_event,
             shutdown_endpoints,
             snapshot_engine=snapshot_engine,
         )
-    finally:
-        # The serve loop returns as soon as `shutdown_event` is set, which the
-        # shutdown sequence does *before* awaiting the runtime teardown. Without
-        # this join the loop closes here and the teardown is destroyed pending.
-        await wait_for_shutdown()
+    )
 
     logger.debug("Worker function completed, exiting...")
 

@@ -11,6 +11,7 @@ import sglang as sgl
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.storage import get_fs
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import WorkerType
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config, _diffusion_generator_kwargs
@@ -42,6 +43,7 @@ async def init_llm_diffusion(
     shutdown_event: asyncio.Event,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -95,8 +97,10 @@ async def init_llm_diffusion(
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
@@ -133,6 +137,7 @@ async def init_image_diffusion(
     config: Config,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize image diffusion worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -181,8 +186,10 @@ async def init_image_diffusion(
     register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=[],
                 health_check_payload=health_check_payload,
@@ -210,6 +217,7 @@ async def init_video_diffusion(
     config: Config,
     shutdown_endpoints: list,
     run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize video generation worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
@@ -247,8 +255,10 @@ async def init_video_diffusion(
     register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+            serve_endpoint(
+                generate_endpoint,
                 handler.generate,
+                shutdown=shutdown,
                 graceful_shutdown=True,
                 metrics_labels=[],
                 health_check_payload=health_check_payload,

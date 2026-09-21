@@ -91,6 +91,7 @@ mod planner;
 mod prometheus_metrics;
 mod push_egress;
 mod python_payload;
+mod shutdown;
 
 type PythonServerStreamingIngress = Ingress<
     SingleIn<python_payload::PythonPayload>,
@@ -402,6 +403,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
+    shutdown::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 
