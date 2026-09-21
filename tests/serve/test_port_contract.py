@@ -522,11 +522,8 @@ def _in_command_position(command: _Command, start: int) -> bool:
     segment = max(offset for offset in command.segments if offset <= start)
     for match in re.finditer(r"\S+", command.text[segment:start]):
         word = match.group()
-        if (
-            _COMMAND_RESERVED_WORD.fullmatch(word)
-            and "q"
-            not in command.quoted[segment + match.start() : segment + match.end()]
-        ):
+        word_mask = command.quoted[segment + match.start() : segment + match.end()]
+        if _COMMAND_RESERVED_WORD.fullmatch(word) and "q" not in word_mask:
             continue
         if _ASSIGNMENT.fullmatch(word):
             continue
