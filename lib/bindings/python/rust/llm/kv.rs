@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -20,10 +22,10 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
-use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
 #[cfg(feature = "kv-indexer")]
@@ -33,14 +35,12 @@ use dynamo_kv_router::services::selection::{
     self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
     SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
     SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
-    warn_for_unserved_worker_selection_policies,
+    WorkerPatchRequest, WorkerRequest, warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
-use llm_rs::kv_router::SelectionPolicySource;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
@@ -519,7 +519,7 @@ where
 #[cfg(feature = "select-service")]
 pub(crate) fn run_select_service_cli<I, T>(
     args: I,
-    policy_registry: WorkerSelectionPolicyRegistry,
+    policy_registry: RouterPluginRegistry,
 ) -> anyhow::Result<()>
 where
     I: IntoIterator<Item = T>,
@@ -1796,7 +1796,7 @@ mod metric_worker_type_tests {
             Some(config),
             load_threshold_config,
             None,
-            None,
+            RouterPlugins::default(),
         )
         .await
         .unwrap();
@@ -1910,7 +1910,7 @@ async fn create_kv_router_from_endpoint(
     kv_router_config: Option<KvRouterConfig>,
     load_threshold_config: RsLoadThresholdConfig,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    plugins: RouterPlugins,
 ) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
@@ -1934,7 +1934,7 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let needs_policy_role = worker_selection_policy_factory.is_some();
+    let needs_policy_role = plugins.worker_selection().is_some();
     let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
@@ -2020,8 +2020,6 @@ async fn create_kv_router_from_endpoint(
             }
         }
     };
-    #[cfg(not(feature = "custom-policy"))]
-    let _ = (policy_model_name, policy_worker_role);
 
     let load_context = llm_rs::kv_router::RoutingLoadContext::start(
         client.clone(),
@@ -2032,34 +2030,31 @@ async fn create_kv_router_from_endpoint(
     )
     .await?;
 
-    #[cfg(not(feature = "custom-policy"))]
-    let selection_policy = SelectionPolicySource::Registry;
-    #[cfg(feature = "custom-policy")]
-    let selection_policy = match worker_selection_policy_factory {
-        None => SelectionPolicySource::Registry,
-        // The policy sees the card's typed role and display name, which can
-        // differ from the metric role and the routing model name.
-        Some(factory) => {
-            let policy_worker_role = policy_worker_role
-                .expect("a configured worker-selection policy waits for a typed model card above");
-            let policy_model_name = policy_model_name.unwrap_or_default();
-            SelectionPolicySource::Factory(Arc::new(move |config, _worker_type, _partition| {
-                factory(
-                    config,
-                    policy_worker_role,
-                    dynamo_kv_router::RoutingPartitionRef::new(
-                        &policy_model_name,
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
-                    ),
-                )
-            }))
-        }
+    // Preserve the model card's role and display name, which can differ
+    // from the metric role and the routing partition name.
+    let plugins = if let Some(factory) = plugins.worker_selection().cloned() {
+        let policy_worker_role = policy_worker_role
+            .expect("a configured worker-selection policy waits for a typed model card above");
+        let policy_model_name = policy_model_name.unwrap_or_default();
+        plugins.with_worker_selection(Arc::new(move |config, _worker_type, _partition| {
+            factory(
+                config,
+                policy_worker_role,
+                dynamo_kv_router::RoutingPartitionRef::new(
+                    &policy_model_name,
+                    dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                ),
+            )
+        }))
+    } else {
+        plugins
     };
+    let plugins = llm_rs::kv_router::plugins::RouterPluginBuilder::new(plugins);
     let kv_router = model_manager
-        .kv_chooser_for_with_policy_and_client(
+        .kv_chooser_for_with_plugins_and_client(
             client,
             block_size as u32,
-            selection_policy,
+            &plugins,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2234,8 +2229,7 @@ impl KvRouter {
         let load_threshold_config = load_threshold_config
             .map(LoadThresholdConfig::as_rust)
             .unwrap_or_default();
-        let worker_selection_policy_factory =
-            crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
+        let plugins = crate::router_plugins(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -2277,7 +2271,7 @@ impl KvRouter {
                     Some(kv_router_config),
                     load_threshold_config,
                     prefill_load_estimator,
-                    worker_selection_policy_factory,
+                    plugins,
                 )
                 .await
                 .map_err(to_pyerr)?;

@@ -43,6 +43,20 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 
 An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
 
+## Public Plugin API and Compatibility
+
+Use `dynamo_kv_router::plugins` for plugin registration and these modules for plugin contracts:
+
+| Module | Public API |
+|---|---|
+| `plugins::worker_selection` | `WorkerFilter`, `WorkerScorer`, `WorkerPicker`, `WorkerSelectionPolicy`, request context, worker signal accessors, configuration, and factories |
+| `plugins::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, configuration, and factories |
+| `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
+
+The module organization changes no signal accessor, callback signature, signal meaning, or configuration format. Cache overlap, worker load, session metadata, and classification inputs retain their existing APIs. Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
+
+Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection` or `plugins::request_classifier`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7. The signal methods themselves are unchanged.
+
 ## Build the Policy
 
 ### Create the Policy and Catalog Crates
@@ -67,7 +81,6 @@ Add `dynamo-kv-router` from the same checkout that builds the frontend or EPP:
 cargo add \
   --manifest-path "$POLICY_DIR/policy/Cargo.toml" \
   --path "$DYNAMO_DIR/lib/kv-router" \
-  --features standalone-selection \
   dynamo-kv-router
 
 # Add parameter deserialization to the policy crate.
@@ -85,7 +98,6 @@ cargo add \
 cargo add \
   --manifest-path "$POLICY_DIR/catalog/Cargo.toml" \
   --path "$DYNAMO_DIR/lib/kv-router" \
-  --features standalone-selection \
   dynamo-kv-router
 ```
 
@@ -96,7 +108,7 @@ A filter answers a hard yes-or-no question about one worker that already passed 
 This filter keeps workers with at least the configured number of device-resident overlap blocks:
 
 ```rust
-use dynamo_kv_router::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidate, WorkerFilter, WorkerInputs, WorkerSelectionContext,
     WorkerSelectionPolicyError,
 };
@@ -134,7 +146,7 @@ A scorer expresses a preference without excluding a worker. It returns one finit
 This scorer uses the current number of active requests as its cost:
 
 ```rust
-use dynamo_kv_router::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext,
     WorkerSelectionPolicyError,
 };
@@ -168,7 +180,7 @@ A picker makes the final choice after filtering and scoring. It sees every remai
 This picker selects the lowest-cost row:
 
 ```rust
-use dynamo_kv_router::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
@@ -200,11 +212,11 @@ The provider runs once at startup. Parse and validate all parameters there, then
 ```rust
 use std::sync::Arc;
 
-use dynamo_kv_router::services::selection::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
     WorkerSelectionPolicyProviderError,
 };
-use dynamo_kv_router::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
+use dynamo_kv_router::plugins::worker_selection::{WorkerFilter, WorkerScorer, WorkerSelectionPolicy};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -248,14 +260,12 @@ Dynamo calls the returned factory once per routing partition. Branch on the type
 Expose a registration function from the policy crate:
 
 ```rust
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
 
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    registry.register("least-busy", Arc::new(provider))
+    registry.register_worker_selection("least-busy", Arc::new(provider))
 }
 ```
 
@@ -263,7 +273,7 @@ Call this function from the catalog:
 
 ```rust
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
     acme_routing_policy::register(registry)
 }
@@ -309,6 +319,86 @@ cargo check --manifest-path "$POLICY_DIR/catalog/Cargo.toml"
 ```
 
 Add one focused test for each policy decision and one registration test for every type name.
+
+## Register a Request Classifier
+
+**Experimental.** Request classifiers use the same statically linked catalog as worker filters, scorers, and pickers. Keep the catalog's single `register` function and call `register_request_classifier` for each classifier type. `RouterPluginRegistry` also accepts the existing worker-selection providers; `WorkerSelectionPolicyRegistry` remains an alias, so existing catalogs compile unchanged.
+
+Implement `RequestClassifier` in your policy crate. Its provider validates `RequestClassifierParameters` at startup and returns a `RequestClassifierFactory`: a closure that receives `RequestClassifierContext` and creates a fresh `Box<dyn RequestClassifier>` for each routed model. The shared router builder supplies the cached capacity context for both HTTP discovery and Python `KvRouter.generate`. Register that provider alongside your worker-selection providers:
+
+```rust
+use std::sync::Arc;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+
+pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), Box<dyn std::error::Error>> {
+    acme_worker_policy::register(registry)?;
+    registry.register_request_classifier("acme-admission", Arc::new(acme_admission::provider))?;
+    Ok(())
+}
+```
+
+The provider signature is:
+
+```rust
+use dynamo_kv_router::plugins::request_classifier::{
+    RequestClassifierFactory, RequestClassifierParameters, RequestClassifierProviderError,
+};
+
+pub fn provider(
+    parameters: &RequestClassifierParameters,
+) -> Result<RequestClassifierFactory, RequestClassifierProviderError>;
+```
+
+Select the classifier in the same `--router-policy-config` YAML:
+
+```yaml
+request_classifier:
+  type: acme-admission
+  parameters:
+    max_in_flight: 32
+```
+
+The parameter mapping belongs to the plugin; `max_in_flight` above is an example plugin setting. Omit `request_classifier` to retain pass-through admission. Unknown types and invalid parameters fail startup. Build and link the catalog with the existing `custom-policy` workflow below; no second catalog export or build flag is required.
+
+The discovery-backed HTTP frontend and Python `KvRouter.generate` path install classifiers on their KV routers. Classification applies to decode/aggregated admission before queue ordering and worker selection. Selection is fixed at frontend startup and is process-wide; per-model queue profiles do not select different classifier types. A classifier can change the policy class, due time, and scheduling cost through the existing `ClassifyRequest` API. Dynamo retains queueing, worker selection, reservations, and lifecycle delivery.
+
+### Shared Plugin Construction
+
+The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
+
+Rust embedders can use the same setup:
+
+```rust
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_llm::entrypoint::input::http::HttpFrontend;
+
+let mut registry = RouterPluginRegistry::default();
+acme_routing_catalog::register(&mut registry)?;
+let plugins = registry.resolve_plugins(&kv_router_config)?;
+HttpFrontend::default()
+    .plugins(plugins)
+    .run(distributed_runtime, engine_config)
+    .await?;
+```
+
+```mermaid
+flowchart LR
+    Catalog["catalog::register"] --> Registry[RouterPluginRegistry]
+    Config[Router policy YAML] --> Registry
+    Registry -->|resolve_plugins| Bundle[RouterPlugins]
+    Bundle --> HTTP[HTTP discovery]
+    Bundle --> Python[Python KvRouter]
+    HTTP --> Build[Shared router construction]
+    Python --> Build
+    Build --> Selector[Per-router worker selector]
+    Build --> Classifier[Per-router request classifier]
+```
+
+The host's `RouterPluginBuilder` passes worker selection through the shared selection core and installs the remaining plugins before the router is exposed to requests. The worker policy is constructed once per partition, including the probe for its required inputs. Adding another plugin trait requires a typed registration slot, a factory in the bundle, and its construction hook. Entry points continue to carry one bundle. Execution and lifecycle callbacks stay on each trait; the bundle does not add per-request dispatch.
+
+The compatibility paths described above remain available until 1.7. An empty bundle retains the default selector and pass-through admission.
+
+The disaggregated prefill hop and query-only probes do not run classifiers. Stateful low-level `best_worker` calls also lack classifier lifecycle enrollment. Offline replay and standalone selection reject `request_classifier` configuration because they cannot run its lifecycle.
 
 ## Available Signals
 
@@ -459,11 +549,11 @@ Register the catalog before the standard runner starts:
 
 ```rust
 use dynamo_ext_proc::run;
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+    let mut registry = RouterPluginRegistry::default();
     acme_routing_catalog::register(&mut registry)?;
     run(Some(registry)).await
 }

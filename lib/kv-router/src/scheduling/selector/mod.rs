@@ -9,11 +9,13 @@ mod policy;
 pub use default::DefaultWorkerSelector;
 
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
-pub use policy::{
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::worker_selection::{
     ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
     WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
 };
+
+pub use policy::WorkerSelectionPolicy;
 
 use default::{pick_default_worker, selection_weights};
 use policy::{
@@ -125,7 +127,7 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct LogitWeights {
+pub(crate) struct LogitWeights {
     overlap_score_credit: f64,
     overlap_score_credit_decay: f64,
     prefill_load_scale: f64,
