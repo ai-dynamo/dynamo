@@ -284,11 +284,16 @@ class _Command(NamedTuple):
     segments: tuple[int, ...]  # offsets in text where each pipeline segment starts
 
 
-def _read_quoted(script: str, index: int) -> tuple[int, str]:
+def _read_quoted(script: str, index: int, *, ansi_c: bool = False) -> tuple[int, str]:
     """Return the index past a quoted span and the text inside it."""
     if script[index] == "'":
-        end = script.find("'", index + 1)
-        end = len(script) if end < 0 else end
+        end = index + 1
+        while end < len(script) and script[end] != "'":
+            if ansi_c and script[end] == "\\":
+                end += 2  # escaped apostrophes do not close an ANSI-C string
+            else:
+                end += 1
+        end = min(end, len(script))
         return end + 1, script[index + 1 : end]
     chunk: list[str] = []
     cursor = index + 1
@@ -401,8 +406,9 @@ def _split_commands(script: str) -> list[_Command]:
             add(script[index + 1 : index + 2], True)
             index += 2
             continue
-        if char in "'\"":
-            end, chunk = _read_quoted(script, index)
+        ansi_c = script.startswith("$'", index)
+        if char in "'\"" or ansi_c:
+            end, chunk = _read_quoted(script, index + int(ansi_c), ansi_c=ansi_c)
             line += script[index:end].count("\n")
             add(chunk, True)
             index = end
@@ -618,6 +624,22 @@ def test_quoted_match_does_not_hide_a_later_launch() -> None:
         (2, "python -m dynamo.frontend", True),
         (5, "python -m dynamo.planner", False),
     ]
+
+
+@pytest.mark.parametrize(
+    "quoted",
+    [
+        r"$'can\'t # literal'",
+        r"$'backslash \\'",
+        r"$'python -m dynamo.fake; \' # still quoted'",
+        r"'ordinary backslash \'",
+        r"\$'ordinary backslash \'",
+    ],
+)
+def test_escaped_ansi_c_quote_does_not_hide_a_later_launch(quoted: str) -> None:
+    """Only ANSI-C quoting allows a backslash to escape a closing apostrophe."""
+    script = f"echo {quoted}; python -m dynamo.frontend\nwait_any_exit\n"
+    assert _service_launches(script) == [(1, "python -m dynamo.frontend", False)]
 
 
 def test_wait_any_exit_is_found_whatever_follows_the_call() -> None:
