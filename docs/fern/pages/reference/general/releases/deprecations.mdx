@@ -33,9 +33,13 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update any custom Validating/MutatingWebhookConfiguration (not managed by the bundled Helm chart) to point at the v1beta1 DGD admission paths with apiVersions: [v1beta1].
 
-<span className="dynref-badge dynref-badge--red">Removed</span> **Go EPP removed, and the Rust EPP shipped inside the Frontend image is the default Endpoint Picker, with `eppConfig` deprecated** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
+<span className="dynref-badge dynref-badge--red">Removed</span> **Go EPP removed, and the Rust EPP shipped inside the Frontend image is the default Endpoint Picker** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
 
   > **Migrate:** Update EPP deployment manifests and flags to the Rust EPP (LW-EPP) contract.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **`eppConfig` deprecated; it remains honored so a `DynamoGraphDeployment` pinned to a 1.4 Go EPP image keeps working after the Operator upgrade** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
+
+  > **Migrate:** Omit `eppConfig` to use the Rust EPP; the field goes away with the Go EPP contract in a later release.
 
 <span className="dynref-badge dynref-badge--red">Removed</span> **Dynamo Snapshot moved to a standalone operator, removing the bundled chart, PodSnapshot CRDs, and reconciliation from Dynamo Operator** ([#13177](https://github.com/ai-dynamo/dynamo/pull/13177)).
 
