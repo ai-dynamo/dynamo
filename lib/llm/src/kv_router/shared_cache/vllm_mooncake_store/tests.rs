@@ -185,7 +185,10 @@ fn cross_group_digest_ambiguity_survives_clear_and_removal() {
     );
     store_all(&cache, 4, 2, &[1]);
     assert_eq!(hits(&cache, &[1], 17), 0);
-    assert!(cache.state.lock().digests[&1].ambiguous);
+    let state = cache.state.lock();
+    assert!(state.ambiguous.contains(&1));
+    assert!(state.digests.is_empty());
+    assert_eq!(state.memberships, 0);
 }
 
 #[test]
@@ -287,10 +290,15 @@ fn learning_requires_admitted_eligible_root_and_preserves_conflicts() {
     cache.observe_stored(SOURCE, &conflicting);
     assert_eq!(hits(&cache, &[1, 2], 33), 0);
     assert_eq!(
-        cache.state.lock().edges[&Edge {
-            parent: None,
-            local: LocalBlockHash(1001)
-        }]
+        cache
+            .state
+            .lock()
+            .edges
+            .peek(&Edge {
+                parent: None,
+                local: LocalBlockHash(1001)
+            })
+            .unwrap()
             .child,
         1
     );
@@ -335,36 +343,122 @@ fn pending_watches_and_generation_fence_observations_and_queries() {
 }
 
 #[test]
-fn all_insertion_limits_preserve_safety_and_sequence() {
-    for limits in [
-        Limits {
-            edges: 1,
-            ..Limits::default()
-        },
-        Limits {
-            digests: 1,
-            ..Limits::default()
-        },
-    ] {
-        let mut cache = cache(contract());
-        cache.limits = limits;
-        learn(&cache, None, &[1, 2]);
-        store_all(&cache, 1, 1, &[1, 2]);
-        assert!(cache.state.lock().disabled);
-        assert_eq!(hits(&cache, &[1, 2], 33), 0);
-    }
+fn digest_limit_discards_residency_and_recovers_without_disabling() {
     let mut cache = cache(contract());
-    cache.limits.memberships = 2;
+    cache.limits.digests = 1;
+    learn(&cache, None, &[1, 2]);
+    store_all(&cache, 1, 1, &[1, 2]);
+    {
+        let state = cache.state.lock();
+        assert!(!state.disabled);
+        assert_eq!(state.digests.len(), 1);
+        assert_eq!(state.memberships, 2);
+    }
+    assert_eq!(hits(&cache, &[1, 2], 33), 0);
+    store_all(&cache, 2, 1, &[1]);
+    assert_eq!(hits(&cache, &[1, 2], 33), 1);
+}
+
+#[test]
+fn membership_limit_discards_residency_and_recovers_without_disabling() {
+    let mut cache = cache(contract());
+    cache.limits.memberships = 3;
     learn(&cache, None, &[1, 2]);
     store_all(&cache, 1, 1, &[1]);
     assert_eq!(hits(&cache, &[1, 2], 33), 1);
     apply(&cache, 2, vec![event(0, 0, 2, "cpu", true)]);
-    assert_eq!(hits(&cache, &[1, 2], 33), 0);
-    store_all(&cache, 2, 1, &[1]);
-    assert_eq!(hits(&cache, &[1, 2], 33), 0);
-    assert_eq!(cache.state.lock().digests.len(), 2);
-    store_all(&cache, 3, 1, &[1]);
     assert_eq!(hits(&cache, &[1, 2], 33), 1);
+    // The event that crosses the limit seeds the rebuilt residency.
+    apply(&cache, 3, vec![event(0, 1, 2, "cpu", true)]);
+    {
+        let state = cache.state.lock();
+        assert!(!state.disabled);
+        assert_eq!(state.digests.len(), 1);
+        assert_eq!(state.memberships, 1);
+    }
+    assert_eq!(hits(&cache, &[1, 2], 33), 0);
+    store_all(&cache, 4, 1, &[1]);
+    assert_eq!(hits(&cache, &[1, 2], 33), 1);
+}
+
+#[test]
+fn learned_edges_evict_least_recently_used_and_recover() {
+    let mut cache = cache(contract());
+    cache.limits.edges = 2;
+    learn(&cache, None, &[1, 2]);
+    store_all(&cache, 1, 1, &[1, 2, 3]);
+    assert_eq!(hits(&cache, &[1, 2], 33), 2);
+    learn(&cache, None, &[3]);
+    {
+        let state = cache.state.lock();
+        assert!(!state.disabled);
+        assert_eq!(state.edges.len(), 2);
+        assert_eq!(state.reverse_edges.len(), 2);
+        assert!(!state.reverse_edges.contains_key(&1));
+    }
+    assert_eq!(hits(&cache, &[1, 2], 33), 0);
+    assert_eq!(hits(&cache, &[3], 17), 1);
+    learn(&cache, None, &[1, 2]);
+    assert_eq!(hits(&cache, &[1, 2], 33), 2);
+    assert_eq!(hits(&cache, &[3], 17), 0);
+    let state = cache.state.lock();
+    assert_eq!(state.edges.len(), 2);
+    assert_eq!(state.reverse_edges.len(), 2);
+    for (edge, learned) in state.edges.iter() {
+        assert_eq!(state.reverse_edges.get(&learned.child), Some(edge));
+    }
+}
+
+#[test]
+fn conflicting_external_hash_blocks_both_chains_without_disabling() {
+    let cache = cache(contract());
+    learn(&cache, None, &[1]);
+    store_all(&cache, 1, 1, &[1]);
+    assert_eq!(hits(&cache, &[1], 17), 1);
+    let mut other_chain = learned_data(None, &[1]);
+    other_chain.blocks[0].tokens_hash = LocalBlockHash(5001);
+    cache.observe_stored(SOURCE, &other_chain);
+    cache.observe_stored(SOURCE, &other_chain);
+    {
+        let state = cache.state.lock();
+        assert!(!state.disabled);
+        assert_eq!(state.edges.len(), 1);
+        assert_eq!(state.memberships, 2);
+    }
+    assert_eq!(hits(&cache, &[1], 17), 0);
+    assert_eq!(hits(&cache, &[4001], 17), 0);
+    learn(&cache, None, &[2]);
+    store_all(&cache, 2, 1, &[2]);
+    assert_eq!(hits(&cache, &[2], 17), 1);
+}
+
+#[test]
+fn digest_identities_follow_object_residency() {
+    let cache = cache(contract());
+    learn(&cache, None, &[1]);
+    store_all(&cache, 1, 1, &[1]);
+    assert_eq!(cache.state.lock().digests[&1].objects, 2);
+    apply(&cache, 2, vec![event(0, 0, 1, "disk", true)]);
+    apply(
+        &cache,
+        3,
+        vec![event(0, 0, 1, "cpu", false), event(0, 1, 1, "cpu", false)],
+    );
+    {
+        let state = cache.state.lock();
+        assert_eq!(state.digests[&1].objects, 1);
+        assert_eq!(state.memberships, 1);
+    }
+    apply(&cache, 4, vec![event(0, 0, 1, "disk", false)]);
+    {
+        let state = cache.state.lock();
+        assert!(state.digests.is_empty());
+        assert!(state.objects.is_empty());
+        assert_eq!(state.memberships, 0);
+        assert_eq!(state.edges.len(), 1);
+    }
+    store_all(&cache, 5, 1, &[1]);
+    assert_eq!(hits(&cache, &[1], 17), 1);
 }
 
 #[test]
@@ -446,7 +540,7 @@ fn surfaced_stream_error_and_end_clear_before_reconnect() {
         let state = cache.state.lock();
         assert_eq!(state.sequence, Some(sequence));
         assert_eq!(state.edges.len(), 1);
-        assert_eq!(state.digests.len(), 1);
+        assert!(state.digests.is_empty());
     }
 }
 
@@ -807,7 +901,8 @@ fn benchmark_long_multigroup_lookup() {
 #[test]
 fn entry_layout_and_map_allocations() {
     use std::mem::size_of;
-    let mut edges = FxHashMap::<Edge, LearnedEdge>::default();
+    let mut edges =
+        LruCache::<Edge, LearnedEdge, FxBuildHasher>::unbounded_with_hasher(FxBuildHasher);
     let mut reverse = FxHashMap::<u64, Edge>::default();
     let mut digests = HashMap::<u64, DigestIdentity>::new();
     let mut objects = HashMap::<ObjectIdentity, u8>::new();
@@ -816,7 +911,7 @@ fn entry_layout_and_map_allocations() {
             parent: Some(hash),
             local: LocalBlockHash(hash),
         };
-        edges.insert(
+        edges.put(
             edge,
             LearnedEdge {
                 child: hash,
@@ -828,7 +923,7 @@ fn entry_layout_and_map_allocations() {
             hash,
             DigestIdentity {
                 digest: digest(hash),
-                ambiguous: false,
+                objects: 1,
             },
         );
         objects.insert(
@@ -845,7 +940,7 @@ fn entry_layout_and_map_allocations() {
         size_of::<(u64, Edge)>(),
         size_of::<(u64, DigestIdentity)>(),
         size_of::<(ObjectIdentity, u8)>(),
-        edges.capacity(),
+        edges.len(),
         reverse.capacity(),
         digests.capacity(),
         objects.capacity()

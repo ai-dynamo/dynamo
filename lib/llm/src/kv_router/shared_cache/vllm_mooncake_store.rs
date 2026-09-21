@@ -11,8 +11,9 @@ use dynamo_kv_router::{
     protocols::{KvCacheStoreData, LocalBlockHash, SharedCacheHits, WorkerWithDpRank},
 };
 use futures::StreamExt;
+use lru::LruCache;
 use parking_lot::Mutex;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use super::mooncake_store_contract::ValidatedContract;
@@ -24,9 +25,11 @@ use super::{
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_BATCH_EVENTS: usize = 4096;
-// At these caps, measured map allocations on aarch64/rustc 1.98 were 98.5 MiB live
-// and 117 MiB during growth (two numeric maps, digest map, and one-medium objects).
-// This excludes allocator metadata, runtime descriptors, input/query buffers, and RSS.
+// At these caps, measured map allocations on aarch64/rustc 1.96 were 100.5 MiB live
+// and 119 MiB during growth (LRU edge map plus reverse map, digest map, and
+// one-medium objects). This excludes allocator metadata, runtime descriptors,
+// input/query buffers, and RSS. Reaching a cap evicts or discards evidence and
+// the hint keeps running; it never disables itself.
 const MAX_LEARNED_EDGES: usize = 262_144;
 const MAX_DIGEST_IDENTITIES: usize = 262_144;
 const MAX_OBJECT_MEMBERSHIPS: usize = 524_288;
@@ -60,10 +63,12 @@ struct LearnedEdge {
     conflicted: bool,
 }
 
+/// One unambiguous full digest behind a GPU event hash, kept only while at
+/// least one of its objects is resident.
 #[derive(Clone, Copy, Debug)]
 struct DigestIdentity {
     digest: [u8; 32],
-    ambiguous: bool,
+    objects: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,32 +77,54 @@ struct ObjectIdentity {
     prefix: u16,
 }
 
-#[derive(Default)]
 struct State {
     contract: Option<Arc<ValidatedContract>>,
     allowed_sources: HashSet<WorkerWithDpRank>,
     generation: u64,
     sequence: Option<u64>,
+    /// Set once the event subscriber has stopped; the cache is retired.
     disabled: bool,
-    edges: FxHashMap<Edge, LearnedEdge>,
+    /// Least recently used order; `limits.edges` evicts the coldest chain link.
+    edges: LruCache<Edge, LearnedEdge, FxBuildHasher>,
     reverse_edges: FxHashMap<u64, Edge>,
     digests: HashMap<u64, DigestIdentity>,
+    /// GPU event hashes seen with two different full digests. These survive
+    /// residency clears because either digest may still be resident unseen.
+    ambiguous: HashSet<u64>,
     objects: HashMap<ObjectIdentity, u8>,
     memberships: usize,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            contract: None,
+            allowed_sources: HashSet::new(),
+            generation: 0,
+            sequence: None,
+            disabled: false,
+            edges: LruCache::unbounded_with_hasher(FxBuildHasher),
+            reverse_edges: FxHashMap::default(),
+            digests: HashMap::new(),
+            ambiguous: HashSet::new(),
+            objects: HashMap::new(),
+            memberships: 0,
+        }
+    }
+}
+
 impl State {
+    /// Forget which objects are resident. Digest identities go with them:
+    /// every resident object re-announces its digest, so nothing is lost.
     fn clear_residency(&mut self) {
         self.objects.clear();
         self.memberships = 0;
+        self.digests.clear();
     }
 
     fn disable(&mut self, reason: &'static str) {
         if !self.disabled {
-            tracing::warn!(
-                reason,
-                "Mooncake Store hints disabled until the contract changes"
-            );
+            tracing::warn!(reason, "Mooncake Store hints disabled");
             record_subscriber_error();
         }
         self.disabled = true;
@@ -105,7 +132,7 @@ impl State {
     }
 
     fn complete(&self, contract: &ValidatedContract, group: usize, external: u64) -> bool {
-        let Some(identity) = self.digests.get(&external).filter(|id| !id.ambiguous) else {
+        let Some(identity) = self.digests.get(&external) else {
             return false;
         };
         contract.group_prefixes[group].iter().all(|&prefix| {
@@ -114,6 +141,24 @@ impl State {
                 prefix,
             })
         })
+    }
+
+    fn evict_coldest_edge(&mut self) {
+        if let Some((_, evicted)) = self.edges.pop_lru() {
+            self.reverse_edges.remove(&evicted.child);
+        }
+    }
+
+    /// Drop every resident object of `digest`; the identity behind `low64`
+    /// is no longer trustworthy.
+    fn mark_ambiguous(&mut self, contract: &ValidatedContract, low64: u64, digest: [u8; 32]) {
+        self.digests.remove(&low64);
+        for &prefix in contract.prefixes.values() {
+            if let Some(mediums) = self.objects.remove(&ObjectIdentity { digest, prefix }) {
+                self.memberships -= mediums.count_ones() as usize;
+            }
+        }
+        self.ambiguous.insert(low64);
     }
 }
 
@@ -277,41 +322,56 @@ impl MooncakeStoreCache {
                 }
             };
             let low64 = u64::from_be_bytes(digest[24..].try_into().unwrap());
-            if let Some(identity) = state.digests.get_mut(&low64) {
-                if identity.digest != digest && !identity.ambiguous {
-                    identity.ambiguous = true;
-                    record_subscriber_error();
-                    tracing::warn!(
-                        "Conflicting Mooncake Store full digests share a GPU event hash"
-                    );
+            if state.ambiguous.contains(&low64) {
+                continue;
+            }
+            if let Some(identity) = state.digests.get(&low64)
+                && identity.digest != digest
+            {
+                let conflicting = identity.digest;
+                state.mark_ambiguous(&contract, low64, conflicting);
+                if state.ambiguous.len() > self.limits.digests {
+                    state.ambiguous.clear();
                 }
-            } else {
-                if state.digests.len() >= self.limits.digests {
-                    state.disable("digest identity capacity exhausted");
-                    return;
-                }
-                state.digests.insert(
-                    low64,
-                    DigestIdentity {
-                        digest,
-                        ambiguous: false,
-                    },
-                );
+                record_subscriber_error();
+                tracing::warn!("Conflicting Mooncake Store full digests share a GPU event hash");
+                continue;
             }
             let key = ObjectIdentity { digest, prefix };
-            let previous = state.objects.get(&key).copied().unwrap_or(0);
-            if stored && previous & medium == 0 {
-                if state.memberships >= self.limits.memberships {
+            let mut previous = state.objects.get(&key).copied().unwrap_or(0);
+            if stored {
+                if previous & medium != 0 {
+                    continue;
+                }
+                let new_digest = !state.digests.contains_key(&low64);
+                if state.memberships >= self.limits.memberships
+                    || (new_digest && state.digests.len() >= self.limits.digests)
+                {
+                    // Residency evidence is discarded and rebuilt from later
+                    // events; the current event seeds the rebuild.
                     state.clear_residency();
                     record_subscriber_error();
-                    return;
+                    previous = 0;
+                }
+                let identity = state
+                    .digests
+                    .entry(low64)
+                    .or_insert(DigestIdentity { digest, objects: 0 });
+                if previous == 0 {
+                    identity.objects += 1;
                 }
                 state.objects.insert(key, previous | medium);
                 state.memberships += 1;
-            } else if !stored && previous & medium != 0 {
+            } else if previous & medium != 0 {
                 let remaining = previous & !medium;
                 if remaining == 0 {
                     state.objects.remove(&key);
+                    if let Some(identity) = state.digests.get_mut(&low64) {
+                        identity.objects -= 1;
+                        if identity.objects == 0 {
+                            state.digests.remove(&low64);
+                        }
+                    }
                 } else {
                     state.objects.insert(key, remaining);
                 }
@@ -324,10 +384,11 @@ impl MooncakeStoreCache {
         if (self.pending)() || !query.shared_cache_eligible {
             return SharedCacheHits::default();
         }
-        let state = self.state.lock();
-        if (self.pending)() || state.disabled {
+        let mut guard = self.state.lock();
+        if (self.pending)() || guard.disabled {
             return SharedCacheHits::default();
         }
+        let state = &mut *guard;
         let Some(contract) = state.contract.as_deref() else {
             return SharedCacheHits::default();
         };
@@ -338,6 +399,8 @@ impl MooncakeStoreCache {
         let count = query.block_hashes.len().min((query.tokens.len() - 1) / b);
         let mut chain = Vec::with_capacity(count.min(self.limits.edges));
         let mut parent = None;
+        // `get` promotes each walked link so requested prefixes outlive
+        // chains nobody asks for.
         for &local in query.block_hashes.iter().take(count.min(self.limits.edges)) {
             let Some(edge) = state
                 .edges
@@ -349,6 +412,7 @@ impl MooncakeStoreCache {
             parent = Some(edge.child);
             chain.push(edge.child);
         }
+        let state = &*state;
         let alignment = contract.alignment as usize;
         let candidates = chain.len() * b / alignment;
         if candidates == 0 {
@@ -518,16 +582,25 @@ impl SharedKvCache for MooncakeStoreCache {
                 }
             } else {
                 if let Some(&existing_key) = state.reverse_edges.get(&child) {
-                    state.edges.get_mut(&existing_key).unwrap().conflicted = true;
-                    // Retaining both conflicting chains would make the reverse identity ambiguous.
-                    state.disable("external event hash names different local chains");
+                    // The same external hash already names another local chain.
+                    // Neither chain can be trusted past this block, so the known
+                    // one is marked and the new one is not learned.
+                    if let Some(existing) = state.edges.peek_mut(&existing_key)
+                        && !existing.conflicted
+                    {
+                        existing.conflicted = true;
+                        record_subscriber_error();
+                        tracing::warn!(
+                            ?source,
+                            "External Mooncake Store event hash names different local chains"
+                        );
+                    }
                     return;
                 }
                 if state.edges.len() >= self.limits.edges {
-                    state.disable("learned identity capacity exhausted");
-                    return;
+                    state.evict_coldest_edge();
                 }
-                state.edges.insert(
+                state.edges.put(
                     key,
                     LearnedEdge {
                         child,
