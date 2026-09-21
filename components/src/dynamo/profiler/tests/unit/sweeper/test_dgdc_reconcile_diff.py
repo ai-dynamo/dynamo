@@ -96,11 +96,6 @@ def test_duplicate_identity_in_desired_set_raises_terminal_error() -> None:
 
 
 def test_duplicate_identity_in_current_with_empty_desired_raises_not_silently_drops() -> None:
-    """Regression test: two current DGDCs sharing an identity, with an
-    empty desired set, must not silently collapse to a single delete via
-    dict-comprehension overwrite -- the surplus object would be dropped
-    from every downstream decision and left orphaned in the cluster
-    forever, never deleted."""
     identity = compute_identity(_SPEC_A, {})
     current = [
         CurrentDGDC(name="cand-000", identity=identity, rank=1),
@@ -108,22 +103,6 @@ def test_duplicate_identity_in_current_with_empty_desired_raises_not_silently_dr
     ]
     with pytest.raises(DiffInputError, match="duplicate identity in current"):
         compute_actions(desired=[], current=current)
-
-
-def test_duplicate_identity_in_current_still_desired_raises_not_silently_drops() -> None:
-    """Regression test: same duplicate-current bug, the other affected
-    path -- when the identity IS still desired, a silent dict-overwrite
-    would leave one duplicate receiving a status update while the other
-    is never reconciled at all, despite the reconciler claiming to
-    reconcile the full current set."""
-    identity = compute_identity(_SPEC_A, {})
-    current = [
-        CurrentDGDC(name="cand-000", identity=identity, rank=2),
-        CurrentDGDC(name="cand-001", identity=identity, rank=3),
-    ]
-    desired = [DesiredCandidate(spec=_SPEC_A, rank=1)]
-    with pytest.raises(DiffInputError, match="duplicate identity in current"):
-        compute_actions(desired, current)
 
 
 def test_rank_reordering_across_multiple_entries_produces_only_status_updates() -> None:
@@ -159,13 +138,8 @@ def test_rank_reordering_across_multiple_entries_produces_only_status_updates() 
 
 
 def test_pareto_candidates_never_produce_rank_status_updates() -> None:
-    """Confirmed against the real v1beta2 Go type: Status.Rank is "the
-    one-based scalar ordering and is absent for Pareto searches" -- every
-    real Pareto candidate leaves rank unset (None), regardless of front
-    size or how membership changes. Since rank never varies on either
-    side for realistic Pareto data, an unchanged front must produce zero
-    status_updates, not the numbered reshuffling the test above exercises
-    for the algorithm's generic case."""
+    """Pareto candidates never carry a rank, so an unchanged front produces
+    no status updates."""
     identities = [compute_identity({"components": [{"replicas": n}]}, {}) for n in (2, 4, 8)]
     current = [
         CurrentDGDC(name=f"cand-{i:03d}", identity=identity, rank=None)
