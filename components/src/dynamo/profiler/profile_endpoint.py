@@ -105,7 +105,7 @@ if __name__ == "__main__":
             args.num_gpus,
             args.max_context_length,
             args.interpolation_granularity,
-            attention_dp_size=args.attention_dp_size,
+            args.attention_dp_size,
         )
     elif mode == EngineType.DECODE:
         assert args.max_kv_tokens > 0, "max_kv_tokens must be provided for decode"
