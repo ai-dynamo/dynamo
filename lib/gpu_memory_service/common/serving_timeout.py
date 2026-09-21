@@ -43,6 +43,28 @@ _warned = False
 _applied_pg_ids: set = set()
 
 
+def _is_nccl_group(dist, group, metadata=None) -> bool:
+    """Return whether ``group`` is backed by NCCL.
+
+    PyTorch tracks CPU/Gloo control-plane groups beside CUDA/NCCL groups in
+    the same private registry. Tightening a request-broadcast Gloo group to
+    the GPU hang-detection timeout can kill a healthy replica while a peer is
+    executing a long request. The setting is deliberately named NCCL: only
+    apply it to process groups whose backend confirms that contract.
+    """
+    backend = None
+    try:
+        backend = dist.get_backend(group)
+    except Exception:
+        # pg_map values are currently ``(backend, store)``. Keep this as a
+        # compatibility fallback because both APIs are private/versioned.
+        if isinstance(metadata, (tuple, list)) and metadata:
+            backend = metadata[0]
+        elif isinstance(metadata, str):
+            backend = metadata
+    return "nccl" in str(backend or "").lower()
+
+
 def serving_timeout_s() -> float:
     raw = os.environ.get("DYN_GMS_SERVING_NCCL_TIMEOUT_S", "5")
     try:
@@ -112,7 +134,7 @@ def apply_serving_collective_timeout(seconds: float | None = None) -> bool:
         return False
 
     applied = 0
-    if "default" not in _applied_pg_ids:
+    if "default" not in _applied_pg_ids and _is_nccl_group(dist, None):
         try:
             set_fn(td, None)  # default / world group
             applied += 1
@@ -127,8 +149,10 @@ def apply_serving_collective_timeout(seconds: float | None = None) -> bool:
     try:
         world = getattr(c10d, "_world", None)
         pg_map = getattr(world, "pg_map", {}) if world is not None else {}
-        for pg in list(pg_map.keys()):
+        for pg, metadata in list(pg_map.items()):
             if id(pg) in _applied_pg_ids:
+                continue
+            if not _is_nccl_group(dist, pg, metadata):
                 continue
             try:
                 set_fn(td, pg)

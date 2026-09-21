@@ -68,6 +68,7 @@ const CRASH_MAGIC: u32 = 0x4753_4d43;
 const CRASH_VERSION: u32 = 1;
 static CRASH_FD: AtomicI32 = AtomicI32::new(-1);
 static CRASH_INSTALLER_PID: AtomicI32 = AtomicI32::new(-1);
+const CRASH_ACTION_FLAGS: libc::c_int = libc::SA_SIGINFO | libc::SA_ONSTACK;
 static CRASH_FIRED: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]
@@ -108,12 +109,17 @@ extern "C" fn gpu_crash_handler(
     };
     let fd = CRASH_FD.load(Ordering::Acquire);
     if fd >= 0 {
-        unsafe {
-            libc::write(
-                fd,
-                (&record as *const CrashRecord).cast::<libc::c_void>(),
-                std::mem::size_of::<CrashRecord>(),
-            );
+        loop {
+            let written = unsafe {
+                libc::write(
+                    fd,
+                    (&record as *const CrashRecord).cast::<libc::c_void>(),
+                    std::mem::size_of::<CrashRecord>(),
+                )
+            };
+            if written >= 0 || unsafe { *libc::__errno_location() } != libc::EINTR {
+                break;
+            }
         }
     }
     unsafe {
@@ -137,17 +143,26 @@ fn install_gpu_crash_interlock(notification_fd: i32, signals: Vec<i32>) -> PyRes
             "at least one catchable signal is required",
         ));
     }
-    if let Some(signal_number) = signals
-        .iter()
-        .find(|signal_number| {
-            **signal_number <= 0
-                || **signal_number == libc::SIGKILL
-                || **signal_number == libc::SIGSTOP
-        })
-    {
+    if unsafe { libc::fcntl(notification_fd, libc::F_GETFD) } < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if let Some(signal_number) = signals.iter().find(|signal_number| {
+        **signal_number <= 0 || **signal_number == libc::SIGKILL || **signal_number == libc::SIGSTOP
+    }) {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "signal {signal_number} cannot be intercepted"
         )));
+    }
+    // Validate every signal and preserve its disposition before changing any
+    // process state. A failed installation must not leave live handlers pointing
+    // at a notification FD that the Python caller will close.
+    let mut previous_actions = Vec::with_capacity(signals.len());
+    for &signal_number in &signals {
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(signal_number, std::ptr::null(), &mut previous) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        previous_actions.push((signal_number, previous));
     }
     if CRASH_FD
         .compare_exchange(-1, notification_fd, Ordering::AcqRel, Ordering::Acquire)
@@ -179,23 +194,49 @@ fn install_gpu_crash_interlock(notification_fd: i32, signals: Vec<i32>) -> PyRes
         ss_flags: 0,
         ss_size: stack_size,
     };
-    if unsafe { libc::sigaltstack(&alt_stack, std::ptr::null_mut()) } != 0 {
+    let mut previous_stack: libc::stack_t = unsafe { std::mem::zeroed() };
+    if unsafe { libc::sigaltstack(&alt_stack, &mut previous_stack) } != 0 {
         unsafe { libc::munmap(stack, stack_size) };
         CRASH_FD.store(-1, Ordering::Release);
         return Err(std::io::Error::last_os_error().into());
     }
 
-    for signal_number in signals {
+    for (installed, signal_number) in signals.into_iter().enumerate() {
         let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
         action.sa_sigaction = gpu_crash_handler as *const () as usize;
-        action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESETHAND;
-        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        // Keep the handler installed: a second fatal signal on another thread
+        // must not restore default termination while GMS is obtaining proof.
+        action.sa_flags = CRASH_ACTION_FLAGS;
+        unsafe {
+            libc::sigemptyset(&mut action.sa_mask);
+            // A dead GMS reader must not turn the notification write into an
+            // unhandled SIGPIPE before we stop the CUDA client.
+            libc::sigaddset(&mut action.sa_mask, libc::SIGPIPE);
+        }
         if unsafe { libc::sigaction(signal_number, &action, std::ptr::null_mut()) } != 0 {
+            let error = std::io::Error::last_os_error();
+            for (number, previous) in previous_actions[..installed].iter().rev() {
+                unsafe { libc::sigaction(*number, previous, std::ptr::null_mut()) };
+            }
+            unsafe {
+                libc::sigaltstack(&previous_stack, std::ptr::null_mut());
+                libc::munmap(stack, stack_size);
+            }
             CRASH_FD.store(-1, Ordering::Release);
-            return Err(std::io::Error::last_os_error().into());
+            return Err(error.into());
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod crash_interlock_tests {
+    use super::CRASH_ACTION_FLAGS;
+
+    #[test]
+    fn fatal_handler_is_not_one_shot() {
+        assert_eq!(CRASH_ACTION_FLAGS & libc::SA_RESETHAND, 0);
+    }
 }
 
 /// Enter the same fail-closed path from normal Python teardown.
