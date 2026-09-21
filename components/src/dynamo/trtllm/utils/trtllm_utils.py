@@ -7,6 +7,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from pydantic import BaseModel
+
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
 
 
@@ -45,9 +47,8 @@ def deep_update(target: dict[str, Any], source: Mapping[str, Any]) -> None:
             if isinstance(existing, dict):
                 deep_update(existing, value)
                 continue
-            model_dump = getattr(existing, "model_dump", None)
-            if callable(model_dump):
-                dumped = model_dump(exclude_none=True, exclude_unset=True)
+            if isinstance(existing, BaseModel):
+                dumped = existing.model_dump(exclude_none=True, exclude_unset=True)
                 if isinstance(dumped, dict):
                     deep_update(dumped, value)
                     target[key] = dumped
