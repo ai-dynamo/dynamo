@@ -645,7 +645,7 @@ async def init_llm_worker(
     if config.modality == Modality.MULTIMODAL:
         engine_args["skip_tokenizer_init"] = False
         model_config = AutoConfig.from_pretrained(
-            config.model,
+            model_path,
             trust_remote_code=engine_args.get("trust_remote_code", False),
         )
         # MM-aware KV routing is aggregated-only, so the image marker is resolved
@@ -672,7 +672,9 @@ async def init_llm_worker(
             )
         multimodal_processor = MultimodalRequestProcessor(
             model_type=model_config.model_type,
-            model_dir=config.model,
+            # Same resolved argument as the engine: a repository id here would
+            # repeat the cache lookup the resolver exists to bypass.
+            model_dir=model_path,
             max_file_size_mb=config.max_file_size_mb,
             tokenizer=tokenizer,
             allowed_local_media_path=config.allowed_local_media_path,

@@ -23,13 +23,19 @@ pytestmark = [
 
 MODEL = "Qwen/Qwen3-0.6B"
 COMMIT = "c1899de289a04d12100db370d81485cdf75e47ca"
+OTHER_COMMIT = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+
+
+def _clear_cache_env(monkeypatch):
+    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _hub(tmp_path, monkeypatch):
     """Point Hugging Face's cache lookup at an empty directory under tmp_path."""
+    _clear_cache_env(monkeypatch)
     hf_home = tmp_path / "hf"
     monkeypatch.setenv("HF_HOME", str(hf_home))
-    monkeypatch.delenv("HF_HUB_CACHE", raising=False)
     hub = hf_home / "hub"
     hub.mkdir(parents=True)
     return hub
@@ -83,3 +89,38 @@ def test_unusable_ref_without_a_complete_snapshot_keeps_the_repository_id(
     _snapshot(repo, COMMIT, complete=False)
 
     assert resolve_model_path(MODEL) == MODEL
+
+
+def test_ref_naming_an_incomplete_snapshot_keeps_the_repository_id(
+    tmp_path, monkeypatch
+):
+    """A named commit is the one to load; another commit is not a substitute."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text(OTHER_COMMIT)
+    _snapshot(repo, OTHER_COMMIT, complete=False)
+    _snapshot(repo, COMMIT)
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+@pytest.mark.parametrize("revision", ["release-x", COMMIT])
+def test_explicit_revision_keeps_the_repository_id(tmp_path, monkeypatch, revision):
+    """The one cached snapshot is not evidence that it holds this revision."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    _snapshot(repo, COMMIT)
+
+    assert resolve_model_path(MODEL, revision) == MODEL
+
+
+def test_legacy_cache_variable_locates_the_snapshot(tmp_path, monkeypatch):
+    """huggingface_hub still honours HUGGINGFACE_HUB_CACHE, so this must too."""
+    _clear_cache_env(monkeypatch)
+    hub = tmp_path / "legacy-hub"
+    hub.mkdir()
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(hub))
+    repo = _repo(hub)
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+
+    assert resolve_model_path(MODEL) == str(snapshot)
