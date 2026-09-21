@@ -114,6 +114,11 @@ on:
         required: false
         type: string
         default: ''
+      secondary_ecr_region:
+        description: 'Second ECR region that must contain every pushed CI image before tests start.'
+        required: false
+        type: string
+        default: 'us-east-1'
       compliance_only:
         description: |
           Run ONLY the compliance extract + verify (and artifact upload),
@@ -662,6 +667,76 @@ jobs:
             -f container/Dockerfile.test \
             --build-arg BASE_IMAGE="${IMAGE_URI}" \
             "${TEST_TAG_ARGS[@]}" .
+      - name: Mirror pushed CI images to secondary ECR
+        if: ${{ inputs.push_image == true && !inputs.compliance_only }}
+        shell: bash
+        env:
+          SOURCE_ECR_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          SOURCE_ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TARGET_ECR_REGION: ${{ inputs.secondary_ecr_region }}
+          TARGET_ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ inputs.secondary_ecr_region }}.amazonaws.com
+          PRIMARY_IMAGE: ${{ steps.calculate-target-tag.outputs.image_uri }}
+          TEST_IMAGE: ${{ steps.calculate-target-tag.outputs.test_image_uri }}
+          RUNTIME_EXTRA_IMAGES: ${{ steps.extra-tags.outputs.tags }}
+          TEST_EXTRA_TAGS: ${{ inputs.test_extra_tags }}
+          INCLUDE_TEST_IMAGE: ${{ inputs.target != 'dev' && inputs.target != 'local-dev' && inputs.target != 'frontend' }}
+        run: |
+          set -euo pipefail
+
+          aws ecr get-login-password --region "${SOURCE_ECR_REGION}" | \
+            skopeo login --username AWS --password-stdin "${SOURCE_ECR_REGISTRY}"
+          aws ecr get-login-password --region "${TARGET_ECR_REGION}" | \
+            skopeo login --username AWS --password-stdin "${TARGET_ECR_REGISTRY}"
+
+          images=("${PRIMARY_IMAGE}")
+          while IFS= read -r image; do
+            [[ -n "${image}" ]] && images+=("${image}")
+          done <<< "${RUNTIME_EXTRA_IMAGES}"
+
+          if [[ "${INCLUDE_TEST_IMAGE}" == "true" ]]; then
+            images+=("${TEST_IMAGE}")
+            while IFS= read -r tag; do
+              [[ -n "${tag}" ]] && images+=("${SOURCE_ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}")
+            done <<< "${TEST_EXTRA_TAGS}"
+          fi
+
+          declare -A copied_tags=()
+          for source_ref in "${images[@]}"; do
+            expected_prefix="${SOURCE_ECR_REGISTRY}/${ECR_REPOSITORY}:"
+            if [[ "${source_ref}" != "${expected_prefix}"* ]]; then
+              echo "::error::Unexpected source image outside ${expected_prefix}: ${source_ref}"
+              exit 1
+            fi
+
+            tag="${source_ref#${expected_prefix}}"
+            [[ -n "${copied_tags[${tag}]:-}" ]] && continue
+            copied_tags["${tag}"]=1
+            target_ref="${TARGET_ECR_REGISTRY}/${ECR_REPOSITORY}:${tag}"
+
+            skopeo copy --all --retry-times 4 \
+              "docker://${source_ref}" \
+              "docker://${target_ref}"
+
+            source_digest=$(aws ecr describe-images \
+              --region "${SOURCE_ECR_REGION}" \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-ids "imageTag=${tag}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)
+            target_digest=$(aws ecr describe-images \
+              --region "${TARGET_ECR_REGION}" \
+              --repository-name "${ECR_REPOSITORY}" \
+              --image-ids "imageTag=${tag}" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)
+
+            if [[ "${source_digest}" != "${target_digest}" ]]; then
+              echo "::error::Regional digest mismatch for ${ECR_REPOSITORY}:${tag}: ${source_digest} != ${target_digest}"
+              exit 1
+            fi
+            echo "Copied ${ECR_REPOSITORY}:${tag} to ${TARGET_ECR_REGION} at ${target_digest}"
+          done
       - name: Show summary
         shell: bash
         if: ${{ inputs.push_image == 'true' && inputs.show_summary == 'true' }}
