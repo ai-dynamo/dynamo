@@ -33,6 +33,7 @@ use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, PublicDetails};
+use dynamo_runtime::telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace};
 use either::Either;
 use futures::Stream;
 use futures::stream::{self, StreamExt};
@@ -51,7 +52,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 use tokio_util::sync::CancellationToken;
-use tracing;
+use tracing::{self, Instrument};
 
 use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
@@ -7057,6 +7058,17 @@ impl OpenAIPreprocessor {
     }
 }
 
+fn preprocessing_lifecycle(context: &PipelineContext<()>) -> LifecycleTrace {
+    context
+        .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+        .ok()
+        .flatten()
+        .map(|trace| trace.as_ref().clone())
+        // Responses and other callers may share this preprocessor without
+        // creating a frontend lifecycle root. Never invent an orphan capture.
+        .unwrap_or_else(|| LifecycleTrace::new(false))
+}
+
 // for pals, we do not want to add the generation prompt to the formatted prompt
 // we also need to know if the template support this add_generation_prompt bool
 // any prompt template that does not support this should return an error
@@ -7080,6 +7092,8 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
         let (mut request, context) = request.into_parts();
+        let lifecycle = preprocessing_lifecycle(&context);
+        let preprocessing = lifecycle.start(LifecycleStage::RequestPreprocessing);
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -7147,6 +7161,7 @@ impl
                     .flatten()
                     .map(|name| name.as_ref().clone()),
             )
+            .instrument(preprocessing.clone())
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
 
@@ -7200,6 +7215,7 @@ impl
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
         let annotations_stream = stream::iter(annotations);
+        drop(preprocessing);
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;
@@ -7694,6 +7710,45 @@ mod tests {
             Some("deepseek_v41"),
             Some(&disabled)
         ));
+    }
+
+    #[test]
+    fn lifecycle_preprocessing_requires_frontend_capture() {
+        const CHILD: &str = "DYNAMO_PREPROCESSOR_LIFECYCLE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Enable the process-cached knob without racing other tests.
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "preprocessor::tests::lifecycle_preprocessing_requires_frontend_capture",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            return;
+        }
+
+        assert!(
+            LifecycleTrace::from_request_id_with_role(
+                "knob-probe",
+                dynamo_runtime::telemetry::LifecycleOperationRole::Worker,
+            )
+            .is_enabled()
+        );
+        let mut context = PipelineContext::new(());
+        assert!(!preprocessing_lifecycle(&context).is_enabled());
+        context.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(false));
+        assert!(!preprocessing_lifecycle(&context).is_enabled());
+        context.insert(LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleTrace::new(true));
+        assert!(preprocessing_lifecycle(&context).is_enabled());
     }
 
     #[test]
