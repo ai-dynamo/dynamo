@@ -255,6 +255,7 @@ mod tests {
                 session_id: "root".to_string(),
                 parent_session_id: None,
                 session_final: None,
+                subagent_spawn: None,
                 compaction: None,
                 input_trigger: None,
             }),

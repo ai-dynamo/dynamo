@@ -277,6 +277,7 @@ pub(crate) fn to_worker_selection_session_context(
         session_id,
         parent_session_id,
         session_final,
+        subagent_spawn: _,
         compaction: _,
         input_trigger,
     } = context;
@@ -2504,6 +2505,7 @@ mod tests {
             session_id: "child-session".into(),
             parent_session_id: Some("root-session".into()),
             session_final: Some(true),
+            subagent_spawn: Some(false),
             compaction: None,
             input_trigger: Some(InputTrigger::ToolResult),
         };

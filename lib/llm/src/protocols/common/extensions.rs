@@ -119,6 +119,11 @@ pub struct AgentContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_final: Option<bool>,
 
+    /// Whether this inference launches one or more subagent sessions.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_spawn: Option<bool>,
+
     /// Present when the current inference creates a compacted session summary.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -369,6 +374,7 @@ impl From<AgentContextHeaderValues> for AgentContext {
             session_id: values.session_id,
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
+            subagent_spawn: values.subagent_spawn,
             compaction: values.compaction,
             input_trigger: None,
         }
@@ -890,7 +896,8 @@ mod tests {
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
         HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
-        HEADER_DYNAMO_SESSION_ID, HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
+        HEADER_DYNAMO_SESSION_ID, HEADER_DYNAMO_SUBAGENT_SPAWN, HEADER_OPENCODE_PARENT_SESSION_ID,
+        HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1542,7 +1549,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_context_from_headers_reads_dynamo_parent_and_final() {
+    fn agent_context_from_headers_reads_dynamo_lifecycle() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_DYNAMO_SESSION_ID, "generic-run".parse().unwrap());
         headers.insert(
@@ -1550,6 +1557,7 @@ mod tests {
             "generic-parent".parse().unwrap(),
         );
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "true".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_SUBAGENT_SPAWN, "true".parse().unwrap());
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
@@ -1559,6 +1567,7 @@ mod tests {
             Some("generic-parent")
         );
         assert_eq!(agent_context.session_final, Some(true));
+        assert_eq!(agent_context.subagent_spawn, Some(true));
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
         assert_eq!(
             agent_context_from_headers(&headers).unwrap().session_final,
@@ -1597,6 +1606,7 @@ mod tests {
             HEADER_DYNAMO_SESSION_ID,
             HEADER_DYNAMO_PARENT_SESSION_ID,
             HEADER_DYNAMO_SESSION_FINAL,
+            HEADER_DYNAMO_SUBAGENT_SPAWN,
         ] {
             let mut headers = HeaderMap::new();
             headers.insert(

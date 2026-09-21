@@ -5849,6 +5849,7 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
+                subagent_spawn: None,
                 compaction: Some(AgentCompaction {
                     trigger: Some("automatic".to_string()),
                     ..Default::default()

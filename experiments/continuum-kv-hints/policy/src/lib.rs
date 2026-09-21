@@ -22,15 +22,19 @@ pub struct FixedRetention {
     pub ttl_seconds: f64,
 }
 
-/// Evicts final sessions and optionally retains non-final sessions.
+/// Applies sparse lifecycle actions to session-addressed KV.
 pub struct SessionKvHintPolicy {
-    fixed_retention: Option<FixedRetention>,
+    spawn_retention: Option<FixedRetention>,
+    evict_final_roots: bool,
     next_message_id: AtomicU64,
 }
 
 impl SessionKvHintPolicy {
-    pub fn new(fixed_retention: Option<FixedRetention>) -> Result<Self, KvHintPolicyError> {
-        if fixed_retention
+    pub fn new(
+        spawn_retention: Option<FixedRetention>,
+        evict_final_roots: bool,
+    ) -> Result<Self, KvHintPolicyError> {
+        if spawn_retention
             .is_some_and(|retain| !retain.ttl_seconds.is_finite() || retain.ttl_seconds <= 0.0)
         {
             return Err(KvHintPolicyError::new(
@@ -38,7 +42,8 @@ impl SessionKvHintPolicy {
             ));
         }
         Ok(Self {
-            fixed_retention,
+            spawn_retention,
+            evict_final_roots,
             next_message_id: AtomicU64::new(0),
         })
     }
@@ -77,9 +82,13 @@ impl SessionKvHintPolicy {
 
 pub fn register(
     frontend: HttpFrontend,
-    fixed_retention: Option<FixedRetention>,
+    spawn_retention: Option<FixedRetention>,
+    evict_final_roots: bool,
 ) -> Result<HttpFrontend, KvHintPolicyError> {
-    Ok(frontend.kv_hint_policy(SessionKvHintPolicy::new(fixed_retention)?))
+    Ok(frontend.kv_hint_policy(SessionKvHintPolicy::new(
+        spawn_retention,
+        evict_final_roots,
+    )?))
 }
 
 impl KvHintPolicy for SessionKvHintPolicy {
@@ -98,7 +107,10 @@ impl KvHintPolicy for SessionKvHintPolicy {
             .map(|hash| hash.0)
             .collect::<Vec<_>>();
 
-        if agent.session_final == Some(true) {
+        if self.evict_final_roots
+            && agent.session_final == Some(true)
+            && agent.parent_session_id.is_none()
+        {
             tracing::info!(
                 target: "continuum_kv_hints",
                 session_id = %agent.session_id,
@@ -116,7 +128,10 @@ impl KvHintPolicy for SessionKvHintPolicy {
             )));
         }
 
-        let Some(retain) = self.fixed_retention else {
+        let Some(retain) = self
+            .spawn_retention
+            .filter(|_| agent.subagent_spawn == Some(true))
+        else {
             return Ok(None);
         };
         tracing::info!(
@@ -161,7 +176,7 @@ mod tests {
 
     #[test]
     fn final_session_emits_deferred_eviction() {
-        let policy = SessionKvHintPolicy::new(None).unwrap();
+        let policy = SessionKvHintPolicy::new(None, true).unwrap();
         let agent = AgentContext::builder()
             .session_id("session-1".to_string())
             .session_final(true)
@@ -189,7 +204,7 @@ mod tests {
 
     #[test]
     fn first_request_can_target_its_current_blocks() {
-        let policy = SessionKvHintPolicy::new(None).unwrap();
+        let policy = SessionKvHintPolicy::new(None, true).unwrap();
         let agent = AgentContext::builder()
             .session_id("session-1".to_string())
             .session_final(true)
@@ -206,14 +221,18 @@ mod tests {
     }
 
     #[test]
-    fn fixed_retention_emits_priority_and_ttl() {
-        let policy = SessionKvHintPolicy::new(Some(FixedRetention {
-            priority: 3,
-            ttl_seconds: 2.5,
-        }))
+    fn spawn_retention_emits_priority_and_ttl() {
+        let policy = SessionKvHintPolicy::new(
+            Some(FixedRetention {
+                priority: 3,
+                ttl_seconds: 2.5,
+            }),
+            false,
+        )
         .unwrap();
         let agent = AgentContext::builder()
             .session_id("session-1".to_string())
+            .subagent_spawn(true)
             .build()
             .unwrap();
 
@@ -222,5 +241,36 @@ mod tests {
         assert_eq!(hint.actions[0].action_type, "kv.retain");
         assert_eq!(hint.actions[0].payload["priority"], 3);
         assert_eq!(hint.actions[0].payload["ttl_seconds"], 2.5);
+    }
+
+    #[test]
+    fn ordinary_request_emits_no_retention() {
+        let policy = SessionKvHintPolicy::new(
+            Some(FixedRetention {
+                priority: 3,
+                ttl_seconds: 2.5,
+            }),
+            false,
+        )
+        .unwrap();
+        let agent = AgentContext::builder()
+            .session_id("session-1".to_string())
+            .build()
+            .unwrap();
+
+        assert!(policy.evaluate(&context(&agent, None)).unwrap().is_none());
+    }
+
+    #[test]
+    fn final_child_does_not_evict_shared_prefix() {
+        let policy = SessionKvHintPolicy::new(None, true).unwrap();
+        let agent = AgentContext::builder()
+            .session_id("child-1".to_string())
+            .parent_session_id("root-1".to_string())
+            .session_final(true)
+            .build()
+            .unwrap();
+
+        assert!(policy.evaluate(&context(&agent, None)).unwrap().is_none());
     }
 }

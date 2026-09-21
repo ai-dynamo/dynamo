@@ -19,6 +19,7 @@ pub(crate) const HEADER_OPENCODE_PARENT_SESSION_ID: &str = "x-parent-session-id"
 pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_PARENT_SESSION_ID: &str = "x-dynamo-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
+pub(crate) const HEADER_DYNAMO_SUBAGENT_SPAWN: &str = "x-dynamo-subagent-spawn";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -54,6 +55,7 @@ pub(crate) struct AgentContextHeaderValues {
     pub(crate) session_id: String,
     pub(crate) parent_session_id: Option<String>,
     pub(crate) session_final: Option<bool>,
+    pub(crate) subagent_spawn: Option<bool>,
     pub(crate) compaction: Option<AgentCompaction>,
 }
 
@@ -70,6 +72,7 @@ fn borrowed_header_value<'a>(headers: &'a HeaderMap, header_name: &str) -> Optio
 
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
+    let subagent_spawn = header_bool(headers, HEADER_DYNAMO_SUBAGENT_SPAWN);
     let compaction = borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
         .and_then(|_| codex_compaction_header_value(headers));
 
@@ -80,6 +83,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
                 .map(str::to_owned),
             session_id: session_id.to_owned(),
             session_final,
+            subagent_spawn,
             compaction,
         });
     }
@@ -109,6 +113,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             session_id: session_id.to_owned(),
             parent_session_id,
             session_final,
+            subagent_spawn,
             compaction,
         });
     }

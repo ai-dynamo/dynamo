@@ -1090,6 +1090,7 @@ pub fn run_input<'p>(
 #[cfg(target_os = "linux")]
 fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>> {
     const ENABLED: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY";
+    const MODE: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY_MODE";
     const TTL: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_TTL_SECONDS";
     const PRIORITY: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_PRIORITY";
 
@@ -1097,14 +1098,29 @@ fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>
         return Ok(None);
     }
 
-    let ttl_seconds = std::env::var(TTL)
-        .ok()
-        .map(|value| {
+    let mode = std::env::var(MODE).unwrap_or_else(|_| "combined".to_string());
+    let (retain_on_spawn, evict_final_roots) = match mode.as_str() {
+        "retain" => (true, false),
+        "evict" => (false, true),
+        "combined" => (true, true),
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "invalid {MODE} value {mode:?}; expected retain, evict, or combined"
+            )));
+        }
+    };
+
+    let ttl_seconds = if retain_on_spawn {
+        let value = std::env::var(TTL)
+            .map_err(|_| PyValueError::new_err(format!("{TTL} is required in {mode} mode")))?;
+        Some(
             value.parse::<f64>().map_err(|error| {
                 PyValueError::new_err(format!("invalid {TTL} value {value:?}: {error}"))
-            })
-        })
-        .transpose()?;
+            })?,
+        )
+    } else {
+        None
+    };
     let fixed_retention = if let Some(ttl_seconds) = ttl_seconds {
         let priority = std::env::var(PRIORITY)
             .unwrap_or_else(|_| "10".to_string())
@@ -1118,7 +1134,7 @@ fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>
         None
     };
 
-    SessionKvHintPolicy::new(fixed_retention)
+    SessionKvHintPolicy::new(fixed_retention, evict_final_roots)
         .map(Some)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }

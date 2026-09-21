@@ -10125,6 +10125,7 @@ mod tests {
             session_id: "codex-thread".to_string(),
             parent_session_id: None,
             session_final: None,
+            subagent_spawn: None,
             compaction: Some(AgentCompaction {
                 trigger: Some("manual".to_string()),
                 ..Default::default()
