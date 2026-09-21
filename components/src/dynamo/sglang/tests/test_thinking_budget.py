@@ -185,7 +185,7 @@ def test_token_filter_check_caches_parser_construction(monkeypatch):
             calls.append(model_type)
             self.detector = SimpleNamespace(think_excluded_tokens=[1])
 
-    monkeypatch.setattr(thinking_budget, "ReasoningParser", Parser)
+    monkeypatch.setattr(thinking_budget, "_create_reasoning_parser", Parser)
     thinking_budget._token_filter_is_active.cache_clear()
 
     assert thinking_budget._token_filter_is_active("cached-parser")

@@ -5,11 +5,15 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import Any
 
-from sglang.srt.parser.reasoning_parser import ReasoningParser
-
 from dynamo.llm.exceptions import InvalidArgument
 
 _U32_MAX = 2**32 - 1
+
+
+def _create_reasoning_parser(model_type: str) -> Any:
+    from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+    return ReasoningParser(model_type=model_type)
 
 
 def extract_thinking_budget(request: Mapping[str, Any]) -> int | None:
@@ -96,7 +100,7 @@ def _token_filter_is_active(reasoning_parser: str) -> bool:
     activate the filter for parsers without excluded reasoning tokens.
     """
     try:
-        parser = ReasoningParser(model_type=reasoning_parser)
+        parser = _create_reasoning_parser(reasoning_parser)
     except (TypeError, ValueError) as exc:
         raise InvalidArgument(
             f"Unable to validate SGLang reasoning parser {reasoning_parser!r}: {exc}"
