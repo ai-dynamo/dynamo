@@ -265,6 +265,8 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         && state.filter_inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let materialize_additional_preferred_taint = eligibility.pinned_worker().is_none()
         && additional_inputs.contains(WorkerInputs::PREFERRED_TAINT);
+    // Reuse the borrowed context across rows; only the current filter's access mask changes.
+    let mut filter_context = input.context.with_inputs(WorkerInputs::NONE);
     let mut has_eligible_worker = false;
     let mut error = None;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
@@ -282,8 +284,8 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             state.filter_inputs,
         );
         for (inputs, filter) in &mut state.filters {
-            let context = input.context.with_inputs(*inputs);
-            match filter.keep(&context, &filter_candidate) {
+            filter_context.inputs = *inputs;
+            match filter.keep(&filter_context, &filter_candidate) {
                 Ok(true) => {}
                 Ok(false) => return false,
                 Err(policy_error) => {
