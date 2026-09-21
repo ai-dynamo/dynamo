@@ -187,9 +187,7 @@ sglang_configs = {
                 "Return a short answer for this synthetic prompt.",
                 repeat_count=1,
                 expected_response=[],
-                expected_log=[
-                    r"SGLang sampling params: .*['\"]thinking_budget['\"]: 32"
-                ],
+                expected_log=[r"SGLang thinking budget configured: 32"],
                 max_tokens=128,
                 extra_body={"thinking_token_budget": 32},
             )
