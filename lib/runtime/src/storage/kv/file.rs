@@ -220,10 +220,6 @@ impl Store for FileStore {
     // This cannot be a Drop imp because DistributedRuntime is cloned various places including
     // Python. Drop doesn't get called.
     fn shutdown(&self) {
-        // Set before either lock is taken below, so a concurrent caller that passes a
-        // shutdown check has already been seen by the drain it raced: `get_or_create_bucket`
-        // checks under `active_dirs`, and `Directory` writes check under the per-directory
-        // mutation lock that `delete_owned_files` also takes.
         self.is_shutdown.store(true, Ordering::Release);
         for (_, mut dir) in self.active_dirs.lock().drain() {
             if let Err(err) = dir.delete_owned_files() {
@@ -284,8 +280,6 @@ impl Directory {
         }
     }
 
-    /// Refuse mutations from a store that no longer owns this directory after shutdown.
-    ///
     /// Call this while holding the mutation lock. `shutdown` sets the flag before it
     /// takes that same lock to delete owned files, so a write either records its file
     /// before the deletion and is cleaned up by it, or sees the flag and refuses.
