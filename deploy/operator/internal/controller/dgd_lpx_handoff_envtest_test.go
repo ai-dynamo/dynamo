@@ -388,10 +388,4 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	storedSource := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(source), storedSource))
 	require.Equal(t, source.Status, storedSource.Status)
-
-	t.Log("Placement status persists independently of request deadlines")
-	stored.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
-	require.NoError(t, env.Client().Status().Update(t.Context(), stored))
-	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(stored), stored))
-	require.Equal(t, 0.75, *stored.Status.Placement.Score)
 }

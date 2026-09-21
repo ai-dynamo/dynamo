@@ -949,7 +949,7 @@ func TestDGD_FromV1alpha1_SubComponentType(t *testing.T) {
 
 // TestDGD_RoundTrip_Status exercises every populated Status sub-struct so that
 // the ConvertTo / ConvertFrom status paths are covered (conditions, services
-// map, restart, checkpoints, LPX placement, rollingUpdate).
+// map, restart, checkpoints, rollingUpdate).
 func TestDGD_RoundTrip_Status(t *testing.T) {
 	now := metav1.NewTime(metav1.Now().Rfc3339Copy().Time)
 	later := metav1.NewTime(now.Time.Add(60 * time.Second))
@@ -959,14 +959,8 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 			ObservedGeneration: 7,
 			State:              v1beta1.DGDStateSuccessful,
 			Placement: &v1beta1.PlacementStatus{
-				Score: ptr.To(0.92),
+				Score: ptr.To(0.87),
 				State: v1beta1.PlacementScoreStateReported,
-			},
-			LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
-				Placement: &v1beta1.PlacementStatus{
-					Score: ptr.To(0.87),
-					State: v1beta1.PlacementScoreStateReported,
-				},
 			},
 			Conditions: []metav1.Condition{
 				{

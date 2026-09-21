@@ -2025,7 +2025,6 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `modelDownload` _[ModelDownloadStatus](#modeldownloadstatus)_ | modelDownload contains the model download status for remote builds. |  | Optional: \{\} <br /> |
-| `placement` _[PlacementStatus](#placementstatus)_ | placement contains LPX scheduling progress and placement signals. |  | Optional: \{\} <br /> |
 
 
 #### v1beta1 DynamoGraphDeploymentRequest
@@ -2700,15 +2699,14 @@ PlacementStatus groups DGD-level scheduler placement fields under a single
 status object so future placement signals (e.g. scheduler contract version,
 last-report timestamp, per-unit reports) can be added without a schema break.
 
-The generic score source is an open question in DEP #10064 (Grove mirror,
-typed Grove scheduler API, or unstructured provider). Until one is selected,
-the DGD controller writes this field only as a compatibility projection of
-current LPX placement.
+The score source is an open question in DEP #10064 (Grove mirror, typed Grove
+scheduler API, or unstructured provider). Until a source is selected and
+implemented, the DGD controller does not write this field; the schema and
+conversion are landed here so downstream consumers can rely on the shape.
 
 
 
 _Appears in:_
-- [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
 - [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |

@@ -7,7 +7,6 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -41,7 +40,6 @@ func mergeLPXChildStatus(
 	if observed {
 		status = &v1beta1.DynamoGraphDeploymentLPXStatus{
 			ModelDownload: child.Status.ModelDownload.DeepCopy(),
-			Placement:     child.Status.Placement.DeepCopy(),
 		}
 		for _, component := range components {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
@@ -75,24 +73,4 @@ func mergeLPXChildStatus(
 		ordinary.Message = "Waiting for the current LPX engine revision and readiness"
 	}
 	return ordinary, status
-}
-
-// lpxPlacementProjection retains an independent ordinary-DGD placement value,
-// but mirrors current LPX placement and clears stale mirrors.
-func lpxPlacementProjection(
-	source *v1beta1.DynamoGraphDeployment,
-	current *v1beta1.PlacementStatus,
-	previousLPX *v1beta1.DynamoGraphDeploymentLPXStatus,
-	nextLPX *v1beta1.DynamoGraphDeploymentLPXStatus,
-) *v1beta1.PlacementStatus {
-	if nextLPX != nil {
-		return nextLPX.Placement
-	}
-	if len(lpx.Components(source)) > 0 {
-		return nil
-	}
-	if previousLPX != nil && apiequality.Semantic.DeepEqual(current, previousLPX.Placement) {
-		return nil
-	}
-	return current
 }

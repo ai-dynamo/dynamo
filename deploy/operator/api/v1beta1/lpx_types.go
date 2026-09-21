@@ -28,9 +28,6 @@ type DynamoGraphDeploymentLPXStatus struct {
 	// modelDownload contains the model download status for remote builds.
 	// +optional
 	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
-	// placement contains LPX scheduling progress and placement signals.
-	// +optional
-	Placement *PlacementStatus `json:"placement,omitempty"`
 }
 
 // ModelDownloadStatus contains the status of remote LPU model downloads.

@@ -655,8 +655,12 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = v1beta1.DGDState(src.State)
 	if src.Placement != nil {
-		dst.Placement = &v1beta1.PlacementStatus{}
-		ConvertFromPlacementStatus(src.Placement, dst.Placement)
+		dst.Placement = &v1beta1.PlacementStatus{
+			State: v1beta1.PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
 	} else {
 		dst.Placement = nil
 	}
@@ -699,8 +703,12 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 	dst.ObservedGeneration = src.ObservedGeneration
 	dst.State = DGDState(src.State)
 	if src.Placement != nil {
-		dst.Placement = &PlacementStatus{}
-		ConvertToPlacementStatus(src.Placement, dst.Placement)
+		dst.Placement = &PlacementStatus{
+			State: PlacementScoreState(src.Placement.State),
+		}
+		if src.Placement.Score != nil {
+			dst.Placement.Score = ptr.To(*src.Placement.Score)
+		}
 	} else {
 		dst.Placement = nil
 	}
@@ -734,22 +742,6 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 	if src.RollingUpdate != nil {
 		dst.RollingUpdate = &RollingUpdateStatus{}
 		ConvertToRollingUpdateStatus(src.RollingUpdate, dst.RollingUpdate)
-	}
-}
-
-// ConvertFromPlacementStatus converts placement status from v1alpha1 to v1beta1.
-func ConvertFromPlacementStatus(src *PlacementStatus, dst *v1beta1.PlacementStatus) {
-	*dst = v1beta1.PlacementStatus{State: v1beta1.PlacementScoreState(src.State)}
-	if src.Score != nil {
-		dst.Score = ptr.To(*src.Score)
-	}
-}
-
-// ConvertToPlacementStatus converts placement status from v1beta1 to v1alpha1.
-func ConvertToPlacementStatus(src *v1beta1.PlacementStatus, dst *PlacementStatus) {
-	*dst = PlacementStatus{State: PlacementScoreState(src.State)}
-	if src.Score != nil {
-		dst.Score = ptr.To(*src.Score)
 	}
 }
 

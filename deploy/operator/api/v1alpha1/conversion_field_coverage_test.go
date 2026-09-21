@@ -191,8 +191,6 @@ DynamoGraphDeploymentStatus.components.updatedReplicas
 DynamoGraphDeploymentStatus.conditions
 DynamoGraphDeploymentStatus.lpx.modelDownload.builds
 DynamoGraphDeploymentStatus.lpx.modelDownload.lastCheckedAt
-DynamoGraphDeploymentStatus.lpx.placement.score
-DynamoGraphDeploymentStatus.lpx.placement.state
 DynamoGraphDeploymentStatus.observedGeneration
 DynamoGraphDeploymentStatus.placement.score
 DynamoGraphDeploymentStatus.placement.state

@@ -275,7 +275,7 @@ func TestModelDownloadSpecChangeRemainsFailClosed(t *testing.T) {
 }
 
 func TestLPXDisabledRevisionPreservesObservationFence(t *testing.T) {
-	t.Log("A new revision retains old placement and download observations without a scheduling deadline")
+	t.Log("A new revision starts with old download observations and no scheduling deadline")
 	source := newModelDownloadDGD(modelDownloadTestSecondBuildID)
 	source.Generation++
 	child := newLPXTestDeployment(t, source)
@@ -283,7 +283,6 @@ func TestLPXDisabledRevisionPreservesObservationFence(t *testing.T) {
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
 		Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: ptr.To(metav1.Now()),
 	}
-	child.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
 	child.Generation++
 	previousGeneration := child.Status.ObservedGeneration
 	require.Nil(t, lpxRequestDeadlineSeconds(source))
@@ -291,16 +290,14 @@ func TestLPXDisabledRevisionPreservesObservationFence(t *testing.T) {
 	r := newLPXTestReconciler(t, registry, child, source)
 	r.runtimeConfig.Gate = features.Gates{LPX: true}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
-	previousPlacement := child.Status.Placement.DeepCopy()
 
-	t.Log("Disabled reconciliation reports the new failure without marking stale placement as observed")
+	t.Log("Disabled reconciliation reports the new failure without marking the new revision as observed")
 	for range 2 {
 		_, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 		require.NoError(t, err)
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 		require.Equal(t, previousGeneration, child.Status.ObservedGeneration)
 		require.Nil(t, child.Status.ModelDownload)
-		require.Equal(t, previousPlacement, child.Status.Placement)
 		require.Empty(t, registry.calls, "the early exit has not checked either build")
 		failed := meta.FindStatusCondition(child.Status.Conditions, "Failed")
 		require.Equal(t, child.Generation, failed.ObservedGeneration)

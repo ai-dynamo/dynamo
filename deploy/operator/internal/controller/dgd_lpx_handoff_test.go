@@ -72,9 +72,7 @@ func projectLPXChildStatus(
 	result *ReconcileResult,
 	status *v1beta1.DynamoGraphDeploymentStatus,
 ) {
-	previousLPX := status.LPX
 	*result, status.LPX = mergeLPXChildStatus(source, child, *result)
-	status.Placement = lpxPlacementProjection(source, status.Placement, previousLPX, status.LPX)
 }
 
 func TestOrdinaryGroveProjectionExcludesLPXWithoutMutatingSource(t *testing.T) {
@@ -220,20 +218,17 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 		GPUsPerEngine: ptr.To(int64(8)), GPUsPerReplica: ptr.To(int64(8)),
 	}}
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"build"}}
-	placementScore := 0.75
-	child.Status.Placement = &v1beta1.PlacementStatus{Score: &placementScore, State: v1beta1.PlacementScoreStateReported}
+	source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
 	result := ReconcileResult{State: v1beta1.DGDStateSuccessful, ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{"prefill": {Replicas: 4, AvailableReplicas: ptr.To(int32(4)), Ready: true}}}
-	status := v1beta1.DynamoGraphDeploymentStatus{}
+	status := *source.Status.DeepCopy()
 	projectLPXChildStatus(source, child, &result, &status)
 	require.Equal(t, v1beta1.DGDStateSuccessful, result.State)
 	require.Len(t, result.ComponentStatus, 2)
 	require.Equal(t, child.Status.Components["lpx"], result.ComponentStatus["lpx"])
-	require.Equal(t, status.LPX.Placement, status.Placement)
+	require.Equal(t, source.Status.Placement, status.Placement)
 	status.LPX.ModelDownload.Builds[0] = "parent-copy"
-	*status.LPX.Placement.Score = 0.25
 	require.Equal(t, "build", child.Status.ModelDownload.Builds[0])
-	require.Equal(t, placementScore, *child.Status.Placement.Score)
 
 	t.Log("Reject missing or stale children and stale Ready conditions")
 	for _, failure := range []string{"missing-child", "generation", "condition"} {
@@ -250,12 +245,11 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 		previous := status
 		projectLPXChildStatus(source, stale, &pending, &previous)
 		require.Equal(t, v1beta1.DGDStatePending, pending.State, failure)
+		require.Equal(t, source.Status.Placement, previous.Placement, failure)
 		if failure == "missing-child" || failure == "generation" {
 			require.Nil(t, previous.LPX, failure)
-			require.Nil(t, previous.Placement, failure)
 		} else {
 			require.NotNil(t, previous.LPX, failure)
-			require.Equal(t, previous.LPX.Placement, previous.Placement, failure)
 		}
 	}
 
@@ -263,14 +257,14 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	partial := child.Status.Components["lpx"]
 	partial.AvailableReplicas, partial.Ready = ptr.To(int32(2)), false
 	child.Status.Components["lpx"] = partial
-	child.Status.ModelDownload, child.Status.Placement = nil, nil
+	child.Status.ModelDownload = nil
 	result.Reason = "CheckpointReady"
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: "LPXRetiring"})
 	projectLPXChildStatus(source, child, &result, &status)
 	require.Equal(t, v1beta1.DGDStatePending, result.State)
 	require.Equal(t, Reason("LPXRetiring"), result.Reason)
 	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{}, status.LPX)
-	require.Nil(t, status.Placement)
+	require.Equal(t, source.Status.Placement, status.Placement)
 	require.Equal(t, partial, result.ComponentStatus["lpx"])
 	source.Status.Components = result.ComponentStatus
 	request := &v1beta1.DynamoGraphDeploymentRequest{}
@@ -293,7 +287,7 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	source.Spec.Components = nil
 	projectLPXChildStatus(source, child, &result, &status)
 	require.Nil(t, status.LPX)
-	require.Nil(t, status.Placement)
+	require.Equal(t, source.Status.Placement, status.Placement)
 }
 
 func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
@@ -313,11 +307,10 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			child, source, _ := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 			child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Replicas: 1}}
 			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"stale-build"}}
-			child.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
 			child.Status.Conditions = []metav1.Condition{{Type: "Failed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "PublicationDenied", Message: "Check the namespace quota"}}
 			result := ReconcileResult{State: v1beta1.DGDStateSuccessful}
 			status := v1beta1.DynamoGraphDeploymentStatus{LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
-				ModelDownload: child.Status.ModelDownload.DeepCopy(), Placement: child.Status.Placement.DeepCopy(),
+				ModelDownload: child.Status.ModelDownload.DeepCopy(),
 			}}
 			switch test.name {
 			case "observed-result":
@@ -349,7 +342,6 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			if test.name == "observed-result" {
 				require.NotNil(t, status.LPX)
 				require.NotNil(t, status.LPX.ModelDownload)
-				require.NotNil(t, status.LPX.Placement)
 				require.Equal(t, int32(1), result.ComponentStatus["lpx"].Replicas)
 
 				t.Log("A retained ordinary rollout cannot hide the child failure in final DGD status")
@@ -430,8 +422,8 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 	}
 }
 
-func TestLPXHandoffOrdinaryScalingPreservesPlacement(t *testing.T) {
-	t.Log("Seed the shared child's current readiness and placement")
+func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
+	t.Log("Seed the shared child's current readiness")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1)),
@@ -439,7 +431,6 @@ func TestLPXHandoffOrdinaryScalingPreservesPlacement(t *testing.T) {
 		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:0"}}}},
 	})
-	child.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported}
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
 		"lpx":   {Replicas: 1, AvailableReplicas: ptr.To(int32(1)), Ready: true},
@@ -466,14 +457,12 @@ func TestLPXHandoffOrdinaryScalingPreservesPlacement(t *testing.T) {
 		require.Equal(t, v1beta1.DGDStateSuccessful, projected.Status.State)
 		require.True(t, meta.IsStatusConditionTrue(projected.Status.Conditions, "Ready"))
 		require.Equal(t, source.Generation, projected.Status.ObservedGeneration)
-		require.Equal(t, beforeChild.Status.Placement, current.Status.Placement)
-		require.Equal(t, beforeChild.Status.Placement, projected.Status.LPX.Placement)
 		require.Equal(t, beforeSource, source)
 		source.Status = projected.Status
 	}
 	require.Equal(t, int64(8), source.Generation)
 
-	t.Log("Scale prefill without changing the child or its placement")
+	t.Log("Scale prefill without changing the child or its readiness")
 	source.GetComponentByName("prefill").Replicas = ptr.To(int32(4))
 	source.Generation++
 	current, err := handoff.Reconcile(t.Context(), source)
@@ -628,14 +617,12 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 
 func TestLPXRemovalSurvivesOrdinaryReconcileFailure(t *testing.T) {
 	for _, test := range []struct {
-		name                 string
-		retainLPX            bool
-		childGone            bool
-		independentPlacement bool
+		name      string
+		retainLPX bool
+		childGone bool
 	}{
 		{name: "remove"},
 		{name: "retain", retainLPX: true},
-		{name: "independent placement", independentPlacement: true},
 		{name: "pending child already gone", childGone: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -658,17 +645,14 @@ func TestLPXRemovalSurvivesOrdinaryReconcileFailure(t *testing.T) {
 			source.Generation++
 			require.NoError(t, kube.Update(t.Context(), source))
 			source.Status.LPX = &v1beta1.DynamoGraphDeploymentLPXStatus{
-				Placement: &v1beta1.PlacementStatus{Score: ptr.To(0.92)},
+				ModelDownload: &v1beta1.ModelDownloadStatus{Builds: []string{"model/build"}},
 			}
-			source.Status.Placement = source.Status.LPX.Placement.DeepCopy()
+			source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
 			source.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
 				"lpx": {Replicas: 1}, "prefill": {Replicas: 2},
 			}
-			if test.independentPlacement {
-				source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.5)}
-			}
 			if test.childGone {
-				source.Status.LPX, source.Status.Placement = nil, nil
+				source.Status.LPX = nil
 				source.Status.Components["lpx"] = v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup}
 			}
 			previousStatus := source.Status.DeepCopy()
@@ -698,11 +682,7 @@ func TestLPXRemovalSurvivesOrdinaryReconcileFailure(t *testing.T) {
 				require.Equal(t, source.Status.LPX, result.Status.LPX)
 				require.Equal(t, source.Status.Components, result.Status.Components)
 			}
-			if test.retainLPX || test.independentPlacement {
-				require.Equal(t, source.Status.Placement, result.Status.Placement)
-			} else {
-				require.Nil(t, result.Status.Placement)
-			}
+			require.Equal(t, source.Status.Placement, result.Status.Placement)
 		})
 	}
 }
@@ -864,7 +844,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 }
 
 func TestOrdinaryDGDClearsLPXStatusWithoutRefresh(t *testing.T) {
-	t.Log("Seed an ordinary DGD with obsolete LPX-owned download and placement status")
+	t.Log("Seed an ordinary DGD with obsolete LPX download status and independent placement")
 	checkedAt := metav1.Unix(1, 0)
 	source := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "download-status", Namespace: "default", Generation: 1},
@@ -873,7 +853,6 @@ func TestOrdinaryDGDClearsLPXStatusWithoutRefresh(t *testing.T) {
 			Placement: &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported},
 			LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
 				ModelDownload: &v1beta1.ModelDownloadStatus{Builds: []string{"model/build"}, LastCheckedAt: &checkedAt},
-				Placement:     &v1beta1.PlacementStatus{Score: ptr.To(0.75), State: v1beta1.PlacementScoreStateReported},
 			},
 		},
 	}
@@ -896,26 +875,4 @@ func TestOrdinaryDGDClearsLPXStatusWithoutRefresh(t *testing.T) {
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(source), updated))
 	require.Nil(t, updated.Status.LPX)
 	require.Equal(t, source.Status.Placement, updated.Status.Placement)
-}
-
-func TestOrdinaryDGDClearsMirroredLPXPlacement(t *testing.T) {
-	t.Log("Seed an ordinary DGD with the same compatibility projection at both placement paths")
-	placement := &v1beta1.PlacementStatus{
-		Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported,
-	}
-	source := &v1beta1.DynamoGraphDeployment{
-		Status: v1beta1.DynamoGraphDeploymentStatus{
-			Placement: placement.DeepCopy(),
-			LPX:       &v1beta1.DynamoGraphDeploymentLPXStatus{Placement: placement.DeepCopy()},
-		},
-	}
-	status := source.Status.DeepCopy()
-	result := &ReconcileResult{}
-
-	t.Log("Project status after the obsolete LPX child is absent")
-	projectLPXChildStatus(source, nil, result, status)
-
-	t.Log("Clear both the obsolete nested status and its matching top-level projection")
-	require.Nil(t, status.LPX)
-	require.Nil(t, status.Placement)
 }

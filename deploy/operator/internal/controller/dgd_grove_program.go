@@ -125,7 +125,6 @@ func (p *groveProgram) Reconcile(
 		}
 
 		// Do not keep reporting retired LPX capacity when ordinary reconciliation fails.
-		programResult.Status.Placement = lpxPlacementProjection(req.DGD, programResult.Status.Placement, programResult.Status.LPX, nil)
 		programResult.Status.LPX = nil
 		for name := range programResult.Status.Components {
 			if req.DGD.GetComponentByName(name) == nil {
@@ -195,14 +194,7 @@ func (p *groveProgram) Reconcile(
 		}
 	}
 
-	previousLPX := programResult.Status.LPX
 	result, programResult.Status.LPX = mergeLPXChildStatus(req.DGD, child, result)
-	programResult.Status.Placement = lpxPlacementProjection(
-		req.DGD,
-		programResult.Status.Placement,
-		previousLPX,
-		programResult.Status.LPX,
-	)
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if child != nil && !child.DeletionTimestamp.IsZero() {
 		programResult.RequeueAfter = 5 * time.Second
