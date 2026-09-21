@@ -263,7 +263,7 @@ def test_dyn_port_accepts_high_non_system_port() -> None:
 # only; a foreground service hides other failures and delays the TERM/INT trap.
 
 _EXAMPLES_DIR = Path(__file__).parents[2] / "examples"
-_HEREDOC = re.compile(r"<<(-?)[ \t]*([\"']?)(\w+)\2")
+_HEREDOC = re.compile(r"<<(-?)[ \t]*")
 # `python -m dynamo.vllm`, `python3 -m dynamo.frontend`, `python -m "$WORKER_MODULE"`.
 _SERVICE = re.compile(
     r"(?<![\w./-])python3?\s+(?:-\S+\s+)*-m\s+(?:dynamo\.\S*|\$\{?\w+\}?)"
@@ -294,12 +294,33 @@ def _read_quoted(script: str, index: int) -> tuple[int, str]:
     cursor = index + 1
     while cursor < len(script) and script[cursor] != '"':
         if script[cursor] == "\\" and cursor + 1 < len(script):
-            chunk.append(script[cursor + 1])
-            cursor += 2
-            continue
+            following = script[cursor + 1]
+            if following in '$`"\\\n':
+                if following != "\n":
+                    chunk.append(following)
+                cursor += 2
+                continue
         chunk.append(script[cursor])
         cursor += 1
     return cursor + 1, "".join(chunk)
+
+
+def _read_heredoc_word(script: str, index: int) -> tuple[int, str]:
+    """Read a delimiter with shell quote removal, without expanding its contents."""
+    chunks: list[str] = []
+    while index < len(script) and script[index] not in " \t\n;&|()<>":
+        char = script[index]
+        if char in "'\"":
+            index, chunk = _read_quoted(script, index)
+            chunks.append(chunk)
+        elif char == "\\" and index + 1 < len(script):
+            if script[index + 1] != "\n":
+                chunks.append(script[index + 1])
+            index += 2
+        else:
+            chunks.append(char)
+            index += 1
+    return index, "".join(chunks)
 
 
 def _split_commands(script: str) -> list[_Command]:
@@ -390,12 +411,19 @@ def _split_commands(script: str) -> list[_Command]:
             end = script.find("\n", index)
             index = size if end < 0 else end
             continue
-        if script.startswith("<<", index) and not script.startswith("<<<", index):
+        if script.startswith("<<<", index):
+            add("<<<", False)
+            index += 3
+            continue
+        if script.startswith("<<", index):
             match = _HEREDOC.match(script, index)
             if match is not None:
-                heredocs.append((match.group(3), match.group(1) == "-"))
-                index = match.end()
-                continue
+                end, delimiter = _read_heredoc_word(script, match.end())
+                if end > match.end():
+                    heredocs.append((delimiter, match.group(1) == "-"))
+                    line += script[index:end].count("\n")
+                    index = end
+                    continue
         if not "".join(parts).strip() and (
             char == "(" or (char == "{" and script[index + 1 : index + 2].isspace())
         ):
@@ -613,6 +641,41 @@ def test_heredoc_body_ends_only_at_the_bash_delimiter() -> None:
     assert _service_launches(_HEREDOC_SAMPLE) == [
         (10, "python -m dynamo.frontend", True),
     ]
+
+
+@pytest.mark.parametrize(
+    "word,delimiter",
+    [
+        ("'END-SCRIPT'", "END-SCRIPT"),
+        ("END-SCRIPT", "END-SCRIPT"),
+        (r"\EOF", "EOF"),
+        ('"END SCRIPT"', "END SCRIPT"),
+        ("END'-SCRIPT'", "END-SCRIPT"),
+        (r'"\EOF"', r"\EOF"),
+        (r'"\$EOF"', "$EOF"),
+        ("''", ""),
+    ],
+)
+@pytest.mark.parametrize("operator", ["<<", "<<-"])
+def test_heredoc_delimiter_is_a_shell_word(
+    word: str, delimiter: str, operator: str
+) -> None:
+    """Punctuation and quote removal must not expose heredoc text as commands."""
+    indent = "\t" if operator == "<<-" else ""
+    script = (
+        f"cat {operator}{word}\n"
+        "python -m dynamo.fake\n"
+        f"{indent}{delimiter}\n"
+        "python -m dynamo.frontend &\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [(4, "python -m dynamo.frontend", True)]
+
+
+def test_here_string_does_not_start_a_heredoc() -> None:
+    """Consuming <<< must not reinterpret its final two characters as <<."""
+    script = 'cat <<<"configuration"\npython -m dynamo.frontend &\nwait_any_exit\n'
+    assert _service_launches(script) == [(2, "python -m dynamo.frontend", True)]
 
 
 @pytest.mark.parametrize("operator", ["&&", "||", "|", "|&"])
