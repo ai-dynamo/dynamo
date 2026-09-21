@@ -216,12 +216,19 @@ impl AnthropicStreamConverter {
             .take(call_limit)
             .filter(|(_, tool_call)| !tool_call.has_emitted && (is_final || tool_call.needs_flush))
         {
-            tool_call.needs_flush = false;
             let raw: String = tool_call
                 .argument_fragments
                 .iter()
                 .map(|(arguments, _)| arguments.as_str())
                 .collect();
+            // While the stream is live, a call whose arguments have not started yet is
+            // indistinguishable from a parameterless call. Emitting it now would close
+            // the block and discard the fragments that follow, so leave it pending and
+            // let the final drain decide.
+            if !is_final && raw.is_empty() {
+                continue;
+            }
+            tool_call.needs_flush = false;
             let arguments_are_valid = if raw.is_empty() {
                 // An empty argument string is valid for a completed call, but at a
                 // token-limit finish it means generation stopped immediately after
@@ -1289,9 +1296,95 @@ mod tests {
         );
         conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
         let values = sse_values(events).await;
-        assert_eq!(values.len(), if arguments.is_some() { 3 } else { 2 });
-        assert_eq!(values[0]["content_block"]["input"], serde_json::json!({}));
-        assert_eq!(values.last().unwrap()["type"], "content_block_stop");
+        // Only arguments that already parse can close mid-stream. A call whose
+        // arguments are still absent or empty waits for the final drain, where
+        // late fragments can no longer arrive.
+        let closes_on_finish = arguments.is_some_and(|arguments| !arguments.is_empty());
+        if closes_on_finish {
+            assert_eq!(
+                values
+                    .iter()
+                    .map(|v| v["type"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "content_block_start",
+                    "content_block_delta",
+                    "content_block_stop"
+                ]
+            );
+        } else {
+            assert!(values.is_empty());
+        }
+
+        let terminal = sse_values(conv.emit_end_events()).await;
+        let mut expected = Vec::new();
+        if !closes_on_finish {
+            expected.push("content_block_start");
+            if arguments.is_some() {
+                expected.push("content_block_delta");
+            }
+            expected.push("content_block_stop");
+        }
+        expected.extend(["message_delta", "message_stop"]);
+        assert_eq!(
+            terminal
+                .iter()
+                .map(|v| v["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        let block_start = if closes_on_finish {
+            &values[0]
+        } else {
+            &terminal[0]
+        };
+        assert_eq!(block_start["content_block"]["name"], "no_parameters");
+        assert_eq!(block_start["content_block"]["input"], serde_json::json!({}));
+        assert_eq!(
+            terminal[expected.len() - 2]["delta"]["stop_reason"],
+            "tool_use"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_identity_only_call_keeps_late_arguments() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        let mut events = Vec::new();
+        conv.append_chunk_events(
+            &tool_call_chunk(0, Some("call_0"), Some("read_file"), None),
+            &mut events,
+        );
+        conv.append_chunk_events(&finish_chunk(FinishReason::ToolCalls), &mut events);
+        assert!(
+            events.is_empty(),
+            "a call with no arguments yet must not close while the stream is live"
+        );
+
+        conv.append_chunk_events(
+            &tool_call_chunk(0, None, None, Some("{\"path\":\"/tmp/example.txt\"}")),
+            &mut events,
+        );
+        let values = sse_values(events).await;
+        assert_eq!(
+            values
+                .iter()
+                .map(|v| v["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop"
+            ]
+        );
+        assert_eq!(values[0]["content_block"]["name"], "read_file");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                values[1]["delta"]["partial_json"].as_str().unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({"path": "/tmp/example.txt"})
+        );
+
         let terminal = sse_values(conv.emit_end_events()).await;
         assert_eq!(terminal.len(), 2);
         assert_eq!(terminal[0]["delta"]["stop_reason"], "tool_use");
@@ -1669,13 +1762,22 @@ mod tests {
         let mut chunk = tool_call_chunk(0, Some("call-1"), Some("Read"), None);
         chunk.inner.choices[0].finish_reason = Some(FinishReason::FunctionCall);
 
-        let finish = conv.process_chunk_tagged(&chunk);
+        // The call carries no argument fragment, so it stays pending while the
+        // stream is live and is emitted once EOF rules out later fragments.
+        assert!(conv.process_chunk_tagged(&chunk).is_empty());
+
+        let terminal = conv.emit_end_events_tagged();
         assert_eq!(
-            event_types(&finish),
-            vec!["content_block_start", "content_block_stop"]
+            event_types(&terminal),
+            vec![
+                "content_block_start",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ]
         );
         assert!(matches!(
-            &finish[0].data,
+            &terminal[0].data,
             AnthropicStreamEvent::ContentBlockStart {
                 content_block: AnthropicResponseContentBlock::ToolUse { id, name, input },
                 ..
@@ -1684,10 +1786,6 @@ mod tests {
                 && name == "Read"
                 && input == &serde_json::json!({})
         ));
-        assert_eq!(
-            event_types(&conv.emit_end_events_tagged()),
-            vec!["message_delta", "message_stop"]
-        );
     }
 
     #[test]
