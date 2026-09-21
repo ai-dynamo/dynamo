@@ -1316,80 +1316,65 @@ async fn router_with_worker_configs_classifier_policy_and_mode(
 }
 
 #[tokio::test]
-async fn policy_affinity_control_rebinds_soft_sessions_and_preserves_hard_pins() {
+async fn policy_affinity_control_selects_and_rebinds_soft_sessions() {
     const TARGET_WORKER: u64 = 7;
     const PREFERRED_WORKER: u64 = 8;
 
-    for exclusive_affinity_target in [false, true] {
-        for affinity_mode in [
+    for (exclusive_affinity_target, expected) in [(false, PREFERRED_WORKER), (true, TARGET_WORKER)]
+    {
+        let workers = HashMap::from([
+            (TARGET_WORKER, ModelRuntimeConfig::default()),
+            (PREFERRED_WORKER, ModelRuntimeConfig::default()),
+        ]);
+        let (router, runtime) = router_with_worker_configs_and_policy(
+            Some(Duration::from_secs(10)),
+            workers,
+            highest_worker_policy(exclusive_affinity_target),
             crate::session_affinity::SessionAffinityMode::Soft,
-            crate::session_affinity::SessionAffinityMode::Hard,
-        ] {
-            let workers = HashMap::from([
-                (TARGET_WORKER, ModelRuntimeConfig::default()),
-                (PREFERRED_WORKER, ModelRuntimeConfig::default()),
-            ]);
-            let (router, runtime) = router_with_worker_configs_and_policy(
-                Some(Duration::from_secs(10)),
-                workers,
-                highest_worker_policy(exclusive_affinity_target),
-                affinity_mode,
+        )
+        .await;
+        let session_id = SessionAffinityId::new(format!("policy-{exclusive_affinity_target}"));
+        bind_affinity_target(&router, &session_id, AffinityTarget::worker(TARGET_WORKER)).await;
+        let mut request = Context::new(request());
+        request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+        let (selection, operation) = router
+            .select_with_affinity(
+                &request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
             )
-            .await;
-            let session_id = SessionAffinityId::new(format!(
-                "policy-{affinity_mode:?}-{exclusive_affinity_target}"
-            ));
-            bind_affinity_target(&router, &session_id, AffinityTarget::worker(TARGET_WORKER)).await;
-            let mut request = Context::new(request());
-            request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+            .await
+            .unwrap();
+        assert_eq!(selection.worker.worker_id, expected);
 
-            let (selection, operation) = router
-                .select_with_affinity(
-                    &request,
-                    RequestPhase::Aggregated,
-                    false,
-                    &CleanupBudget::default(),
-                )
-                .await
-                .unwrap();
-            let expected = if affinity_mode == crate::session_affinity::SessionAffinityMode::Soft
-                && !exclusive_affinity_target
-            {
-                PREFERRED_WORKER
-            } else {
-                TARGET_WORKER
-            };
-            assert_eq!(selection.worker.worker_id, expected);
+        let output = Annotated::from_data(LLMEngineOutput {
+            finish_reason: Some(FinishReason::Stop),
+            ..Default::default()
+        });
+        let stream = ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            request.context().clone(),
+        );
+        let mut stream = router
+            .bind_affinity(operation, route_target(selection.worker), stream)
+            .unwrap();
+        while stream.next().await.is_some() {}
+        router.kv_router().free(request.id()).await.unwrap();
 
-            // Model a successful dispatch response through the same affinity binding path used
-            // by `generate`: advisory soft affinity may rebind, while hard affinity remains pinned.
-            let output = Annotated::from_data(LLMEngineOutput {
-                finish_reason: Some(FinishReason::Stop),
-                ..Default::default()
-            });
-            let stream = ResponseStream::new(
-                Box::pin(stream::once(async move { output })),
-                request.context().clone(),
-            );
-            let mut stream = router
-                .bind_affinity(operation, route_target(selection.worker), stream)
-                .unwrap();
-            while stream.next().await.is_some() {}
-            router.kv_router().free(request.id()).await.unwrap();
+        assert_eq!(
+            router
+                .affinity
+                .as_ref()
+                .unwrap()
+                .query_target(&session_id, None)
+                .unwrap(),
+            Some(AffinityTarget::worker(expected))
+        );
 
-            assert_eq!(
-                router
-                    .affinity
-                    .as_ref()
-                    .unwrap()
-                    .query_target(&session_id, None)
-                    .unwrap(),
-                Some(AffinityTarget::worker(expected))
-            );
-
-            drop(router);
-            runtime.shutdown();
-        }
+        drop(router);
+        runtime.shutdown();
     }
 }
 

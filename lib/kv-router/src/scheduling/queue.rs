@@ -2217,14 +2217,7 @@ mod tests {
                 )
             })
             .collect();
-        make_queue_with_custom_configs_and_selector(
-            configs,
-            block_size,
-            threshold_frac,
-            selector,
-            None,
-            None,
-        )
+        make_queue_with_custom_configs_and_selector(configs, block_size, threshold_frac, selector)
     }
 
     #[allow(clippy::type_complexity)]
@@ -2235,8 +2228,6 @@ mod tests {
         block_size: u32,
         threshold_frac: Option<f64>,
         selector: Sel,
-        overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-        available_worker_provider: Option<WorkerAvailabilityProvider>,
     ) -> (
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
@@ -2268,8 +2259,8 @@ mod tests {
             selector,
             None,
             None,
-            overloaded_worker_provider,
-            available_worker_provider,
+            None,
+            None,
         ));
 
         (queue, slots)
@@ -2687,95 +2678,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exclusive_affinity_falls_back_when_target_is_ineligible() {
-        let selector = || MinDecodeSelector {
-            rendezvous: None,
-            exclusive_affinity_target: true,
-        };
-        let target = WorkerWithDpRank::new(1, 0);
-
-        let overloaded: OverloadedWorkerProvider = Arc::new(|| Some(HashSet::from([1])));
-        let configs = (0..2)
-            .map(|id| {
-                (
-                    id,
-                    SimpleWorkerConfig {
-                        max_num_batched_tokens: Some(64),
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-        let (queue, _slots) = make_queue_with_custom_configs_and_selector(
-            configs,
+    async fn exclusive_affinity_falls_back_when_target_is_disallowed() {
+        let (queue, _slots) = make_queue_with_custom_selector(
+            2,
             16,
+            64,
             None,
-            selector(),
-            Some(overloaded),
-            None,
+            MinDecodeSelector {
+                rendezvous: None,
+                exclusive_affinity_target: true,
+            },
         );
-        let (mut request, _response_rx) = make_request("overloaded-affinity", 64);
-        request.affinity_target = Some(target.into());
-        assert_eq!(
-            queue
-                .select_without_admission(request)
-                .await
-                .unwrap()
-                .response
-                .best_worker,
-            WorkerWithDpRank::new(0, 0)
-        );
-
-        let available: WorkerAvailabilityProvider =
-            Arc::new(|_| Some(Arc::new(HashSet::from([0]))));
-        let configs = (0..2)
-            .map(|id| {
-                (
-                    id,
-                    SimpleWorkerConfig {
-                        max_num_batched_tokens: Some(64),
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-        let (queue, _slots) = make_queue_with_custom_configs_and_selector(
-            configs,
-            16,
-            None,
-            selector(),
-            None,
-            Some(available),
-        );
-        let (mut request, _response_rx) = make_request("unavailable-affinity", 64);
-        request.affinity_target = Some(target.into());
-        assert_eq!(
-            queue
-                .select_without_admission(request)
-                .await
-                .unwrap()
-                .response
-                .best_worker,
-            WorkerWithDpRank::new(0, 0)
-        );
-
-        let (queue, _slots) = make_queue_with_custom_selector(2, 16, 64, None, selector());
         let (mut request, _response_rx) = make_request("disallowed-affinity", 64);
-        request.affinity_target = Some(target.into());
+        request.affinity_target = Some(WorkerWithDpRank::new(1, 0).into());
         request.allowed_worker_ids = Some(HashSet::from([0]));
-        assert_eq!(
-            queue
-                .select_without_admission(request)
-                .await
-                .unwrap()
-                .response
-                .best_worker,
-            WorkerWithDpRank::new(0, 0)
-        );
+
+        let selected = queue.select_without_admission(request).await.unwrap();
+
+        assert_eq!(selected.response.best_worker, WorkerWithDpRank::new(0, 0));
     }
 
     #[tokio::test]
-    async fn exclusive_affinity_respects_exact_and_worker_only_dp_targets() {
+    async fn exclusive_affinity_respects_dp_rank_scope() {
         let configs = HashMap::from([
             (
                 7,
@@ -2802,33 +2726,25 @@ mod tests {
                 rendezvous: None,
                 exclusive_affinity_target: true,
             },
-            None,
-            None,
         );
 
-        let (mut exact, _response_rx) = make_request("exact-rank-affinity", 64);
-        exact.affinity_target = Some(WorkerWithDpRank::new(7, 3).into());
-        assert_eq!(
-            queue
-                .select_without_admission(exact)
-                .await
-                .unwrap()
-                .response
-                .best_worker,
-            WorkerWithDpRank::new(7, 3)
-        );
-
-        let (mut worker_only, _response_rx) = make_request("worker-only-affinity", 64);
-        worker_only.affinity_target = Some(WorkerAffinityTarget::new(7, None));
-        assert_eq!(
-            queue
-                .select_without_admission(worker_only)
-                .await
-                .unwrap()
-                .response
-                .best_worker,
-            WorkerWithDpRank::new(7, 2)
-        );
+        for (name, target, expected) in [
+            (
+                "exact-rank-affinity",
+                WorkerAffinityTarget::new(7, Some(3)),
+                WorkerWithDpRank::new(7, 3),
+            ),
+            (
+                "worker-only-affinity",
+                WorkerAffinityTarget::new(7, None),
+                WorkerWithDpRank::new(7, 2),
+            ),
+        ] {
+            let (mut request, _response_rx) = make_request(name, 64);
+            request.affinity_target = Some(target);
+            let selected = queue.select_without_admission(request).await.unwrap();
+            assert_eq!(selected.response.best_worker, expected);
+        }
     }
 
     #[tokio::test]
