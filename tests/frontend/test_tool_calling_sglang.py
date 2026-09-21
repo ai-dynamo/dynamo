@@ -284,9 +284,16 @@ def tool_calling_services(
     """
     topology: str = request.param
     frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
-    # Reserved base for torch.distributed rendezvous ports: below the kernel's
-    # ephemeral range, and the flock registry keeps other containers off it.
-    nccl_port = allocate_port(DynamoPortRange.NCCL.value)
+    try:
+        # Reserved base for torch.distributed rendezvous ports: below the kernel's
+        # ephemeral range, and the flock registry keeps other containers off it.
+        nccl_port = allocate_port(DynamoPortRange.NCCL.value)
+    except BaseException:
+        # The teardown below is not reachable yet, and nothing has been started,
+        # so release the three registry entries here rather than leaving them
+        # for the stale-allocation sweep.
+        deallocate_ports([frontend_port, system_port, fpm_port])
+        raise
     allocated_ports = [frontend_port, system_port, fpm_port, nccl_port]
 
     try:
