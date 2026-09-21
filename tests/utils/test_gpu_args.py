@@ -60,5 +60,4 @@ def test_trtllm_override_caps_tokens_without_imposing_a_memory_fraction() -> Non
     assert kv_cache_config["max_tokens"] == 2592
     assert "free_gpu_memory_fraction" not in kv_cache_config
 
-    # No token cap: an unprofiled launch keeps the engine config's own sizing.
     assert gpu_args.build_trtllm_override_args(_env_without_profile_overrides()) == []

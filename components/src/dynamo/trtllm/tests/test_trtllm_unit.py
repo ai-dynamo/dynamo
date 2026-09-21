@@ -20,6 +20,8 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
+from tensorrt_llm.llmapi.llm_args import KvCacheConfig
+
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
@@ -419,14 +421,6 @@ def test_deep_update_adds_new_keys():
 
 
 def test_deep_update_merges_into_pydantic_sub_config():
-    """An override merges into a sub-config model instead of replacing it.
-
-    An engine YAML reaches the worker as a pydantic model, so an override that
-    names one field must not discard the fields it does not name. Keys the YAML
-    never set stay absent, leaving TRT-LLM's per-model defaults in force.
-    """
-    from tensorrt_llm.llmapi.llm_args import KvCacheConfig
-
     target = {"kv_cache_config": KvCacheConfig(free_gpu_memory_fraction=0.3)}
     deep_update(target, {"kv_cache_config": {"max_tokens": 2592}})
 

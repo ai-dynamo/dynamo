@@ -41,7 +41,7 @@ LAUNCH_UTILS = REPO_ROOT / "examples" / "common" / "launch_utils.sh"
 EXIT_LINE = re.compile(r"A background process exited with code (\d+)(.*)")
 
 
-def _run_wait_any_exit(body: str, tmp_path: Path) -> tuple[int, str]:
+def _run_wait_any_exit(body: str, tmp_path: Path) -> tuple[int, str, int]:
     """Run *body* then wait_any_exit in its own process group.
 
     wait_any_exit signals its whole process group on the way out, so the script
@@ -61,14 +61,14 @@ def _run_wait_any_exit(body: str, tmp_path: Path) -> tuple[int, str]:
     )
     match = EXIT_LINE.search(completed.stdout)
     assert match is not None, f"no exit line in output: {completed.stdout!r}"
-    return int(match.group(1)), match.group(2)
+    return int(match.group(1)), match.group(2), completed.returncode
 
 
 def test_wait_any_exit_names_a_plain_background_child(tmp_path: Path) -> None:
-    """The ordinary case: a backgrounded command is named by its command line."""
-    code, detail = _run_wait_any_exit("sleep 0.05 &\nsleep 30 &", tmp_path)
+    code, detail, returncode = _run_wait_any_exit("sleep 0.05 &\nsleep 30 &", tmp_path)
 
     assert code == 0
+    assert returncode == 0
     assert "sleep 0.05" in detail
 
 
@@ -81,14 +81,17 @@ def test_wait_any_exit_names_a_background_pipeline_member(tmp_path: Path) -> Non
     background `... | tee <log>` pipelines, so reading only the second column
     would drop the command and leave a bare pid in the log.
     """
-    code, detail = _run_wait_any_exit("sleep 0.05 | sleep 0.15 &\nsleep 30 &", tmp_path)
+    code, detail, returncode = _run_wait_any_exit(
+        "sleep 0.05 | sleep 0.15 &\nsleep 30 &", tmp_path
+    )
 
     assert code == 0
+    assert returncode == 0
     assert "sleep 0.15" in detail
 
 
 def test_wait_any_exit_reports_a_failing_child_exit_code(tmp_path: Path) -> None:
-    """The exit code is the child's, not the helper's."""
-    code, _ = _run_wait_any_exit("bash -c 'exit 7' &\nsleep 30 &", tmp_path)
+    code, _, returncode = _run_wait_any_exit("bash -c 'exit 7' &\nsleep 30 &", tmp_path)
 
     assert code == 7
+    assert returncode == 7
