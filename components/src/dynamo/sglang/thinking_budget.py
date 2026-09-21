@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any
 
 from sglang.srt.parser.reasoning_parser import ReasoningParser
@@ -87,6 +88,7 @@ def _validate_server_config(server_args: Any, engine: Any | None) -> None:
     )
 
 
+@lru_cache(maxsize=None)
 def _token_filter_is_active(reasoning_parser: str) -> bool:
     """Return whether SGLang's parser activates the per-request token filter.
 

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import dynamo.sglang.thinking_budget as thinking_budget
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.thinking_budget import (
     apply_thinking_budget,
@@ -174,6 +175,22 @@ def test_apply_thinking_budget_uses_runtime_parser_for_auto_config():
     )
 
     assert actual == {"custom_params": {"thinking_budget": 32}}
+
+
+def test_token_filter_check_caches_parser_construction(monkeypatch):
+    calls = []
+
+    class Parser:
+        def __init__(self, model_type):
+            calls.append(model_type)
+            self.detector = SimpleNamespace(think_excluded_tokens=[1])
+
+    monkeypatch.setattr(thinking_budget, "ReasoningParser", Parser)
+    thinking_budget._token_filter_is_active.cache_clear()
+
+    assert thinking_budget._token_filter_is_active("cached-parser")
+    assert thinking_budget._token_filter_is_active("cached-parser")
+    assert calls == ["cached-parser"]
 
 
 def test_apply_thinking_budget_rejects_custom_logit_processor():
