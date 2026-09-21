@@ -211,12 +211,6 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         bench_mode: str,
         is_prefill: bool | None,
     ):
-        """Configure a benchmark worker and register its allocated ports for cleanup.
-
-        ``is_prefill`` selects prefill (True), decode (False), or aggregated
-        (None) serving. Disaggregated workers receive a NIXL side-channel
-        port, and the prefill worker also receives a KV-event publisher port.
-        """
         self.bench_output_path = bench_output_path
         self.bench_mode = bench_mode
         self.is_prefill = is_prefill
@@ -326,7 +320,6 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             allocated_ports.append(self.nixl_side_channel_port)
             env["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(self.nixl_side_channel_port)
 
-        # Only the prefill worker publishes KV events, on its own ZMQ socket.
         if is_prefill is True:
             self.kv_event_port = allocate_port(DynamoPortRange.SERVE.value)
             allocated_ports.append(self.kv_event_port)
