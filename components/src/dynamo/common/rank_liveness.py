@@ -250,6 +250,15 @@ class RankLivenessClient:
                                 "[GMS liveness] leader fenced the TP cohort after "
                                 "a peer-rank failure"
                             )
+                            try:
+                                sock.send(b"fence-ack", flags=zmq.NOBLOCK)
+                            except zmq.ZMQError:
+                                logger.debug(
+                                    "[GMS liveness] rank %d fence acknowledgement "
+                                    "failed",
+                                    self._rank,
+                                    exc_info=True,
+                                )
                             self._fire(0, "peer-rank-lost")
                             return
                         if frame in (b"startup-ack", b"ack"):
@@ -321,6 +330,7 @@ class RankLivenessMonitor:
         expected_ranks: Optional[Iterable[int]] = None,
         startup_grace_ms_override: Optional[int] = None,
         runtime_armed: bool = True,
+        broadcast_fence: bool = False,
     ):
         self._on_rank_lost = on_rank_lost
         self._bind_addr = bind_addr or leader_bind_addr()
@@ -340,6 +350,7 @@ class RankLivenessMonitor:
         )
         self._startup_grace = grace_value / 1000.0
         self._runtime_armed = bool(runtime_armed)
+        self._broadcast_fence_enabled = bool(broadcast_fence)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._fired = False
@@ -509,10 +520,71 @@ class RankLivenessMonitor:
                             self._timeout * 1000,
                             (now - cycle_started) * 1000,
                         )
+                        if self._broadcast_fence_enabled:
+                            self._broadcast_fence(
+                                sock, poller, last_seen, lost_rank=rank
+                            )
                         self._fire(rank, "liveness-timeout")
                         return
         finally:
             sock.close(0)
+
+    def _broadcast_fence(self, sock, poller, last_seen, *, lost_rank: int) -> None:
+        """Prompt surviving ranks to fail-stop before the leader releases ownership.
+
+        The writer-cohort lock remains the correctness fence: takeover still waits
+        for every writer guard even when this best-effort latency hint is lost. An
+        acknowledgement only keeps the ROUTER alive long enough to put the fence
+        on each established connection; it is not treated as proof of process or
+        CUDA termination.
+        """
+
+        import zmq
+
+        pending = {rank for rank in last_seen if rank != lost_rank}
+        if not pending:
+            return
+        for rank in pending:
+            try:
+                sock.send_multipart(
+                    [f"rank-{rank}".encode(), b"fence"], flags=zmq.NOBLOCK
+                )
+            except zmq.ZMQError:
+                logger.debug(
+                    "[GMS liveness] failed to send cohort fence to rank %d",
+                    rank,
+                    exc_info=True,
+                )
+
+        # Bound this optimization well below the normal heartbeat deadline. Ranks
+        # that do not acknowledge still fail-stop when the leader disappears, and
+        # the successor cannot pass retire_writer_cohort until their guards close.
+        deadline = time.monotonic() + min(0.1, self._timeout / 2)
+        while pending:
+            remaining_ms = int(max(0.0, deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            events = dict(poller.poll(remaining_ms))
+            if sock not in events:
+                break
+            for _ in range(_MAX_HEARTBEATS_PER_POLL):
+                try:
+                    frames = sock.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                if len(frames) < 2:
+                    continue
+                rank = self._rank_of(frames[0])
+                if rank is not None and frames[-1] == b"fence-ack":
+                    pending.discard(rank)
+        if pending:
+            logger.warning(
+                "[GMS liveness] cohort fence unacknowledged by ranks %s; "
+                "writer-cohort retirement remains authoritative",
+                sorted(pending),
+            )
+        else:
+            logger.info("[GMS liveness] surviving ranks acknowledged cohort fence")
 
     def _fire(self, rank: int, reason: str) -> bool:
         if self._fired:
