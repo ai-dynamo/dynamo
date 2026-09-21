@@ -1104,12 +1104,10 @@ class VllmProcessor:
                     metrics["video_count"] = video_count
                 if audio_count:
                     metrics["audio_count"] = audio_count
+                # Attach metrics to data when available; otherwise use an annotation.
                 if data := envelope.get("data"):
                     data["llm_metrics"] = metrics
                 else:
-                    # Parser buffering can consume generated tokens without producing
-                    # a chat chunk. Keep the annotation fallback so those tokens are
-                    # still observed by the HTTP metrics collector.
                     envelope["event"] = "llm_metrics"
                     envelope["comment"] = [json.dumps(metrics)]
 

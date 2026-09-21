@@ -848,12 +848,10 @@ class SglangProcessor:
                 cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
                 if cached_tokens is not None:
                     metrics["cached_tokens"] = cached_tokens
+                # Attach metrics to data when available; otherwise use an annotation.
                 if data := envelope.get("data"):
                     data["llm_metrics"] = metrics
                 else:
-                    # Parser buffering can consume generated tokens without producing
-                    # a chat chunk. Keep the annotation fallback so those tokens are
-                    # still observed by the HTTP metrics collector.
                     envelope["event"] = "llm_metrics"
                     envelope["comment"] = [json.dumps(metrics)]
 
