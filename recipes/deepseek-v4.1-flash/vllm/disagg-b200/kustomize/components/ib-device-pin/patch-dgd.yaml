@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-vllm-b200-disagg
+spec:
+  components:
+    # A strategic merge puts patched components first. Name the Frontend so the
+    # rendered manifest keeps the canonical beta order.
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env: &ibDevices
+                # mlx5_0-5, mlx5_10 and mlx5_11 are the 400 Gb/s NDR ports on
+                # the reference nodes. mlx5_6-9 run at 100 Gb/s and
+                # mlx5_bond_0 is Ethernet; both are excluded deliberately, and
+                # a bonded device can steer UCX away from the per-port RDMA
+                # queues.
+                - name: UCX_NET_DEVICES
+                  value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env: *ibDevices

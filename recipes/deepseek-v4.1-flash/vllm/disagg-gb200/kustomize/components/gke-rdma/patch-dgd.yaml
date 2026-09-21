@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-vllm-gb200-disagg
+spec:
+  components:
+    # A strategic merge puts patched components first. Name the Frontend so the
+    # rendered manifest keeps the canonical beta order.
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        metadata:
+          annotations: &gkeAnnotations
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
+        spec:
+          containers:
+            - name: main
+              env: &gkeEnv
+                # GID index 3 is the RoCEv2 convention. These GKE networks are
+                # RoCE, so it applies here. It is deliberately absent from the
+                # base and from the B200 recipe, where the ports report
+                # link_layer InfiniBand and this setting names a foreign scheme.
+                - name: UCX_IB_GID_INDEX
+                  value: "3"
+              resources: &gkeResources
+                requests:
+                  # The base requests `rdma/ib`, which GKE does not advertise.
+                  # Drop it and take the four multi-network devices instead.
+                  rdma/ib: null
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+                limits:
+                  rdma/ib: null
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+    - name: DecodeWorker
+      podTemplate:
+        metadata:
+          annotations: *gkeAnnotations
+        spec:
+          containers:
+            - name: main
+              env: *gkeEnv
+              resources: *gkeResources

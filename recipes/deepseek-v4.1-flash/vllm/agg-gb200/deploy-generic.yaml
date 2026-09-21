@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/deepseek-v4.1-flash/vllm/agg-gb200/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/deepseek-v4.1-flash/vllm/agg-gb200/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/deepseek-v4.1-flash/vllm/agg-gb200/kustomize/overlays/generic
+# You may edit a copy before applying it.
+
+# DeepSeek-V4.1-Flash on vLLM, aggregated. Two workers, TP4 each, 8x GB200.
+# KV-aware routing, DSpark speculative decoding, up to 1M tokens of context.
+#
+# This is the same serving configuration the B200 aggregated recipe uses. Only
+# the architecture label, the GPU product label, and the deployment name differ.
+#
+# Do not set --attention-backend, --moe-backend beyond what is here, or
+# --linear-backend. vLLM resolves the rest for this model, and a mistyped
+# --attention-backend value does not error: it silently falls through to a
+# slower fallback. Do not set --block-size either; it resolves to 128 for this
+# backend, and the DeepSeek-V4-Flash recipes' 256 belongs to a different model.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-vllm-gb200-agg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-port
+          - "8000"
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT
+            value: "50"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Exists
+    replicas: 1
+    type: frontend
+  - name: Worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - deepseek-ai/DeepSeek-V4.1-Flash
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4.1-Flash
+          - --tokenizer-mode
+          - deepseek_v41
+          - --tensor-parallel-size
+          - "4"
+          # Expert parallelism gates the MegaMoE backend below: every
+          # member of that family refuses to load without it.
+          - --enable-expert-parallel
+          - --moe-backend
+          - deep_gemm_mega_moe
+          # Load-time only. Each rank reads just its own expert shard from
+          # disk, which shortens model load on a 510 GB checkpoint.
+          - --enable-ep-weight-filter
+          # Expert-parallel load balancing. The communicator is named
+          # explicitly: it defaults to None, which prefers NIXL, and NIXL
+          # is not in this image.
+          - --enable-eplb
+          - --eplb-config
+          - '{"communicator":"torch_gloo"}'
+          # The engram tables are pinned host memory, about 47 GiB per
+          # rank, read over UVA on every token, so NUMA placement matters.
+          - --numa-bind
+          # The checkpoint accepts images. This recipe serves text, so
+          # drop the vision tower and its encoder cache.
+          - --language-model-only
+          # Two reasoning parsers, and both are required. The engine-side
+          # one gates guided decoding; the Dynamo-side one splits the
+          # response into reasoning_content and content. Do not also set
+          # the engine-side --tool-call-parser: Dynamo refuses both halves
+          # of the tool-call pair at once.
+          - --reasoning-parser
+          - deepseek_v41
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          # Without this, response_format is accepted but never enforced.
+          - --dyn-enable-structural-tag
+          # enable_kv_cache_events is load-bearing. Omit it and it
+          # defaults to false, Dynamo logs "KV event publishing skipped",
+          # and DYN_ROUTER_MODE=kv silently degrades to load-based
+          # routing with overlap_blocks=0 on every request.
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          # A decode step is num_reqs x (1 + num_spec) tokens, so sizes
+          # above 512 are captured and never replayed.
+          - --max-cudagraph-capture-size
+          - "512"
+          # The single largest lever on this workload. The resolved
+          # default is 0, which tells the sliding-window group to retain
+          # only a 160-token tail at the previous prompt end. The
+          # reconciled prefix hit is the minimum across groups, so that
+          # tail caps every request. 1024 keeps one tail per 1024 tokens.
+          # Must be a multiple of the scheduler block size.
+          - --prefix-cache-retention-interval
+          - "1024"
+          # The DeepSeek sparse indexer K cache, fp8 to mxfp4. "auto"
+          # resolves to fp8, so fp8 is the baseline, not bf16. mxfp4
+          # requires compute capability 10.0; GB200 and B200 both qualify,
+          # sm_120 consumer Blackwell does not. fp8 and mxfp4 are the only
+          # two accepted values.
+          - --attention-config
+          - '{"indexer_kv_dtype":"mxfp4"}'
+          # DSpark. The checkpoint's own dspark_block_size is 5; depth 3
+          # measured better here. Do not copy DeepSeek-V4-Flash's 7.
+          # Adaptive verification is off: it is the established cause of a
+          # CUDA illegal memory access on this model, and turning it off
+          # also forbids --enforce-eager, which that path requires.
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "3600"
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "300"
+          - name: VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+            value: "65536"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 10
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 5557
+            name: kv-events
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 10
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "8"
+              ephemeral-storage: 16Gi
+              memory: 512Gi
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 120
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        terminationGracePeriodSeconds: 60
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Exists
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+    replicas: 2
+    sharedMemorySize: 200Gi
+    type: worker

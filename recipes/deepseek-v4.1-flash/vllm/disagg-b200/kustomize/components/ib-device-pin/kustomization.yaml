@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pin UCX to a specific set of InfiniBand HCAs.
+#
+# The reference B200 nodes expose twelve mlx5 devices at three different
+# speeds plus an Ethernet bond. UCX_NET_DEVICES is unset by default, so UCX
+# selects by heuristic and can pick a slow port or the bond. This names only
+# the eight fastest ports.
+#
+# The device list is a property of the node hardware, not of the recipe.
+# Read your own nodes with `ibstat` or `ibv_devinfo` before applying this,
+# and edit the value to match.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      group: nvidia.com
+      version: v1beta1
+      kind: DynamoGraphDeployment
+    path: patch-dgd.yaml
