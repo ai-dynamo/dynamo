@@ -36,7 +36,8 @@ pub fn register(
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
+    use dynamo_kv_router::protocols::WorkerConfigLike;
+    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerSelector, WorkerType};
 
     use super::*;
 
@@ -59,6 +60,41 @@ mod tests {
         register(&mut registry).unwrap();
         let resolved = registry.resolve(&config);
         (config, resolved)
+    }
+
+    struct PolicyTestWorker;
+
+    impl WorkerConfigLike for PolicyTestWorker {
+        fn data_parallel_start_rank(&self) -> u32 {
+            0
+        }
+
+        fn data_parallel_size(&self) -> u32 {
+            1
+        }
+
+        fn max_num_batched_tokens(&self) -> Option<u64> {
+            None
+        }
+
+        fn total_kv_blocks(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    fn resolves_exclusive_affinity(yaml: &str) -> bool {
+        let (config, resolved) = resolve(yaml);
+        let factory = resolved
+            .unwrap()
+            .expect("a configured instance resolves to a factory");
+        let policy = factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+        <dynamo_kv_router::WorkerSelectionPolicy as WorkerSelector<PolicyTestWorker>>::uses_exclusive_affinity_target(
+            &policy,
+        )
     }
 
     /// Catches a policy type name that drifts from its documentation, and proves the documented
@@ -90,6 +126,30 @@ worker_selection:
         }
     }
 
+    #[test]
+    fn resolves_soft_affinity_parameter() {
+        let yaml = |parameter: &str| {
+            format!(
+                r#"
+worker_selection:
+  aggregated: two-tier
+  instances:
+    - name: two-tier
+      type: dynamo-two-tier-cost-fn
+{parameter}
+"#
+            )
+        };
+
+        assert!(!resolves_exclusive_affinity(&yaml("")));
+        assert!(!resolves_exclusive_affinity(&yaml(
+            "      parameters:\n        respect_soft_affinity: false"
+        )));
+        assert!(resolves_exclusive_affinity(&yaml(
+            "      parameters:\n        respect_soft_affinity: true"
+        )));
+    }
+
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must
     /// fail startup rather than silently leaving the default in place.
     #[test]
@@ -102,7 +162,7 @@ worker_selection:
     - name: dynamo-two-tier-cost-fn
       type: dynamo-two-tier-cost-fn
       parameters:
-        cache_affinity_threshold: 0.8
+        respect_soft_affinitty: true
 "#,
         );
 
@@ -115,7 +175,7 @@ worker_selection:
             "unexpected error: {error}"
         );
         assert!(
-            error.to_string().contains("cache_affinity_threshold"),
+            error.to_string().contains("respect_soft_affinitty"),
             "the error should name the offending key: {error}"
         );
     }

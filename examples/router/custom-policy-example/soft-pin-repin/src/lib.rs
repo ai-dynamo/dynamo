@@ -108,6 +108,8 @@ fn provider(
                     max_active_requests,
                 }),
             )
+            // This policy needs every eligible candidate so it can decide when to repin.
+            .with_exclusive_affinity_target(false)
         },
     ))
 }

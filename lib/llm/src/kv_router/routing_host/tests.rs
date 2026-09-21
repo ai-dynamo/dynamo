@@ -13,6 +13,10 @@ use std::{
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::{
     config::KvRouterConfig,
+    plugins::worker_selection::{
+        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        WorkerSelectionPolicyError,
+    },
     protocols::RoutingConstraints,
     scheduling::{
         ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
@@ -465,6 +469,36 @@ fn affinity_request(
         SessionAffinityId::new(session_id),
     );
     request
+}
+
+struct HighestWorkerPicker;
+
+impl WorkerPicker for HighestWorkerPicker {
+    fn pick(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        input: WorkerInputView<'_>,
+    ) -> Result<usize, WorkerSelectionPolicyError> {
+        input
+            .candidates()
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, candidate)| candidate.worker())
+            .map(|(row, _)| row)
+            .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
+    }
+}
+
+fn highest_worker_policy(exclusive_affinity_target: bool) -> SelectionPolicySource {
+    SelectionPolicySource::Factory(Arc::new(move |config, worker_type, _| {
+        WorkerSelectionPolicy::new(
+            config.clone(),
+            worker_type.as_str(),
+            Vec::new(),
+            Box::new(HighestWorkerPicker),
+        )
+        .with_exclusive_affinity_target(exclusive_affinity_target)
+    }))
 }
 
 #[tokio::test]
@@ -1190,6 +1224,39 @@ async fn router_with_worker_configs_and_classifier(
     workers: HashMap<u64, ModelRuntimeConfig>,
     classifier: Option<impl RequestClassifier>,
 ) -> (RoutingHost, Runtime) {
+    router_with_worker_configs_classifier_policy_and_mode(
+        session_affinity_ttl,
+        workers,
+        classifier,
+        SelectionPolicySource::Registry,
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .await
+}
+
+async fn router_with_worker_configs_and_policy(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    policy: SelectionPolicySource,
+    affinity_mode: crate::session_affinity::SessionAffinityMode,
+) -> (RoutingHost, Runtime) {
+    Box::pin(router_with_worker_configs_classifier_policy_and_mode(
+        session_affinity_ttl,
+        workers,
+        None::<RecordingClassifier>,
+        policy,
+        affinity_mode,
+    ))
+    .await
+}
+
+async fn router_with_worker_configs_classifier_policy_and_mode(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    classifier: Option<impl RequestClassifier>,
+    policy: SelectionPolicySource,
+    affinity_mode: crate::session_affinity::SessionAffinityMode,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     // Each runtime has its own in-memory discovery store, so fixture namespaces can repeat.
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1216,7 +1283,7 @@ async fn router_with_worker_configs_and_classifier(
         workers,
         None,
         16,
-        SelectionPolicySource::Registry,
+        policy,
         Some(config),
         None,
         "decode",
@@ -1233,7 +1300,11 @@ async fn router_with_worker_configs_and_classifier(
     let inner = PushRouter::from_client(client, RouterMode::KV)
         .await
         .unwrap();
-    let mut router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
+    let affinity = session_affinity_ttl
+        .map(|ttl| chooser.affinity_coordinator(ttl, affinity_mode))
+        .transpose()
+        .unwrap();
+    let mut router = RoutingHost::new_with_coordinator(inner, Arc::new(chooser), affinity);
     // Parallel tests must not share the process-global request counters.
     router.request_metrics = router.request_metrics.with_isolated_counters_for_test();
     router
@@ -1242,6 +1313,84 @@ async fn router_with_worker_configs_and_classifier(
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
     (router, runtime)
+}
+
+#[tokio::test]
+async fn policy_affinity_control_rebinds_soft_sessions_and_preserves_hard_pins() {
+    const TARGET_WORKER: u64 = 7;
+    const PREFERRED_WORKER: u64 = 8;
+
+    for exclusive_affinity_target in [false, true] {
+        for affinity_mode in [
+            crate::session_affinity::SessionAffinityMode::Soft,
+            crate::session_affinity::SessionAffinityMode::Hard,
+        ] {
+            let workers = HashMap::from([
+                (TARGET_WORKER, ModelRuntimeConfig::default()),
+                (PREFERRED_WORKER, ModelRuntimeConfig::default()),
+            ]);
+            let (router, runtime) = router_with_worker_configs_and_policy(
+                Some(Duration::from_secs(10)),
+                workers,
+                highest_worker_policy(exclusive_affinity_target),
+                affinity_mode,
+            )
+            .await;
+            let session_id = SessionAffinityId::new(format!(
+                "policy-{affinity_mode:?}-{exclusive_affinity_target}"
+            ));
+            bind_affinity_target(&router, &session_id, AffinityTarget::worker(TARGET_WORKER)).await;
+            let mut request = Context::new(request());
+            request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+
+            let (selection, operation) = router
+                .select_with_affinity(
+                    &request,
+                    RequestPhase::Aggregated,
+                    false,
+                    &CleanupBudget::default(),
+                )
+                .await
+                .unwrap();
+            let expected = if affinity_mode == crate::session_affinity::SessionAffinityMode::Soft
+                && !exclusive_affinity_target
+            {
+                PREFERRED_WORKER
+            } else {
+                TARGET_WORKER
+            };
+            assert_eq!(selection.worker.worker_id, expected);
+
+            // Model a successful dispatch response through the same affinity binding path used
+            // by `generate`: advisory soft affinity may rebind, while hard affinity remains pinned.
+            let output = Annotated::from_data(LLMEngineOutput {
+                finish_reason: Some(FinishReason::Stop),
+                ..Default::default()
+            });
+            let stream = ResponseStream::new(
+                Box::pin(stream::once(async move { output })),
+                request.context().clone(),
+            );
+            let mut stream = router
+                .bind_affinity(operation, route_target(selection.worker), stream)
+                .unwrap();
+            while stream.next().await.is_some() {}
+            router.kv_router().free(request.id()).await.unwrap();
+
+            assert_eq!(
+                router
+                    .affinity
+                    .as_ref()
+                    .unwrap()
+                    .query_target(&session_id, None)
+                    .unwrap(),
+                Some(AffinityTarget::worker(expected))
+            );
+
+            drop(router);
+            runtime.shutdown();
+        }
+    }
 }
 
 /// A dispatch plane that yields before completing, unlike [`CompletedBuiltinDispatch`].

@@ -191,8 +191,9 @@ impl WorkerSelectionContext<'_> {
 
     /// Return the session-affinity target resolved by the request host.
     ///
-    /// The default selector treats an eligible target as exclusive. Custom policies receive it as
-    /// advisory context; it may be absent from their candidate set when unavailable or filtered.
+    /// Custom policies receive the target as advisory context by default and may opt into exclusive
+    /// handling through [`WorkerSelectionPolicy::with_exclusive_affinity_target`]. An ineligible
+    /// target does not narrow the candidate set and may be absent from it.
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
         self.request.affinity_target
     }

@@ -48,6 +48,7 @@ pub const POLICY_TYPE: &str = "dynamo-two-tier-cost-fn";
 const DEFAULT_CACHE_THRESHOLD: f64 = 0.5;
 const DEFAULT_BALANCE_ABS_THRESHOLD: usize = 32;
 const DEFAULT_BALANCE_REL_THRESHOLD: f64 = 1.1;
+const DEFAULT_RESPECT_SOFT_AFFINITY: bool = false;
 
 /// Tunables for [`POLICY_TYPE`], named after their `sgl-router` counterparts.
 ///
@@ -63,6 +64,8 @@ struct Parameters {
     balance_abs_threshold: usize,
     /// Minimum ratio of largest to smallest active-request count before the load tier applies.
     balance_rel_threshold: f64,
+    /// Whether an eligible soft-affinity target exclusively constrains candidate selection.
+    respect_soft_affinity: bool,
 }
 
 impl Default for Parameters {
@@ -71,6 +74,7 @@ impl Default for Parameters {
             cache_threshold: DEFAULT_CACHE_THRESHOLD,
             balance_abs_threshold: DEFAULT_BALANCE_ABS_THRESHOLD,
             balance_rel_threshold: DEFAULT_BALANCE_REL_THRESHOLD,
+            respect_soft_affinity: DEFAULT_RESPECT_SOFT_AFFINITY,
         }
     }
 }
@@ -173,6 +177,7 @@ fn provider(
                 Vec::new(),
                 Box::new(TwoTierCostFnPicker { parameters }),
             )
+            .with_exclusive_affinity_target(parameters.respect_soft_affinity)
         },
     ))
 }
