@@ -774,36 +774,6 @@ jobs:
       copy_timeout_minutes: 20
     secrets: inherit
 
-  snapshot-placeholder-vllm:
-    name: vLLM Snapshot Placeholder
-    needs: [vllm-copy-to-acr]
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-vllm-placeholder
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-vllm-placeholder', needs.vllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
-
   vllm-dev-copy-to-acr:
     name: vllm-dev # This name overlaps with other vllm jobs to group them in the UI
     needs: [vllm-dev-build]
@@ -824,36 +794,6 @@ jobs:
       cuda_version: '["13.0"]' # Deploy tests only use CUDA 13
       copy_timeout_minutes: 20
     secrets: inherit
-
-  snapshot-placeholder-sglang:
-    name: SGLang Snapshot Placeholder
-    needs: [sglang-copy-to-acr]
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-sglang-placeholder
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-sglang-placeholder', needs.sglang-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
 
   sglang-dev-copy-to-acr:
     name: sglang-dev # This name overlaps with other sglang jobs to group them in the UI
@@ -878,36 +818,6 @@ jobs:
       cuda_version: '["13.1"]'
       copy_timeout_minutes: 20
     secrets: inherit
-
-  snapshot-placeholder-trtllm:
-    name: TRTLLM Snapshot Placeholder
-    needs: [trtllm-copy-to-acr]
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: prod-default-v2
-    outputs:
-      image_tag: ${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-        with:
-          persist-credentials: false
-      - name: Build and push snapshot placeholder
-        uses: $/.github/actions/build-deploy-component
-        with:
-          component: checkpoint-placeholder
-          image_tag: ${{ github.sha }}-trtllm-placeholder
-          builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
-          namespace: ${{ vars.BUILDKIT_NAMESPACE }}
-          aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
-          ecr_registry: ${{ vars.ECR_REGISTRY }}
-          ecr_repository: ${{ vars.ECR_REPOSITORY }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          extra_tags: |
-            ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ format('{0}-ci-{1}-trtllm-placeholder', needs.trtllm-copy-to-acr.outputs.runtime_version, github.sha) }}
-          extra_build_args: |
-            BASE_IMAGE=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
 
   trtllm-dev-copy-to-acr:
     name: trtllm-dev # This name overlaps with other trtllm jobs to group them in the UI
@@ -1282,11 +1192,11 @@ jobs:
 
   deploy-test-checkpoint-vllm:
     name: vLLM Snapshot Deploy Test
-    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
+    needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, vllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent-checkpoint-vllm.result == 'success' &&
-      needs.snapshot-placeholder-vllm.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1339,7 +1249,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-vllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-vllm.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.vllm-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
@@ -1350,11 +1260,11 @@ jobs:
 
   deploy-test-checkpoint-sglang:
     name: SGLang Snapshot Deploy Test
-    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
+    needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, sglang-copy-to-acr, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent-checkpoint-sglang.result == 'success' &&
-      needs.snapshot-placeholder-sglang.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1407,7 +1317,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-sglang.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-sglang.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.sglang-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_sglang
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
@@ -1418,11 +1328,11 @@ jobs:
 
   deploy-test-checkpoint-trtllm:
     name: TRTLLM Snapshot Deploy Test
-    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
+    needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, trtllm-copy-to-acr, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
       needs.deploy-snapshot-agent-checkpoint-trtllm.result == 'success' &&
-      needs.snapshot-placeholder-trtllm.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success' &&
       needs.frontend-copy-to-acr.result == 'success'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 30
@@ -1475,7 +1385,7 @@ jobs:
           operator_tag: ${{ needs.deploy-operator-checkpoint-trtllm.outputs.operator_tag }}
           framework: checkpoint
           profile: dgd_restore
-          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-trtllm.outputs.image_tag }}
+          image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.trtllm-copy-to-acr.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
@@ -1615,9 +1525,6 @@ jobs:
       - deploy-snapshot-agent-checkpoint-vllm
       - deploy-snapshot-agent-checkpoint-sglang
       - deploy-snapshot-agent-checkpoint-trtllm
-      - snapshot-placeholder-vllm
-      - snapshot-placeholder-sglang
-      - snapshot-placeholder-trtllm
       - frontend-copy-to-acr
       - deploy-test-checkpoint-vllm
       - deploy-test-checkpoint-sglang
@@ -1641,7 +1548,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
     if: always()
-    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, snapshot-placeholder-vllm, snapshot-placeholder-sglang, snapshot-placeholder-trtllm, power-agent, sidecar-build, frontend-build, planner-build]
+    needs: [vllm-build, sglang-build, trtllm-build, vllm-dev-build, sglang-dev-build, trtllm-dev-build, vllm-efa-build, sglang-efa-build, trtllm-efa-build, operator, power-agent, sidecar-build, frontend-build, planner-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

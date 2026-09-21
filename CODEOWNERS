@@ -366,7 +366,6 @@
 /lib/gpu_memory_service/                                                                                @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/cli/                                                                            @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/tests/                                                                          @ai-dynamo/dynamo-gms-codeowners
-/deploy/checkpoint-placeholder/                                                                         @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/client/                                                                         @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/common/                                                                         @ai-dynamo/dynamo-gms-codeowners
 /lib/gpu_memory_service/server/                                                                         @ai-dynamo/dynamo-gms-codeowners
