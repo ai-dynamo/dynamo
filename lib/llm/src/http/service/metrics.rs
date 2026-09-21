@@ -479,6 +479,7 @@ pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
 }
 
 const MAX_BUCKET_COUNT: usize = 512;
+const MAX_BUCKET_LIST_BYTES: usize = MAX_BUCKET_COUNT * 32;
 
 const DEFAULT_ITL_BUCKETS: [f64; 23] = [
     0.002, 0.004, 0.006, 0.008, 0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040, 0.060, 0.080,
@@ -590,6 +591,10 @@ fn parse_bucket_config(
 }
 
 fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
+    if value.len() > MAX_BUCKET_LIST_BYTES {
+        return None;
+    }
+
     let buckets = value
         .split(',')
         .map(|item| item.trim().parse::<f64>())
@@ -624,7 +629,8 @@ fn inter_token_latency_buckets(env: EnvLookup<'_>) -> Vec<f64> {
         return parse_bucket_list(&value).unwrap_or_else(|| {
             tracing::warn!(
                 env_var = env_metrics::DYN_METRICS_ITL_BUCKETS,
-                value,
+                value_len = value.len(),
+                max_value_bytes = MAX_BUCKET_LIST_BYTES,
                 "Invalid explicit ITL histogram buckets, using defaults"
             );
             DEFAULT_ITL_BUCKETS.to_vec()
@@ -2973,6 +2979,11 @@ mod tests {
             let env = fake_env(&pairs);
             assert_eq!(inter_token_latency_buckets(&env), DEFAULT_ITL_BUCKETS);
         }
+
+        let oversized_value = format!("{:>width$}", "0", width = MAX_BUCKET_LIST_BYTES + 1);
+        let pairs = [("DYN_METRICS_ITL_BUCKETS", oversized_value.as_str())];
+        let env = fake_env(&pairs);
+        assert_eq!(inter_token_latency_buckets(&env), DEFAULT_ITL_BUCKETS);
     }
 
     #[test]
