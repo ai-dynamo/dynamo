@@ -92,6 +92,8 @@ def pruned_schema(source: Any) -> dict[str, Any] | None:
 
 
 def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
+    """Generate CRD merge definitions, including Kustomize-only overrides."""
+
     crd = yaml.safe_load(crd_path.read_text(encoding="utf-8"))
     if not isinstance(crd, dict):
         raise TypeError(f"{crd_path} must contain one CustomResourceDefinition")
@@ -127,7 +129,11 @@ def crd_definitions(crd_path: Path) -> dict[str, dict[str, Any]]:
         ):
             # Merge shared environment entries by name in Kustomize without
             # changing the CRD's server-side apply ownership semantics.
-            env_schema = source_schema["properties"]["spec"]["properties"]["env"]
+            env_schema = source_schema["properties"]["spec"]["properties"].get("env")
+            if env_schema is None:
+                raise ValueError(
+                    f"{crd_path}: {group}/{version} {kind} schema is missing spec.env"
+                )
             spec_schema["properties"]["env"] = pruned_schema(
                 {
                     **env_schema,

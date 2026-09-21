@@ -526,6 +526,9 @@ the Component value `eth0` rendered this contiguous excerpt:
 ```
 
 Kubernetes does not make this a safe override contract.
+A later strategic merge patch can silently retain a duplicate's value instead
+of the requested update, even when Kustomize exits successfully. Keep
+environment names unique before applying subsequent patches.
 `scripts/validate-recipe-kustomization.py` rejects the duplicate at the layer
 that appends it. Override a Component-added value with a guarded `test` plus
 `replace` in the case patch instead of appending the same name again.

@@ -233,10 +233,42 @@ spec:
       value: rc_x
 ```
 
+Matching entries merge field by field. When switching from a literal `value`
+to `valueFrom`, explicitly remove the old field with `value: null`. Otherwise,
+the render retains both fields, and a non-empty `value` conflicts with
+`valueFrom`:
+
+```yaml
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: example
+spec:
+  env:
+    - name: HF_HOME
+      value: null
+      valueFrom:
+        configMapKeyRef:
+          name: cache-config
+          key: path
+```
+
+For the reverse transition, set `valueFrom: null` alongside the new `value`.
+Both patches preserve unrelated environment entries. These are ordinary
+Kustomize patches; the beta cluster starter validator's stricter patch contract
+rejects null deletions and `$patch` directives.
+
 This rule applies during Kustomize rendering. It does not change the operator
 CRD or DGDR override semantics, where shared `spec.env` remains an atomic list.
 JSON 6902 `add` operations at `/spec/env/-` still append literally and can create
-duplicate names. Regenerate both checked-in schema copies with
+duplicate names. With duplicates present, a later strategic merge patch can
+silently ignore the requested update even when Kustomize exits successfully.
+For example, with v5.8.1, starting with `UCX_NET_DEVICES: ens2f0`, appending the
+same name with `eth0`, then merging `mlx5_0` renders `eth0`. Keep names unique
+throughout patch layering; update an existing entry with a strategic merge
+patch or a guarded JSON 6902 replacement instead of appending the same name.
+
+Regenerate both checked-in schema copies with
 `python3 scripts/generate_kustomize_openapi.py`; refresh the schema in an older
 copied cluster starter to use the shared-env merge rule.
 
