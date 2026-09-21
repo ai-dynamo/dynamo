@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Deprecations
 subtitle: Breaking changes, deprecations, and removals across Dynamo releases
@@ -441,6 +441,8 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 <span className="dynref-badge dynref-badge--red">Removed</span> **Connector Flag Replaced** ([#6450](https://github.com/ai-dynamo/dynamo/pull/6450)): The `--connector` flag is removed. Disaggregated prefill workers now require explicit `--kv-transfer-config` with a JSON value.
 
   > **Migrate:** Replace `--connector nixl` with `--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'`. Update all deployment YAMLs and launch scripts accordingly.
+
+Following the backend-specific connector cleanup ([#12611](https://github.com/ai-dynamo/dynamo/pull/12611)), vLLM ignores `DYN_CONNECTOR`; remove it from vLLM deployments and use `--kv-transfer-config` when KV transfer is required.
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **KV Events Now Opt-In** ([#6404](https://github.com/ai-dynamo/dynamo/pull/6404)): KV cache events are no longer auto-created when prefix caching is enabled. Users must explicitly opt in via `--kv-events-config`.
 
