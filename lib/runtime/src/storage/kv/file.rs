@@ -284,7 +284,7 @@ impl Directory {
         }
     }
 
-    /// Refuse a mutation that would put state back on disk after `shutdown`.
+    /// Refuse mutations from a store that no longer owns this directory after shutdown.
     ///
     /// Call this while holding the mutation lock. `shutdown` sets the flag before it
     /// takes that same lock to delete owned files, so a write either records its file
@@ -552,6 +552,7 @@ impl Bucket for Directory {
         let full_path = self.p.join(safe_key.as_ref());
         let str_path = full_path.display().to_string();
         let _mutation_lock = self.lock_mutations().await?;
+        self.reject_if_shutdown()?;
         if !full_path.exists() {
             return Err(StoreError::MissingKey(str_path));
         }
@@ -1077,6 +1078,36 @@ mod tests {
             late.is_err(),
             "cached bucket accepted a write after shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_store_cannot_delete_a_live_stores_value() {
+        let t = tempfile::tempdir().unwrap();
+        let stale_store = FileStore::new(CancellationToken::new(), t.path());
+        let stale_bucket = stale_store
+            .get_or_create_bucket("v1/shared", None)
+            .await
+            .unwrap();
+        let key = Key::new("shared".to_string());
+        stale_bucket.insert(&key, "old".into(), 0).await.unwrap();
+
+        stale_store.shutdown();
+        assert_eq!(stale_bucket.get(&key).await.unwrap(), None);
+
+        let live_store = FileStore::new(CancellationToken::new(), t.path());
+        let live_bucket = live_store
+            .get_or_create_bucket("v1/shared", None)
+            .await
+            .unwrap();
+        live_bucket.insert(&key, "new".into(), 0).await.unwrap();
+
+        let late_delete = stale_bucket.delete(&key).await;
+        let remaining = live_bucket.get(&key).await.unwrap();
+        live_store.shutdown();
+
+        assert_eq!(remaining, Some("new".into()));
+        assert!(matches!(late_delete, Err(StoreError::FilesystemError(_))));
+        assert_eq!(live_bucket.get(&key).await.unwrap(), None);
     }
 
     #[tokio::test]
