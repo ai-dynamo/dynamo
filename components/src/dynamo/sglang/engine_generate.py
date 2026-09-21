@@ -40,7 +40,7 @@ def build_native_generate_request(
     native_payload: Mapping[str, Any],
     *,
     input_ids: list[int],
-    fallback_rid: str,
+    request_id: str,
     priority: int | None,
     sampling_overrides: Mapping[str, Any] | None = None,
     bootstrap_host: str | None = None,
@@ -57,7 +57,7 @@ def build_native_generate_request(
     routing state, and fields supplied by the selected worker. SGLang owns
     all remaining validation.
 
-    ``fallback_rid`` is router-owned and always replaces a caller-supplied
+    ``request_id`` is router-owned and always replaces a caller-supplied
     ``rid`` so cancellation cannot target another request.
     Native session requests pass their caller-visible node ID as the fallback
     because SGLang keys session continuations by the submitted top-level
@@ -65,7 +65,7 @@ def build_native_generate_request(
     """
     payload = dict(native_payload)
     payload["input_ids"] = input_ids
-    payload["rid"] = fallback_rid
+    payload["rid"] = request_id
     payload["stream"] = True
     if priority is None:
         payload.pop("priority", None)
