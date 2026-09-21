@@ -4,7 +4,7 @@
 mod support;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use dynamo_custom_policy_builtin::default_policy;
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionInput, WorkerSelector};
+use dynamo_kv_router::{KvRouterConfig, WorkerSelector};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -67,24 +67,14 @@ fn bench(c: &mut Criterion) {
             let reference_allocs = allocations(|| {
                 black_box(
                     reference
-                        .select_worker(WorkerSelectionInput::configured(
-                            &workers,
-                            &request,
-                            request.eligibility(),
-                            16,
-                        ))
+                        .select_worker(support::selection_input(&workers, &request, 16))
                         .unwrap(),
                 );
             });
             let plugin_allocs = allocations(|| {
                 black_box(
                     plugin
-                        .select_worker(WorkerSelectionInput::configured(
-                            &workers,
-                            &request,
-                            request.eligibility(),
-                            16,
-                        ))
+                        .select_worker(support::selection_input(&workers, &request, 16))
                         .unwrap(),
                 );
             });
@@ -95,12 +85,7 @@ fn bench(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         reference
-                            .select_worker(WorkerSelectionInput::configured(
-                                &workers,
-                                &request,
-                                request.eligibility(),
-                                16,
-                            ))
+                            .select_worker(support::selection_input(&workers, &request, 16))
                             .unwrap(),
                     )
                 })
@@ -109,12 +94,7 @@ fn bench(c: &mut Criterion) {
                 b.iter(|| {
                     black_box(
                         plugin
-                            .select_worker(WorkerSelectionInput::configured(
-                                &workers,
-                                &request,
-                                request.eligibility(),
-                                16,
-                            ))
+                            .select_worker(support::selection_input(&workers, &request, 16))
                             .unwrap(),
                     )
                 })
@@ -184,12 +164,7 @@ fn stacked(c: &mut Criterion) {
             let mut select = || {
                 black_box(
                     policy
-                        .select_worker(WorkerSelectionInput::configured(
-                            &workers,
-                            &request,
-                            request.eligibility(),
-                            16,
-                        ))
+                        .select_worker(support::selection_input(&workers, &request, 16))
                         .unwrap(),
                 );
             };
@@ -236,12 +211,7 @@ fn shared_cache(c: &mut Criterion) {
                     let mut select = || {
                         black_box(
                             policy
-                                .select_worker(WorkerSelectionInput::configured(
-                                    &workers,
-                                    &request,
-                                    request.eligibility(),
-                                    16,
-                                ))
+                                .select_worker(support::selection_input(&workers, &request, 16))
                                 .unwrap(),
                         );
                     };

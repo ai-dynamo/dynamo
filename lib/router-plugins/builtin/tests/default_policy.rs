@@ -5,8 +5,8 @@ use dynamo_custom_policy_builtin::{DefaultWorkerSelector, default_policy, defaul
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::{
     KvRouterConfig, RoutingPartitionRef, WorkerInputView, WorkerInputs, WorkerPicker,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelectionPolicy,
-    WorkerSelectionPolicyError, WorkerSelector, WorkerType,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    WorkerType,
 };
 use support::*;
 
@@ -45,12 +45,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                 );
                 let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
                 for _ in 0..64 {
-                    let input = WorkerSelectionInput::configured(
-                        &workers,
-                        &request,
-                        request.eligibility(),
-                        16,
-                    );
+                    let input = support::selection_input(&workers, &request, 16);
                     let expected = reference.select_worker(input).unwrap();
                     let actual = plugin.select_worker(input).unwrap();
                     assert_eq!(
@@ -92,12 +87,7 @@ fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
         }
         for _ in 0..32 {
             let selected = policy
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    &request,
-                    request.eligibility(),
-                    16,
-                ))
+                .select_worker(support::selection_input(&workers, &request, 16))
                 .unwrap();
             assert!(best.contains(&selected.worker.worker_id));
         }
@@ -136,12 +126,7 @@ fn prepared_values_follow_each_request_when_reusing_a_policy() {
                         load.active_prefill_tokens += round * 19;
                     }
                 }
-                let input = WorkerSelectionInput::configured(
-                    &workers,
-                    &request,
-                    request.eligibility(),
-                    block_size,
-                );
+                let input = support::selection_input(&workers, &request, block_size);
                 let expected = reference.select_worker(input).unwrap();
                 let actual = plugin.select_worker(input).unwrap();
                 assert_eq!(
@@ -183,12 +168,7 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
     }
     let (workers, request) = fixture(2, 17);
     WorkerSelectionPolicy::new(KvRouterConfig::default(), "test", vec![], Box::new(Inspect))
-        .select_worker(WorkerSelectionInput::configured(
-            &workers,
-            &request,
-            request.eligibility(),
-            16,
-        ))
+        .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();
 }
 
@@ -220,12 +200,7 @@ fn mandatory_pin_is_preserved() {
     let (workers, mut request) = fixture(4, 17);
     request.pinned_worker = Some(WorkerWithDpRank::new(3, 1));
     let selected = default_policy(KvRouterConfig::default(), "test")
-        .select_worker(WorkerSelectionInput::configured(
-            &workers,
-            &request,
-            request.eligibility(),
-            16,
-        ))
+        .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();
     assert_eq!(Some(selected.worker), request.pinned_worker);
 }
@@ -260,12 +235,7 @@ fn configured_parameters_replace_request_score_overrides() {
     let policy = default_policy(config, "prefill");
     for _ in 0..32 {
         let result = policy
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
+            .select_worker(support::selection_input(&workers, &request, 16))
             .unwrap();
         assert_eq!(result.worker.worker_id, 0);
     }
@@ -303,7 +273,7 @@ fn pin_does_not_advance_seeded_random_stream() {
     let plugin = DefaultWorkerSelector::new_seeded(Some(config), "prefill", 42);
     for pinned in [true, false, true, false, false] {
         request.pinned_worker = pinned.then_some(WorkerWithDpRank::new(3, 1));
-        let input = WorkerSelectionInput::configured(&workers, &request, request.eligibility(), 16);
+        let input = support::selection_input(&workers, &request, 16);
         assert_eq!(
             reference.select_worker(input).unwrap().worker,
             plugin.select_worker(input).unwrap().worker

@@ -6,7 +6,7 @@ mod support;
 use dynamo_kv_router::{
     KvRouterConfig, SharedCacheHits, WorkerCandidate, WorkerCandidates, WorkerFilter,
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionInput, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
 };
 use std::sync::{
     Arc,
@@ -210,12 +210,7 @@ fn each_component_can_only_read_its_own_inputs() {
                         assert_eq!(declarations.load(Ordering::Relaxed), 5);
                         for _ in 0..2 {
                             policy
-                                .select_worker(WorkerSelectionInput::configured(
-                                    &workers,
-                                    &request,
-                                    request.eligibility(),
-                                    16,
-                                ))
+                                .select_worker(support::selection_input(&workers, &request, 16))
                                 .unwrap();
                         }
                         assert_eq!(calls.load(Ordering::Relaxed), 22);

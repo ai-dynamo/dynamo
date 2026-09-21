@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use dynamo_kv_router::{
     KvRouterConfig, WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerInputs,
-    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionInput,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    WorkerPicker, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
+    WorkerSelectionPolicyError, WorkerSelector,
 };
 use support::fixture;
 
@@ -139,12 +139,7 @@ fn scores_batches_from_surviving_workers_and_resets_each_selection() {
             request.allowed_worker_ids = Some([3].into_iter().collect());
         }
         let result = policy
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
+            .select_worker(support::selection_input(&workers, &request, 16))
             .unwrap();
         assert_eq!(result.worker.worker_id, 3);
         let mut calls = calls.lock().unwrap();
@@ -215,24 +210,14 @@ fn skips_preparation_for_empty_sets_and_aborts_on_preparation_error() {
         request.allowed_worker_ids = Some(allowed.into_iter().collect());
         assert!(
             policy
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    &request,
-                    request.eligibility(),
-                    16,
-                ))
+                .select_worker(support::selection_input(&workers, &request, 16))
                 .is_err()
         );
         assert_eq!(*calls.lock().unwrap(), 0);
     }
     request.allowed_worker_ids = None;
     let error = policy
-        .select_worker(WorkerSelectionInput::configured(
-            &workers,
-            &request,
-            request.eligibility(),
-            16,
-        ))
+        .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap_err();
     assert!(error.to_string().contains("prepare failed"));
     assert_eq!(*calls.lock().unwrap(), 1);
@@ -270,12 +255,7 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
             Box::new(NeverPick),
         );
         let error = policy
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &request,
-                request.eligibility(),
-                16,
-            ))
+            .select_worker(support::selection_input(&workers, &request, 16))
             .unwrap_err();
         assert!(error.to_string().contains("non-finite"));
     }
@@ -337,12 +317,7 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
         Box::new(CheckColumns),
     );
     let select = |request: &dynamo_kv_router::scheduling::SchedulingRequest| {
-        policy.select_worker(WorkerSelectionInput::configured(
-            &workers,
-            request,
-            request.eligibility(),
-            16,
-        ))
+        policy.select_worker(support::selection_input(&workers, request, 16))
     };
     assert!(
         select(&request)
@@ -402,14 +377,7 @@ fn unwritten_costs_cannot_reuse_a_previous_selection_or_scorer() {
         vec![Box::new(Fill), Box::new(OmitOnSecondCall(true))],
         Box::new(First),
     );
-    let select = || {
-        policy.select_worker(WorkerSelectionInput::configured(
-            &workers,
-            &request,
-            request.eligibility(),
-            16,
-        ))
-    };
+    let select = || policy.select_worker(support::selection_input(&workers, &request, 16));
     select().unwrap();
     let error = select().unwrap_err();
     assert!(matches!(
