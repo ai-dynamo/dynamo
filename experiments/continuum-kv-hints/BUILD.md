@@ -1,6 +1,6 @@
 # Building the Continuum KV hints container
 
-The tested container consists of a Dynamo image built from the experiment branch and a Python-only vLLM overlay. The overlay does not replace vLLM native extensions.
+The generated Dynamo Dockerfile starts from the official vLLM `v0.29.0` runtime image and builds Dynamo from the selected source revision. A second Docker build copies the Python files changed by `VLLM_REF` into that Dynamo image. `VLLM_REF` is source input, not another base image, and the overlay does not replace vLLM native extensions.
 
 ## Last validated image
 
@@ -50,7 +50,7 @@ test -z "$(git -C "$VLLM_DIR" status --porcelain)"
 
 export DYNAMO_SHA=$(printf '%s' "$DYNAMO_COMMIT" | cut -c1-10)
 export VLLM_SHA=$(printf '%s' "$VLLM_COMMIT" | cut -c1-10)
-export DYNAMO_IMAGE="${IMAGE_REPOSITORY}:dynamo-kv-hints-${TARGET_ARCH}-${DYNAMO_SHA}-vllm-v0.29.0"
+export DYNAMO_IMAGE="${IMAGE_REPOSITORY}:dynamo-kv-hints-${TARGET_ARCH}-${DYNAMO_SHA}"
 export IMAGE="${IMAGE_REPOSITORY}:dynamo-kv-hints-${TARGET_ARCH}-${DYNAMO_SHA}-vllm-${VLLM_SHA}"
 ```
 
@@ -64,14 +64,14 @@ The standard Dynamo vLLM runtime installs vLLM-Omni. When `VLLM_PLUGINS` is unse
 VLLM_PLUGINS=modelexpress,lora_filesystem_resolver,lora_hf_hub_resolver
 ```
 
-## Build Dynamo from source
+## Build Dynamo from source on vLLM 0.29.0
 
 ```bash
 cd "$DYNAMO_DIR"
-python3 container/render.py --framework vllm --output-short-filename
+container/render.py --framework vllm --target runtime --output-short-filename
 patch container/rendered.Dockerfile experiments/continuum-kv-hints/rendered-dockerfile-experiments.patch
 
-docker build --build-arg ENABLE_MEDIA_FFMPEG=false -t "$DYNAMO_IMAGE" -f container/rendered.Dockerfile .
+docker build -t "$DYNAMO_IMAGE" -f container/rendered.Dockerfile .
 ```
 
 `container/render.py` regenerates `container/rendered.Dockerfile`; apply the experiment patch after every render. The patch adds `COPY experiments/` to the build stages because this branch adds experiment crates to the Cargo workspace.
