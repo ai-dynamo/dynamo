@@ -282,6 +282,7 @@ _FUNCTION_HEADER = re.compile(
     r"(?:function\s+([A-Za-z_][\w-]*)(?:\s*\(\s*\))?|"
     r"([A-Za-z_][\w-]*)\s*\(\s*\))\s*"
 )
+_CASE_HEADER = re.compile(r"\s*(case)\s+.+\s+(in)\s*")
 
 
 class _Command(NamedTuple):
@@ -353,6 +354,8 @@ def _split_commands(script: str) -> list[_Command]:
     substitutions = 0  # command/process substitution parentheses are not group closers
     # closer, first member, outer AND-OR list, function name, definition line
     scopes: list[tuple[str, int, int, str, int]] = []
+    # awaiting pattern, first member, outer AND-OR list
+    cases: list[tuple[bool, int, int]] = []
     scoped: set[int] = set()  # preserve inner terminators unless the group gets &
     index = 0
     size = len(script)
@@ -378,7 +381,10 @@ def _split_commands(script: str) -> list[_Command]:
         text = "".join(parts)
         lead = len(text) - len(text.lstrip())
         stripped = text.strip()
-        if stripped:
+        if stripped == "esac" and cases and "q" not in "".join(mask):
+            _, first, group = cases.pop()
+            scoped.update(range(first, len(commands)))
+        elif stripped:
             commands.append(
                 _Command(
                     start,
@@ -454,7 +460,38 @@ def _split_commands(script: str) -> list[_Command]:
             substitutions += 1 if char == "(" else -1
             index += 1
             continue
-        header = "".join(parts).strip()
+        raw_header = "".join(parts)
+        header = raw_header.strip()
+        case_header = _CASE_HEADER.fullmatch(raw_header) if char.isspace() else None
+        if case_header and not substitutions:
+            header_mask = "".join(mask)
+            keywords_unquoted = all(
+                "q" not in header_mask[case_header.start(word) : case_header.end(word)]
+                for word in (1, 2)
+            )
+            if keywords_unquoted:
+                cases.append((True, len(commands), group))
+                group = len(commands)
+                parts.clear()
+                mask.clear()
+                segments[:] = [0]
+                header = ""
+                word_started = False
+                pending = False
+        if cases and cases[-1][0] and char in "()|":
+            if char == ")":
+                _, first, outer = cases[-1]
+                cases[-1] = (False, first, outer)
+                parts.clear()
+                mask.clear()
+                segments[:] = [0]
+                word_started = False
+                prev_code = ""
+                start = line
+            else:
+                add(char, False)
+            index += 1
+            continue
         function = (
             _FUNCTION_HEADER.fullmatch(header)
             if char in "{\n" and "q" not in "".join(mask)
@@ -520,6 +557,12 @@ def _split_commands(script: str) -> list[_Command]:
                         break
             if not continued or not "".join(parts).strip():
                 start = line
+            continue
+        if cases and script.startswith((";;", ";&"), index):
+            flush(";")
+            _, first, outer = cases[-1]
+            cases[-1] = (True, first, outer)
+            index += 3 if script.startswith(";;&", index) else 2
             continue
         if char == ";":
             flush(";")
@@ -726,6 +769,30 @@ def test_compound_command_keywords_expose_service_launches() -> None:
         (1, "python -m dynamo.vllm", False),
         (1, "python -m dynamo.frontend", False),
     ]
+
+
+def test_case_patterns_expose_branch_commands_only_in_case_context() -> None:
+    """Quoted/alternative patterns end at an unquoted case delimiter."""
+    script = (
+        'case "$MODE" in\n'
+        '    serve|"worker") python -m dynamo.vllm ;;\n'
+        "    *) echo idle ;;\n"
+        "esac\n"
+        "'serve)' python -m dynamo.fake\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [(2, "python -m dynamo.vllm", False)]
+
+
+def test_nested_case_branches_preserve_enclosing_background_group() -> None:
+    """Case delimiters must not close an enclosing subshell or hide nested branches."""
+    script = (
+        "(\n"
+        'case "$MODE" in serve) case "$INNER" in\n'
+        "    *) python -m dynamo.vllm ;; esac ;; esac\n"
+        ") &\nwait_any_exit\n"
+    )
+    assert _service_launches(script) == [(3, "python -m dynamo.vllm", True)]
 
 
 def test_function_launches_inherit_each_invocation_background_status() -> None:
