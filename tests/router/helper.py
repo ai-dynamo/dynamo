@@ -9,6 +9,7 @@ import os
 import random
 import string
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -197,6 +198,7 @@ async def wait_for_frontend_ready(
     store_backend: str = "etcd",
     request_plane: str = "nats",
     request_headers: dict[str, str] | None = None,
+    response_validator: Callable[[str], bool] | None = None,
 ):
     """Wait for backend worker(s) to be ready via the HTTP frontend (OpenAI API).
 
@@ -211,7 +213,11 @@ async def wait_for_frontend_ready(
     Args:
         frontend_url: Base URL of the frontend HTTP server (e.g., "http://localhost:8000")
         expected_num_workers: Exact total worker count to enforce through discovery.
-        timeout: Maximum time to wait in seconds for each readiness phase.
+        timeout: Maximum time to wait in seconds for each readiness phase. This is
+            not an overall budget: discovery spends it once per worker group, and
+            phases 2 and 3 then share one further budget. Worst-case total is
+            ``(len(engine_workers) + 1) * timeout``, which callers must keep below
+            their own pytest timeout.
         test_payload: Optional chat completions payload for the final readiness probe.
             Use this when readiness must satisfy the same routing constraints as the test.
         engine_workers: Worker process object, or a list of process objects, exposing
@@ -219,6 +225,8 @@ async def wait_for_frontend_ready(
         store_backend: Discovery backend used by the workers.
         request_plane: Request transport used by the workers.
         request_headers: Optional headers for the chat-completions readiness probe.
+        response_validator: Optional predicate for the successful response body.
+            The pipeline is ready only when it returns true.
 
     Raises:
         TimeoutError: If workers don't register or pipeline doesn't become ready within timeout
@@ -322,13 +330,32 @@ async def wait_for_frontend_ready(
                     chat_url,
                     json=test_payload,
                     headers=request_headers,
+                    # Bound each probe. A streaming probe gets its 200 as soon as
+                    # headers flush, so a worker that then stalls would otherwise
+                    # block on the body read for aiohttp's default total=300s and
+                    # burn the entire readiness budget in a single attempt.
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status == 200:
-                        logger.info("Chat completions pipeline ready!")
-                        return
+                        if response_validator is None:
+                            logger.info("Chat completions pipeline ready!")
+                            return
+                        response_body = await response.text()
+                        if response_validator(response_body):
+                            logger.info("Chat completions pipeline ready!")
+                            return
+                        logger.debug(
+                            "Chat completions returned 200 but the response did not "
+                            "satisfy the readiness predicate (elapsed: %.1fs). "
+                            "Body: %.500s",
+                            elapsed,
+                            response_body,
+                        )
                     else:
                         logger.debug(
-                            f"Chat completions not ready yet, status {response.status} (elapsed: {elapsed:.1f}s)"
+                            "Chat completions not ready yet, status %s (elapsed: %.1fs)",
+                            response.status,
+                            elapsed,
                         )
         except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
             logger.debug(f"Error testing chat completions: {e}")

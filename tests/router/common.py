@@ -2259,6 +2259,8 @@ def _test_router_decisions_disagg(
     request_plane: str = "nats",
     router_aic_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
+    verify_timing: bool = True,
+    frontend_timeout: int = 120,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -2281,6 +2283,8 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         router_aic_config: Optional AIC router perf-model config for frontend KV routing.
+        verify_timing: Request and validate response timing telemetry. Defaults to True.
+        frontend_timeout: Maximum time to wait for worker and frontend readiness.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2309,16 +2313,38 @@ def _test_router_decisions_disagg(
         logger.info(
             "Waiting for prefill and decode workers to register with frontend..."
         )
+        readiness_payload = {
+            **test_payload,
+            "messages": [{"role": "user", "content": "readiness probe"}],
+            "max_tokens": 1,
+            "stream": True,
+            "nvext": {"extra_fields": ["worker_id"]},
+        }
+
+        def disagg_response_ready(body: str) -> bool:
+            for data in parse_sse_json_chunks(body):
+                worker_ids = data.get("nvext", {}).get("worker_id", {})
+                if not isinstance(worker_ids, dict):
+                    continue
+                if (
+                    worker_ids.get("prefill_worker_id") is not None
+                    and worker_ids.get("decode_worker_id") is not None
+                ):
+                    return True
+            return False
+
         asyncio.run(
             wait_for_frontend_ready(
                 frontend_url=frontend_url,
                 expected_num_workers=(
                     prefill_workers.num_workers + decode_workers.num_workers
                 ),
-                timeout=120,
+                timeout=frontend_timeout,
                 engine_workers=[prefill_workers, decode_workers],
                 store_backend=store_backend,
                 request_plane=request_plane,
+                test_payload=readiness_payload,
+                response_validator=disagg_response_ready,
             )
         )
 
@@ -2336,7 +2362,9 @@ def _test_router_decisions_disagg(
                     # Each iteration adds more content to extend the prefix
                     progressive_content = " ".join([base_content] * (i + 1))
 
-                    # Create payload with worker_id and timing in extra_fields
+                    extra_fields = (
+                        ["worker_id", "timing"] if verify_timing else ["worker_id"]
+                    )
                     payload = {
                         **test_payload,
                         "messages": [
@@ -2345,7 +2373,7 @@ def _test_router_decisions_disagg(
                                 "content": progressive_content,
                             }
                         ],
-                        "nvext": {"extra_fields": ["worker_id", "timing"]},
+                        "nvext": {"extra_fields": extra_fields},
                         "stream": True,
                     }
 
@@ -2385,13 +2413,15 @@ def _test_router_decisions_disagg(
                         if decode_wid is not None:
                             decode_worker_ids.append(decode_wid)
 
-                        # Verify timing info is present and valid.
-                        # kv_transfer_estimated_latency_ms is measured on both the original
-                        # and bootstrap prefill paths (uses first_token_time as stop).
-                        assert (
-                            timing_info is not None
-                        ), f"Request {i + 1}: Expected timing info in final chunk, got None"
-                        verify_response_timing(timing_info, disagg=not enable_bootstrap)
+                        if verify_timing:
+                            # kv_transfer_estimated_latency_ms is measured on both the original
+                            # and bootstrap prefill paths (uses first_token_time as stop).
+                            assert (
+                                timing_info is not None
+                            ), f"Request {i + 1}: Expected timing info in final chunk, got None"
+                            verify_response_timing(
+                                timing_info, disagg=not enable_bootstrap
+                            )
 
                     # Small delay between requests
                     await asyncio.sleep(1)
