@@ -6331,6 +6331,7 @@ mod tests {
             },
             nvext: None,
             chat_template_args: None,
+            thinking_token_budget: None,
         }
     }
 
@@ -8143,6 +8144,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -8177,6 +8179,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_required_fields(&request);
@@ -8425,6 +8428,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
 
@@ -8457,6 +8461,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8488,6 +8493,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8519,6 +8525,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8552,6 +8559,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);
@@ -8583,6 +8591,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         };
         let result = validate_chat_completion_fields_generic(&request);

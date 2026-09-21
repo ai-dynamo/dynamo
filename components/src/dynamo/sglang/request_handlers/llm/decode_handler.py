@@ -32,6 +32,7 @@ from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_payload,
     native_generate_stream,
+    new_sglang_request_id,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
@@ -140,6 +141,95 @@ def _sampling_option_params(values: Dict[str, Any]) -> Dict[str, Any]:
     if values.get("seed") is not None:
         params["sampling_seed"] = values.get("seed")
     return params
+
+
+def _ordered_cancellation_request_id(
+    request_id: str,
+    sampling_params: Any,
+    *,
+    supported: bool,
+    batched: bool = False,
+) -> str | None:
+    """Use pre-output cancellation only when SGLang preserves the submitted ID."""
+    if not supported or batched:
+        return None
+    if isinstance(sampling_params, list):
+        sampling_params = sampling_params[0] if sampling_params else {}
+    if isinstance(sampling_params, Mapping):
+        sample_count = sampling_params.get("n") or 1
+        beam_width = sampling_params.get("beam_width") or 1
+        # SGLang parallel sampling replaces normalized ``rid_<index>`` values
+        # with unrelated UUIDs before scheduler dispatch. Until SGLang exposes
+        # a group abort API, the submitted ID cannot order a safe exact abort.
+        if sample_count > 1 and beam_width <= 1:
+            return None
+    return request_id
+
+
+def _native_payload_is_batched(native_payload: Mapping[str, Any]) -> bool:
+    for field in ("prompt", "text"):
+        if isinstance(native_payload.get(field), list):
+            return True
+    input_ids = native_payload.get("input_ids")
+    if isinstance(input_ids, list) and input_ids and isinstance(input_ids[0], list):
+        return True
+    input_embeds = native_payload.get("input_embeds")
+    return bool(
+        isinstance(input_embeds, list)
+        and input_embeds
+        and isinstance(input_embeds[0], list)
+        and input_embeds[0]
+        and isinstance(input_embeds[0][0], list)
+    )
+
+
+def _native_session_request_id(
+    native_payload: Mapping[str, Any], context_id: str
+) -> str | None:
+    """Preserve the public node ID used by SGLang session continuations."""
+    if native_payload.get("session_params") is None:
+        return None
+    request_id = native_payload.get("rid")
+    if request_id is None or request_id == "":
+        return context_id
+    if not isinstance(request_id, str):
+        raise ValueError("native SGLang session requests require a scalar rid")
+    return request_id
+
+
+def _public_native_response_id(
+    engine_response_id: Any,
+    response_index: Any,
+    internal_request_id: str | None,
+    response_request_id: str | list[str] | None,
+) -> Any:
+    """Map only response IDs derived from Dynamo's submitted SGLang ID."""
+    if not isinstance(engine_response_id, str) or not isinstance(
+        internal_request_id, str
+    ):
+        return engine_response_id
+    if engine_response_id == internal_request_id:
+        return (
+            response_request_id
+            if isinstance(response_request_id, str)
+            else engine_response_id
+        )
+    if (
+        not isinstance(response_index, int)
+        or isinstance(response_index, bool)
+        or response_index < 0
+        or engine_response_id != f"{internal_request_id}_{response_index}"
+    ):
+        return engine_response_id
+    if isinstance(response_request_id, str):
+        return f"{response_request_id}_{response_index}"
+    if (
+        isinstance(response_request_id, list)
+        and response_index < len(response_request_id)
+        and isinstance(response_request_id[response_index], str)
+    ):
+        return response_request_id[response_index]
+    return engine_response_id
 
 
 def _user_stop_token_ids(request: Dict[str, Any]) -> set[int]:
@@ -429,6 +519,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         native_payload: Mapping[str, Any],
         input_param: Dict[str, Any],
         context: Context,
+        sglang_request_id: str,
         priority: int | None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """Build and dispatch one native SGLang request."""
@@ -449,14 +540,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         native_request = build_native_generate_request(
             native_payload,
             input_ids=input_ids,
-            fallback_rid=context.trace_id or context.id(),
+            fallback_rid=sglang_request_id,
             priority=self._priority_kwargs(priority).get("priority"),
             bootstrap_host=bootstrap_info.get("bootstrap_host"),
             bootstrap_port=bootstrap_info.get("bootstrap_port"),
             bootstrap_room=bootstrap_info.get("bootstrap_room"),
-            external_trace_header=context.trace_headers()
-            if self.enable_trace
-            else None,
+            external_trace_header=(
+                context.trace_headers() if self.enable_trace else None
+            ),
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
         )
@@ -484,24 +575,60 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         if self._first_token_source is not None:
             self._first_token_source.bind(context, routing.get("dp_rank"))
         _raise_if_conditional_disagg_bypass(request)
-        trace_id = context.trace_id
+        sglang_request_id = new_sglang_request_id()
         input_param = self._get_input_param(request)
         priority = (request.get("routing") or {}).get("priority")
         native_payload = native_generate_payload(request)
+        native_session_request_id = None
         if native_payload is not None:
+            native_session_request_id = _native_session_request_id(
+                native_payload, context.id()
+            )
+            if native_session_request_id is not None:
+                sglang_request_id = native_session_request_id
+        logging.info(
+            "Submitted SGLang Request ID: %s, Context: %s",
+            sglang_request_id,
+            context.id(),
+        )
+        if native_payload is not None:
+            submitted_request_id = _ordered_cancellation_request_id(
+                sglang_request_id,
+                native_payload.get("sampling_params"),
+                supported=(
+                    getattr(self, "_supports_ordered_cancellation", False)
+                    # Session node IDs are caller-visible. Waiting for SGLang's
+                    # response avoids aborting an unrelated request if a caller
+                    # reuses an active node ID.
+                    and native_session_request_id is None
+                ),
+                batched=_native_payload_is_batched(native_payload),
+            )
             stream = self._native_generate_stream(
                 request,
                 native_payload,
                 input_param,
                 context,
+                sglang_request_id,
                 priority,
             )
-            async for output in self._process_native_generate_stream(stream, context):
+            async for output in self._process_native_generate_stream(
+                stream,
+                context,
+                submitted_request_id=submitted_request_id,
+                internal_request_id=sglang_request_id,
+                response_request_id=native_payload.get("rid") or context.id(),
+            ):
                 yield output
             return
 
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
+        submitted_request_id = _ordered_cancellation_request_id(
+            sglang_request_id,
+            sampling_params,
+            supported=getattr(self, "_supports_ordered_cancellation", False),
+        )
         logprob_kwargs = self._build_logprob_kwargs(request)
         metadata_uploader = self._metadata_uploader_from_request(request)
 
@@ -554,7 +681,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 external_trace_header=trace_header,
-                rid=trace_id,
+                rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -568,6 +695,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    submitted_request_id=submitted_request_id,
                 ):
                     yield out
             else:
@@ -577,6 +705,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request=request,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    submitted_request_id=submitted_request_id,
                 ):
                     yield out
         else:
@@ -638,7 +767,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._routed_experts_kwargs,
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
-                rid=trace_id,
+                rid=sglang_request_id,
                 data_parallel_rank=dp_rank,
                 lora_path=lora_path,
                 **logprob_kwargs,
@@ -652,6 +781,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     return_tokens_as_token_ids,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    submitted_request_id=submitted_request_id,
                 ):
                     yield out
             else:
@@ -661,6 +791,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request=request,
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
+                    submitted_request_id=submitted_request_id,
                 ):
                     yield out
 
@@ -668,25 +799,65 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         self,
         stream_source: AsyncIterator[Dict[str, Any]],
         context: Context,
+        submitted_request_id: str | None = None,
+        internal_request_id: str | None = None,
+        response_request_id: str | list[str] | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
+        request_ids: set[str] = set()
         first_output_seen = False
-        async with self._cancellation_monitor(request_id_future, context):
-            async for chunk in stream_source:
+        async with self._cancellation_monitor(
+            request_id_future,
+            context,
+            submitted_request_id,
+            request_ids=request_ids,
+        ) as cancellation_task:
+            async for chunk in self._stream_until_cancelled(
+                stream_source, cancellation_task
+            ):
                 native_response = chunk["engine_data"]["sglang_response"]
-                if not request_id_future.done():
-                    sglang_request_id = native_response.get("meta_info", {}).get("id")
-                    if sglang_request_id:
+                output = chunk
+                meta_info = native_response.get("meta_info", {})
+                sglang_request_id = meta_info.get("id")
+                if sglang_request_id:
+                    request_ids.add(sglang_request_id)
+                    if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
+                    if meta_info.get("finish_reason"):
+                        request_ids.discard(sglang_request_id)
+                if context.is_stopped():
+                    if submitted_request_id is None:
+                        self._abort_requests(request_ids, context)
+                    continue
                 if not first_output_seen and (
                     native_response.get("output_ids") or native_response.get("text")
                 ):
                     first_output_seen = True
                     context.notify_first_token()
+                if response_request_id is not None and isinstance(meta_info, dict):
+                    engine_response_id = meta_info.get("id")
+                    public_response_id = _public_native_response_id(
+                        engine_response_id,
+                        native_response.get("index"),
+                        internal_request_id,
+                        response_request_id,
+                    )
+                    if public_response_id != engine_response_id:
+                        public_response = {
+                            **native_response,
+                            "meta_info": {**meta_info, "id": public_response_id},
+                        }
+                        output = {
+                            **chunk,
+                            "engine_data": {
+                                **chunk["engine_data"],
+                                "sglang_response": public_response,
+                            },
+                        }
                 if not context.is_stopped():
-                    yield chunk
+                    yield output
 
     async def _process_token_stream(
         self,
@@ -695,6 +866,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         return_tokens_as_token_ids: bool = False,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        submitted_request_id: str | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -712,8 +884,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
-        async with self._cancellation_monitor(request_id_future, context, request_ids):
-            async for res in stream_source:
+        async with self._cancellation_monitor(
+            request_id_future,
+            context,
+            submitted_request_id,
+            request_ids=request_ids,
+        ) as cancellation_task:
+            async for res in self._stream_until_cancelled(
+                stream_source, cancellation_task
+            ):
                 meta_info = res.get("meta_info", {})
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
@@ -724,14 +903,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
                 if context.is_stopped():
-                    # A choice's first chunk can arrive after the monitor fired.
-                    self._abort_requests(request_ids, context)
+                    if submitted_request_id is None:
+                        # A choice's first chunk can arrive after the monitor fired.
+                        self._abort_requests(request_ids, context)
                     continue
 
-                # Check cancellation before yielding to allow proper cleanup.
-                # This lets SGLang proceed to the second token generation, which will
-                # async context switch and allow the abort monitor to signal cancellation.
-                # The loop should exit by itself when context.is_stopped() returns True.
                 # SGLang omits index for non-n/legacy chunks; treat those as
                 # choice 0 while preserving explicit indices for n>1.
                 output_idx = res.get("index") or 0
@@ -759,11 +935,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
-                # Empty, non-final chunks can happen during scheduler idle ticks.
-                # Keep waiting for the next chunk unless cancellation was requested.
+                # Keep draining empty, non-final chunks after cancellation so the
+                # abort monitor can run and SGLang can finish request cleanup.
                 if not output_ids and not finish_reason:
-                    if context.is_stopped():
-                        break
                     continue
 
                 if output_ids and not first_output_seen:
@@ -841,6 +1015,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request: Dict[str, Any] | None = None,
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
+        submitted_request_id: str | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -857,8 +1032,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
         first_output_seen = False
-        async with self._cancellation_monitor(request_id_future, context, request_ids):
-            async for res in stream_source:
+        async with self._cancellation_monitor(
+            request_id_future,
+            context,
+            submitted_request_id,
+            request_ids=request_ids,
+        ) as cancellation_task:
+            async for res in self._stream_until_cancelled(
+                stream_source, cancellation_task
+            ):
                 meta_info = res.get("meta_info", {})
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
@@ -869,7 +1051,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
                 if context.is_stopped():
-                    self._abort_requests(request_ids, context)
+                    if submitted_request_id is None:
+                        self._abort_requests(request_ids, context)
                     continue
 
                 # Check cancellation before yielding to allow proper cleanup.
@@ -914,7 +1097,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
                 response = {
-                    "id": meta_info["id"],
+                    "id": context.id(),
                     "created": int(time.time()),
                     "choices": [choice_data],
                     "model": self.config.server_args.served_model_name,

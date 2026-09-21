@@ -182,20 +182,6 @@ pub(crate) struct EmbeddedSelection {
     queue_metric_indices: HashMap<String, usize>,
 }
 
-static INSTALLED_POLICY_REGISTRY: OnceLock<WorkerSelectionPolicyRegistry> = OnceLock::new();
-
-/// Install the process-wide worker-selection policy registry (linked custom
-/// policies) that embedded selection partitions resolve `KvRouterConfig`
-/// policy instances against. Returns `false` if one is already installed.
-pub fn install_worker_selection_policy_registry(registry: WorkerSelectionPolicyRegistry) -> bool {
-    INSTALLED_POLICY_REGISTRY.set(registry).is_ok()
-}
-
-/// The installed registry, or the built-in default.
-pub fn worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    INSTALLED_POLICY_REGISTRY.get().cloned().unwrap_or_default()
-}
-
 /// Bridges the partition's scheduler load snapshots to the router's
 /// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`, and its per-worker
 /// load to the frontend gauges.
@@ -270,6 +256,7 @@ impl EmbeddedSelection {
             WorkerSelectionPolicyRegistry::default(),
         )
         .worker_selection_policy_factory(args.policy_factory)
+        .host_manages_request_lifecycle()
         .indexer_threads(1)
         .host(SelectionHost {
             load: HostLoad {
