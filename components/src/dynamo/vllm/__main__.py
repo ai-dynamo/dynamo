@@ -3,14 +3,16 @@
 
 import os
 import re
+import sys
 
 
-def _isolate_failover_compile_cache() -> str | None:
+def _isolate_failover_compile_cache(argv: list[str] | None = None) -> str | None:
     """Give each failover engine an independent writable compiler cache."""
     if "VLLM_CACHE_ROOT" in os.environ:
         return None
     shadow_mode = os.environ.get("DYN_GMS_FAILOVER_SHADOW_MODE", "0")
-    if shadow_mode.strip().lower() not in {"1", "true", "yes", "on"}:
+    shadow_requested = shadow_mode.strip().lower() in {"1", "true", "yes", "on"}
+    if not shadow_requested and "--gms-shadow-mode" not in (argv or sys.argv):
         return None
     engine_id = os.environ.get("ENGINE_ID")
     if not engine_id:
