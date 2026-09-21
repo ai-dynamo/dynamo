@@ -231,6 +231,7 @@ async def test_prepare_non_leader_failover_attaches_lock_owner(monkeypatch):
         "backend_name": "sglang",
         "tags": ["kv_cache"],
         "promotion_warmup": None,
+        "lease_transition_serving": False,
     }
 
 

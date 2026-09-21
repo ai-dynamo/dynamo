@@ -13,6 +13,7 @@ from sglang.srt.observability.trace import set_global_trace_level
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.gms_failover import (
     acquire_gms_failover_lock_before_init,
+    lease_transition_serving_enabled,
     prepare_gms_failover,
     run_gms_failover_promotion_warmup,
 )
@@ -210,6 +211,9 @@ async def _prepare_non_leader_failover(
         "backend_name": "sglang",
         "tags": ["kv_cache"],
         "promotion_warmup": None,
+        "lease_transition_serving": lease_transition_serving_enabled(
+            "sglang", mapped_standby=_uses_mapped_sleeping_standby()
+        ),
     }
     if activation_barrier is not None:
         failover_kwargs["activation_barrier"] = activation_barrier
@@ -490,6 +494,9 @@ async def init_decode(
             promotion_warmup=promotion_warmup,
             warm_standby_before_quiesce=_can_prewarm_mapped_standby(),
             activation_barrier=activation_barrier,
+            lease_transition_serving=lease_transition_serving_enabled(
+                "sglang", mapped_standby=_uses_mapped_sleeping_standby()
+            ),
         )
         failover_activation.attach_to(handler)
     maybe_start_gms_failover_child_watchdog(handler, engine)
