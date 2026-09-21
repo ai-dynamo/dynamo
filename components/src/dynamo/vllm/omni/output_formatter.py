@@ -52,7 +52,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from io import BytesIO
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import numpy as np
 import soundfile as sf
@@ -67,9 +67,18 @@ from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechRespo
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
 from dynamo.common.protocols.video_protocol import NvVideosResponse, VideoData
 from dynamo.common.storage import upload_to_fs
+from dynamo.common.utils.cmaf_video import (
+    CMAF_INIT_TAG,
+    CMAF_METADATA_TAG,
+    cmaf_gop_frames,
+    cmaf_segment_seconds,
+    iter_cmaf_chunks,
+    metadata_bytes,
+)
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.common.utils.video_utils import (
+    StreamingCmafEncoder,
     encode_video,
     frames_to_numpy,
     normalize_video_frames,
@@ -682,6 +691,138 @@ class DiffusionFormatter:
         except (TypeError, ValueError):
             return None
         return resolved if resolved > 0 else None
+
+    # ------------------------------------------------------------------
+    # CMAF streaming
+    # ------------------------------------------------------------------
+
+    def cmaf_frame(
+        self,
+        request_id: str,
+        tag: str,
+        payload: bytes,
+        *,
+        progress: int = 0,
+    ) -> Dict[str, Any]:
+        """Wrap one CMAF payload in the tagged response the frontend reads.
+
+        The payload is base64-encoded for the internal hop only, as the MJPEG
+        stream route already does; the frontend emits the raw bytes.
+        """
+        return NvVideosResponse(
+            id=request_id,
+            object="video",
+            model=self._model_name,
+            status="completed",
+            progress=progress,
+            created=int(time.time()),
+            data=[
+                VideoData(
+                    output_format="mp4",
+                    b64_json=base64.b64encode(payload).decode("utf-8"),
+                )
+            ],
+            cmaf=tag,
+        ).model_dump()
+
+    def cmaf_error(self, request_id: str, message: str) -> Dict[str, Any]:
+        """Terminal error response for the CMAF stream.
+
+        Shaped as a failed ``NvVideosResponse`` because that is what the frontend
+        deserializes on this route; a bare end of stream is never acceptable
+        after a failure, since it is indistinguishable from success.
+        """
+        return NvVideosResponse(
+            id=request_id,
+            object="video",
+            model=self._model_name,
+            status="failed",
+            progress=0,
+            created=int(time.time()),
+            data=[],
+            error=message,
+        ).model_dump()
+
+    async def stream_cmaf(
+        self,
+        images: list,
+        request_id: str,
+        *,
+        fps: Optional[int] = None,
+        gop_frames: Optional[int] = None,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Encode a clip as a CMAF stream, yielding tagged frames as they finish.
+
+        One ffmpeg session for the whole clip, fed a segment at a time, so the
+        muxer authors a single continuous timeline.
+
+        Exceptions propagate: the caller turns them into the terminal error frame
+        rather than a silent end of stream. See DEP 0017.
+        """
+        fps = int(fps or self._default_fps)
+        gop = int(gop_frames if gop_frames is not None else cmaf_gop_frames())
+        start_time = time.time()
+
+        # Same normalization as the batch response, so both routes agree on the
+        # pixels; a CMAF stream carries exactly one video.
+        videos = self._split_video_outputs(images, {})
+        if len(videos) != 1:
+            raise ValueError(f"CMAF streaming expects one video, got {len(videos)}")
+        canonical = self._video_to_numpy_frames(videos[0])
+        total, height, width, _ = canonical.shape
+        segment_count = (total + gop - 1) // gop
+
+        encoder = StreamingCmafEncoder(fps, width, height, gop_frames=gop)
+        await encoder.start()
+        logger.info(
+            "CMAF stream %s: %d frame(s) %dx%d @ %d fps -> %d segment(s) of %d",
+            request_id,
+            total,
+            width,
+            height,
+            fps,
+            segment_count,
+            gop,
+        )
+        metadata_sent = False
+        pushed = 0
+        try:
+            for chunk in iter_cmaf_chunks(canonical, gop):
+                pushed += len(chunk)
+                async for tag, payload in encoder.push(chunk):
+                    if tag == CMAF_INIT_TAG and not metadata_sent:
+                        # The codec string comes from the init segment, so
+                        # metadata can only be built once it exists -- yet it
+                        # still has to reach the client first.
+                        yield self.cmaf_frame(
+                            request_id,
+                            CMAF_METADATA_TAG,
+                            metadata_bytes(
+                                video_codec=encoder.codec_string(),
+                                width=width,
+                                height=height,
+                                fps=fps,
+                                target_duration=cmaf_segment_seconds(fps, gop),
+                                segment_count=segment_count,
+                            ),
+                        )
+                        metadata_sent = True
+                    yield self.cmaf_frame(
+                        request_id,
+                        tag,
+                        payload,
+                        progress=min(99, 99 * pushed // max(total, 1)),
+                    )
+
+            # A fragmented muxer cannot close the last fragment until the input
+            # ends, so finish() is what produces it.
+            async for tag, payload in encoder.finish():
+                yield self.cmaf_frame(request_id, tag, payload, progress=99)
+        finally:
+            await encoder.aclose()
+        logger.info(
+            "CMAF stream %s complete in %.2fs", request_id, time.time() - start_time
+        )
 
     async def _encode_image(
         self,
@@ -1506,6 +1647,29 @@ class OutputFormatter:
         return await formatter.format(
             stage_output, request_id, request_type=request_type, **ctx
         )
+
+    async def stream_cmaf(
+        self,
+        stage_output: Any,
+        request_id: str,
+        **ctx: Any,
+    ) -> AsyncIterator[Dict[str, Any]]:
+        """Encode video output as a CMAF stream of tagged frames."""
+        images = getattr(stage_output, "images", stage_output)
+        if is_empty_payload(images):
+            raise RuntimeError("No video frames to stream")
+        async for frame in self._formatters["image"].stream_cmaf(
+            images, request_id, **ctx
+        ):
+            yield frame
+
+    def cmaf_frame(self, request_id: str, tag: str, payload: bytes, **kwargs: Any):
+        """Wrap one CMAF payload in a tagged response."""
+        return self._formatters["image"].cmaf_frame(request_id, tag, payload, **kwargs)
+
+    def cmaf_error(self, request_id: str, message: str) -> Dict[str, Any]:
+        """Terminal error response for the CMAF stream."""
+        return self._formatters["image"].cmaf_error(request_id, message)
 
     async def finish_audio(
         self,
