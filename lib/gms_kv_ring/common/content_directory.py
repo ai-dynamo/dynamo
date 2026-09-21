@@ -188,9 +188,11 @@ class ContentDirectory:
 
     @property
     def authoritative(self) -> bool:
-        return self.mode == "authoritative" or (
-            self.mode == "shadow" and self.read_view_is_current_writer
-        )
+        if self.mode == "authoritative":
+            return (
+                not self._standby or self._has_owned or self.read_view_is_current_writer
+            )
+        return self.mode == "shadow" and self.read_view_is_current_writer
 
     @property
     def async_read_enabled(self) -> bool:

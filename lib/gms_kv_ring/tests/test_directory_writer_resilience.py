@@ -19,6 +19,33 @@ from gms_kv_ring.daemon.rpc_directory import (
 pytestmark = pytest.mark.pre_merge
 
 
+def test_authoritative_mode_standby_is_read_only_until_writer_handoff():
+    primary = ContentDirectory(
+        "/tmp/gms-directory-primary-authority.sock",
+        engine="test",
+        block_size=16,
+        mode="authoritative",
+        standby=False,
+    )
+    standby = ContentDirectory(
+        "/tmp/gms-directory-standby-authority.sock",
+        engine="test",
+        block_size=16,
+        mode="authoritative",
+        standby=True,
+    )
+
+    assert primary.authoritative is True
+    assert standby.authoritative is False
+
+    standby._view_current_writer = True
+    assert standby.authoritative is True
+
+    standby._view_current_writer = False
+    standby._has_owned = True
+    assert standby.authoritative is True
+
+
 def test_freeze_current_writer_view_preserves_epoch_and_publication_pipeline():
     directory = ContentDirectory(
         "/tmp/gms-directory-freeze-writer.sock",

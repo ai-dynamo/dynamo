@@ -26,7 +26,6 @@ from dynamo.common.gms_failover import (
     lease_transition_serving_enabled,
     run_gms_failover_post_lock_fence,
     run_gms_failover_promotion_warmup,
-    start_gms_failover_stabilization,
 )
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
@@ -1529,13 +1528,9 @@ class WorkerFactory:
         resumed = False
         try:
             resume_attempted = True
-            # The opt-in mapped-standby path resumes from FREE slots and
-            # exact-generation SEALED pins first, then promotes in the
-            # background. The default path remains paused until promotion.
-            if not lease_transition_serving:
-                await run_gms_failover_post_lock_fence(
-                    backend_name="vllm", role="shadow"
-                )
+            # Classify predecessor readers before admitting any successor
+            # access. Optional GPU-quiescence reclamation remains asynchronous.
+            await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
             if mapped_standby:
                 await self._resume_after_kv_fence(handler)
             else:
@@ -1546,15 +1541,9 @@ class WorkerFactory:
                 await promotion_warmup()
             self._maybe_start_rank_liveness_monitor(handler, config, failover_lock=lock)
             if lease_transition_serving:
-                start_gms_failover_stabilization(
-                    handler,
-                    runtime,
-                    backend_name="vllm",
-                    role="shadow",
-                )
                 logger.info(
-                    "[Shadow] Serving from FREE and read-pinned SEALED leases "
-                    "while predecessor retirement completes"
+                    "[Shadow] Serving from FREE and exact-generation SEALED leases "
+                    "while GPU-quiescence recovery completes"
                 )
         except BaseException as activation_error:
             safe_to_release = not resume_attempted

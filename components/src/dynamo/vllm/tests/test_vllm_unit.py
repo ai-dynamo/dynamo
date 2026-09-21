@@ -2839,7 +2839,7 @@ async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_gms_mapped_shadow_resumes_before_lease_stabilization(monkeypatch):
+async def test_gms_mapped_shadow_classifies_leases_before_resume(monkeypatch):
     from dynamo.vllm.worker_factory import WorkerFactory
 
     events = []
@@ -2868,12 +2868,8 @@ async def test_gms_mapped_shadow_resumes_before_lease_stabilization(monkeypatch)
         events.append(("transition", backend_name, mapped_standby))
         return True
 
-    async def unexpected_fence(**_kwargs):
-        raise AssertionError("transition mode must not synchronously fence")
-
-    def start_stabilization(owner, runtime, *, backend_name, role):
-        assert owner is handler
-        events.append(("stabilize", backend_name, role))
+    async def fence(**kwargs):
+        events.append(("fence", kwargs["backend_name"], kwargs["role"]))
 
     handler = SimpleNamespace(
         _pause_controller=PauseController(),
@@ -2896,11 +2892,7 @@ async def test_gms_mapped_shadow_resumes_before_lease_stabilization(monkeypatch)
     )
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence",
-        unexpected_fence,
-    )
-    monkeypatch.setattr(
-        "dynamo.vllm.worker_factory.start_gms_failover_stabilization",
-        start_stabilization,
+        fence,
     )
 
     assert (
@@ -2913,10 +2905,10 @@ async def test_gms_mapped_shadow_resumes_before_lease_stabilization(monkeypatch)
         ("pause_generation_only", False),
         ("health", True),
         "lock",
+        ("fence", "vllm", "shadow"),
         ("resume", ([],), {}),
         "mark_resumed",
         "monitor",
-        ("stabilize", "vllm", "shadow"),
     ]
 
 
