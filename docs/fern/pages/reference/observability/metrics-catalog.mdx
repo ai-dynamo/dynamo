@@ -311,7 +311,7 @@ F2 and F3 are recorded at selection time. F4 and F5 require a complete worker ou
 
 F0 uses `request.token_ids.len()`, while prefix matching can use multimodal routing tokens. For multimodal requests these token counts need not match; stage differences are not necessarily cache losses.
 
-`dynamo_frontend_cached_tokens` reports reuse per logical frontend request, not per routing attempt. The Generate path records zero when matching backend usage is unavailable and increments `dynamo_frontend_cached_tokens_missing_total`, rather than substituting the router estimate. An explicit worker-reported zero is not missing usage. Removing this fallback does not make the frontend metric interchangeable with F5 during migration or disaggregated routing.
+`dynamo_frontend_cached_tokens` reports reuse per logical frontend request and can fall back to a router estimate when matching backend usage is unavailable. Its existing behavior is unchanged. F5 uses only the worker result for each routing attempt, so the frontend metric cannot replace it during migration or disaggregated routing.
 
 Enable it on the router/frontend process:
 

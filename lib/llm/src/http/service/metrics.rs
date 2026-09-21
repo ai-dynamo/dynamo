@@ -531,7 +531,6 @@ pub struct Metrics {
     input_sequence_length: HistogramVec,
     output_sequence_length: HistogramVec,
     cached_tokens: HistogramVec,
-    cached_tokens_missing_total: IntCounterVec,
     tokenizer_latency: HistogramVec,
     output_tokens_counter: IntCounterVec,
     time_to_first_token: HistogramVec,
@@ -1071,18 +1070,9 @@ impl Metrics {
         let cached_tokens = HistogramVec::new(
             HistogramOpts::new(
                 frontend_metric_name(frontend_service::CACHED_TOKENS),
-                "Worker-reported cached tokens (prefix cache hits) per request; zero when unavailable",
+                "Number of cached tokens (prefix cache hits) per request",
             )
             .buckets(input_sequence_buckets.clone()),
-            &["model"],
-        )
-        .unwrap();
-
-        let cached_tokens_missing_total = IntCounterVec::new(
-            Opts::new(
-                frontend_metric_name("cached_tokens_missing_total"),
-                "Requests without matching backend cached-token usage",
-            ),
             &["model"],
         )
         .unwrap();
@@ -1220,7 +1210,6 @@ impl Metrics {
             input_sequence_length,
             output_sequence_length,
             cached_tokens,
-            cached_tokens_missing_total,
             tokenizer_latency,
             output_tokens_counter,
             time_to_first_token,
@@ -1380,7 +1369,6 @@ impl Metrics {
         registry.register(Box::new(self.input_sequence_length.clone()))?;
         registry.register(Box::new(self.output_sequence_length.clone()))?;
         registry.register(Box::new(self.cached_tokens.clone()))?;
-        registry.register(Box::new(self.cached_tokens_missing_total.clone()))?;
         registry.register(Box::new(self.tokenizer_latency.clone()))?;
         registry.register(Box::new(self.output_tokens_counter.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
@@ -1989,16 +1977,6 @@ impl ResponseMetricCollector {
         {
             self.cached_tokens_observed = true;
             self.cached_tokens.observe(tokens as f64);
-        }
-    }
-
-    pub(super) fn finish_cached_tokens(&mut self) {
-        if !self.cached_tokens_observed {
-            self.metrics
-                .cached_tokens_missing_total
-                .with_label_values(&[&self.model])
-                .inc();
-            self.observe_cached_tokens(Some(0));
         }
     }
 
@@ -3449,31 +3427,6 @@ mod tests {
                 .get_sample_count(),
             1
         );
-    }
-
-    #[test]
-    fn cached_tokens_missing_is_distinct_from_reported_zero() {
-        let metrics = Arc::new(Metrics::new());
-        for (model, reported, missing) in [
-            ("missing", None, 1),
-            ("zero", Some(0), 0),
-            ("hit", Some(42), 0),
-        ] {
-            let mut collector = metrics.clone().create_response_collector(model);
-            collector.observe_cached_tokens(reported);
-            collector.finish_cached_tokens();
-            collector.finish_cached_tokens();
-            let histogram = metrics.cached_tokens.with_label_values(&[model]);
-            assert_eq!(histogram.get_sample_count(), 1);
-            assert_eq!(histogram.get_sample_sum(), reported.unwrap_or(0) as f64);
-            assert_eq!(
-                metrics
-                    .cached_tokens_missing_total
-                    .with_label_values(&[model])
-                    .get(),
-                missing,
-            );
-        }
     }
 
     #[test]
