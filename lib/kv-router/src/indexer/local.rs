@@ -234,17 +234,19 @@ pub struct LocalKvIndexer {
 
 impl LocalKvIndexer {
     /// create a new LocalKvIndexer pointing to a KvIndexer.
+    ///
+    /// The worker cannot know whether a router learns shared-cache identity
+    /// from its `TreeDump`, so the primary always records dump provenance.
     pub fn new(
         token: CancellationToken,
         kv_block_size: u32,
         metrics: Arc<KvIndexerMetrics>,
         max_buffer_size: usize,
     ) -> Self {
-        Self::from_primary(
-            KvIndexer::new(token, kv_block_size, metrics.clone()),
-            metrics,
-            max_buffer_size,
-        )
+        let indexer = KvIndexer::builder(token, kv_block_size, metrics.clone())
+            .shared_cache_provenance(true)
+            .build();
+        Self::from_primary(indexer, metrics, max_buffer_size)
     }
 
     /// Construct a local indexer with a delegate for its primary device index.
@@ -257,6 +259,7 @@ impl LocalKvIndexer {
     ) -> Self {
         let indexer = KvIndexer::builder(token, kv_block_size, metrics.clone())
             .delegate(delegate)
+            .shared_cache_provenance(true)
             .build();
         Self::from_primary(indexer, metrics, max_buffer_size)
     }
