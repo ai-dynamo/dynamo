@@ -315,6 +315,8 @@ def _split_commands(script: str) -> list[_Command]:
     line = 1
     start = 1
     group = 0  # index in commands of the first member of the open AND-OR list
+    scopes: list[tuple[str, int, int]] = []  # closer, first member, outer AND-OR list
+    scoped: set[int] = set()  # preserve inner terminators unless the group gets &
     index = 0
     size = len(script)
 
@@ -357,6 +359,8 @@ def _split_commands(script: str) -> list[_Command]:
             # Bash runs a whole AND-OR list in the background, so the terminator
             # that closes the list applies to every member, not just the last.
             for position in range(group, len(commands)):
+                if position in scoped and terminator != "&":
+                    continue
                 commands[position] = commands[position]._replace(terminator=terminator)
             group = len(commands)
         parts.clear()
@@ -392,6 +396,27 @@ def _split_commands(script: str) -> list[_Command]:
                 heredocs.append((match.group(3), match.group(1) == "-"))
                 index = match.end()
                 continue
+        if not "".join(parts).strip() and (
+            char == "(" or (char == "{" and script[index + 1 : index + 2].isspace())
+        ):
+            scopes.append((")" if char == "(" else "}", len(commands), group))
+            group = len(commands)
+            parts.clear()
+            mask.clear()
+            segments[:] = [0]
+            pending = False
+            start = line
+            index += 1
+            continue
+        closes_scope = scopes and char == scopes[-1][0]
+        if closes_scope and (char == ")" or not "".join(parts).strip()):
+            flush("\n")
+            _, first, group = scopes.pop()
+            scoped.update(range(first, len(commands)))
+            prev = prev_code = char
+            pending = False
+            index += 1
+            continue
         if char == "\n":
             continued = pending
             if not continued:
@@ -618,6 +643,28 @@ def test_continued_pipeline_still_skips_heredoc_body() -> None:
         "wait_any_exit\n"
     )
     assert _service_launches(script) == [(1, "python -m dynamo.frontend", True)]
+
+
+@pytest.mark.parametrize("grouped", ["{ %s; }", "(%s)", "( { %s; } )"])
+@pytest.mark.parametrize("terminator", ["&", ";"])
+def test_grouped_service_launches(grouped: str, terminator: str) -> None:
+    """Groups expose their launches and apply an outer ampersand to every member."""
+    script = grouped % "python -m dynamo.frontend & python -m dynamo.vllm"
+    script += f" {terminator}\npython -m dynamo.planner\nwait_any_exit\n"
+    assert _service_launches(script) == [
+        (1, "python -m dynamo.frontend", True),
+        (1, "python -m dynamo.vllm", terminator == "&"),
+        (2, "python -m dynamo.planner", False),
+    ]
+
+
+def test_grouped_and_or_list_inherits_background_status() -> None:
+    """An outer AND-OR list backgrounds both a group and its sibling command."""
+    script = "{ python -m dynamo.frontend; } &&\npython -m dynamo.vllm &\n"
+    assert _service_launches(script) == [
+        (1, "python -m dynamo.frontend", True),
+        (2, "python -m dynamo.vllm", True),
+    ]
 
 
 def test_launch_scripts_background_the_services_wait_any_exit_watches() -> None:
