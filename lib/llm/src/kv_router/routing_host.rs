@@ -799,9 +799,6 @@ where
                 );
                 tracker.record_router_queue_depth(self.kv_router().pending_count());
             }
-            self.request_metrics
-                .input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
             let stream_context = request.context().clone();
             let worker_id_info = request
                 .tracker

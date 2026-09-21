@@ -104,17 +104,13 @@ impl CacheLossTracking {
     }
 }
 
-fn cache_loss_stages(
-    route: RouteObservation,
-    outcome: &CacheLossWorkerOutcome,
-) -> Option<[u64; 5]> {
-    let f2 = route.best_router_tokens;
-    let f3 = route.selected_router_tokens;
-    let f4 = outcome
-        .gpu_hit_tokens
-        .checked_add(outcome.cpu_lookup_tokens)?;
-    let f5 = outcome.gpu_hit_tokens.checked_add(outcome.cpu_hit_tokens)?;
-    Some([route.prompt_tokens, f2, f3, f4, f5])
+fn cache_loss_worker_stage(outcome: &CacheLossWorkerOutcome) -> Option<[u64; 2]> {
+    Some([
+        outcome
+            .gpu_hit_tokens
+            .checked_add(outcome.cpu_lookup_tokens)?,
+        outcome.gpu_hit_tokens.checked_add(outcome.cpu_hit_tokens)?,
+    ])
 }
 
 fn valid_cache_loss_worker_outcome(
@@ -127,7 +123,7 @@ fn valid_cache_loss_worker_outcome(
 
 #[derive(Debug, Eq, PartialEq)]
 enum CacheLossFinalization {
-    Complete([u64; 5]),
+    Complete([u64; 2]),
     Incomplete,
 }
 
@@ -147,12 +143,10 @@ fn finalize_cache_loss_state(
     let Some(outcome) = worker_outcome.take() else {
         return Some(CacheLossFinalization::Incomplete);
     };
-    Some(
-        cache_loss_stages(route.expect("checked above"), &outcome).map_or(
-            CacheLossFinalization::Incomplete,
-            CacheLossFinalization::Complete,
-        ),
-    )
+    Some(cache_loss_worker_stage(&outcome).map_or(
+        CacheLossFinalization::Incomplete,
+        CacheLossFinalization::Complete,
+    ))
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -710,9 +704,12 @@ where
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
             request_metrics.requests_started_total.inc();
-            if let Some(cache_loss) = cache_loss {
-                request_metrics.observe_cache_loss_input(cache_loss.prompt_tokens);
-            }
+        }
+        if let Some(cache_loss) = cache_loss {
+            request_metrics.observe_cache_loss_route(
+                cache_loss.best_router_tokens,
+                cache_loss.selected_router_tokens,
+            );
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -951,10 +948,10 @@ where
             return;
         };
         match finalization {
-            CacheLossFinalization::Complete(stages) => self
+            CacheLossFinalization::Complete(lookup_tokens) => self
                 .observability
                 .request_metrics()
-                .observe_cache_loss_funnel(stages),
+                .observe_cache_loss_worker(lookup_tokens),
             CacheLossFinalization::Incomplete => self
                 .observability
                 .request_metrics()
@@ -999,22 +996,13 @@ mod cache_loss_tests {
 
     #[test]
     fn worker_outcomes_can_exceed_router_observations() {
-        let route = route();
         let outcome = outcome();
 
-        assert_eq!(
-            cache_loss_stages(route, &outcome),
-            Some([100, 75, 60, 90, 85])
-        );
+        assert_eq!(cache_loss_worker_stage(&outcome), Some([90, 85]));
     }
 
     #[test]
     fn stages_preserve_values_above_prior_stages_and_prompt_length() {
-        let route = RouteObservation {
-            prompt_tokens: 100,
-            best_router_tokens: 110,
-            selected_router_tokens: 105,
-        };
         let outcome = CacheLossWorkerOutcome {
             complete: true,
             prompt_tokens: 100,
@@ -1023,28 +1011,20 @@ mod cache_loss_tests {
             cpu_lookup_tokens: 20,
         };
 
-        assert_eq!(
-            cache_loss_stages(route, &outcome),
-            Some([100, 110, 105, 140, 135])
-        );
+        assert_eq!(cache_loss_worker_stage(&outcome), Some([140, 135]));
     }
 
     #[test]
     fn counter_overflow_marks_the_observation_incomplete() {
-        let route = RouteObservation {
-            prompt_tokens: 100,
-            best_router_tokens: 75,
-            selected_router_tokens: 60,
-        };
         let outcome = CacheLossWorkerOutcome {
             complete: true,
             prompt_tokens: 100,
             gpu_hit_tokens: u64::MAX,
             cpu_hit_tokens: 1,
-            cpu_lookup_tokens: 0,
+            cpu_lookup_tokens: 1,
         };
 
-        assert_eq!(cache_loss_stages(route, &outcome), None);
+        assert_eq!(cache_loss_worker_stage(&outcome), None);
     }
 
     #[test]
@@ -1054,7 +1034,7 @@ mod cache_loss_tests {
 
         assert_eq!(
             finalize_cache_loss_state(Some(route()), &mut worker_outcome, &mut recorded, true),
-            Some(CacheLossFinalization::Complete([100, 75, 60, 90, 85]))
+            Some(CacheLossFinalization::Complete([90, 85]))
         );
         assert_eq!(
             finalize_cache_loss_state(Some(route()), &mut worker_outcome, &mut recorded, true),
@@ -1096,7 +1076,7 @@ mod cache_loss_tests {
 
         assert_eq!(
             finalize_cache_loss_state(Some(route), &mut worker_outcome, &mut recorded, true),
-            Some(CacheLossFinalization::Complete([100, 75, 60, 90, 85]))
+            Some(CacheLossFinalization::Complete([90, 85]))
         );
     }
 }

@@ -453,10 +453,12 @@ where
                     guard.request_metrics().kv_hit_rate.observe(hit_rate);
                 }
             }
-            guard
-                .request_metrics()
-                .input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
+            if !is_query_only {
+                guard
+                    .request_metrics()
+                    .input_sequence_tokens
+                    .observe(request.token_ids.len() as f64);
+            }
             Ok(())
         }
         .await;

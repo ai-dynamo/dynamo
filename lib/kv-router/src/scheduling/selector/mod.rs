@@ -641,6 +641,32 @@ mod worker_stage_tests {
     }
 
     #[test]
+    fn raw_overlap_is_specific_to_the_selected_dp_rank() {
+        let mut request = base_request(128);
+        let selected = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(selected, 2);
+        request.overlap.tier_overlap_blocks.disk.insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(other_rank, 7);
+        request.overlap.effective_cached_tokens.insert(selected, 3);
+        assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
+        assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
+    }
+
+    #[test]
     fn worker_stage_tracking_excludes_out_of_range_dp_rank() {
         let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
         let mut request = base_request(128);
