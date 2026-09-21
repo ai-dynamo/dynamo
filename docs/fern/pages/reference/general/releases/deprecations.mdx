@@ -21,7 +21,9 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <span className="dynref-badge dynref-badge--blue">Behavioral</span> **vLLM ignores `DYN_CONNECTOR`** following the backend-specific connector cleanup ([#12611](https://github.com/ai-dynamo/dynamo/pull/12611)).
 
-  > **Migrate:** Remove `DYN_CONNECTOR` from vLLM deployments and use `--kv-transfer-config` when KV transfer is required.
+<Note>
+**Migrate:** Remove `DYN_CONNECTOR` from vLLM deployments and use `--kv-transfer-config` when KV transfer is required.
+</Note>
 
 <a id="v150"></a>
 
