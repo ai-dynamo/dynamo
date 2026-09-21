@@ -240,9 +240,8 @@ def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
 
     async def _call():
         try:
-            # Generous outer bound -- a hundred times the patched deadline. It is
-            # not the claim under test, only a guard so a caller that is never
-            # released fails here instead of hanging the suite.
+            # Not the claim under test: 100x the patched deadline, only a guard
+            # so an unreleased caller fails here instead of hanging the suite.
             return await asyncio.wait_for(
                 BaseWorkerHandler.get_ep_capacity(handler, {}), timeout=5.0
             )
