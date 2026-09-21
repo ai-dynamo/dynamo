@@ -193,8 +193,10 @@ fn prepare_protected_model(
         validate_config(&config)?;
         let package_key = read_public_key(&config.package_trust.public_key_file)?;
         let license_key = read_public_key(&config.license_trust.public_key_file)?;
-        let device_key_handle = parse_handle(&config.tpm.device_key_handle)?;
-        let policy_authority_key_handle = parse_handle(&config.tpm.policy_authority_key_handle)?;
+        let device_key_handle =
+            parse_handle(&config.tpm.device_key_handle).ok_or_else(config_error)?;
+        let policy_authority_key_handle =
+            parse_handle(&config.tpm.policy_authority_key_handle).ok_or_else(config_error)?;
         let authorized = load_authorized_model(
             package_root,
             &config.license_root,
@@ -300,12 +302,11 @@ fn read_private_file(path: &Path, maximum: u64) -> PyResult<Vec<u8>> {
 }
 
 #[cfg(any(test, all(target_os = "linux", feature = "model-protection-tpm2")))]
-fn parse_handle(value: &str) -> PyResult<u32> {
+fn parse_handle(value: &str) -> Option<u32> {
     value
         .strip_prefix("0x")
         .filter(|digits| digits.len() == 8)
         .and_then(|digits| u32::from_str_radix(digits, 16).ok())
-        .ok_or_else(config_error)
 }
 
 fn config_error() -> PyErr {
@@ -342,8 +343,8 @@ mod tests {
 
     #[test]
     fn parses_only_explicit_persistent_handle_syntax() {
-        assert_eq!(parse_handle("0x81000001").unwrap(), 0x81000001);
-        assert!(parse_handle("81000001").is_err());
-        assert!(parse_handle("0x1").is_err());
+        assert_eq!(parse_handle("0x81000001"), Some(0x81000001));
+        assert_eq!(parse_handle("81000001"), None);
+        assert_eq!(parse_handle("0x1"), None);
     }
 }
