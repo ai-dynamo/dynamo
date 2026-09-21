@@ -303,7 +303,15 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Cache-reuse funnel telemetry
 
-The optional cache-reuse funnel records token totals per routing attempt. It reuses `dynamo_component_router_input_sequence_tokens_sum` for F0; the stage-labeled funnel metric publishes F2 through F5. Query-only worker lookups are excluded from F0 because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
+The cache-reuse funnel records token totals per routing attempt. F2 through F5 are always enabled, with a separate counter for each measurement. F0 reuses the existing input-token sum. Query-only worker lookups are excluded because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
+
+| Stage | Metric |
+| --- | --- |
+| F0: Tokens Received | `dynamo_component_router_input_sequence_tokens_sum` |
+| F2: Tokens Resident on Some Worker | `dynamo_component_router_cache_loss_max_eligible_cached_prefix_tokens_total` |
+| F3: Tokens Resident on Chosen Worker | `dynamo_component_router_cache_loss_selected_cached_prefix_tokens_total` |
+| F4: Tokens Found by Worker | `dynamo_component_router_cache_loss_worker_lookup_tokens_total` |
+| F5: Tokens Actually Used From Cache by Worker | `dynamo_component_router_cache_loss_worker_reused_tokens_total` |
 
 F2 and F3 report raw contiguous prefix overlap in token units across device, host-pinned, and disk or external tiers. They do not apply the router's configurable cache-tier weights; those weights affect worker selection only.
 
@@ -313,13 +321,7 @@ F0 uses `request.token_ids.len()`, while prefix matching can use multimodal rout
 
 `dynamo_frontend_cached_tokens` reports reuse per logical frontend request and can fall back to a router estimate when matching backend usage is unavailable. Its existing behavior is unchanged. F5 uses only the worker result for each routing attempt, so the frontend metric cannot replace it during migration or disaggregated routing.
 
-Enable it on the router/frontend process:
-
-```bash
-DYN_ROUTER_CACHE_REUSE_METRICS=true
-```
-
-It is disabled by default.
+The vLLM worker includes cache-reuse metadata in its final response without an enable flag. Older workers without this metadata contribute incomplete observations rather than estimated F4/F5 values.
 
 ### Per-request routing overhead
 

@@ -1266,7 +1266,10 @@ mod prefill_start_tests {
             )
             .unwrap(),
             overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
-            cache_loss_worker_stages: None,
+            cache_loss_worker_stages:
+                crate::kv_router::metrics::CacheLossWorkerStageMetrics::for_test(
+                    &prometheus::Registry::new(),
+                ),
         })
     }
 
