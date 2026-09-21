@@ -881,8 +881,6 @@ class MultimodalPrefillWorkerHandler(
                                 ),
                             )
 
-        except InvalidArgument:
-            raise
         except Exception as e:
             logger.error(f"Error in prefill generation: {e}", exc_info=True)
             extra_fields = (
