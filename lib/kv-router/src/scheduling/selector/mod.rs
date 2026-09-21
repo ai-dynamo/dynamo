@@ -251,7 +251,7 @@ impl<'a> MaterializedSelectionInput<'a> {
             } else {
                 0
             } as f64;
-            let worker_load = worker_load.unwrap_or_default();
+            let worker_load = worker_load.unwrap_or_else(|| self.request.worker_load_for(worker));
             WorkerLoadInput {
                 raw_prefill_blocks: raw_prefill_tokens / self.context.block_size as f64,
                 active_prefill_tokens: worker_load.active_prefill_tokens,

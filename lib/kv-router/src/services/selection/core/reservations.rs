@@ -401,7 +401,7 @@ impl SelectionCore {
             None => None,
         };
         if let Some(hashes) = routing_hashes {
-            self.record_routing_decision(&entry, worker, hashes).await;
+            self.record_routing_decision(&entry, worker, hashes).await?;
         }
         claim.install(booking, affinity_lease)?;
 

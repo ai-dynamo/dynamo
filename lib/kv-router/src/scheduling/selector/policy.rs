@@ -390,6 +390,48 @@ mod tests {
     }
 
     #[test]
+    fn custom_picker_counts_tracked_blocks_without_worker_projection() {
+        struct LoadPicker;
+
+        impl WorkerPicker for LoadPicker {
+            fn required_worker_inputs(&self) -> WorkerInputs {
+                WorkerInputs::LOAD
+            }
+
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                let load = &input.load().expect("requested load inputs")[0];
+                assert_eq!(load.decode_cost_blocks(), 2.0);
+                assert_eq!(load.active_prefill_tokens(), 0);
+                assert_eq!(load.active_requests(), 0);
+                Ok(0)
+            }
+        }
+
+        let workers = HashMap::from([(0, TaintedWorkerConfig::default())]);
+        let mut request = base_request(33);
+        request.token_seq = Some(vec![0, 1]);
+        let policy = WorkerSelectionPolicy::new(
+            KvRouterConfig::default(),
+            "test",
+            Vec::new(),
+            Box::new(LoadPicker),
+        );
+
+        policy
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                16,
+            ))
+            .unwrap();
+    }
+
+    #[test]
     fn custom_picker_receives_requested_cache_inputs() {
         struct HighestOverlapPicker;
 

@@ -522,7 +522,7 @@ impl SelectionCore {
             };
             if let Some(hashes) = routing_hashes.take() {
                 self.record_routing_decision(&entry, response.best_worker, hashes)
-                    .await;
+                    .await?;
             }
             claim.install(booking, affinity_lease)?;
             None
@@ -680,23 +680,27 @@ impl SelectionCore {
     /// Record a booked routing decision into the partition's approximate
     /// indexer (side or primary). The booking already landed, so a failure
     /// here only costs predicted cache credit; it is logged, not returned.
+    /// Shutdown still aborts the owning operation so its booking is released.
     pub(super) async fn record_routing_decision(
         &self,
         entry: &SelectionEntry,
         worker: WorkerWithDpRank,
         block_hashes: Vec<LocalBlockHash>,
-    ) {
+    ) -> Result<(), SelectionError> {
         if block_hashes.is_empty() {
-            return;
+            return Ok(());
         }
-        if let Err(error) = entry
-            .indexer
-            .record_routing_decision_hashes(
+        let result = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
+            }
+            result = entry.indexer.record_routing_decision_hashes(
                 worker,
                 RoutingDecisionHashes::from_local_hashes(block_hashes),
-            )
-            .await
-        {
+            ) => result,
+        };
+        if let Err(error) = result {
             tracing::warn!(
                 %error,
                 key = %entry.key,
@@ -705,6 +709,7 @@ impl SelectionCore {
                 "Failed to record routing decision into approximate indexer"
             );
         }
+        Ok(())
     }
 
     /// Normalize the prompt and gather cache signals. The indexer lookup and
@@ -774,8 +779,13 @@ impl SelectionCore {
             }
         };
         let lookups_started = Instant::now();
-        let ((tiered, indexer), (shared_cache_hits, shared_cache, shared_cache_error)) =
-            tokio::join!(indexer_lookup, shared_cache_lookup);
+        let ((tiered, indexer), (shared_cache_hits, shared_cache, shared_cache_error)) = tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => {
+                return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
+            }
+            result = async { tokio::join!(indexer_lookup, shared_cache_lookup) } => result,
+        };
         let timings = LookupTimings {
             block_hashing: normalized.block_hashing,
             seq_hashing: normalized.seq_hashing,
