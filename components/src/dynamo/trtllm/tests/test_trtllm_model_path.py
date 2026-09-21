@@ -12,6 +12,7 @@ import os
 
 import pytest
 
+from dynamo.trtllm.utils import model_path as model_path_module
 from dynamo.trtllm.utils.model_path import resolve_model_path
 
 pytestmark = [
@@ -26,9 +27,24 @@ COMMIT = "c1899de289a04d12100db370d81485cdf75e47ca"
 OTHER_COMMIT = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 
 
+class _ReachableHub:
+    """A Hub that answers, without the tests reaching the network to find out."""
+
+    def model_info(self, *args, **kwargs):
+        return object()
+
+
+class _UnreachableHub:
+    def model_info(self, *args, **kwargs):
+        raise OSError("no route to host")
+
+
 def _clear_cache_env(monkeypatch):
     for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"):
         monkeypatch.delenv(name, raising=False)
+    # Offline by default: the fallback is only for a Hub that cannot answer,
+    # and no case here may depend on the runner having network.
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
 
 
 def _hub(tmp_path, monkeypatch):
@@ -94,7 +110,6 @@ def test_unusable_ref_without_a_complete_snapshot_keeps_the_repository_id(
 def test_ref_naming_an_incomplete_snapshot_keeps_the_repository_id(
     tmp_path, monkeypatch
 ):
-    """A named commit is the one to load; another commit is not a substitute."""
     repo = _repo(_hub(tmp_path, monkeypatch))
     (repo / "refs" / "main").write_text(OTHER_COMMIT)
     _snapshot(repo, OTHER_COMMIT, complete=False)
@@ -111,6 +126,53 @@ def test_explicit_revision_keeps_the_repository_id(tmp_path, monkeypatch, revisi
     _snapshot(repo, COMMIT)
 
     assert resolve_model_path(MODEL, revision) == MODEL
+
+
+@pytest.mark.parametrize("ref", [None, "not-a-commit-hash"])
+def test_a_ref_that_is_not_empty_keeps_the_repository_id(tmp_path, monkeypatch, ref):
+    """Only an empty ref makes the engine's lookup return the hashless path."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    if ref is not None:
+        (repo / "refs" / "main").write_text(ref)
+    _snapshot(repo, COMMIT)
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+def test_snapshot_with_an_unresolved_link_keeps_the_repository_id(
+    tmp_path, monkeypatch
+):
+    """A link to a blob that has not landed marks a download still running."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    (snapshot / "model.safetensors").symlink_to(repo / "blobs" / "absent")
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+def test_a_reachable_hub_keeps_the_repository_id(tmp_path, monkeypatch):
+    """The Hub resolves the revision itself; do not guess from a stale cache."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(model_path_module, "HfApi", _ReachableHub)
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+def test_a_hub_that_cannot_answer_falls_back_to_the_cached_snapshot(
+    tmp_path, monkeypatch
+):
+    """Offline mode is not the only way the lookup loses the Hub."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(model_path_module, "HfApi", _UnreachableHub)
+
+    assert resolve_model_path(MODEL) == str(snapshot)
 
 
 def test_legacy_cache_variable_locates_the_snapshot(tmp_path, monkeypatch):

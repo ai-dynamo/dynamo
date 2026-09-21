@@ -19,15 +19,15 @@ It imports nothing that needs CUDA, so it stays testable without a GPU.
 
 import logging
 import os
-import re
 from typing import Optional
 
+from huggingface_hub import HfApi
 from huggingface_hub.constants import DEFAULT_REVISION, HF_HUB_CACHE
 from huggingface_hub.file_download import repo_folder_name
 
-_COMMIT_HASH = re.compile(r"^[0-9a-f]{40}$")
-
 _CONFIG_FILE = "config.json"
+
+_HUB_PROBE_TIMEOUT = 10.0
 
 
 def _hub_cache_dir() -> str:
@@ -48,16 +48,51 @@ def _hub_cache_dir() -> str:
 
 
 def _is_complete_snapshot(path: str) -> bool:
-    return os.path.isfile(os.path.join(path, _CONFIG_FILE))
+    """A config, and no entry still waiting on its blob.
 
-
-def _names_a_commit(ref_file: str) -> bool:
+    ``huggingface_hub`` links a file into the snapshot only once that blob has
+    finished downloading, so a link that resolves to nothing marks a download
+    another process is still doing, not a snapshot the engine can load.
+    """
+    if not os.path.isfile(os.path.join(path, _CONFIG_FILE)):
+        return False
     try:
-        with open(ref_file, encoding="utf-8") as ref:
-            commit = ref.read().strip()
+        entries = os.listdir(path)
     except OSError:
         return False
-    return bool(_COMMIT_HASH.match(commit))
+    return all(os.path.exists(os.path.join(path, entry)) for entry in entries)
+
+
+def _ref_is_empty(ref_file: str) -> bool:
+    """The one reference shape that makes the engine's own lookup go wrong.
+
+    An empty reference is joined onto ``<repo>/snapshots`` as an empty commit,
+    yielding a directory that exists and holds no config. A reference that is
+    missing, unreadable, or names something else makes the lookup raise
+    instead, which is a loud failure this module has no better answer for.
+    """
+    try:
+        with open(ref_file, encoding="utf-8") as ref:
+            return ref.read().strip() == ""
+    except OSError:
+        return False
+
+
+def _hub_is_unreachable(model: str) -> bool:
+    """Whether the engine's own lookup can still ask the Hub.
+
+    A reachable Hub resolves the revision itself, which beats anything guessed
+    from a cache whose reference no longer describes it. Only once that has
+    failed is the local snapshot the better answer. Asked only on the broken
+    reference path, so a healthy start makes no request.
+    """
+    if os.environ.get("HF_HUB_OFFLINE", "0") not in ("", "0"):
+        return True
+    try:
+        HfApi().model_info(model, timeout=_HUB_PROBE_TIMEOUT)
+    except Exception:
+        return True
+    return False
 
 
 def _sole_complete_snapshot(repo_dir: str) -> Optional[str]:
@@ -77,23 +112,21 @@ def _sole_complete_snapshot(repo_dir: str) -> Optional[str]:
 def resolve_model_path(model: str, revision: Optional[str] = None) -> str:
     """Return the model argument to give the engine.
 
-    The repository id is returned unchanged unless no revision was requested,
-    the cache reference for the default revision is unusable, and exactly one
-    complete snapshot is present -- only then is that snapshot directory
-    returned, so the engine never repeats the broken lookup. A machine with no
-    local copy keeps downloading exactly as before.
+    The repository id comes back unchanged unless all four hold: no revision
+    was requested, the cache reference for the default revision is empty,
+    exactly one complete snapshot is present, and the Hub can no longer be
+    asked. Only then is that snapshot directory returned, which is the one
+    situation where the engine's own lookup is certain to produce the hashless
+    path and crash.
 
-    Every other branch returns the input, because substituting a snapshot the
-    cache does not name for the requested revision would load different weights
-    without saying so, which is worse than the crash this module prevents.
+    Every other branch returns the input, because substituting a snapshot that
+    nothing ties to the requested revision would load different weights without
+    saying so, which is worse than the crash this module prevents.
     """
     if os.path.exists(model):
         return model
 
     if revision is not None:
-        # An explicit revision names which weights to load. An unusable
-        # reference is no evidence that a cached snapshot holds them, and a
-        # cache carrying only some other revision must not stand in for it.
         return model
 
     repo_dir = os.path.join(
@@ -101,18 +134,19 @@ def resolve_model_path(model: str, revision: Optional[str] = None) -> str:
     )
     ref_file = os.path.join(repo_dir, "refs", DEFAULT_REVISION)
 
-    if _names_a_commit(ref_file):
-        # The reference names the commit to load. If that snapshot is missing
-        # or half-written, it is the engine's to fetch or finish; another
-        # commit's snapshot is not a substitute for it.
+    if not _ref_is_empty(ref_file):
         return model
 
     snapshot = _sole_complete_snapshot(repo_dir)
     if snapshot is None:
         return model
 
+    if not _hub_is_unreachable(model):
+        return model
+
     logging.info(
-        "Cache reference %s for %s is unusable; using the local snapshot %s",
+        "Cache reference %s for %s is empty and the Hub is unreachable; "
+        "using the local snapshot %s",
         ref_file,
         model,
         snapshot,
