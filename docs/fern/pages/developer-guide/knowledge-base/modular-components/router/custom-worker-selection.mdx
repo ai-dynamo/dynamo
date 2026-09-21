@@ -431,7 +431,7 @@ The disaggregated prefill hop and query-only probes do not run classifiers. Stat
 
 ## Available Signals
 
-Request context and worker identity are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
+Worker identity and ordinary request metadata are always available. Request-level cache context requires `WorkerInputs::CACHE`. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
 ### Request Context
 
@@ -439,8 +439,8 @@ Request context and worker identity are always available. Dynamo calculates opti
 |---|---|
 | `prompt_tokens()` | Exact incoming prompt token count, borrowed from the request without allocation |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
-| `has_tier_matches()` | Whether the current request lookup contains any tier-specific matches, before policy filters |
-| `shared_cache_hits()` | Optional unweighted shared-cache ranges from the current lookup |
+| `has_tier_matches()` | With `CACHE`, returns `Some(true)` if the lookup contains any tier-specific matches before filtering, or `Some(false)` otherwise; without `CACHE`, returns `None` |
+| `shared_cache_hits()` | With `CACHE`, returns the optional unweighted shared-cache ranges from the current lookup; without `CACHE`, returns `None` |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
@@ -449,6 +449,8 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
+
+Each filter, scorer, and picker must declare `WorkerInputs::CACHE` in its own `required_worker_inputs()` to read the two cache context accessors. Another component requesting cache does not enable them. The host borrows the existing lookup snapshot; reading these accessors adds no cache lookup or range copy.
 
 ### Session Context
 

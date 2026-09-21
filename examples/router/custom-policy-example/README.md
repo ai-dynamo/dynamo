@@ -377,4 +377,6 @@ Send the same `curl` request from a fourth terminal. The frontend log records se
 
 Filters, scorers, and pickers can read `context.prompt_tokens()` for the exact input token count. This returns the existing request value without a prompt copy or allocation. Use `context.request_blocks()` when the policy needs rounded KV blocks instead. For example, at 16 tokens per block, a 17-token prompt has 2 blocks.
 
+Request-level cache information also requires `WorkerInputs::CACHE`: `context.has_tier_matches()` returns `None` without that declaration and `Some(false)` when declared but no tier matches were found. `context.shared_cache_hits()` returns `None` when cache was not requested or the request has no shared-cache ranges. Each filter, scorer, and picker declares its own inputs; another component requesting cache does not grant access.
+
 The builtin default now uses the public policy API too. Rust hosts install `dynamo_custom_policy_builtin::default_registry()` before adding custom providers. This supplies default selection for roles that the custom configuration does not replace.

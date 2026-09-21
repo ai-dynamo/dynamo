@@ -37,6 +37,7 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
     pub(crate) has_tier_matches: bool,
+    pub(crate) inputs: WorkerInputs,
     pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
 }
@@ -65,7 +66,7 @@ pub struct WorkerInputs(u8);
 impl WorkerInputs {
     /// Request no optional worker inputs.
     pub const NONE: Self = Self(0);
-    /// Request KV-cache overlap inputs.
+    /// Request worker KV-cache overlap inputs and request-level cache context.
     pub const CACHE: Self = Self(1 << 0);
     /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
@@ -191,17 +192,39 @@ impl WorkerSelectionContext<'_> {
     }
 
     /// Shared-cache ranges from this request's lookup snapshot, if present.
+    /// Returns None unless this component declared [`WorkerInputs::CACHE`].
     /// The ranges are unweighted block offsets. The host owns their lifetime and
     /// policy inspection does not perform a lookup or change accounting.
     pub fn shared_cache_hits(&self) -> Option<&crate::SharedCacheHits> {
-        self.request.shared_cache_hits.as_ref()
+        if self.inputs.contains(WorkerInputs::CACHE) {
+            self.request.shared_cache_hits.as_ref()
+        } else {
+            None
+        }
     }
 
     /// Whether this request has any tier-specific cache matches, before worker filtering.
-    /// False means the host only supplied its accounting estimate (or no cache data).
+    /// Returns None unless this component declared [`WorkerInputs::CACHE`]. Some(false)
+    /// means the host only supplied its accounting estimate (or no cache data).
     /// The value describes the current lookup snapshot, not worker cache capacity.
-    pub fn has_tier_matches(&self) -> bool {
-        self.has_tier_matches
+    pub fn has_tier_matches(&self) -> Option<bool> {
+        self.inputs
+            .contains(WorkerInputs::CACHE)
+            .then_some(self.has_tier_matches)
+    }
+
+    /// Restrict request-level signals to this component's startup input declaration.
+    pub(crate) fn with_inputs(&self, inputs: WorkerInputs) -> Self {
+        Self {
+            request: self.request,
+            request_blocks: self.request_blocks,
+            block_size: self.block_size,
+            track_prefill_tokens: self.track_prefill_tokens,
+            has_tier_matches: self.has_tier_matches,
+            inputs,
+            pinned_worker: self.pinned_worker,
+            router_temperature_override: self.router_temperature_override,
+        }
     }
 
     /// Return the incoming prompt size in KV blocks.

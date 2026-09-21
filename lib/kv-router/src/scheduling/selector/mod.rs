@@ -140,6 +140,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
+                inputs: WorkerInputs::NONE,
                 pinned_worker: request.pinned_worker,
                 has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
                     || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
@@ -407,7 +408,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let row = picker.pick(&input.context, picker_input)?;
+                let context = input.context.with_inputs(*picker_inputs);
+                let row = picker.pick(&context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,

@@ -35,8 +35,8 @@ pub(super) enum WorkerSelectionPolicyStateRef<'a> {
 }
 
 pub(super) struct ComposedPolicyState {
-    pub(super) filters: Vec<Box<dyn WorkerFilter>>,
-    pub(super) scorers: Vec<Box<dyn WorkerScorer>>,
+    pub(super) filters: Vec<(WorkerInputs, Box<dyn WorkerFilter>)>,
+    pub(super) scorers: Vec<(WorkerInputs, Box<dyn WorkerScorer>)>,
     pub(super) picker: Box<dyn WorkerPicker>,
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
@@ -86,12 +86,23 @@ impl WorkerSelectionPolicy {
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
         let picker_inputs = picker.required_worker_inputs();
-        let filter_inputs = filters.iter().fold(WorkerInputs::NONE, |inputs, filter| {
-            inputs | filter.required_worker_inputs()
-        });
-        let scorer_picker_inputs = scorers.iter().fold(picker_inputs, |inputs, scorer| {
-            inputs | scorer.required_worker_inputs()
-        });
+        // Freeze each declaration once; callbacks must not inherit another component's access.
+        let filters: Vec<_> = filters
+            .into_iter()
+            .map(|filter| (filter.required_worker_inputs(), filter))
+            .collect();
+        let scorers: Vec<_> = scorers
+            .into_iter()
+            .map(|scorer| (scorer.required_worker_inputs(), scorer))
+            .collect();
+        let filter_inputs = filters
+            .iter()
+            .fold(WorkerInputs::NONE, |inputs, (required, _)| {
+                inputs | *required
+            });
+        let scorer_picker_inputs = scorers
+            .iter()
+            .fold(picker_inputs, |inputs, (required, _)| inputs | *required);
         Self {
             worker_label,
             exclusive_affinity: false,
@@ -191,9 +202,10 @@ impl ComposedPolicyState {
         }
         debug_assert_eq!(unscored_candidates.len(), candidates.len());
         score_contributions.resize(candidates.len(), f64::NAN);
-        for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
+        for (scorer_index, (inputs, scorer)) in scorers.iter_mut().enumerate() {
             score_contributions.fill(f64::NAN);
-            scorer.score(context, unscored_candidates, score_contributions)?;
+            let context = context.with_inputs(*inputs);
+            scorer.score(&context, unscored_candidates, score_contributions)?;
             for (row, (contribution, scored)) in score_contributions
                 .iter()
                 .zip(candidates.iter_mut())
@@ -269,8 +281,9 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             filter_preferred_taint_multiplier,
             state.filter_inputs,
         );
-        for filter in &mut state.filters {
-            match filter.keep(&input.context, &filter_candidate) {
+        for (inputs, filter) in &mut state.filters {
+            let context = input.context.with_inputs(*inputs);
+            match filter.keep(&context, &filter_candidate) {
                 Ok(true) => {}
                 Ok(false) => return false,
                 Err(policy_error) => {
