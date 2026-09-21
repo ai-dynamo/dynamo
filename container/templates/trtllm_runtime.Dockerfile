@@ -58,13 +58,47 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
     LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
     test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
 
+# One fixed path for the MPI the worker runs on, resolved per architecture, so a
+# single ENV block below can name it.
+#
+# TRT-LLM spawns its executor ranks with MPI.COMM_SELF.Spawn through mpi4py's
+# MpiPoolSession. 1.3.0rc27 repointed /opt/hpcx/ompi and /usr/local/mpi from
+# ompi4 to ompi5, and on amd64 that spawn does not work: the child reaches
+# mpi4py's barrier and dies there, so the worker never binds its gRPC port and
+# every serving test waits out its deadline. Measured in the built image on an
+# amd64 GPU host, running as the image's own uid 1000: VRAM stays at 456 MiB and
+# nothing registers, and the log carries `ucp_ep_create(proc=0) failed:
+# Destination is unreachable` followed by MPI_ERR_OTHER and MPI_ABORT. CI agrees
+# from the other side: at f3fe60fe, where ompi4 reached the shipped image, both
+# tests that hang elsewhere passed, 232s and 184s, and the 2-GPU amd64 job went
+# green for the only time on this branch.
+#
+# arm64 keeps ompi5, and that is not a preference. ompi4 there lacks
+# ompi_mpi_short_float, which the base image's libtorch_cpu.so needs, so the
+# arm64 runtime sanity check fails on `import torch` the moment ompi4 wins.
+#
+# The symlink alone does not do it: with the ENV still naming ompi5's bin and
+# prefix, Open MPI 4 cannot launch its own runtime and the spawn fails at
+# dpm.c:1997. The three ENV entries below are what make it work, measured in the
+# same image: VRAM 456 MiB to 6.7 GB to 41.6 GB, `Registered endpoint` once, and
+# zero MPI errors.
+#
+# Transitional. Delete this and the ENV entries when upstream's ompi5 can spawn,
+# and re-measure rather than assume.
+RUN if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
+    test -d "$t" && \
+    mkdir -p /opt/dynamo && ln -sfn "$t" /opt/dynamo/mpi && \
+    echo "MPI for ${TARGETARCH}: $(readlink -f /opt/dynamo/mpi)"
+
 # LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
 # (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
 # NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/mpi/bin:/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 
@@ -768,18 +802,22 @@ RUN set -eu; \
 {% if target in ("dev", "local-dev") %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% endif %}
