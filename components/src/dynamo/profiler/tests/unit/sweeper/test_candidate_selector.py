@@ -6,8 +6,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-import pytest
-
 from dynamo.profiler.sweeper.candidate_selector import (
     ObjectiveSpec,
     ParetoGoal,
@@ -31,11 +29,6 @@ def test_scalar_first_candidate_is_selected() -> None:
 
 
 def test_scalar_higher_score_new_candidate_is_ranked_first() -> None:
-    """Both survive (within the default bound) -- the new, better
-    candidate takes list position 0, the old one moves to position 1.
-    Confirmed real behavior is a ranked list, not a single replaced
-    winner: "candidates = sweeper.run(config); best = candidates[0]" --
-    Sweeper itself returns the full best-first list."""
     current = [_Candidate(score=1.0, name="old")]
     selection = update_selection(current, _Candidate(score=2.0, name="new"), goal=ScalarGoal())
     assert [c.name for c in selection] == ["new", "old"]

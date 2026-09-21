@@ -27,19 +27,7 @@ class ObjectiveSpec:
 
 @dataclass(frozen=True)
 class ScalarGoal:
-    """Selection is a bounded, ranked top-N list, not a single winner.
-
-    Confirmed against the real Sweeper Results docs, not the earlier,
-    wrong assumption: `candidates = sweeper.run(config); best =
-    candidates[0]` -- Sweeper itself returns a full best-first LIST for a
-    scalar goal; the caller picks [0] themselves. Corroborated
-    independently by Spica's run_smart_search, which "returns a
-    list[Candidate]: best-first for a scalar goal, or the non-dominated
-    set for a pareto goal" -- the same shape, described in different
-    words by an unrelated system. Status.Rank's real comment ("the
-    one-based scalar ordering and is absent for Pareto searches") reads
-    correctly as "1..N ordering used for scalar", not "1, exactly once".
-    """
+    """Selection is a bounded, ranked top-N list, not a single winner."""
 
     max_candidates: int = 5  # matches RecommendationSpec.MaxCandidates -- general, not Pareto-only
 
