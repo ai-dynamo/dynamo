@@ -3,9 +3,10 @@
 #
 # AIPerf Mooncake trace-replay benchmark for the DeepSeek-V4.1-Flash vLLM DGDs.
 #
-# One Job covers all four vLLM variants (agg/disagg x B200/GB200). Edit the env
-# block below to target the desired DGD, and update the podAffinity
-# graph-deployment-name to the SAME DGD. Run one concurrency per Job, and clear
+# One Job covers all four vLLM variants (agg/disagg x B200/GB200). Set ENDPOINT
+# and CONCURRENCY in the env block below to pick the target; the podAffinity
+# already lists every deployment name, so it needs no edit.
+# Run one concurrency per Job, and clear
 # DGD worker and router KV state between independent runs -- every run replays
 # the same corpus, so a warm second run inherits the first run's cache rather
 # than the trace's own reuse, and the two stop being comparable.
@@ -39,11 +40,13 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                # Must match the DGD behind ENDPOINT below so the benchmark Job
-                # co-locates with the target frontend. Change this together with
-                # ENDPOINT when you switch variants (one of:
-                # dsv41-flash-vllm-{b200,gb200}-{agg,disagg}).
+                # Every target this Job can drive. Only one is deployed at a
+                # time, so the Job lands beside whichever frontend exists; set
+                # ENDPOINT below to pick the target.
                 - dsv41-flash-vllm-b200-agg
+                - dsv41-flash-vllm-b200-disagg
+                - dsv41-flash-vllm-gb200-agg
+                - dsv41-flash-vllm-gb200-disagg
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf
@@ -119,8 +122,7 @@ spec:
           # total_reasoning_tokens to get what the GPU actually produced.
         env:
         # Defaults target AGG B200 at its validated operating point (C=88).
-        # Edit ENDPOINT + CONCURRENCY per variant AND update the podAffinity
-        # graph-deployment-name above to the same DGD (see README.md).
+        # Edit ENDPOINT + CONCURRENCY per variant; see README.md for the table.
         - name: ENDPOINT
           value: dsv41-flash-vllm-b200-agg-frontend:8000
         - name: TARGET_MODEL

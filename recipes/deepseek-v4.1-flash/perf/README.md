@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4.1-Flash vLLM benchmark
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. Set `ENDPOINT`,
-`CONCURRENCY`, and the `podAffinity` DGD name for the target.
+[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. Set `ENDPOINT` and
+`CONCURRENCY` for the target.
 
 The Job waits for the target model on the DGD frontend, then replays the trace
 at one `CONCURRENCY` value and writes raw artifacts to the shared
@@ -19,8 +19,9 @@ and carry no benchmark.
 
 ## Targeting a variant
 
-Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity`
-`values` list to contain only the target DGD name.
+Edit the `env` block in [`perf.yaml`](perf.yaml). The `podAffinity` already
+lists every deployment name, so it needs no edit: only one target is deployed
+at a time and the Job lands beside whichever frontend exists.
 
 | Variant | `ENDPOINT` | Validated `CONCURRENCY` |
 | --- | --- | --- |
@@ -86,8 +87,7 @@ export NAMESPACE=your-namespace
 
 ### 1. Deploy the DGD
 
-See the deployment instructions in the target recipe's README, for example
-[`../vllm/agg-b200/README.md`](../vllm/agg-b200/README.md).
+See the deployment instructions in [the recipe README](../README.md).
 
 ### 2. Stage the trace on the PVC
 

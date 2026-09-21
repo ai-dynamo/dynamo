@@ -1,0 +1,378 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate every public overlay and rendered manifest of this matrix (from the repository root):
+#   scripts/kustomize-matrix.py unfold recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/.kustomize-matrix.yaml
+#   scripts/kustomize-matrix.py render recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/.kustomize-matrix.yaml
+# Inspect only this Kustomize overlay (from the repository root):
+#   kustomize build recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/kustomize/overlays/gke-rdma
+# You may edit a copy before applying it.
+
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: dsv41-flash-vllm-gb200-disagg-compute-domain
+spec:
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: dsv41-flash-vllm-gb200-disagg-compute-domain-channel
+  numNodes: 0
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-vllm-gb200-disagg
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --http-port
+          - "8000"
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: DYN_ROUTER_MODE
+            value: kv
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          name: main
+          ports:
+          - containerPort: 8000
+            name: http
+            protocol: TCP
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+        nodeSelector:
+          kubernetes.io/arch: arm64
+        tolerations:
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Exists
+    replicas: 1
+    type: frontend
+  - name: PrefillWorker
+    podTemplate:
+      metadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
+      spec:
+        containers:
+        - args:
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+          - --model
+          - deepseek-ai/DeepSeek-V4.1-Flash
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4.1-Flash
+          - --tokenizer-mode
+          - deepseek_v41
+          - --tensor-parallel-size
+          - "4"
+          - --enable-expert-parallel
+          - --moe-backend
+          - deep_gemm_mega_moe
+          - --enable-ep-weight-filter
+          - --enable-eplb
+          - --eplb-config
+          - '{"communicator":"torch_gloo"}'
+          - --numa-bind
+          - --language-model-only
+          - --reasoning-parser
+          - deepseek_v41
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --dyn-enable-structural-tag
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          - --max-num-batched-tokens
+          - "32768"
+          - --long-prefill-token-threshold
+          - "4096"
+          - --max-cudagraph-capture-size
+          - "512"
+          - --prefix-cache-retention-interval
+          - "1024"
+          - --attention-config
+          - '{"indexer_kv_dtype":"mxfp4"}'
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: UCX_IB_GID_INDEX
+            value: "3"
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: UCX_TLS
+            value: cuda_copy,cuda_ipc,tcp,rc
+          - name: UCX_RC_TIMEOUT
+            value: 600s
+          - name: UCX_KEEPALIVE_INTERVAL
+            value: 300s
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: "y"
+          - name: UCX_MEMTYPE_CACHE
+            value: "n"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "3600"
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "300"
+          - name: VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+            value: "65536"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 10
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 5557
+            name: kv-events
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 10
+          resources:
+            limits:
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "8"
+              ephemeral-storage: 16Gi
+              memory: 512Gi
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 120
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: dsv41-flash-vllm-gb200-disagg-compute-domain-channel
+        terminationGracePeriodSeconds: 60
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Exists
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+    replicas: 2
+    sharedMemorySize: 200Gi
+    type: worker
+  - name: DecodeWorker
+    podTemplate:
+      metadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
+      spec:
+        containers:
+        - args:
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cuda"}'
+          - --model
+          - deepseek-ai/DeepSeek-V4.1-Flash
+          - --served-model-name
+          - deepseek-ai/DeepSeek-V4.1-Flash
+          - --tokenizer-mode
+          - deepseek_v41
+          - --tensor-parallel-size
+          - "4"
+          - --enable-expert-parallel
+          - --moe-backend
+          - deep_gemm_mega_moe
+          - --enable-ep-weight-filter
+          - --enable-eplb
+          - --eplb-config
+          - '{"communicator":"torch_gloo"}'
+          - --numa-bind
+          - --language-model-only
+          - --reasoning-parser
+          - deepseek_v41
+          - --dyn-reasoning-parser
+          - deepseek_v41
+          - --dyn-tool-call-parser
+          - deepseek_v41
+          - --dyn-enable-structural-tag
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557","enable_kv_cache_events":true}'
+          - --max-cudagraph-capture-size
+          - "1024"
+          - --prefix-cache-retention-interval
+          - "1024"
+          - --attention-config
+          - '{"indexer_kv_dtype":"mxfp4"}'
+          - --speculative-config
+          - '{"method":"dspark","num_speculative_tokens":3,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false}'
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: UCX_IB_GID_INDEX
+            value: "3"
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: "1"
+          - name: UCX_TLS
+            value: cuda_copy,cuda_ipc,tcp,rc
+          - name: UCX_RC_TIMEOUT
+            value: 600s
+          - name: UCX_KEEPALIVE_INTERVAL
+            value: 300s
+          - name: UCX_CUDA_IPC_ENABLE_MNNVL
+            value: "y"
+          - name: UCX_MEMTYPE_CACHE
+            value: "n"
+          - name: TRANSFORMERS_OFFLINE
+            value: "1"
+          - name: VLLM_ENGINE_READY_TIMEOUT_S
+            value: "3600"
+          - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+            value: "300"
+          - name: VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+            value: "65536"
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /live
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 10
+          name: main
+          ports:
+          - containerPort: 9090
+            name: system
+            protocol: TCP
+          - containerPort: 5557
+            name: kv-events
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 60
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 10
+            timeoutSeconds: 10
+          resources:
+            limits:
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "8"
+              ephemeral-storage: 16Gi
+              memory: 512Gi
+              networking.gke.io.networks/rdma-0: "1"
+              networking.gke.io.networks/rdma-1: "1"
+              networking.gke.io.networks/rdma-2: "1"
+              networking.gke.io.networks/rdma-3: "1"
+              nvidia.com/gpu: "4"
+          securityContext:
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+            runAsGroup: 0
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 120
+            httpGet:
+              path: /health
+              port: system
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+          - mountPath: /shared-model-cache
+            name: shared-model-cache
+        nodeSelector:
+          nvidia.com/gpu.product: NVIDIA-GB200
+        resourceClaims:
+        - name: compute-domain-channel
+          resourceClaimTemplateName: dsv41-flash-vllm-gb200-disagg-compute-domain-channel
+        terminationGracePeriodSeconds: 60
+        tolerations:
+        - effect: NoSchedule
+          key: nvidia.com/gpu
+          operator: Exists
+        - effect: NoSchedule
+          key: kubernetes.io/arch
+          operator: Exists
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+    replicas: 1
+    sharedMemorySize: 200Gi
+    type: worker

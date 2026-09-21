@@ -201,7 +201,7 @@ Then apply the manifest for your target.
 <div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-gb200/deploy-generic.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -209,13 +209,13 @@ kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-gb200/deploy-generic.yaml 
 <div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200/deploy-generic.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml -n ${NAMESPACE}
 ```
 
 On Google Kubernetes Engine, apply the RDMA variant instead. It claims the four GKE RDMA networks that GB200 node pools advertise, drops the generic `rdma/ib` request, and sets the RoCEv2 GID index:
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200/deploy-gke-rdma.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-gke-rdma.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -223,7 +223,7 @@ kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200/deploy-gke-rdma.y
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-b200/deploy-generic.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -231,13 +231,13 @@ kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-b200/deploy-generic.yaml -
 <div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-b200/deploy-generic.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml -n ${NAMESPACE}
 ```
 
 If your nodes expose several InfiniBand HCAs at different speeds, apply the pinned variant instead. It names a specific device list in `UCX_NET_DEVICES` so UCX cannot select a slow port. Read your own nodes with `ibstat` and edit the list to match before using it:
 
 ```bash
-kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-b200/deploy-ib-device-pin.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-ib-device-pin.yaml -n ${NAMESPACE}
 ```
 
 </div>
@@ -465,10 +465,10 @@ The NVLink fabric KV path needs both workers in one NVLink clique. A fabric memo
 
 <div data-recipe-framework="vllm">
 
-- vLLM aggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-gb200/deploy-generic.yaml)
-- vLLM aggregated B200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-b200/deploy-generic.yaml)
-- vLLM disaggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200/deploy-generic.yaml), [deploy-gke-rdma.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200/deploy-gke-rdma.yaml)
-- vLLM disaggregated B200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200/deploy-generic.yaml), [deploy-ib-device-pin.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200/deploy-ib-device-pin.yaml)
+- vLLM aggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml)
+- vLLM aggregated B200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml)
+- vLLM disaggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml), [deploy-gke-rdma.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-gke-rdma.yaml)
+- vLLM disaggregated B200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml), [deploy-ib-device-pin.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-ib-device-pin.yaml)
 - Benchmark: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/perf/perf.yaml)
 
 </div>

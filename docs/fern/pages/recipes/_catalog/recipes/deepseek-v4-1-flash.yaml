@@ -34,7 +34,7 @@ targets:
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/agg-gb200/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
@@ -67,7 +67,7 @@ targets:
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 2P1D over NIXL/UCX, one NVLink clique'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/disagg-gb200/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
@@ -97,7 +97,7 @@ targets:
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/agg-b200/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
@@ -130,7 +130,7 @@ targets:
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 2P1D over NIXL/UCX on InfiniBand'
     sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
   deploy:
-    asset: recipes/deepseek-v4.1-flash/vllm/disagg-b200/deploy-generic.yaml
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml
   benchmark:
     tool: aiperf
     asset: recipes/deepseek-v4.1-flash/perf/perf.yaml

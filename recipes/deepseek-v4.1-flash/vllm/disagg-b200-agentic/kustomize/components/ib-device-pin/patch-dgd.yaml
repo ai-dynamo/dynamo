@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-vllm-b200-disagg
+spec:
+  components:
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env: &ibDevices
+                - name: UCX_NET_DEVICES
+                  value: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_10:1,mlx5_11:1
+    - name: DecodeWorker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env: *ibDevices
