@@ -163,23 +163,6 @@ sidecar_configs = {
         env={"PYTHONUNBUFFERED": "1", "MAX_MODEL_LEN": "2048"},
         request_payloads=[_disaggregated_chat_payload()],
     ),
-    "trtllm_disaggregated": EngineConfig(
-        name="trtllm_disaggregated",
-        directory=trtllm_sidecar_dir,
-        script_name="disagg.sh",
-        marks=[
-            pytest.mark.trtllm,
-            pytest.mark.gpu_2,
-            pytest.mark.pre_merge,
-            pytest.mark.timeout(1200),
-            pytest.mark.requested_trtllm_kv_tokens(2048),
-        ],
-        model="Qwen/Qwen3-0.6B",
-        health_check_workers=True,
-        health_check_worker_count=2,
-        env={"PYTHONUNBUFFERED": "1", "TRTLLM_CONTEXT_LENGTH": "2048"},
-        request_payloads=[_disaggregated_chat_payload()],
-    ),
 }
 
 
@@ -219,17 +202,14 @@ def test_serve_deployment(
             "DYN_NAMESPACE": f"sidecar-disagg-{generate_random_suffix()}",
             "MODEL": config.model,
         }
-        num_engine_ports = {"vllm": 4, "sglang": 5, "trtllm": 2}[backend]
+        num_engine_ports = {"vllm": 4, "sglang": 5}[backend]
         with reserved_ports(
             num_engine_ports, start_port=DynamoPortRange.SERVE.value
         ) as engine_ports:
             for index, role in enumerate(roles):
                 prefix = f"{backend.upper()}_{role}"
-                if backend == "trtllm":
-                    engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[index])
-                else:
-                    engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[index * 2])
-                    engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[index * 2 + 1])
+                engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[index * 2])
+                engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[index * 2 + 1])
                 if backend == "vllm":
                     engine_env[f"{prefix}_NIXL_SIDE_CHANNEL_PORT"] = str(
                         dynamo_dynamic_ports.nixl_side_channel_ports[index]

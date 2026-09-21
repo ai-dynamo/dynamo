@@ -638,7 +638,7 @@ jobs:
       cuda_version: '["13.1"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: (pre_merge or post_merge) and trtllm and gpu_2 and not sidecar
+      gpu_test_markers: (pre_merge or post_merge) and trtllm and gpu_2
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
