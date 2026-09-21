@@ -118,17 +118,18 @@ class CancellationMixin:
                         (next_item, cancellation_task),
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                    if cancellation_task in done:
+                        cancellation_task.result()
+                        drain_deadline = (
+                            asyncio.get_running_loop().time()
+                            + _CANCELLATION_DRAIN_TIMEOUT_S
+                        )
                     if next_item in done:
                         try:
                             yield next_item.result()
                         except StopAsyncIteration:
                             return
                         continue
-                    cancellation_task.result()
-                    drain_deadline = (
-                        asyncio.get_running_loop().time()
-                        + _CANCELLATION_DRAIN_TIMEOUT_S
-                    )
 
                 remaining = drain_deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:

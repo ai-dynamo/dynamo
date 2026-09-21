@@ -65,8 +65,8 @@ except ImportError:
 try:
     from sglang.srt.observability.req_time_stats import APIServerReqTimeStats
 except ImportError:
-    # SGLang 0.5.18 lacks dispatch timestamps. Remove when the minimum
-    # supported SGLang release is 0.5.19+.
+    # Fail closed for downstream SGLang builds that omit request-time
+    # statistics or dispatch timestamps.
     APIServerReqTimeStats = None
 
 

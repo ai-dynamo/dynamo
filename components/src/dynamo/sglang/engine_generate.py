@@ -59,6 +59,9 @@ def build_native_generate_request(
 
     ``fallback_rid`` is router-owned and always replaces a caller-supplied
     ``rid`` so cancellation cannot target another request.
+    Native session requests pass their caller-visible node ID as the fallback
+    because SGLang keys session continuations by the submitted top-level
+    request ID.
     """
     payload = dict(native_payload)
     payload["input_ids"] = input_ids

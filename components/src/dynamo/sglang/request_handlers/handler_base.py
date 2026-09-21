@@ -589,6 +589,10 @@ class BaseWorkerHandler(
         self._supports_ordered_cancellation = (
             engine is not None and supports_disagg_prefill_cancel_anytime(engine)
         )
+        logger.info(
+            "SGLang ordered cancellation support: %s",
+            self._supports_ordered_cancellation,
+        )
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher

@@ -15,7 +15,7 @@ from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandle
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.core,
+    pytest.mark.fault_tolerance,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -424,6 +424,87 @@ async def test_unsupported_runtime_uses_response_id_cancellation(
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    ("public_request_id", "expected_request_id"),
+    [("session-request-2", "session-request-2"), (None, "dynamo-request")],
+)
+async def test_native_session_request_preserves_session_tree_ids(
+    decode_cancellation_case, public_request_id, expected_request_id
+):
+    case = decode_cancellation_case
+    native_payload = {"session_params": {"id": "session-1", "rid": "session-request-1"}}
+    if public_request_id is not None:
+        native_payload["rid"] = public_request_id
+    case.request["extra_args"] = {"sglang_tito": native_payload}
+    case.finish_without_cancel = True
+    case.allow_registration.set()
+
+    outputs = await asyncio.wait_for(
+        _collect(case.handler.generate(case.request, case.context)), timeout=1
+    )
+
+    assert outputs == []
+    assert case.native_request.rid == expected_request_id
+    assert case.native_request.session_params["rid"] == "session-request-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_native_session_cancellation_uses_confirmed_response_id(
+    decode_cancellation_case,
+):
+    case = decode_cancellation_case
+    case.request["extra_args"] = {
+        "sglang_tito": {
+            "rid": "session-request-2",
+            "session_params": {"id": "session-1", "rid": "session-request-1"},
+        }
+    }
+    case.first_response = True
+    case.allow_registration.set()
+
+    consumer = asyncio.create_task(
+        _collect(case.handler.generate(case.request, case.context))
+    )
+    try:
+        await asyncio.wait_for(case.first_response_consumed.wait(), timeout=1)
+        assert not case.abort_calls
+
+        case.cancelled.set()
+
+        outputs = await asyncio.wait_for(consumer, timeout=1)
+        assert case.abort_calls == [("session-request-2", False)]
+        assert (
+            outputs[0]["engine_data"]["sglang_response"]["meta_info"]["id"]
+            == "session-request-2"
+        )
+    finally:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_decode_logs_internal_and_context_request_ids(
+    decode_cancellation_case, caplog
+):
+    caplog.set_level(logging.INFO)
+    case = decode_cancellation_case
+    case.finish_without_cancel = True
+    case.allow_registration.set()
+
+    await asyncio.wait_for(
+        _collect(case.handler.generate(case.request, case.context)), timeout=1
+    )
+
+    assert (
+        "Submitted SGLang Request ID: internal-request-id, Context: dynamo-request"
+        in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_parallel_sampling_does_not_guess_sglang_child_request_ids(
     decode_cancellation_case,
 ):
@@ -485,6 +566,42 @@ async def test_cancelled_stream_drain_is_bounded(
     )
 
     assert outputs == []
+    assert "Timed out draining SGLang stream after cancellation" in caplog.messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_cancelled_stream_starts_deadline_when_chunk_is_already_ready(
+    decode_cancellation_case, monkeypatch, caplog
+):
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation._CANCELLATION_DRAIN_TIMEOUT_S",
+        0,
+    )
+
+    async def simultaneous_wait(awaitables, **_kwargs):
+        await asyncio.gather(*awaitables)
+        return set(awaitables), set()
+
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.cancellation.asyncio.wait",
+        simultaneous_wait,
+    )
+
+    async def buffered_stream():
+        yield {"chunk": 1}
+        yield {"chunk": 2}
+
+    cancellation_task = asyncio.create_task(asyncio.sleep(0))
+    await cancellation_task
+    stream = decode_cancellation_case.handler._stream_until_cancelled(
+        buffered_stream(), cancellation_task
+    )
+
+    assert await anext(stream) == {"chunk": 1}
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
     assert "Timed out draining SGLang stream after cancellation" in caplog.messages
 
 
@@ -996,6 +1113,7 @@ async def test_cancellation_monitor_preserves_abort_ordering(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_ordered_abort_stops_when_stream_ends_before_registration(
     decode_cancellation_case, caplog
 ):
@@ -1020,6 +1138,7 @@ async def test_ordered_abort_stops_when_stream_ends_before_registration(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_cancellation_monitor_logs_fallback_abort_failure(
     decode_cancellation_case, caplog
 ):
@@ -1046,6 +1165,7 @@ async def test_cancellation_monitor_logs_fallback_abort_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_shutdown_survives_ordered_abort_cleanup(decode_cancellation_case):
     case = decode_cancellation_case
     rid = "internal-request-id"

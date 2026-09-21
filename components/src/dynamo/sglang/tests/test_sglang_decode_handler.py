@@ -318,6 +318,52 @@ async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
             pass
 
 
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_name):
+    handler = _new_decode_handler()
+    notified = False
+
+    def notify_first_token():
+        nonlocal notified
+        notified = True
+
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: True,
+        notify_first_token=notify_first_token,
+    )
+
+    class UnexpectedUploader:
+        async def upload_choice(self, *_args):
+            raise AssertionError("stopped chunks must not upload metadata")
+
+    async def stream():
+        yield {
+            "text": "ignored",
+            "output_ids": [1],
+            "meta_info": {
+                "id": "internal-request-id",
+                "finish_reason": {"type": "stop"},
+            },
+        }
+
+    outputs = await _collect(
+        getattr(handler, processor_name)(
+            stream(),
+            context,
+            metadata_uploader=UnexpectedUploader(),
+            submitted_request_id="internal-request-id",
+        )
+    )
+
+    assert outputs == []
+    assert not notified
+
+
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     request = {
         "rid": "resolved-request",

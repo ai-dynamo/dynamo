@@ -183,6 +183,20 @@ def _native_payload_is_batched(native_payload: Mapping[str, Any]) -> bool:
     )
 
 
+def _native_session_request_id(
+    native_payload: Mapping[str, Any], context_id: str
+) -> str | None:
+    """Preserve the public node ID used by SGLang session continuations."""
+    if native_payload.get("session_params") is None:
+        return None
+    request_id = native_payload.get("rid")
+    if request_id is None or request_id == "":
+        return context_id
+    if not isinstance(request_id, str):
+        raise ValueError("native SGLang session requests require a scalar rid")
+    return request_id
+
+
 def _public_native_response_id(
     engine_response_id: Any,
     response_index: Any,
@@ -562,19 +576,32 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self._first_token_source.bind(context, routing.get("dp_rank"))
         _raise_if_conditional_disagg_bypass(request)
         sglang_request_id = new_sglang_request_id()
-        logging.debug(
+        input_param = self._get_input_param(request)
+        priority = (request.get("routing") or {}).get("priority")
+        native_payload = native_generate_payload(request)
+        native_session_request_id = None
+        if native_payload is not None:
+            native_session_request_id = _native_session_request_id(
+                native_payload, context.id()
+            )
+            if native_session_request_id is not None:
+                sglang_request_id = native_session_request_id
+        logging.info(
             "Submitted SGLang Request ID: %s, Context: %s",
             sglang_request_id,
             context.id(),
         )
-        input_param = self._get_input_param(request)
-        priority = (request.get("routing") or {}).get("priority")
-        native_payload = native_generate_payload(request)
         if native_payload is not None:
             submitted_request_id = _ordered_cancellation_request_id(
                 sglang_request_id,
                 native_payload.get("sampling_params"),
-                supported=getattr(self, "_supports_ordered_cancellation", False),
+                supported=(
+                    getattr(self, "_supports_ordered_cancellation", False)
+                    # Session node IDs are caller-visible. Waiting for SGLang's
+                    # response avoids aborting an unrelated request if a caller
+                    # reuses an active node ID.
+                    and native_session_request_id is None
+                ),
                 batched=_native_payload_is_batched(native_payload),
             )
             stream = self._native_generate_stream(
@@ -800,8 +827,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
-                if context.is_stopped() and submitted_request_id is None:
-                    self._abort_requests(request_ids, context)
+                if context.is_stopped():
+                    if submitted_request_id is None:
+                        self._abort_requests(request_ids, context)
                     continue
                 if not first_output_seen and (
                     native_response.get("output_ids") or native_response.get("text")
@@ -874,9 +902,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
-                if context.is_stopped() and submitted_request_id is None:
-                    # A choice's first chunk can arrive after the monitor fired.
-                    self._abort_requests(request_ids, context)
+                if context.is_stopped():
+                    if submitted_request_id is None:
+                        # A choice's first chunk can arrive after the monitor fired.
+                        self._abort_requests(request_ids, context)
                     continue
 
                 # SGLang omits index for non-n/legacy chunks; treat those as
@@ -1021,8 +1050,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         logging.debug(f"New SGLang Request ID: {sglang_request_id}")
                     if meta_info.get("finish_reason"):
                         request_ids.discard(sglang_request_id)
-                if context.is_stopped() and submitted_request_id is None:
-                    self._abort_requests(request_ids, context)
+                if context.is_stopped():
+                    if submitted_request_id is None:
+                        self._abort_requests(request_ids, context)
                     continue
 
                 # Check cancellation before yielding to allow proper cleanup.
