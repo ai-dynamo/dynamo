@@ -230,15 +230,12 @@ def test_mooncake_optional_json_metadata_preserves_serving_capabilities(
         )
     )
     assert published is (reply_state == "agreed")
-    value = metadata.get_engine_specific(runtime.RUNTIME_KEY)
+    # `get_engine_specific` only decodes string values; these keys hold JSON
+    # objects and booleans, so read the raw JSON through `runtime_data`.
+    runtime_data = metadata.runtime_data
     if published:
-        assert json.loads(value) == descriptor
+        assert json.loads(runtime_data[runtime.RUNTIME_KEY]) == descriptor
     else:
-        assert value is None
-    assert json.loads(metadata.get_engine_specific(VLLM_GENERATE_CAPABILITY)) is True
-    assert (
-        json.loads(metadata.get_engine_specific(TOKEN_BUDGET_RUNTIME_KEY))[
-            "combined_limit"
-        ]
-        == 4096
-    )
+        assert runtime.RUNTIME_KEY not in runtime_data
+    assert json.loads(runtime_data[VLLM_GENERATE_CAPABILITY]) is True
+    assert json.loads(runtime_data[TOKEN_BUDGET_RUNTIME_KEY])["combined_limit"] == 4096
