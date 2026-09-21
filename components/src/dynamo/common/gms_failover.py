@@ -79,6 +79,15 @@ def _backend_env_name(backend_name: str, suffix: str) -> str:
     return f"DYN_{backend_name.upper().replace('-', '_')}_{suffix}"
 
 
+def _promotion_warmup_concurrency(backend_name: str) -> int:
+    backend_env = _backend_env_name(
+        backend_name, "GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY"
+    )
+    if backend_env in os.environ:
+        return max(1, _int_env(backend_env, 1))
+    return max(1, _int_env("DYN_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", 1))
+
+
 def _post_lock_fence_ms(backend_name: str) -> int:
     # Cohort guards exclude CPU submitters and permanently close old admission.
     # Their release is NOT proof that previously submitted CUDA work has drained:
@@ -114,7 +123,7 @@ async def run_gms_failover_promotion_warmup(
     *,
     backend_name: str,
 ) -> None:
-    """Run one local canary request before a promoted shadow enters discovery."""
+    """Run local canary requests before an engine enters discovery."""
 
     if not _promotion_warmup_enabled(backend_name):
         return
@@ -124,14 +133,15 @@ async def run_gms_failover_promotion_warmup(
     backoff_s = _promotion_warmup_backoff_s()
     last_error: Exception | None = None
 
-    async def _run_once(attempt: int) -> None:
+    concurrency = _promotion_warmup_concurrency(backend_name)
+
+    async def _run_stream() -> None:
         # Engine handlers accept Dynamo's native Context, not merely a Python
         # object with similarly named methods. SGLang forwards this through a
         # compiled boundary that enforces the concrete type.
         from dynamo._core import Context
 
         context = Context(f"gms-failover-promotion-warmup-{uuid.uuid4()}")
-        started = time.monotonic()
         stream = generate(dict(payload), context)
         saw_chunk = False
         try:
@@ -148,10 +158,16 @@ async def run_gms_failover_promotion_warmup(
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 await aclose()
+
+    async def _run_once(attempt: int) -> None:
+        started = time.monotonic()
+        await asyncio.gather(*(_run_stream() for _ in range(concurrency)))
         logger.info(
-            "[GMS failover] %s promotion warmup completed attempt=%d elapsed_ms=%.2f",
+            "[GMS failover] %s promotion warmup completed attempt=%d "
+            "concurrency=%d elapsed_ms=%.2f",
             backend_name,
             attempt,
+            concurrency,
             (time.monotonic() - started) * 1000.0,
         )
 

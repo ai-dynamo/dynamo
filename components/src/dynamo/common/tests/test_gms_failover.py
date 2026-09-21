@@ -580,6 +580,22 @@ async def test_gms_failover_promotion_warmup_backend_override_disables(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_gms_failover_promotion_warmup_honors_backend_concurrency(monkeypatch):
+    monkeypatch.setenv("DYN_TEST_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", "4")
+    seen = []
+
+    async def generate(request, _context):
+        seen.append(request)
+        yield {"token_ids": [1], "finish_reason": "stop"}
+
+    await run_gms_failover_promotion_warmup(
+        generate, {"token_ids": [7]}, backend_name="test"
+    )
+
+    assert seen == [{"token_ids": [7]}] * 4
+
+
+@pytest.mark.asyncio
 async def test_gms_failover_post_lock_fence_honors_backend_override(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", "100")
     monkeypatch.setenv("DYN_TEST_GMS_FAILOVER_POST_LOCK_FENCE_MS", "25")

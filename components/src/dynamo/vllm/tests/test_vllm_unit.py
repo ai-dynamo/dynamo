@@ -2509,6 +2509,7 @@ async def test_gms_primary_acquires_active_lock_before_registration(monkeypatch)
     assert events == [
         "lock",
         ("fence", "vllm", "active"),
+        "warmup",
     ]
 
 
@@ -2871,6 +2872,9 @@ async def test_gms_mapped_shadow_classifies_leases_before_resume(monkeypatch):
     async def fence(**kwargs):
         events.append(("fence", kwargs["backend_name"], kwargs["role"]))
 
+    async def warmup():
+        events.append("warmup")
+
     handler = SimpleNamespace(
         _pause_controller=PauseController(),
         engine_client=SimpleNamespace(),
@@ -2896,12 +2900,19 @@ async def test_gms_mapped_shadow_classifies_leases_before_resume(monkeypatch):
     )
 
     assert (
-        await factory._maybe_wait_for_failover_lock(handler, Runtime(), config) is False
+        await factory._maybe_wait_for_failover_lock(
+            handler,
+            Runtime(),
+            config,
+            promotion_warmup=warmup,
+        )
+        is False
     )
 
     assert handler._gms_failover_lock is lock
     assert events == [
         ("transition", "vllm", True),
+        "warmup",
         ("pause_generation_only", False),
         ("health", True),
         "lock",
@@ -3290,3 +3301,16 @@ async def test_gms_shadow_requiesces_and_releases_lock_when_warmup_fails(monkeyp
         ("health", False),
         "release",
     ]
+
+
+def test_failover_cli_flag_gets_isolated_vllm_compile_cache(monkeypatch):
+    from dynamo.vllm.__main__ import _isolate_failover_compile_cache
+
+    monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+    monkeypatch.delenv("DYN_GMS_FAILOVER_SHADOW_MODE", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/cache")
+    monkeypatch.setenv("ENGINE_ID", "1")
+
+    assert _isolate_failover_compile_cache(["dynamo.vllm", "--gms-shadow-mode"]) == (
+        "/cache/vllm-gms-failover/1"
+    )
