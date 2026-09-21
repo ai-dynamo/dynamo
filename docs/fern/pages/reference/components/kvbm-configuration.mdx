@@ -7,7 +7,7 @@ subtitle: Field reference for the KV Block Manager environment variables and the
 
 The KV Block Manager (KVBM) is configured through two layers:
 
-- **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, object storage, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
+- **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
 - **The `KVBM_*` / TOML figment system** — a lower-level, layered configuration for the KVBM runtime (Tokio/Rayon threads, messenger transport, NixL backends, offload policies, event publishing). Used for advanced tuning and for vLLM's `kv_connector_extra_config`.
 
 Names and defaults on this page come from [`environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs) and the [`kvbm-config`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-config) crate.
@@ -82,35 +82,33 @@ KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object stor
 
 ## Object storage (G4)
 
-The G4 tier stores blocks in an S3-compatible object store. Enable it with `DYN_KVBM_OBJECT_ENABLED=1` and supply the bucket and credentials.
+The G4 tier stores blocks in an S3-compatible object store. Object storage is configured through the advanced KVBM TOML/JSON configuration under `object.client`. The current runtime configuration path does not consume the `DYN_KVBM_OBJECT_*` variables listed in older documentation, so use the configuration shown below instead of setting those variables.
 
-<ParamField path="DYN_KVBM_OBJECT_ENABLED" type="boolean" default="false">
-  Enable object storage. Set to `1` to enable.
-</ParamField>
+For an S3-compatible object store, add this to the TOML file referenced by `KVBM_CONFIG_PATH`:
 
-<ParamField path="DYN_KVBM_OBJECT_BUCKET" type="string" default="unset">
-  Bucket name for the object-storage cache. Supports a `{worker_id}` template for per-worker buckets, for example `kv-cache-{worker_id}`.
-</ParamField>
+```toml
+[object.client]
+type = "s3"
+bucket = "kvbm-blocks"
+region = "us-east-1"
+# endpoint_url = "http://minio:9000"
+# force_path_style = true
+# max_concurrent_requests = 16
+```
 
-<ParamField path="DYN_KVBM_OBJECT_ENDPOINT" type="string" default="unset">
-  Endpoint URL for the object store. Set for S3-compatible services such as MinIO.
-</ParamField>
+The same shape can be supplied as a JSON override, for example through vLLM's `kv_connector_extra_config`:
 
-<ParamField path="DYN_KVBM_OBJECT_REGION" type="string" default="unset">
-  Region for the object store.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_ACCESS_KEY" type="string" default="unset">
-  Access key for object-store authentication.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_SECRET_KEY" type="string" default="unset">
-  Secret key for object-store authentication.
-</ParamField>
-
-<ParamField path="DYN_KVBM_OBJECT_NUM_BLOCKS" type="integer" default="unset">
-  Number of blocks to store in object storage.
-</ParamField>
+```json
+{
+  "object": {
+    "client": {
+      "type": "s3",
+      "bucket": "kvbm-blocks",
+      "region": "us-east-1"
+    }
+  }
+}
+```
 
 ## Distributed (leader/worker)
 
@@ -226,10 +224,10 @@ Nested sections without an env prefix (offload policies, onboard mode, object st
 worker_threads = 4
 
 [cache.host]
-size_gb = 100.0
+cache_size_gb = 100.0
 
 [cache.disk]
-size_gb = 200.0
+cache_size_gb = 200.0
 use_gds = true
 storage_path = "/mnt/nvme/kv_cache"
 
