@@ -1459,6 +1459,98 @@ fn attach_agent_context_from_context(
     }
 }
 
+/// Reorder `tool` messages to match the order of the preceding assistant
+/// message's `tool_calls`, so the rendered prompt and the collected multimodal
+/// data agree on which result each media item belongs to.
+///
+/// `tool_call_id` makes tool results order-independent by identity, so clients
+/// that run tools concurrently legitimately append them in completion order.
+/// The DeepSeek and Kimi K3 renderers normalize to call order internally
+/// because their reference encoders do; media collection walks the message list
+/// as sent. Normalizing here, upstream of both, means dynamo decides the order
+/// rather than each consumer deriving its own.
+///
+/// Scope matches the renderers: the mapping resets at every assistant message,
+/// a window runs from there to the next assistant message, and a window whose
+/// ids do not all resolve is left exactly as sent rather than reordered on a
+/// guess. Returns `None` when nothing moves, so the common path does not clone.
+fn normalize_tool_result_order(
+    messages: &[ChatCompletionRequestMessage],
+) -> Option<Vec<ChatCompletionRequestMessage>> {
+    let mut permutation: Option<Vec<usize>> = None;
+    let mut call_order: HashMap<&str, usize> = HashMap::new();
+    let mut index = 0;
+
+    while index < messages.len() {
+        if let ChatCompletionRequestMessage::Assistant(assistant) = &messages[index] {
+            call_order.clear();
+            for (position, tool_call) in assistant.tool_calls.iter().flatten().enumerate() {
+                // First occurrence wins, matching the renderers' index maps.
+                call_order.entry(tool_call.id.as_str()).or_insert(position);
+            }
+            index += 1;
+            continue;
+        }
+
+        // A window spans to the next assistant turn. Tool results are gathered
+        // across any interleaved message, because the DeepSeek encoder folds
+        // such a turn into one message's content blocks and then reorders the
+        // tool results within it.
+        let start = index;
+        while index < messages.len()
+            && !matches!(&messages[index], ChatCompletionRequestMessage::Assistant(_))
+        {
+            index += 1;
+        }
+        if call_order.is_empty() {
+            continue;
+        }
+
+        let mut slots: Vec<(usize, usize)> = Vec::new();
+        let mut unresolved = None;
+        for (offset, message) in messages[start..index].iter().enumerate() {
+            let ChatCompletionRequestMessage::Tool(tool) = message else {
+                continue;
+            };
+            match call_order.get(tool.tool_call_id.as_str()) {
+                Some(&call_position) => slots.push((call_position, start + offset)),
+                None => {
+                    unresolved = Some(tool.tool_call_id.as_str());
+                    break;
+                }
+            }
+        }
+
+        if let Some(tool_call_id) = unresolved {
+            tracing::debug!(
+                tool_call_id,
+                "tool result does not match any preceding tool call; leaving the \
+                 surrounding results in the order they were sent"
+            );
+            continue;
+        }
+        if slots.len() < 2 || slots.is_sorted_by_key(|&(call_position, _)| call_position) {
+            continue;
+        }
+
+        let targets: Vec<usize> = slots.iter().map(|&(_, position)| position).collect();
+        // Stable, so duplicate ids keep their relative order.
+        slots.sort_by_key(|&(call_position, _)| call_position);
+        let permutation = permutation.get_or_insert_with(|| (0..messages.len()).collect());
+        for (&target, &(_, source)) in targets.iter().zip(slots.iter()) {
+            permutation[target] = source;
+        }
+    }
+
+    let permutation = permutation?;
+    Some(
+        permutation
+            .into_iter()
+            .map(|position| messages[position].clone())
+            .collect(),
+    )
+}
+
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
@@ -1467,6 +1559,43 @@ struct NormalizedArgsRequest<'a, R> {
     inner: &'a R,
     normalize_tool_call_args: bool,
     continue_final_message: bool,
+    /// Tool results reordered to match the preceding assistant `tool_calls`.
+    /// Borrowed, so the prompt and the multimodal paths share one reordering
+    /// instead of each cloning the message vector.
+    reordered_messages: Option<&'a [ChatCompletionRequestMessage]>,
+}
+
+/// Reordered messages for `request`, or `None` when it is already in call order.
+fn reorder_tool_results<R: OAIChatLikeRequest>(
+    request: &R,
+) -> Option<Vec<ChatCompletionRequestMessage>> {
+    request
+        .typed_messages()
+        .and_then(normalize_tool_result_order)
+}
+
+impl<'a, R: OAIChatLikeRequest> NormalizedArgsRequest<'a, R> {
+    fn new(
+        inner: &'a R,
+        normalize_tool_call_args: bool,
+        continue_final_message: bool,
+        reordered_messages: Option<&'a [ChatCompletionRequestMessage]>,
+    ) -> Self {
+        Self {
+            inner,
+            normalize_tool_call_args,
+            continue_final_message,
+            reordered_messages,
+        }
+    }
+
+    /// True when the wrapper would not change anything, so the caller can hand
+    /// the inner request straight to the renderer and avoid re-serializing it.
+    fn is_noop(&self) -> bool {
+        !self.normalize_tool_call_args
+            && !self.continue_final_message
+            && self.reordered_messages.is_none()
+    }
 }
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
@@ -1475,8 +1604,8 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
-            .unwrap_or_default();
+        let mut json =
+            serde_json::to_value(self.typed_messages().unwrap_or_default()).unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
         {
@@ -1499,7 +1628,22 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        self.inner.typed_messages()
+        match self.reordered_messages {
+            Some(messages) => Some(messages),
+            None => self.inner.typed_messages(),
+        }
+    }
+
+    fn prompt_input_type(&self) -> PromptInput {
+        self.inner.prompt_input_type()
+    }
+
+    fn extract_tokens(&self) -> Option<TokenInput> {
+        self.inner.extract_tokens()
+    }
+
+    fn reasoning_effort(&self) -> Option<minijinja::value::Value> {
+        self.inner.reasoning_effort()
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
@@ -1554,6 +1698,12 @@ impl<R: StopConditionsProvider> StopConditionsProvider for NormalizedArgsRequest
 impl<R: OutputOptionsProvider> OutputOptionsProvider for NormalizedArgsRequest<'_, R> {
     fn extract_output_options(&self) -> anyhow::Result<crate::protocols::common::OutputOptions> {
         self.inner.extract_output_options()
+    }
+}
+
+impl<R: MediaRequestExt> MediaRequestExt for NormalizedArgsRequest<'_, R> {
+    fn media_io_kwargs(&self) -> Option<&serde_json::Value> {
+        self.inner.media_io_kwargs()
     }
 }
 
@@ -2780,10 +2930,17 @@ impl OpenAIPreprocessor {
         let preprocess_start = Instant::now();
         let mut builder = self.builder_with_lora(request, lora_name)?;
 
+        // One reordering per request, shared by the prompt and the multimodal
+        // paths. They must agree: the renderer orders media placeholders by
+        // tool-call order while collection walks the message list, and a
+        // mismatch pairs each image with the wrong tool result -- silently,
+        // since the counts still match.
+        let reordered = reorder_tool_results(request);
+
         let template_start = Instant::now();
         let formatted_prompt = {
             let _nvtx = dynamo_nvtx_range!("preprocess.template");
-            self.apply_template(request)
+            self.apply_template_with(request, reordered.as_deref())
                 .with_context(|| "Failed to apply prompt template")?
         };
         TEMPLATE_SECONDS.observe(template_start.elapsed().as_secs_f64());
@@ -2805,9 +2962,12 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
+        // Both flags stay false: this path shares only the reordering, so
+        // `extra_args["messages"]` keeps its shape in every other respect.
+        let media_request = NormalizedArgsRequest::new(request, false, false, reordered.as_deref());
         let (_mm_routing_entries, image_tokens) = self
             .gather_multi_modal_data_with_image_tokens(
-                request,
+                &media_request,
                 &mut builder,
                 formatted_prompt.as_ref().map(RenderedPrompt::as_str),
                 &token_ids,
@@ -3161,15 +3321,40 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
+        let reordered = reorder_tool_results(request);
+        self.apply_template_with(request, reordered.as_deref())
+    }
+
+    /// `apply_template` against an already-computed tool-result reordering, so
+    /// the prompt and the multimodal paths share one pass instead of each
+    /// recomputing and cloning. Callers that reach `apply_template` directly --
+    /// the inference-gateway EPP tokenizes through it -- get the same ordering
+    /// and therefore the same token sequence the frontend prefills.
+    fn apply_template_with<
+        'a,
+        R: OAIChatLikeRequest
+            + AnnotationsProvider
+            + SamplingOptionsProvider
+            + StopConditionsProvider
+            + OutputOptionsProvider
+            + NvExtProvider
+            + CommonExtProvider,
+    >(
+        &self,
+        request: &'a R,
+        reordered: Option<&'a [ChatCompletionRequestMessage]>,
+    ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
-        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
-            self.apply_template_inner(&NormalizedArgsRequest {
-                inner: request,
-                normalize_tool_call_args: self.normalize_tool_call_args,
-                continue_final_message: continue_final,
-            })?
-        } else {
+        let normalized = NormalizedArgsRequest::new(
+            request,
+            self.normalize_tool_call_args,
+            continue_final,
+            reordered,
+        );
+        let formatted_prompt = if normalized.is_noop() {
             self.apply_template_inner(request)?
+        } else {
+            self.apply_template_inner(&normalized)?
         };
         let Some(prompt) = formatted_prompt else {
             return Ok(None);
@@ -10751,11 +10936,7 @@ mod tests {
         let continue_final = request.get_continue_final_message() == Some(true);
         let rendered = if continue_final {
             formatter
-                .render_prompt(&NormalizedArgsRequest {
-                    inner: request,
-                    normalize_tool_call_args: false,
-                    continue_final_message: true,
-                })
+                .render_prompt(&NormalizedArgsRequest::new(request, false, true, None))
                 .unwrap()
         } else {
             formatter.render_prompt(request).unwrap()
@@ -12400,5 +12581,306 @@ mod tests {
             image,
             video(2)
         ]));
+    }
+
+    // ---- tool-result ordering: renderer and media collector must agree ----
+
+    /// Model emitted `tool_calls [c1=NVDA, c2=AMD]`; the client ran both tools
+    /// concurrently and appended AMD's result first, which is conforming --
+    /// `tool_call_id` exists so results match by identity, not position.
+    fn out_of_order_tool_image_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "compare the two charts"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "chart", "arguments": "{}"}},
+                    {"id": "c2", "type": "function",
+                     "function": {"name": "chart", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "c2", "content": [
+                    {"type": "text", "text": "AMD"},
+                    {"type": "image_url",
+                     "image_url": {"url": "https://example.com/amd.png"}}
+                ]},
+                {"role": "tool", "tool_call_id": "c1", "content": [
+                    {"type": "text", "text": "NVDA"},
+                    {"type": "image_url",
+                     "image_url": {"url": "https://example.com/nvda.png"}}
+                ]}
+            ],
+            "max_tokens": 1
+        }))
+        .unwrap()
+    }
+
+    /// Position of each tool-result label in the rendered prompt. Asserts the
+    /// label occurs exactly once, so a fixture that leaks a label into another
+    /// turn fails loudly instead of silently measuring the wrong occurrence.
+    fn sole_index_of(rendered: &str, label: &str) -> usize {
+        let matches: Vec<usize> = rendered.match_indices(label).map(|(at, _)| at).collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "{label} must appear exactly once in the prompt, found {}",
+            matches.len()
+        );
+        matches[0]
+    }
+
+    fn placeholder_order(rendered: &str) -> [&'static str; 2] {
+        if sole_index_of(rendered, "NVDA") < sole_index_of(rendered, "AMD") {
+            ["nvda.png", "amd.png"]
+        } else {
+            ["amd.png", "nvda.png"]
+        }
+    }
+
+    async fn collected_tool_image_urls(request: &NvCreateChatCompletionRequest) -> Vec<String> {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let (preprocessed, _, _) = preprocessor
+            .preprocess_request(request, None)
+            .await
+            .unwrap();
+        preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("image_url"))
+            .expect("both tool-result images must be collected")
+            .iter()
+            .map(|slot| match slot {
+                MultimodalData::Url(url) => url.to_string(),
+                other => panic!("expected a passthrough URL, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Kimi K3 reorders tool results into call order because its reference
+    /// encoder does. The collector must land on the same order, or each image
+    /// is paired with the wrong tool result -- silently, since the placeholder
+    /// and media counts still match.
+    #[tokio::test]
+    async fn tool_result_media_matches_sorting_renderer_placeholder_order() {
+        use dynamo_renderer::OAIPromptFormatter;
+
+        let request = out_of_order_tool_image_request();
+        let collected = collected_tool_image_urls(&request).await;
+
+        let rendered = dynamo_renderer::kimi_k3::KimiK3Formatter::new(false)
+            .render(&request)
+            .unwrap();
+        let placeholder_order = placeholder_order(&rendered);
+
+        assert_eq!(
+            rendered.matches("<|media_pad|>").count(),
+            collected.len(),
+            "counts alone cannot detect a swap; order is the real invariant"
+        );
+        for (slot, image) in placeholder_order.iter().zip(&collected) {
+            assert!(
+                image.ends_with(slot),
+                "placeholder for {slot} received {image}; rendered order {placeholder_order:?} \
+                 disagrees with collected order {collected:?}"
+            );
+        }
+    }
+
+    /// A renderer that does not reorder must agree with the collector too --
+    /// normalizing upstream must not desynchronize the paths that were already
+    /// consistent. This is a regression guard, not bug-detecting coverage: it
+    /// passes with and without the fix, because both sides move together.
+    #[tokio::test]
+    async fn tool_result_media_matches_non_sorting_renderer_placeholder_order() {
+        let request = out_of_order_tool_image_request();
+        let collected = collected_tool_image_urls(&request).await;
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let rendered = preprocessor
+            .apply_template(&request)
+            .unwrap()
+            .expect("chat template renders a prompt");
+        let rendered = rendered.as_str();
+
+        let placeholder_order = placeholder_order(rendered);
+
+        for (slot, image) in placeholder_order.iter().zip(&collected) {
+            assert!(
+                image.ends_with(slot),
+                "placeholder for {slot} received {image}; rendered order {placeholder_order:?} \
+                 disagrees with collected order {collected:?}"
+            );
+        }
+    }
+
+    fn messages_from(value: serde_json::Value) -> Vec<ChatCompletionRequestMessage> {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn tool_ids(messages: &[ChatCompletionRequestMessage]) -> Vec<&str> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::Tool(tool) => Some(tool.tool_call_id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assistant_with_calls(ids: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": ids.iter().map(|id| serde_json::json!({
+                "id": id, "type": "function",
+                "function": {"name": "f", "arguments": "{}"}
+            })).collect::<Vec<_>>()
+        })
+    }
+
+    fn tool_result(id: &str) -> serde_json::Value {
+        tool_result_with(id, "ok")
+    }
+
+    fn tool_result_with(id: &str, content: &str) -> serde_json::Value {
+        serde_json::json!({"role": "tool", "tool_call_id": id, "content": content})
+    }
+
+    fn tool_contents(messages: &[ChatCompletionRequestMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                ChatCompletionRequestMessage::Tool(tool) => match &tool.content {
+                    dynamo_protocols::types::ChatCompletionRequestToolMessageContent::Text(
+                        text,
+                    ) => Some(text.clone()),
+                    other => panic!("expected text tool content, got {other:?}"),
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn normalize_tool_result_order_is_a_noop_when_already_in_call_order() {
+        let messages = messages_from(serde_json::json!([
+            assistant_with_calls(&["c1", "c2"]),
+            tool_result("c1"),
+            tool_result("c2")
+        ]));
+        assert!(
+            normalize_tool_result_order(&messages).is_none(),
+            "an already-ordered request must not allocate or clone"
+        );
+    }
+
+    #[test]
+    fn normalize_tool_result_order_sorts_a_run_into_call_order() {
+        let messages = messages_from(serde_json::json!([
+            assistant_with_calls(&["c1", "c2", "c3"]),
+            tool_result("c3"),
+            tool_result("c1"),
+            tool_result("c2")
+        ]));
+        let reordered = normalize_tool_result_order(&messages).expect("run is out of order");
+        assert_eq!(tool_ids(&reordered), ["c1", "c2", "c3"]);
+    }
+
+    #[test]
+    fn normalize_tool_result_order_keeps_batches_independent() {
+        // A batch-2 result must never migrate ahead of batch 1.
+        let messages = messages_from(serde_json::json!([
+            assistant_with_calls(&["c1", "c2"]),
+            tool_result("c2"),
+            tool_result("c1"),
+            {"role": "user", "content": "round two"},
+            assistant_with_calls(&["c3", "c4"]),
+            tool_result("c4"),
+            tool_result("c3")
+        ]));
+        let reordered = normalize_tool_result_order(&messages).expect("both runs are out of order");
+        assert_eq!(tool_ids(&reordered), ["c1", "c2", "c3", "c4"]);
+        assert!(
+            matches!(reordered[3], ChatCompletionRequestMessage::User(_)),
+            "the intervening user turn must keep its position"
+        );
+    }
+
+    #[test]
+    fn normalize_tool_result_order_leaves_a_run_with_an_unresolved_id_untouched() {
+        // Never reorder on data we cannot interpret -- an unknown id must not
+        // be assigned a position by default.
+        let messages = messages_from(serde_json::json!([
+            assistant_with_calls(&["c1", "c2"]),
+            tool_result("c2"),
+            tool_result("orphan"),
+            tool_result("c1")
+        ]));
+        assert!(
+            normalize_tool_result_order(&messages).is_none(),
+            "one unresolved id must leave the whole run as sent"
+        );
+    }
+
+    /// The DeepSeek encoder folds an interleaved turn into one message's
+    /// content blocks and then reorders the tool results within it, so results
+    /// must be gathered across that turn -- while the turn itself stays put.
+    #[test]
+    fn normalize_tool_result_order_gathers_results_across_an_interleaved_turn() {
+        let messages = messages_from(serde_json::json!([
+            assistant_with_calls(&["c1", "c2", "c3"]),
+            tool_result("c3"),
+            tool_result("c1"),
+            {"role": "user", "content": "interjection"},
+            tool_result("c2")
+        ]));
+        let reordered = normalize_tool_result_order(&messages).expect("results are out of order");
+        assert_eq!(tool_ids(&reordered), ["c1", "c2", "c3"]);
+        assert!(
+            matches!(reordered[3], ChatCompletionRequestMessage::User(_)),
+            "the interleaved turn must keep its position, got {:?}",
+            reordered[3]
+        );
+    }
+
+    #[test]
+    fn normalize_tool_result_order_is_stable_for_duplicate_ids() {
+        let messages = messages_from(serde_json::json!([
+            assistant_with_calls(&["c1", "c2"]),
+            tool_result_with("c2", "second-call"),
+            tool_result_with("c1", "first-of-duplicate"),
+            tool_result_with("c1", "second-of-duplicate")
+        ]));
+        let reordered = normalize_tool_result_order(&messages).expect("results are out of order");
+        assert_eq!(tool_ids(&reordered), ["c1", "c1", "c2"]);
+        // Asserting on content, not ids: an unstable sort keeps the ids in
+        // place while swapping which result each one carries.
+        assert_eq!(
+            tool_contents(&reordered),
+            ["first-of-duplicate", "second-of-duplicate", "second-call"]
+        );
+    }
+
+    #[test]
+    fn normalize_tool_result_order_ignores_tool_results_with_no_preceding_calls() {
+        let messages = messages_from(serde_json::json!([
+            {"role": "user", "content": "hi"},
+            tool_result("c1"),
+            tool_result("c2")
+        ]));
+        assert!(
+            normalize_tool_result_order(&messages).is_none(),
+            "no assistant tool_calls means no call order to sort against"
+        );
     }
 }
