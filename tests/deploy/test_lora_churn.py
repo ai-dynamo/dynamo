@@ -222,9 +222,9 @@ async def test_lora_registration_churn_has_bounded_resources(
             worker_pods[0], deployment_spec.system_port
         )
         assert frontend_port_forward is not None, "Unable to port-forward the frontend"
-        assert worker_port_forward is not None, (
-            "Unable to port-forward the decode worker"
-        )
+        assert (
+            worker_port_forward is not None
+        ), "Unable to port-forward the decode worker"
         base_url = f"http://localhost:{frontend_port_forward.local_port}"
         system_url = f"http://localhost:{worker_port_forward.local_port}"
         assert wait_for_model_availability(
