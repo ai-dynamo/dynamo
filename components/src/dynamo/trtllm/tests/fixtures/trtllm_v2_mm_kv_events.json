@@ -1,13 +1,22 @@
 {
-  "source": {
+  "forward_source": {
     "repository": "NVIDIA/TensorRT-LLM",
-    "commit": "92e2337bb02bcc18430bb363d96b7036274f11dc",
-    "contract": "buffered KVCacheEventSerializer output"
+    "pull_request": 18810,
+    "merge_commit": "3fafd1376149d14ab718cfb5d6b5b2333b367db6",
+    "producer": "KVCacheEventManager + KVCacheEventSerializer",
+    "contract": "buffered serialized event"
+  },
+  "legacy_source": {
+    "repository": "NVIDIA/TensorRT-LLM",
+    "commit": "a67ede16f63436fc4deaf27cfd2ac94a33a33789",
+    "contract": "representative pre-18810 digest event without complete mm_keys"
   },
   "mm_token_id_offset": 1000,
   "forward_event": {
-    "event_id": 41,
+    "event_id": 0,
     "attention_dp_rank": 0,
+    "layer_group_id": 0,
+    "window_size": 128,
     "hash_algo": "v1_block_key",
     "data": {
       "type": "stored",
@@ -69,6 +78,8 @@
   "legacy_event": {
     "event_id": 42,
     "attention_dp_rank": 0,
+    "layer_group_id": 0,
+    "window_size": 128,
     "hash_algo": "v1_block_key",
     "data": {
       "type": "stored",

@@ -477,7 +477,7 @@ def _publisher_for_kv_event_test():
     pub.partial_block_hashes = set()
     pub.kv_block_size = 4
     pub.mm_token_id_offset = 1000
-    pub.max_window_size = None
+    pub.max_window_size = 128
     return pub
 
 
@@ -507,6 +507,26 @@ def _stored_kv_event(cache_salt="tenant-a"):
 def _load_v2_mm_fixture():
     fixture_path = Path(__file__).parent / "fixtures" / "trtllm_v2_mm_kv_events.json"
     return json.loads(fixture_path.read_text())
+
+
+@pytest.mark.multimodal
+def test_v2_mm_fixture_is_merged_trtllm_serializer_output():
+    fixture = _load_v2_mm_fixture()
+    source = fixture["forward_source"]
+    event = fixture["forward_event"]
+
+    assert source == {
+        "repository": "NVIDIA/TensorRT-LLM",
+        "pull_request": 18810,
+        "merge_commit": "3fafd1376149d14ab718cfb5d6b5b2333b367db6",
+        "producer": "KVCacheEventManager + KVCacheEventSerializer",
+        "contract": "buffered serialized event",
+    }
+    assert event["event_id"] == 0
+    assert event["window_size"] == 128
+    assert event["layer_group_id"] == 0
+    assert event["attention_dp_rank"] == 0
+    assert event["hash_algo"] == "v1_block_key"
 
 
 @pytest.mark.parametrize("hash_algo", ["v1_block_key", "v2_sha256_64"])
