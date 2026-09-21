@@ -461,7 +461,7 @@ def _split_commands(script: str) -> list[_Command]:
             add(" ", False)  # a pipeline is backgrounded as a whole
             segments.append(sum(map(len, parts)))
             pending = True
-            index += 1
+            index += 2 if script.startswith("|&", index) else 1
             continue
         add(char, False)
         index += 1
@@ -615,7 +615,7 @@ def test_heredoc_body_ends_only_at_the_bash_delimiter() -> None:
     ]
 
 
-@pytest.mark.parametrize("operator", ["&&", "||", "|"])
+@pytest.mark.parametrize("operator", ["&&", "||", "|", "|&"])
 @pytest.mark.parametrize("gap", ["\n", "  \n\n    # keep waiting\n"])
 @pytest.mark.parametrize("terminator", ["&", ";"])
 def test_operator_continues_across_newlines(
@@ -643,6 +643,17 @@ def test_continued_pipeline_still_skips_heredoc_body() -> None:
         "wait_any_exit\n"
     )
     assert _service_launches(script) == [(1, "python -m dynamo.frontend", True)]
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_stderr_pipeline_requires_a_separate_background_marker(
+    background: bool,
+) -> None:
+    """The ampersand in |& redirects stderr; it does not background the pipeline."""
+    script = "python -m dynamo.frontend |& tee frontend.log"
+    if background:
+        script += " &"
+    assert _service_launches(script) == [(1, "python -m dynamo.frontend", background)]
 
 
 @pytest.mark.parametrize("grouped", ["{ %s; }", "(%s)", "( { %s; } )"])
