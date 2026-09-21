@@ -181,6 +181,7 @@ tonic-reflection = { version = "0.13.1" }
 prost = { version = "0.13.5" }
 
 # tokenizers
+hf-tokenizers = { package = "tokenizers", version = "=1.0.0-rc.2", default-features = false, features = ["regex"] }
 tokenizers = { version = "0.21.4", default-features = false, features = [
   "onig",
   "esaxx_fast",
