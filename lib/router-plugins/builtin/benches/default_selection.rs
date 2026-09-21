@@ -54,7 +54,7 @@ fn bench(c: &mut Criterion) {
             .measurement_time(Duration::from_millis(500))
             .sample_size(30)
             .nresamples(1_000);
-        for count in [8, 64, 256, 1024] {
+        for count in [8, 64, 256, 1024, 4096] {
             let (workers, request) = support::fixture(count, 2048);
             let config = KvRouterConfig {
                 router_temperature: temperature,
@@ -123,5 +123,80 @@ fn bench(c: &mut Criterion) {
         group.finish();
     }
 }
-criterion_group!(benches, bench);
+
+struct LoadScorer(f64);
+impl dynamo_kv_router::WorkerScorer for LoadScorer {
+    fn required_worker_inputs(&self) -> dynamo_kv_router::WorkerInputs {
+        dynamo_kv_router::WorkerInputs::LOAD
+    }
+    fn score(
+        &mut self,
+        _: &dynamo_kv_router::WorkerSelectionContext<'_>,
+        candidate: &dynamo_kv_router::WorkerCandidate,
+    ) -> Result<f64, dynamo_kv_router::WorkerSelectionPolicyError> {
+        Ok(candidate.load().unwrap().active_requests() as f64 * self.0)
+    }
+}
+
+struct MinimumPicker;
+impl dynamo_kv_router::WorkerPicker for MinimumPicker {
+    fn pick(
+        &mut self,
+        _: &dynamo_kv_router::WorkerSelectionContext<'_>,
+        input: dynamo_kv_router::WorkerInputView<'_>,
+    ) -> Result<usize, dynamo_kv_router::WorkerSelectionPolicyError> {
+        Ok(input
+            .candidates()
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| a.cost().total_cmp(&b.cost()))
+            .unwrap()
+            .0)
+    }
+}
+
+fn stacked(c: &mut Criterion) {
+    for scorer_count in [1, 2, 4] {
+        let mut group = c.benchmark_group(format!("stacked_scoring/s{scorer_count}"));
+        group
+            .warm_up_time(Duration::from_millis(200))
+            .measurement_time(Duration::from_millis(500))
+            .sample_size(30)
+            .nresamples(1_000);
+        for count in [8, 64, 1024, 4096] {
+            let (workers, request) = support::fixture(count, 2048);
+            let scorers = (0..scorer_count)
+                .map(|index| {
+                    Box::new(LoadScorer((index + 1) as f64))
+                        as Box<dyn dynamo_kv_router::WorkerScorer>
+                })
+                .collect();
+            let policy = dynamo_kv_router::WorkerSelectionPolicy::new(
+                KvRouterConfig::default(),
+                "prefill",
+                scorers,
+                Box::new(MinimumPicker),
+            );
+            let mut select = || {
+                black_box(
+                    policy
+                        .select_worker(WorkerSelectionInput::configured(
+                            &workers,
+                            &request,
+                            request.eligibility(),
+                            16,
+                        ))
+                        .unwrap(),
+                );
+            };
+            let count_allocs = allocations(&mut select);
+            eprintln!(
+                "stacked allocations per 100 warm selections: scorers={scorer_count} workers={count} allocations={count_allocs}"
+            );
+            group.bench_function(BenchmarkId::new("plugin", count), |b| b.iter(&mut select));
+        }
+        group.finish();
+    }
+}
+criterion_group!(benches, bench, stacked);
 criterion_main!(benches);
