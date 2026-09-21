@@ -545,7 +545,15 @@ def test_text_only_v1_and_v2_events_remain_unchanged(hash_algo):
 
 
 @pytest.mark.multimodal
-def test_v2_mm_fixture_matches_request_side_canonical_tokens():
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason=(
+        "TensorRT-LLM V2 events do not yet preserve the frontend multimodal "
+        "routing identity"
+    ),
+)
+def test_v2_mm_fixture_matches_frontend_routing_identity():
     fixture = _load_v2_mm_fixture()
     pub = _publisher_for_kv_event_test()
     pub.mm_token_id_offset = fixture["mm_token_id_offset"]
@@ -554,10 +562,18 @@ def test_v2_mm_fixture_matches_request_side_canonical_tokens():
 
     digest_a = fixture["forward_event"]["data"]["blocks"][0]["mm_keys"][0]["hash"]
     digest_b = fixture["forward_event"]["data"]["blocks"][2]["mm_keys"][1]["hash"]
+    routing_uuid_a = "9dc26f865941d289"
+    routing_uuid_b = "0123456789abcdef"
+    assert pad_value_for_mm_hash(int(routing_uuid_a, 16)) != pad_value_for_mm_hash(
+        int(digest_a[:16], 16)
+    )
+    assert pad_value_for_mm_hash(int(routing_uuid_b, 16)) != pad_value_for_mm_hash(
+        int(digest_b[:16], 16)
+    )
     request_tokens = [1, 99, 99, 99, 99, 7, 99, 99, 99, 88, 88, 9]
     request_features = [
         SimpleNamespace(
-            mm_hash=digest_a,
+            mm_hash=routing_uuid_a,
             mm_position=SimpleNamespace(
                 offset=1,
                 length=8,
@@ -565,7 +581,7 @@ def test_v2_mm_fixture_matches_request_side_canonical_tokens():
             ),
         ),
         SimpleNamespace(
-            mm_hash=digest_b,
+            mm_hash=routing_uuid_b,
             mm_position=SimpleNamespace(offset=9, length=2, is_embed=None),
         ),
     ]

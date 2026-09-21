@@ -96,6 +96,7 @@ def make_image_payload_cached_tokens(
     expected_response: list[str],
     *,
     repeat_count: int = 3,
+    expected_log: list[str] | None = None,
     min_cached_tokens: int = 1,
     require_rust_processor_init: bool = False,
     require_vllm_mm_processor_init: bool = False,
@@ -105,6 +106,7 @@ def make_image_payload_cached_tokens(
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
 
+    ``expected_log`` adds backend-specific launch evidence.
     ``require_rust_processor_init`` / ``require_vllm_mm_processor_init`` assert
     the MM-routing init log fired. ``min_routing_total_blocks`` asserts the
     [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
@@ -137,6 +139,7 @@ def make_image_payload_cached_tokens(
         },
         repeat_count=repeat_count,
         expected_response=expected_response,
+        expected_log=expected_log,
         min_cached_tokens=min_cached_tokens,
         require_rust_processor_init=require_rust_processor_init,
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,

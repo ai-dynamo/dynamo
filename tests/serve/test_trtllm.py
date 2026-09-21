@@ -355,6 +355,47 @@ trtllm_configs = {
             )
         ],
     ),
+    "aggregated_multimodal_router_v2": TRTLLMConfig(
+        name="aggregated_multimodal_router_v2",
+        directory=trtllm_dir,
+        script_name="agg_multimodal_router.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.pre_merge,
+            pytest.mark.profiled_vram_gib(12.0),
+            pytest.mark.requested_trtllm_kv_tokens(32768),
+            pytest.mark.timeout(960),
+            pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason=(
+                    "TensorRT-LLM V2 events do not yet preserve the frontend "
+                    "multimodal routing identity"
+                ),
+            ),
+        ],
+        model="Qwen/Qwen3-VL-2B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        env={
+            "DYN_MM_ALLOW_INTERNAL": "1",
+            "TRTLLM_USE_KV_CACHE_MANAGER_V2": "1",
+        },
+        request_payloads=[
+            make_image_payload_cached_tokens(
+                ["green"],
+                repeat_count=2,
+                expected_log=[
+                    r"TensorRT-LLM KV cache manager V2 forced for multimodal routing test"
+                ],
+                require_rust_processor_init=True,
+                min_avg_kv_hit_rate=0.5,
+            )
+        ],
+    ),
     "aggregated_multimodal_video_nvdec": TRTLLMConfig(
         # The only serve-level cover for video input on this backend. TensorRT-LLM
         # supports video for the Qwen-VL families, and multimodal_processor routes
