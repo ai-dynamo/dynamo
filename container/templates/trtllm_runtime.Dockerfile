@@ -184,6 +184,22 @@ ENV DYNAMO_HOME=/workspace \
 
 WORKDIR /workspace
 
+# Backport TRT-LLM PR #19303 (draft KV pool publish). tensorrt_llm comes from
+# the base runtime image and is never reinstalled here, so this can run before
+# the package layers; runtime_full's filesystem is overlaid into pre_runtime.
+# Rebased onto v1.3.0rc27 -- main has since restructured _joint_reuse_supported
+# and the reuse_match_backoff block, so the upstream diff does not apply to this
+# tag. Drop once an rc ships the fix: --forward then exits non-zero and fails
+# this layer rather than silently shipping an unpatched image.
+# Use the base image's own patch(1): `apt-get purge -y patch` cascades through
+# dpkg-dev to build-essential and cuda-nvcc, which the Triton cuda_utils JIT
+# check two steps below needs. The vLLM block installs and purges it because its
+# base image lacks that dependency chain; this one must not.
+RUN --mount=type=bind,source=./container/deps/trtllm/trtllm-pr-19303-draft-kv-pool-publish.patch,target=/tmp/trtllm-pr-19303.patch \
+    set -eu; \
+    pkg_root="$(python3 -c 'import importlib.util, pathlib; print(pathlib.Path(importlib.util.find_spec("tensorrt_llm").origin).parent.parent)')"; \
+    patch --batch --forward --fuzz=0 -p1 -d "$pkg_root" < /tmp/trtllm-pr-19303.patch
+
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd

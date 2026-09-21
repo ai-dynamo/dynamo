@@ -1,0 +1,127 @@
+diff --git a/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py b/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py
+index 513fae8795..ea6b06c77f 100644
+--- a/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py
++++ b/tensorrt_llm/_torch/attention/backends/sparse/deepseek_v4/cache_manager.py
+@@ -250,6 +250,7 @@ def _get_index_mode(attn_type: DeepseekV4AttentionType) -> PageIndexMode:
+ 
+ class DeepseekV4CacheManager(KVCacheManagerV2):
+     _supports_reuse_match_backoff = False
++    _supports_draft_reuse_match_backoff = False
+ 
+     # This tensor is for compatibility with AttentionOp, it only contains swa attention.
+     # kv_cache_pool_pointers contains one virtual attention-op pool per local
+diff --git a/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py b/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py
+index 7029f111cf..8161d36d6b 100644
+--- a/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py
++++ b/tensorrt_llm/_torch/attention/backends/sparse/qsa/cache_manager.py
+@@ -48,6 +48,11 @@ class QSAMambaHybridCacheManagerV2(MambaHybridCacheManagerV2):
+     paged cache different shapes or page strides.
+     """
+ 
++    # The parent opts in because its draft pool is attention-only. QSA's is
++    # not: each draft layer adds a Role.INDEX_KEY buffer and a
++    # QSA_INDEX_POSITION page, unvalidated for cross-request reuse.
++    _supports_draft_reuse_match_backoff = False
++
+     def __init__(
+         self,
+         *args,
+diff --git a/tensorrt_llm/_torch/pyexecutor/_util.py b/tensorrt_llm/_torch/pyexecutor/_util.py
+index 78d1b6d921..0953dfa5b1 100644
+--- a/tensorrt_llm/_torch/pyexecutor/_util.py
++++ b/tensorrt_llm/_torch/pyexecutor/_util.py
+@@ -1576,8 +1576,10 @@ class KvCacheCreator:
+         """
+         if not self._is_kv_cache_manager_v2:
+             return False
++        # Pairing depends on the draft pool's support: it holds only the
++        # speculation layers, so it can support what the target pool cannot.
+         if not getattr(self._kv_cache_manager_cls,
+-                       "_supports_reuse_match_backoff", False):
++                       "_supports_draft_reuse_match_backoff", False):
+             return False
+         return draft_prompt_lookahead(self._speculative_config) is not None
+ 
+diff --git a/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py b/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py
+index 11bf7f0121..ae30277aad 100644
+--- a/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py
++++ b/tensorrt_llm/_torch/pyexecutor/kv_cache/kv_cache_manager_v2.py
+@@ -1023,6 +1023,13 @@ class KVCacheManagerV2(BaseResourceManager):
+     # Read by KvCacheCreator: a subclass that overrides the context
+     # commit/history protocol opts out of generic reuse-match backoff.
+     _supports_reuse_match_backoff = True
++    # The same question for a separate one-model draft pool, which holds only
++    # the speculation layers and may therefore support the protocol when the
++    # pool holding the model's own layers does not.
++    _supports_draft_reuse_match_backoff = True
++    # Opt-in for a subclass whose target truncates reuse to a coarse grid,
++    # where the draft's one-token backoff costs it a whole interval.
++    _drop_advisory_draft_lookahead = False
+ 
+     def __init__(
+         self,
+@@ -1146,8 +1153,24 @@ class KVCacheManagerV2(BaseResourceManager):
+         # A draft manager only publishes to its radix tree when it is paired.
+         self._can_publish_block_reuse = joint_kv_cache_reuse or not self.is_draft
+         # Unsupported adapters keep their main-like reuse endpoint.
++        supports_backoff = (
++            self._supports_draft_reuse_match_backoff
++            if self.is_draft
++            else self._supports_reuse_match_backoff
++        )
+         self.reuse_match_backoff = draft_prompt_lookahead(spec_config) or 0
+-        if not self._supports_reuse_match_backoff:
++        if not supports_backoff:
++            self.reuse_match_backoff = 0
++        elif (
++            self.is_draft
++            and joint_kv_cache_reuse
++            and self._drop_advisory_draft_lookahead
++            and not getattr(spec_config, "use_relaxed_acceptance_for_thinking", False)
++        ):
++            # The trim is advisory, but the scheduler caps the target at the
++            # draft's claim, so on a snapshot-grid target one token costs a
++            # whole interval. Exact verification already rejects a bad draft
++            # token; relaxed acceptance does not, so it keeps the trim.
+             self.reuse_match_backoff = 0
+         # Mirror V1's KV reserve sizing (see V1 __init__ for rationale).
+         self._kv_reserve_draft_tokens = self.max_total_draft_tokens
+diff --git a/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py b/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py
+index f1284e7132..241c3d3380 100644
+--- a/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py
++++ b/tensorrt_llm/_torch/pyexecutor/kv_cache/mamba_cache_manager.py
+@@ -2965,6 +2965,12 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
+     # Recurrent-state snapshots use a specialized commit/history protocol, so
+     # keep main-like reuse endpoints and the existing unpaired draft path.
+     _supports_reuse_match_backoff = False
++    # get_layer_masks() returns an all-False mamba mask for a draft pool, so
++    # local_num_mamba_layers == 0 and the truncation above cannot apply to it.
++    _supports_draft_reuse_match_backoff = True
++    # It still applies to the paired target, which the scheduler caps at the
++    # draft's claim; waive the trim so it cannot leave the snapshot grid.
++    _drop_advisory_draft_lookahead = True
+ 
+     # Qwen4-Exp PLE state is opt-in. These class-level defaults keep every other
+     # model — and any partially-constructed instance that sets only the fields it
+@@ -4634,6 +4640,11 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
+                 f"request {request.py_request_id} to {history_length} tokens")
+ 
+     def try_commit_blocks(self, request: LlmRequest, kv_cache=None) -> None:
++        if self.is_draft:
++            # Attention-only pool: no recurrent state, so the snapshot-boundary
++            # gate below does not apply. expect_snapshot_points is target
++            # geometry. Commit on the base class's block cadence instead.
++            return super().try_commit_blocks(request)
+         should_block_reuse = (self.enable_block_reuse and not self.is_draft
+                               and not request.is_dummy_request)
+         if not should_block_reuse:
+@@ -4668,6 +4679,9 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
+ 
+     def update_context_resources(self,
+                                  scheduled_batch: ScheduledRequests) -> None:
++        if self.is_draft:
++            # Attention-only pool; see try_commit_blocks.
++            return super().update_context_resources(scheduled_batch)
+         for request in scheduled_batch.context_requests:
+             kv_cache = self.kv_cache_map.get(request.py_request_id)
+             if kv_cache is None or not kv_cache.is_active:
