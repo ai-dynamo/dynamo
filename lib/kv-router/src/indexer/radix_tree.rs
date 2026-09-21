@@ -18,6 +18,8 @@ use crate::protocols::*;
 
 pub(crate) type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
 type WorkerLookup = FxHashMap<ExternalSequenceBlockHash, SharedRadixBlock>;
+type SharedCacheProvenance =
+    FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, LocalBlockHash>>;
 
 #[derive(Debug)]
 pub(crate) struct RadixBlock {
@@ -85,8 +87,9 @@ pub struct RadixTree {
     root: SharedRadixBlock,
     lookup: FxHashMap<WorkerWithDpRank, WorkerLookup>,
     lifecycle: super::HashLifecycle,
-    shared_cache_provenance:
-        FxHashMap<WorkerWithDpRank, FxHashMap<ExternalSequenceBlockHash, LocalBlockHash>>,
+    /// `None` until a consumer of dump eligibility opts in; the map costs one
+    /// entry per cached block per worker.
+    shared_cache_provenance: Option<SharedCacheProvenance>,
 }
 
 impl Default for RadixTree {
@@ -128,8 +131,16 @@ impl RadixTree {
             root: Rc::new(RefCell::new(RadixBlock::root())),
             lookup: FxHashMap::default(),
             lifecycle: super::HashLifecycle::default(),
-            shared_cache_provenance: FxHashMap::default(),
+            shared_cache_provenance: None,
         }
+    }
+
+    /// Record per-block shared-cache eligibility so `dump_tree_as_events` can
+    /// restore it. Call before applying events; blocks stored earlier dump as
+    /// ineligible.
+    pub fn enable_shared_cache_provenance(&mut self) {
+        self.shared_cache_provenance
+            .get_or_insert_with(FxHashMap::default);
     }
 
     pub(crate) fn contains_worker_block(
@@ -314,8 +325,11 @@ impl RadixTree {
         worker: WorkerWithDpRank,
         store: &KvCacheStoreData,
     ) {
+        let Some(by_worker) = self.shared_cache_provenance.as_mut() else {
+            return;
+        };
         if store.shared_cache_eligible {
-            let provenance = self.shared_cache_provenance.entry(worker).or_default();
+            let provenance = by_worker.entry(worker).or_default();
             for block in &store.blocks {
                 if block.mm_extra_info.is_none() {
                     provenance.insert(block.block_hash, block.tokens_hash);
@@ -323,7 +337,7 @@ impl RadixTree {
                     provenance.remove(&block.block_hash);
                 }
             }
-        } else if let Some(provenance) = self.shared_cache_provenance.get_mut(&worker) {
+        } else if let Some(provenance) = by_worker.get_mut(&worker) {
             for block in &store.blocks {
                 provenance.remove(&block.block_hash);
             }
@@ -649,7 +663,10 @@ impl RadixTree {
         let Some(lookup) = self.lookup.get_mut(&worker) else {
             return Err(KvCacheEventError::BlockNotFound);
         };
-        let mut provenance = self.shared_cache_provenance.get_mut(&worker);
+        let mut provenance = self
+            .shared_cache_provenance
+            .as_mut()
+            .and_then(|by_worker| by_worker.get_mut(&worker));
         let mut first_error = None;
         let mut eagerly_removed = FxHashSet::default();
         let mut block_hashes = remove.block_hashes.into_iter().peekable();
@@ -742,7 +759,9 @@ impl RadixTree {
             .collect::<Vec<_>>();
 
         for worker in workers {
-            self.shared_cache_provenance.remove(&worker);
+            if let Some(by_worker) = self.shared_cache_provenance.as_mut() {
+                by_worker.remove(&worker);
+            }
             let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) else {
                 continue;
             };
@@ -771,7 +790,9 @@ impl RadixTree {
 
     pub fn remove_worker_dp_rank(&mut self, worker_id: WorkerId, dp_rank: DpRank) {
         let worker = WorkerWithDpRank { worker_id, dp_rank };
-        self.shared_cache_provenance.remove(&worker);
+        if let Some(by_worker) = self.shared_cache_provenance.as_mut() {
+            by_worker.remove(&worker);
+        }
         let Some(blocks) = self.lookup.remove(&worker) else {
             return;
         };
@@ -889,10 +910,13 @@ impl RadixTree {
     }
 
     fn restore_dump_provenance(&self, events: Vec<RouterEvent>) -> Vec<RouterEvent> {
+        let Some(by_worker) = self.shared_cache_provenance.as_ref() else {
+            return events;
+        };
         let mut output = Vec::with_capacity(events.len());
         for event in events {
             let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
-            let provenance = self.shared_cache_provenance.get(&worker);
+            let provenance = by_worker.get(&worker);
             let eligible = |block: &KvCacheStoredBlockData| {
                 provenance
                     .is_some_and(|known| known.get(&block.block_hash) == Some(&block.tokens_hash))
@@ -1084,9 +1108,35 @@ mod tests {
         ));
     }
 
+    fn provenance_tree() -> RadixTree {
+        let mut tree = RadixTree::new();
+        tree.enable_shared_cache_provenance();
+        tree
+    }
+
+    #[test]
+    fn shared_cache_provenance_is_not_recorded_unless_enabled() {
+        let mut tree = RadixTree::new();
+        let mut positive = create_store_event(1, 0, vec![1, 2, 3], None);
+        let KvCacheEventData::Stored(store) = &mut positive.event.data else {
+            unreachable!();
+        };
+        store.shared_cache_eligible = true;
+        tree.apply_event(positive.clone()).unwrap();
+        assert!(tree.shared_cache_provenance.is_none());
+        assert!(tree.dump_tree_as_events().iter().all(|event| {
+            matches!(&event.event.data, KvCacheEventData::Stored(store) if !store.shared_cache_eligible)
+        }));
+        tree.apply_event(create_remove_event(1, 1, vec![2]))
+            .unwrap();
+        tree.remove_worker_dp_rank(1, 0);
+        tree.remove_worker(1);
+        assert!(tree.shared_cache_provenance.is_none());
+    }
+
     #[test]
     fn shared_cache_provenance_survives_compaction_and_replay_per_worker() {
-        let mut tree = RadixTree::new();
+        let mut tree = provenance_tree();
         let mut root = create_store_event(1, 0, vec![1, 2], None);
         let KvCacheEventData::Stored(store) = &mut root.event.data else {
             unreachable!();
@@ -1117,7 +1167,7 @@ mod tests {
         tree.apply_event(other_rank).unwrap();
 
         let events = tree.dump_tree_as_events();
-        let mut restored = RadixTree::new();
+        let mut restored = provenance_tree();
         let mut worker_one_blocks = Vec::new();
         for event in &events {
             let KvCacheEventData::Stored(store) = &event.event.data else {
@@ -1147,7 +1197,7 @@ mod tests {
 
     #[test]
     fn shared_cache_provenance_is_cleared_by_unknown_stores_and_rank_resets() {
-        let mut tree = RadixTree::new();
+        let mut tree = provenance_tree();
         let mut positive = create_store_event(1, 0, vec![1, 2, 3], None);
         let KvCacheEventData::Stored(store) = &mut positive.event.data else {
             unreachable!();
@@ -1191,7 +1241,7 @@ mod tests {
             assert_eq!(store.shared_cache_eligible, event.event.dp_rank == 1);
         }
         tree.remove_worker(1);
-        assert!(tree.shared_cache_provenance.is_empty());
+        assert!(tree.shared_cache_provenance.as_ref().unwrap().is_empty());
     }
 
     #[test]

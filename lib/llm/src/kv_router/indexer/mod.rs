@@ -11,7 +11,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     approx::PruneConfig,
-    config::{ApproximateCachePolicyKind, KvRouterConfig},
+    config::{ApproximateCachePolicyKind, KvRouterConfig, SharedCacheType},
     indexer::{
         ApproximateRetentionConfig, KvIndexer, KvIndexerMetrics, LowerTierIndexers,
         ThreadPoolIndexer,
@@ -90,6 +90,9 @@ pub(crate) async fn build(
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 ) -> Result<Indexer> {
     let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
+    // Dump provenance is only consumed by a shared-cache observer replaying
+    // stores, so the default configuration does not pay for the map.
+    let shared_cache_provenance = kv_router_config.shared_cache_type != SharedCacheType::None;
     if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
         tracing::warn!(
             use_remote_indexer = kv_router_config.use_remote_indexer,
@@ -172,12 +175,14 @@ pub(crate) async fn build(
             });
         }
 
-        let primary = KvIndexer::new_with_approximate_retention(
+        let primary = KvIndexer::builder(
             cancellation_token.child_token(),
             block_size,
             kv_indexer_metrics.clone(),
-            Some(retention),
-        );
+        )
+        .retention(retention)
+        .shared_cache_provenance(shared_cache_provenance)
+        .build();
         let session_updates = session_prefix_index
             .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
         return Ok(Indexer::Single {
@@ -226,12 +231,13 @@ pub(crate) async fn build(
     }
 
     let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-    let primary = KvIndexer::new_with_pruning(
+    let primary = KvIndexer::builder(
         cancellation_token.child_token(),
         block_size,
         kv_indexer_metrics.clone(),
-        None,
-    );
+    )
+    .shared_cache_provenance(shared_cache_provenance)
+    .build();
     let session_updates =
         session_prefix_index.map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
     Ok(Indexer::Single {
