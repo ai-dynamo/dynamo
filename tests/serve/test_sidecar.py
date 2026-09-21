@@ -17,6 +17,7 @@ from tests.serve.common import (
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import chat_payload_default
 from tests.utils.payloads import ChatPayload
 from tests.utils.port_utils import reserved_ports
@@ -33,20 +34,10 @@ trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
 
 
 def _sidecar_worker_gpu_env(backend: str) -> dict[str, str]:
-    """Build the two-worker GPU assignment environment for a sidecar backend."""
-    devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
-    env = {}
-    for index in range(2):
-        key = f"{backend.upper()}_WORKER{index + 1}_GPU"
-        device = os.environ.get(key)
-        if device is None:
-            assert len(devices) > index and devices[index].strip() not in (
-                "",
-                "-1",
-            ), f"Two visible GPUs are required; CUDA_VISIBLE_DEVICES={devices}"
-            device = devices[index].strip()
-        env[key] = device
-    return env
+    """Assign both workers to the first allocated GPU."""
+    device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+    assert device != "-1", "One visible GPU is required"
+    return {f"{backend.upper()}_WORKER{index + 1}_GPU": device for index in range(2)}
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -159,10 +150,10 @@ def test_serve_deployment(
 @pytest.mark.router
 @pytest.mark.sidecar
 @pytest.mark.e2e
-@pytest.mark.gpu_2
+@pytest.mark.gpu_1
 @pytest.mark.pre_merge  # Guard native KV-event discovery on every sidecar change.
 @pytest.mark.model("Qwen/Qwen3-0.6B")
-@pytest.mark.timeout(780)
+@pytest.mark.timeout(1200)
 @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize(
@@ -199,7 +190,11 @@ def test_sidecar_kv_routing(
         name=f"{backend}_kv_routing",
         directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
         script_name="agg_kv_router.sh",
-        script_args=["--disable-cuda-graph"] if backend == "sglang" else [],
+        script_args=(
+            ["--disable-cuda-graph", "--disable-piecewise-cuda-graph"]
+            if backend == "sglang"
+            else []
+        ),
         marks=[],
         model="Qwen/Qwen3-0.6B",
         health_check_workers=True,

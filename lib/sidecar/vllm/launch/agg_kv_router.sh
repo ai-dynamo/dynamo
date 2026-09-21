@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Two aggregated vLLM native-gRPC sidecars behind Dynamo's KV-aware router.
-# Requires two GPUs and a vLLM build that exposes KV-event source discovery.
+# Requires a vLLM build that exposes KV-event source discovery.
 # See ../README.md for the validated vLLM/vllm-rs source state.
 
 set -e
@@ -91,7 +91,7 @@ KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":
 KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${VLLM_WORKER2_KV_EVENT_PORT}\",\"enable_kv_cache_events\":true}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
-print_launch_banner "Launching vLLM Native-gRPC Sidecars with KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching vLLM Native-gRPC Sidecars with KV Routing (2 workers)" "$MODEL" "$HTTP_PORT" \
     "Worker 1: GPU ${VLLM_WORKER1_GPU}, gRPC ${VLLM_HOST}:${VLLM_WORKER1_GRPC_PORT}, KV events tcp://*:${VLLM_WORKER1_KV_EVENT_PORT}" \
     "Worker 2: GPU ${VLLM_WORKER2_GPU}, gRPC ${VLLM_HOST}:${VLLM_WORKER2_GRPC_PORT}, KV events tcp://*:${VLLM_WORKER2_KV_EVENT_PORT}"
 
