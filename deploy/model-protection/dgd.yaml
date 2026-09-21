@@ -26,6 +26,10 @@ spec:
       spec:
         nodeSelector:
           feature.node.kubernetes.io/tpm2: "true"
+        automountServiceAccountToken: false
+        securityContext:
+          # Replace 113 with the numeric group that owns /dev/tpmrm0 on each node.
+          supplementalGroups: [113]
         terminationGracePeriodSeconds: 180
         initContainers:
         - name: prepare-model-protection-runtime
@@ -40,6 +44,8 @@ spec:
             install -m 0400 /runtime-source/model.protection.license.sig /runtime/license/model.protection.license.sig
             install -m 0400 /runtime-source/package-public.key /runtime/trust/package-public.key
             install -m 0400 /runtime-source/license-public.key /runtime/trust/license-public.key
+            install -d -m 0700 -o 1000 -g 1000 /tmp
+            chown -R 1000:1000 /run/protected-models /runtime
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -56,6 +62,8 @@ spec:
           - mountPath: /runtime-source
             name: model-protection-source
             readOnly: true
+          - mountPath: /tmp
+            name: process-tmp
         containers:
         - name: main
           image: registry.example.com/dynamo-vllm-protected:VERSION
@@ -91,8 +99,9 @@ spec:
             capabilities:
               drop: ["ALL"]
             readOnlyRootFilesystem: true
-            runAsNonRoot: false
-            runAsUser: 0
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
             seccompProfile:
               type: RuntimeDefault
           startupProbe:

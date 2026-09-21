@@ -186,8 +186,10 @@ plaintext session for the worker lifetime required by vLLM.
 Start from `dgd.yaml` and replace the image digest, package PVC, and projected
 Secret names. The profile provides separate memory-backed volumes for model
 plaintext and runtime/JIT caches, sets `DYN_NAMESPACE_WORKER_SUFFIX` to empty,
-and schedules only to approved TPM nodes. Replace the example `hostPath` TPM
-device with the cluster's audited TPM device plugin before production use.
+and schedules only to approved TPM nodes. Set `supplementalGroups` to the
+numeric group that owns `/dev/tpmrm0` on those nodes (`113` is only the example
+profile value). Replace the example `hostPath` TPM device with the cluster's
+audited TPM device plugin before production use.
 
 Required platform controls are encrypted or disabled swap, disabled core
 dumps, no privileged debug containers, immutable image digests, and admission

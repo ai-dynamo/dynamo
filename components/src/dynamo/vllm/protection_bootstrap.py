@@ -4,6 +4,7 @@
 """Fail-closed protected-model bootstrap before vLLM argument construction."""
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,8 @@ from dynamo._core import (
     prepare_protected_model,
 )
 from dynamo.common.utils.namespace import get_worker_namespace
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_VLLM_SERIES = "0.29."
 _CONFIG_ENV = "DYN_MODEL_PROTECTION_CONFIG"
@@ -44,6 +47,12 @@ _FORBIDDEN_OPTIONS = {
     "--trust-remote-code",
     "--weight-transfer-config",
     "--worker-extension-cls",
+}
+_BOOTSTRAP_OPTIONS = {
+    "--model",
+    "--model-protection-config",
+    "--namespace",
+    "--served-model-name",
 }
 
 
@@ -84,7 +93,7 @@ def prepare_model_argv(argv: list[str]) -> ProtectionBootstrap:
         return ProtectionBootstrap(list(argv))
     if len(models) != 1 or len(protected_models) != 1:
         raise ModelProtectionError("MODEL_PROTECTION_CONFIG_INVALID")
-    if any(_has_option(argv, option) for option in _FORBIDDEN_OPTIONS):
+    if any(_has_forbidden_option(argv, option) for option in _FORBIDDEN_OPTIONS):
         raise ModelProtectionError("MODEL_PROTECTION_MODE_UNSUPPORTED")
     if os.environ.get("DYN_SNAPSHOT_CONTROL_DIR"):
         raise ModelProtectionError("MODEL_PROTECTION_MODE_UNSUPPORTED")
@@ -258,8 +267,9 @@ def uninstall_protected_engine_core_policy() -> None:
 
 
 def _protected_engine_core_entry(*args: Any, **kwargs: Any) -> Any:
-    from dynamo._core import enforce_model_protection_process_policy
     from vllm.v1.engine.core import EngineCoreProc
+
+    from dynamo._core import enforce_model_protection_process_policy
 
     enforce_model_protection_process_policy()
     target = getattr(
@@ -299,7 +309,11 @@ async def materialize_protected_weights(
             try:
                 materialize.result()
             except BaseException:
-                pass
+                logger.debug(
+                    "protected weight materialization failed while the caller "
+                    "was already unwinding",
+                    exc_info=True,
+                )
         raise
     finally:
         shutdown.cancel()
@@ -318,6 +332,16 @@ def _option_values(argv: list[str], option: str) -> list[str]:
 
 def _has_option(argv: list[str], option: str) -> bool:
     return any(token == option or token.startswith(f"{option}=") for token in argv)
+
+
+def _has_forbidden_option(argv: list[str], option: str) -> bool:
+    """Treat an argparse abbreviation of a forbidden protected option as forbidden."""
+    return any(
+        token.startswith("--")
+        and (name := token.split("=", 1)[0]) not in _BOOTSTRAP_OPTIONS
+        and option.startswith(name)
+        for token in argv
+    )
 
 
 def _replace_option(argv: list[str], option: str, value: str) -> list[str]:

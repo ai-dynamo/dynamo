@@ -1090,7 +1090,3 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
 
 def main(protection: ProtectionBootstrap | None = None) -> None:
     uvloop.run(worker(protection=protection))
-
-
-if __name__ == "__main__":
-    main()

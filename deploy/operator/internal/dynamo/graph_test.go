@@ -9777,7 +9777,13 @@ func TestProtectedModelProfileKeepsStableNamespaceAfterOperatorDefaults(t *testi
 		Name:      "protected-model-tmpfs",
 		MountPath: "/run/protected-models",
 	})
-	assert.Nil(t, podSpec.AutomountServiceAccountToken)
+	require.NotNil(t, podSpec.AutomountServiceAccountToken)
+	assert.False(t, *podSpec.AutomountServiceAccountToken)
+	require.NotNil(t, podSpec.Containers[0].SecurityContext)
+	require.NotNil(t, podSpec.Containers[0].SecurityContext.RunAsNonRoot)
+	assert.True(t, *podSpec.Containers[0].SecurityContext.RunAsNonRoot)
+	require.NotNil(t, podSpec.Containers[0].SecurityContext.RunAsUser)
+	assert.EqualValues(t, 1000, *podSpec.Containers[0].SecurityContext.RunAsUser)
 }
 
 func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {

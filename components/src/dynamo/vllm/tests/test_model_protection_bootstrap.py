@@ -7,8 +7,7 @@ import pickle
 import sys
 import threading
 from pathlib import Path
-from types import ModuleType
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -99,6 +98,21 @@ def test_protected_model_rejects_unsupported_loader_before_preparation(
         bootstrap.prepare_model_argv(
             ["--model", "/packages/model", "--trust-remote-code"]
         )
+
+
+@pytest.mark.parametrize("option", ["--trust-remote-cod", "--conf"])
+def test_protected_model_rejects_abbreviated_forbidden_option(
+    monkeypatch, option: str
+) -> None:
+    monkeypatch.setattr(bootstrap, "is_protected_model", lambda _: True)
+    monkeypatch.setattr(
+        bootstrap,
+        "prepare_protected_model",
+        lambda *_: pytest.fail("abbreviated mode released protected state"),
+    )
+
+    with pytest.raises(ModelProtectionError, match="MODEL_PROTECTION_MODE_UNSUPPORTED"):
+        bootstrap.prepare_model_argv(["--model", "/packages/model", option])
 
 
 def test_protected_model_restores_plugin_policy_when_preparation_fails(
@@ -196,9 +210,7 @@ def test_effective_gate_rejects_external_or_mutable_inputs(
         bootstrap.validate_protected_engine_args(config, prepared, "0.29.0")
 
 
-def test_effective_gate_accepts_pinned_vllm_engine_args(
-    monkeypatch, tmp_path
-) -> None:
+def test_effective_gate_accepts_pinned_vllm_engine_args(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("VLLM_CONFIG_ROOT", str(tmp_path))
     vllm = pytest.importorskip("vllm")
     if not vllm.__version__.startswith(bootstrap.SUPPORTED_VLLM_SERIES):
@@ -346,11 +358,12 @@ def test_engine_core_policy_is_installed_and_runs_in_child(monkeypatch) -> None:
     )
 
     bootstrap.install_protected_engine_core_policy()
-
-    child_entry = pickle.loads(pickle.dumps(EngineCoreProc.run_engine_core))
-    assert child_entry("target") == "target"
-    assert calls == ["policy", "target"]
-    bootstrap.uninstall_protected_engine_core_policy()
+    try:
+        child_entry = pickle.loads(pickle.dumps(EngineCoreProc.run_engine_core))
+        assert child_entry("target") == "target"
+        assert calls == ["policy", "target"]
+    finally:
+        bootstrap.uninstall_protected_engine_core_policy()
     assert EngineCoreProc.run_engine_core("restored") == "restored"
     assert calls[-1] == "restored"
 
@@ -482,9 +495,7 @@ def test_cancellation_preserves_caller_error_after_materializer_failure() -> Non
             raise RuntimeError("writer failed while cancellation was pending")
 
     async def run() -> None:
-        prepared = bootstrap.ProtectionBootstrap(
-            [], FailingSession(), "/model", "test"
-        )
+        prepared = bootstrap.ProtectionBootstrap([], FailingSession(), "/model", "test")
         task = asyncio.create_task(
             bootstrap.materialize_protected_weights(prepared, asyncio.Event())
         )

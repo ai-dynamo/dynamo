@@ -223,6 +223,7 @@ dev_images:
 operator:
   - *ci
   - 'deploy/operator/**'
+  - 'deploy/model-protection/dgd.yaml'
   - 'deploy/operator/.*'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'

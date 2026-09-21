@@ -25,7 +25,9 @@ fi
 if [[ -z "${BINDGEN_EXTRA_CLANG_ARGS:-}" ]]; then
   GCC_INCLUDE="$(gcc -print-file-name=include 2>/dev/null || true)"
   BINDGEN_EXTRA_CLANG_ARGS="-I/usr/include -I/usr/include/x86_64-linux-gnu"
-  [[ -d "$GCC_INCLUDE" ]] && BINDGEN_EXTRA_CLANG_ARGS+=" -I$GCC_INCLUDE"
+  if [[ -d "$GCC_INCLUDE" ]]; then
+    BINDGEN_EXTRA_CLANG_ARGS+=" -I$GCC_INCLUDE"
+  fi
   export BINDGEN_EXTRA_CLANG_ARGS
 fi
 

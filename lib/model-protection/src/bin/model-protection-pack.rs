@@ -90,6 +90,7 @@ fn run() -> Result<()> {
     require_identifier(required(&args, "--customer-scope-id")?)?;
     require_identifier(required(&args, "--model-id")?)?;
     require_identifier(required(&args, "--model-version")?)?;
+    require_runtime_version(&args)?;
     if !source.is_absolute() || !output.is_absolute() || !issuer_record.is_absolute() {
         return Err(PackError("PACKAGE_CONFIG_INVALID"));
     }
@@ -384,6 +385,12 @@ fn require_identifier(value: &str) -> Result<()> {
     Ok(())
 }
 
+fn require_runtime_version(args: &BTreeMap<String, String>) -> Result<()> {
+    semver::Version::parse(required(args, "--minimum-runtime-version")?)
+        .map(|_| ())
+        .map_err(|_| PackError("PACKAGE_CONFIG_INVALID"))
+}
+
 fn source_names(source: &Path) -> Result<Vec<String>> {
     fs::read_dir(source)
         .map_err(|_| PackError("SOURCE_IO_ERROR"))?
@@ -488,6 +495,16 @@ fn lower_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_minimum_runtime_version_fails_before_packaging() {
+        let args = BTreeMap::from([("--minimum-runtime-version".to_string(), "1.5".to_string())]);
+
+        assert_eq!(
+            require_runtime_version(&args).unwrap_err().to_string(),
+            "PACKAGE_CONFIG_INVALID"
+        );
+    }
 
     #[test]
     fn failed_writer_never_removes_a_competing_artifact() {

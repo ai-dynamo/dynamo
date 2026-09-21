@@ -226,7 +226,10 @@ async def test_health_failure_during_grace_period_stops_monitor(mock_engine):
     monitor._shutdown_engine = MagicMock()
 
     with (
-        patch("dynamo.vllm.engine_monitor.shutdown_in_progress", return_value=True),
+        patch(
+            "dynamo.vllm.engine_monitor.shutdown_in_progress",
+            side_effect=[False, True],
+        ),
         patch("dynamo.vllm.engine_monitor.os._exit") as exit_process,
     ):
         await monitor._check_engine_health()

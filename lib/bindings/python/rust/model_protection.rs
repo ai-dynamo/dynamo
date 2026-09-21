@@ -9,13 +9,13 @@ use std::path::Path;
 #[cfg(all(target_os = "linux", feature = "model-protection-tpm2"))]
 use std::path::PathBuf;
 
-use dynamo_model_protection::{
-    CancellationToken, ModelProtectionKind, ProtectionError, detect_model_protection,
-};
 #[cfg(all(target_os = "linux", feature = "model-protection-tpm2"))]
 use dynamo_model_protection::{
-    AuthorizedModel, SecureModelSession, enforce_process_persistence_policy,
-    load_authorized_model, materialize_tpm_model,
+    AuthorizedModel, SecureModelSession, enforce_process_persistence_policy, load_authorized_model,
+    materialize_tpm_model,
+};
+use dynamo_model_protection::{
+    CancellationToken, ModelProtectionKind, ProtectionError, detect_model_protection,
 };
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -194,8 +194,7 @@ fn prepare_protected_model(
         let package_key = read_public_key(&config.package_trust.public_key_file)?;
         let license_key = read_public_key(&config.license_trust.public_key_file)?;
         let device_key_handle = parse_handle(&config.tpm.device_key_handle)?;
-        let policy_authority_key_handle =
-            parse_handle(&config.tpm.policy_authority_key_handle)?;
+        let policy_authority_key_handle = parse_handle(&config.tpm.policy_authority_key_handle)?;
         let authorized = load_authorized_model(
             package_root,
             &config.license_root,
@@ -205,12 +204,9 @@ fn prepare_protected_model(
             &license_key,
         )
         .map_err(protection_error)?;
-        let mut session = SecureModelSession::prepare(
-            namespace,
-            &authorized,
-            config.process_memory_margin_bytes,
-        )
-        .map_err(protection_error)?;
+        let mut session =
+            SecureModelSession::prepare(namespace, &authorized, config.process_memory_margin_bytes)
+                .map_err(protection_error)?;
         session
             .stage_public_metadata(package_root, &authorized)
             .map_err(protection_error)?;
@@ -331,7 +327,10 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(is_protected_model, m)?)?;
     m.add_function(wrap_pyfunction!(prepare_protected_model, m)?)?;
-    m.add_function(wrap_pyfunction!(enforce_model_protection_process_policy, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        enforce_model_protection_process_policy,
+        m
+    )?)?;
     m.add_class::<PyProtectedModelSession>()?;
     m.add_class::<PyModelProtectionCancellation>()?;
     Ok(())

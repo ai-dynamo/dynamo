@@ -16,6 +16,7 @@ Required environment:
 
 Optional environment:
   PACK_BIN                   model-protection-pack binary
+  PACKAGE_KEY_ID             package signing key id (default: package-signing-v1)
   MIN_RUNTIME_VERSION       minimum Dynamo runtime version (default: 0.1.0)
 EOF
 }
@@ -51,7 +52,9 @@ MIN_RUNTIME_VERSION="${MIN_RUNTIME_VERSION:-0.1.0}"
   exit 2
 }
 
+umask 077
 mkdir -p "$OUTPUT_DIR"
+chmod 700 "$OUTPUT_DIR"
 PACKAGE_DIR="$OUTPUT_DIR/package"
 ISSUER_RECORD="$OUTPUT_DIR/issuer-record.json"
 [[ ! -e "$PACKAGE_DIR" && ! -e "$ISSUER_RECORD" ]] || {
@@ -59,7 +62,6 @@ ISSUER_RECORD="$OUTPUT_DIR/issuer-record.json"
   exit 3
 }
 
-umask 077
 "$PACK_BIN" \
   --source "$SOURCE_DIR" \
   --output "$PACKAGE_DIR" \
