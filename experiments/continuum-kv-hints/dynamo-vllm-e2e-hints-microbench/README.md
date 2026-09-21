@@ -17,7 +17,7 @@ Run the constrained-cache matrix against a pinned experiment image:
 export CONTINUUM_IMAGE=nvcr.io/nvidian/dynamo-dev/karenc:dynamo-kv-hints-3c5a01b513-vllm-9b6e116be2
 
 for case in baseline evict retain retain-final; do
-  bash experiments/continuum-kv-hints/networked-e2e/run_constrained_cache.sh \
+  bash experiments/continuum-kv-hints/dynamo-vllm-e2e-hints-microbench/run_constrained_cache.sh \
     "$case" "/tmp/continuum-kv-hints/$case"
 done
 ```
@@ -27,9 +27,9 @@ done
 Run the TTL-expiry and shared-prefix cases separately:
 
 ```bash
-bash experiments/continuum-kv-hints/networked-e2e/run_constrained_cache.sh \
+bash experiments/continuum-kv-hints/dynamo-vllm-e2e-hints-microbench/run_constrained_cache.sh \
   retain-expired /tmp/continuum-kv-hints/retain-expired
-bash experiments/continuum-kv-hints/networked-e2e/run_constrained_cache.sh \
+bash experiments/continuum-kv-hints/dynamo-vllm-e2e-hints-microbench/run_constrained_cache.sh \
   shared-evict /tmp/continuum-kv-hints/shared-evict
 ```
 

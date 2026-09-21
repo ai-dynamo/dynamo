@@ -12,7 +12,7 @@ experiments/continuum-kv-hints/
   policy/                             post-selection session KV hint policy crate
   session-prefix-indexer/             SessionPrefixIndexer CPU microbenchmark crate
   dynamo-vllm-boundary/smoke.py       in-process Dynamo-to-vLLM boundary smoke
-  networked-e2e/                      Dynamo vLLM constrained-cache runners (legacy directory name)
+  dynamo-vllm-e2e-hints-microbench/  Dynamo vLLM constrained-cache hint microbenchmarks
   weka-correctness/                   reduced WEKA fixture and end-to-end correctness replay
 ```
 
