@@ -23,6 +23,13 @@ class LoRAState:
             str, asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
+        # Batches that resolved an adapter and are still submitting work to the
+        # engine. A pooling batch larger than max_num_seqs is admitted in waves,
+        # so it spans many event-loop turns and a lifecycle op can land midway.
+        # name -> number of in-flight batches holding that adapter.
+        self.active_batches: dict[str, int] = {}
+        # name -> event set when active_batches for that name reaches zero.
+        self.batch_drained: dict[str, asyncio.Event] = {}
 
     def resolve_request(
         self,
@@ -75,6 +82,45 @@ class LoRAState:
                 lock = asyncio.Lock()
                 self.lora_load_locks[lora_name] = lock
             return lock
+
+    def reserve_batch(self, lora_name: str) -> None:
+        """Record that a batch is using this adapter.
+
+        Callers must hold the adapter's lock so a lifecycle op cannot slip
+        between the resolve and the reservation.
+        """
+        count = self.active_batches.get(lora_name, 0) + 1
+        self.active_batches[lora_name] = count
+        if count == 1:
+            event = self.batch_drained.get(lora_name)
+            if event is not None:
+                event.clear()
+
+    def release_batch(self, lora_name: str) -> None:
+        """Release a batch reservation. Safe to call without the adapter lock."""
+        count = self.active_batches.get(lora_name, 0) - 1
+        if count > 0:
+            self.active_batches[lora_name] = count
+            return
+        self.active_batches.pop(lora_name, None)
+        event = self.batch_drained.get(lora_name)
+        if event is not None:
+            event.set()
+
+    async def wait_for_batch_drain(self, lora_name: str) -> None:
+        """Block until no batch holds this adapter.
+
+        Call while holding the adapter's lock: reservations are taken under the
+        same lock, so holding it blocks new batches and guarantees this drains
+        rather than chasing a moving target.
+        """
+        while self.active_batches.get(lora_name):
+            event = self.batch_drained.get(lora_name)
+            if event is None:
+                event = asyncio.Event()
+                self.batch_drained[lora_name] = event
+            await event.wait()
+        self.batch_drained.pop(lora_name, None)
 
     def list_lora_ids(self) -> dict[str, int]:
         """Return map of loaded LoRA names to integer IDs.

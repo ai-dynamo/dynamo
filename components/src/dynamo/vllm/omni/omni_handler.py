@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import copy
-import functools
 import logging
 import os
 import random
@@ -49,7 +48,6 @@ from dynamo.llm import (
     register_model,
 )
 from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
-from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.omni.audio_handler import AudioGenerationHandler
 from dynamo.vllm.omni.base_handler import BaseOmniHandler
 
@@ -103,6 +101,21 @@ def _apply_media_passthrough(
                 "no extra_args",
                 sorted(knobs),
             )
+
+
+def lora_resolver_engine_args(config) -> SimpleNamespace:
+    """Project config onto the engine-args surface LoRAHandlerMixin reads.
+
+    Omni resolves adapters against ``config.model`` rather than
+    ``engine_args.model``, so the mixin cannot simply be handed the real engine
+    args. Every attribute the mixin reads must be carried here: dropping
+    ``enable_lora`` silently turns the fail-closed predicate off, and an unknown
+    adapter name is then answered from the base weights.
+    """
+    return SimpleNamespace(
+        model=config.model,
+        enable_lora=bool(getattr(config.engine_args, "enable_lora", False)),
+    )
 
 
 class OmniHandler(BaseOmniHandler):
@@ -229,7 +242,7 @@ class OmniHandler(BaseOmniHandler):
         self._served_model_aliases = tuple(
             getattr(config, "served_model_aliases", ()) or ()
         )
-        self.engine_args = SimpleNamespace(model=config.model)
+        self.engine_args = lora_resolver_engine_args(config)
 
         self.output_formatter = OutputFormatter(
             model_name=config.served_model_name or config.model,
@@ -244,14 +257,6 @@ class OmniHandler(BaseOmniHandler):
             engine_client=self.engine_client,
             media_output_fs=media_output_fs,
             media_output_http_url=media_output_http_url,
-        )
-
-    @functools.cached_property
-    def _lora_enabled(self) -> bool:
-        # Match non-Omni LoRA gating: engine must be started with LoRA support
-        # and the LoRA manager must be initialized.
-        return bool(getattr(self.config.engine_args, "enable_lora", False)) and (
-            get_lora_manager() is not None
         )
 
     def _parse_lora_unload_request(self, request: Any) -> str:
