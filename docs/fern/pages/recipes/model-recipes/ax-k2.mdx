@@ -2,52 +2,117 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: A.X-K2
-subtitle: Serve A.X-K2 with Dynamo and vLLM on B200, aggregated or disaggregated.
+subtitle: Serve A.X-K2 with Dynamo and vLLM on B200 or H200, aggregated or disaggregated.
 ---
-
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Deploy SK Telecom's [A.X-K2](https://huggingface.co/skt/A.X-K2-NVFP4) with
-NVIDIA Dynamo, NVFP4 weights, FP8 KV cache, KV-aware routing, and EAGLE3
-speculative decoding. Both topologies use four B200 GPUs per worker and
-support text generation, reasoning, and tool calling.
+Deploy SK Telecom's [A.X-K2](https://huggingface.co/skt/A.X-K2) with
+NVIDIA Dynamo and vLLM. B200 targets use NVFP4 weights; H200 targets use FP8
+weights. Both use FP8 KV cache and EAGLE3 with three speculative tokens.
 
 <div className="dynamo-target-picker">
+
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
+
 <div className="dynamo-target-picker-row">
-<span className="dynamo-target-picker-dim">Topology</span>
-<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
-<label htmlFor="recipe-variant-agg">Aggregated</label>
-<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
-<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+
+<span className="dynamo-target-picker-dim">GPU</span>
+
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+
+<label htmlFor="recipe-sku-b200">B200</label>
+
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+
+<label htmlFor="recipe-sku-h200">H200</label>
+
 </div>
-<div className="dynamo-target-picker-summary" data-variant="agg">
+
+<div className="dynamo-target-picker-row">
+
+<span className="dynamo-target-picker-dim">Topology</span>
+
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+
+</div>
+
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="agg">
+
 <span><b>Checkpoint</b> skt/A.X-K2-NVFP4</span>
 <span><b>Hardware</b> 8x B200, two TP4 aggregate workers</span>
 <span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
 <span><b>Speculation</b> EAGLE3, 3 tokens</span>
 <span><b>FlashInfer autotuning</b> Disabled</span>
+
 </div>
-<div className="dynamo-target-picker-summary" data-variant="disagg">
+
+<div className="dynamo-target-picker-summary" data-sku="b200" data-variant="disagg">
+
 <span><b>Checkpoint</b> skt/A.X-K2-NVFP4</span>
 <span><b>Hardware</b> 12x B200, two TP4 prefill workers and one TP4 decode worker</span>
 <span><b>Precision</b> NVFP4 weights, FP8 KV cache</span>
 <span><b>Speculation</b> EAGLE3, 3 tokens on both roles</span>
 <span><b>FlashInfer autotuning</b> Disabled on prefill and decode</span>
+
 </div>
+
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="agg">
+
+<span><b>Checkpoint</b> skt/A.X-K2</span>
+<span><b>Hardware</b> 32x H200, four TP8 aggregate workers, expert parallelism enabled</span>
+<span><b>Precision</b> FP8 weights, FP8 KV cache</span>
+<span><b>Speculation</b> EAGLE3, 3 tokens, draft KV dtype auto</span>
+
+</div>
+
+<div className="dynamo-target-picker-summary" data-sku="h200" data-variant="disagg">
+
+<span><b>Checkpoint</b> skt/A.X-K2</span>
+<span><b>Hardware</b> 32x H200, two TP8/DP1 prefill workers and two TP8 decode workers, expert parallelism enabled</span>
+<span><b>Precision</b> FP8 weights, FP8 KV cache</span>
+<span><b>Speculation</b> EAGLE3, 3 tokens, draft KV dtype auto</span>
+
+</div>
+
 </div>
 
 ## Prerequisites
 
 - A Kubernetes cluster with the [Dynamo platform](../../kubernetes/getting-started/quickstart.mdx) installed.
-- Four B200 GPUs and 400 GiB of host memory per worker: eight GPUs total for
-  aggregated serving or twelve for disaggregated serving.
 - A ReadWriteMany storage class for model weights.
-- A Hugging Face token with access to `skt/A.X-K2-NVFP4` and `skt/A.X-K2-EAGLE3`.
+- A Hugging Face token with access to `skt/A.X-K2`, `skt/A.X-K2-NVFP4`, and `skt/A.X-K2-EAGLE3`.
 
-<div data-variant="disagg">
+<div data-sku="b200">
+
+Each worker needs four B200 GPUs and 400 GiB of host memory: eight GPUs total
+for aggregated serving or twelve for disaggregated serving.
+
+</div>
+
+<div data-sku="h200">
+
+Each target needs four workers with eight H200 GPUs each (32 GPUs total).
+Each worker requests 512 GiB of host memory with a 768 GiB limit.
+Use a cluster overlay to bind H200 scheduling and expose your RDMA devices
+and network interfaces; the generic manifests do not supply site bindings.
+
+<Note>
+
+For H200 results, use the benchmark configuration described below.
+
+</Note>
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
 
 Disaggregated serving also requires InfiniBand with one `rdma/shared_ib`
 device resource available per worker for NIXL/UCX KV transfer.
@@ -69,7 +134,7 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" create secret generic hf-token-
 Set `storageClassName` in
 [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/model-cache/model-cache.yaml)
 to your cluster's ReadWriteMany storage class. Create the PVC and download
-both pinned checkpoints:
+the three pinned checkpoints:
 
 ```bash
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/model-cache/model-cache.yaml
@@ -78,12 +143,12 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Complete \
   job/axk2-model-download --timeout=14400s
 ```
 
-Both profiles and the download job mount `model-cache`. To use an existing
+All profiles and the download job mount `model-cache`. To use an existing
 populated PVC, set `claimName` in the job and selected deployment source to
 that PVC and skip creating a new claim. Regenerate the selected manifest
 after editing its Kustomize source.
 
-<div data-variant="agg">
+<div data-sku="b200" data-variant="agg">
 
 Deploy two aggregate workers:
 
@@ -104,7 +169,7 @@ python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/agg-b200-chat/.kus
 
 </div>
 
-<div data-variant="disagg">
+<div data-sku="b200" data-variant="disagg">
 
 Deploy two prefill workers and one decode worker:
 
@@ -125,6 +190,38 @@ python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/disagg-b200-chat/.
 
 </div>
 
+<div data-sku="h200" data-variant="agg">
+
+Deploy four aggregate workers after applying your cluster bindings to the
+[Kustomize sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2/vllm/agg-h200/kustomize)
+and regenerating the manifest:
+
+```bash
+python3 scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/agg-h200/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/agg-h200/.kustomize-matrix.yaml
+export DGD=axk2-vllm-agg-h200
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
+  -f recipes/ax-k2/vllm/agg-h200/deploy-generic.yaml
+```
+
+</div>
+
+<div data-sku="h200" data-variant="disagg">
+
+Deploy two prefill workers and two decode workers after applying your cluster bindings to the
+[Kustomize sources](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2/vllm/disagg-h200/kustomize)
+and regenerating the manifest:
+
+```bash
+python3 scripts/kustomize-matrix.py unfold recipes/ax-k2/vllm/disagg-h200/.kustomize-matrix.yaml
+python3 scripts/kustomize-matrix.py render recipes/ax-k2/vllm/disagg-h200/.kustomize-matrix.yaml
+export DGD=axk2-vllm-disagg-h200
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply \
+  -f recipes/ax-k2/vllm/disagg-h200/deploy-generic.yaml
+```
+
+</div>
+
 ## Smoke Test
 
 Wait for the selected deployment, then forward its frontend port:
@@ -135,6 +232,8 @@ kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait --for=condition=Ready \
 kubectl --context "${CONTEXT}" -n "${NAMESPACE}" port-forward \
   "service/${DGD}-frontend" 8000:8000
 ```
+
+<div data-sku="b200">
 
 In another terminal, verify model discovery and a completion:
 
@@ -149,7 +248,28 @@ Model discovery should list `skt/A.X-K2-NVFP4`; the completion should contain
 a `choices` array. Reasoning uses the `deepseek_v3` parser, and tool calling
 uses the `hermes` parser.
 
+</div>
+
+<div data-sku="h200">
+
+In another terminal, verify model discovery and a completion:
+
+```bash
+curl --fail http://localhost:8000/v1/models
+curl --fail http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"A.X-K2","messages":[{"role":"user","content":"What is 2 + 2?"}],"temperature":0,"max_tokens":4096,"stream":false}'
+```
+
+Model discovery should list `A.X-K2`; the completion should contain
+a `choices` array. Reasoning uses the `deepseek_v3` parser, and tool calling
+uses the `hermes` parser.
+
+</div>
+
 ## Benchmark
+
+<div data-sku="b200">
 
 The [AIPerf workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/README.md)
 replays an 8K-input / 1K-output chat trace with 70% KV reuse against the
@@ -175,29 +295,111 @@ deployment before applying the job.
 
 Benchmarking uses synthetic EAGLE3 acceptance length 2.12.
 
-| Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (mean) | TTFT P50 (seconds) |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
-| Chat (15% subset) | vLLM | Aggregated (2 workers) | B200 | 16 | 76.49 | 55.83 | 0.525 |
-| Chat (15% subset) | vLLM | Disaggregated (2P1D) | B200 | 16 | 61.97 | 83 | 3.879 |
+
+| Workload          | Framework | Recipe                 | SKU  | Concurrency | System output tok/s/GPU | User output tok/s (mean) | TTFT P50 (seconds) |
+| ----------------- | --------- | ---------------------- | ---- | -----------: | -----------------------: | ------------------------: | ------------------: |
+| Chat (15% subset) | vLLM      | Aggregated (2 workers) | B200 | 16          | 76.49                   | 55.83                    | 0.525              |
+| Chat (15% subset) | vLLM      | Disaggregated (2P1D)   | B200 | 16          | 61.97                   | 83                       | 3.879              |
+
+
+</div>
+
+<div data-sku="h200">
+
+Configure the [H200 AIPerf Job](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/h200/perf.yaml)
+for the running deployment using the
+[benchmark instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/perf/h200/README.md).
+
+Run with 32 H200 GPUs, `1.4.1-a.x-k2-post.1`, FP8 weights/KV cache,
+and EAGLE3 k=3 with real acceptance.
+
+
+| Benchmark Setting        | Value                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| Topology                 | 4×TP8 aggregated vs. 2P2D TP8, expert parallelism enabled                      |
+| Workload                 | W1: 32 shared 10,240-token prefixes + 6,144 unique tokens; 1,024 output tokens |
+| Cache / Routing          | Sequential sweep without cache reset / KV-aware on both configurations         |
+| Deployment Context Limit | 262,144 tokens                                                                 |
+| Max Sequences per Engine | 64 aggregate/decode; 32 prefill                                                |
+| Requests / Runs          | c16–64: 1,024 requests, one run; c128: 2,048 requests, mean of three runs      |
+
+
+```bash
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" apply -f recipes/ax-k2/perf/h200/perf.yaml
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" wait \
+  --for=condition=Complete job/axk2-h200-perf --timeout=21600s
+kubectl --context "${CONTEXT}" -n "${NAMESPACE}" logs job/axk2-h200-perf -c aiperf
+```
+
+### H200 Performance Results
+
+| Recipe                 | Concurrency | System Output tok/s | System output tok/s/GPU | User output tok/s (mean) | TPOT p50 (ms) | TPOT p99 (ms) | TTFT p50 (seconds) |
+| ---------------------- | -----------: | -------------------: | -----------------------: | ------------------------: | -------------: | -------------: | ------------------: |
+| Aggregated (4 workers) | 16          | 851.0               | 26.59                   | 57.83                    | 17.80         | 22.48         | 0.853              |
+| Disaggregated (2P2D)   | 16          | 847.0               | 26.47                   | 57.84                    | 17.91         | 21.39         | 0.959              |
+| Aggregated (4 workers) | 32          | 1,254.5             | 39.20                   | 42.67                    | 24.51         | 32.21         | 0.850              |
+| Disaggregated (2P2D)   | 32          | 1,305.9             | 40.81                   | 45.08                    | 23.19         | 27.41         | 1.006              |
+| Aggregated (4 workers) | 64          | 1,662.3             | 51.95                   | 28.73                    | 36.71         | 52.15         | 0.875              |
+| Disaggregated (2P2D)   | 64          | 2,003.4             | 62.61                   | 37.54                    | 28.40         | 34.19         | 1.751              |
+| Aggregated (4 workers) | 128         | 2,236.7             | 69.90                   | 19.30                    | 55.20         | 75.11         | 0.913              |
+| Disaggregated (2P2D)   | 128         | 2,428.0             | 75.87                   | 29.19                    | 36.63         | 43.48         | 13.720             |
+
+
+- **PDD throughput:** +20.5% at c64 and +8.6% at c128, using the same 32 GPUs.
+- **PDD decode latency:** TPOT p50 improves from 36.71 to 28.40 ms at c64 and from 55.20 to 36.63 ms at c128.
+
+#### Recommendation
+
+- **Low concurrency or TTFT-first:** prefer aggregated serving; PDD provides no throughput gain at c16.
+- **Throughput/TPOT-first:** consider PDD at c64, with TTFT p50 of 1.75 seconds for this W1 workload.
+- **Higher concurrency:** use c128 only if TTFT p50 of 13.72 seconds is acceptable; raising concurrency to c192 adds waiting without improving throughput.
+
+</div>
 
 ## Compare All Targets
 
-| Setting | Aggregated | Disaggregated |
-| --- | --- | --- |
-| Workers | 2 aggregate | 2 prefill + 1 decode |
-| Total GPUs | 8x B200 | 12x B200 |
-| Parallelism | TP4, DP1, expert parallelism disabled | Same on both roles |
-| Precision | NVFP4 weights, FP8 KV cache | Same on both roles |
-| Attention | `FLASHINFER_MLA_SPARSE` | Same on both roles |
-| FlashInfer autotuning | Disabled | Disabled on prefill and decode |
-| EAGLE3 | 3 speculative tokens | 3 speculative tokens on both roles |
-| Async scheduling | Enabled | Prefill disabled, decode enabled |
-| Context length | 262,144 tokens | 262,144 tokens |
-| Routing | KV-aware | KV-aware |
-| KV transfer | N/A | NIXL/UCX over InfiniBand |
+### B200
+
+
+| Setting               | Aggregated                            | Disaggregated                      |
+| --------------------- | ------------------------------------- | ---------------------------------- |
+| Workers               | 2 aggregate                           | 2 prefill + 1 decode               |
+| Total GPUs            | 8x B200                               | 12x B200                           |
+| Parallelism           | TP4, DP1, expert parallelism disabled | Same on both roles                 |
+| Precision             | NVFP4 weights, FP8 KV cache           | Same on both roles                 |
+| Attention             | `FLASHINFER_MLA_SPARSE`               | Same on both roles                 |
+| FlashInfer autotuning | Disabled                              | Disabled on prefill and decode     |
+| EAGLE3                | 3 speculative tokens                  | 3 speculative tokens on both roles |
+| Async scheduling      | Enabled                               | Prefill disabled, decode enabled   |
+| Context length        | 262,144 tokens                        | 262,144 tokens                     |
+| Routing               | KV-aware                              | KV-aware                           |
+| KV transfer           | N/A                                   | NIXL/UCX over InfiniBand           |
+
+
+### H200
+
+
+| Setting                  | Aggregated                                  | Disaggregated                                                         |
+| ------------------------ | ------------------------------------------- | --------------------------------------------------------------------- |
+| Workers                  | 4 aggregate                                 | 2 prefill + 2 decode                                                  |
+| Total GPUs               | 32x H200                                    | 32x H200                                                              |
+| Parallelism              | TP8 + expert parallelism                    | Prefill TP8/DP1 + expert parallelism; decode TP8 + expert parallelism |
+| Checkpoint               | `skt/A.X-K2`, FP8 weights                   | Same                                                                  |
+| KV Cache                 | `fp8_ds_mla`                                | Same                                                                  |
+| EAGLE3                   | 3 speculative tokens, draft KV dtype `auto` | Same on both roles                                                    |
+| Max Sequences per Engine | 64                                          | 32 prefill / 64 decode                                                |
+| Context Length           | 262,144 tokens                              | Same                                                                  |
+| Routing                  | KV-aware                                    | KV-aware                                                              |
+| KV Transfer              | N/A                                         | NIXL/UCX over RDMA                                                    |
+
+
+If model initialization runs out of memory, lower `--max-model-len` to 32768
+on every worker.
 
 ## Source
 
 - [Recipe and configuration table](https://github.com/ai-dynamo/dynamo/tree/main/recipes/ax-k2)
 - [Aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/agg-b200-chat/deploy-generic.yaml)
 - [Disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/disagg-b200-chat/deploy-generic.yaml)
+- [H200 aggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/agg-h200/deploy-generic.yaml)
+- [H200 disaggregated manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/ax-k2/vllm/disagg-h200/deploy-generic.yaml)

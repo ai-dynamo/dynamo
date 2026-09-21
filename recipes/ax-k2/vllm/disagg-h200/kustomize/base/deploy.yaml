@@ -1,0 +1,286 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Experimental H200 candidate; GPU and overload validation are pending.
+# Public runtime, 32-GPU comparison, EAGLE3 k=3.
+# Sequence limits are per engine, not global admission control.
+# If model initialization runs out of memory, lower --max-model-len to 32768.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: axk2-vllm-disagg-h200
+  labels:
+    app.kubernetes.io/name: axk2-vllm-disagg-h200
+    app.kubernetes.io/part-of: axk2
+  annotations:
+    recipes.dynamo.nvidia.com/validation-status: experimental-unvalidated-h200
+    recipes.dynamo.nvidia.com/draft-revision: 24958e91737d760908f73a8af4b6e06080fc5c1d
+    recipes.dynamo.nvidia.com/model-revision: 2287ca456927eed33b899c404c0b2ffaf17aa09f
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1@sha256:2aa1db2002f58d2a821f27908ef0e25e86b7c14b154249f7c68626c1c43dbccd
+          imagePullPolicy: IfNotPresent
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.frontend
+          env:
+          - name: DYN_ROUTER_MODE
+            value: kv
+          - name: DYN_ROUTER_USE_KV_EVENTS
+            value: 'true'
+          - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
+            value: '1.0'
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          resources:
+            requests:
+              cpu: '8'
+              memory: 16Gi
+    runtimeVersionOverride: 1.4.1
+  - name: PrefillWorker
+    type: prefill
+    runtimeVersionOverride: 1.4.1
+    replicas: 2
+    sharedMemorySize: 64Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1@sha256:2aa1db2002f58d2a821f27908ef0e25e86b7c14b154249f7c68626c1c43dbccd
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --trust-remote-code
+          - --tensor-parallel-size
+          - '8'
+          - --data-parallel-size
+          - '1'
+          - --enable-expert-parallel
+          - --speculative-config
+          - '{"method":"eagle3","model":"/shared-model-cache/hub/models--skt--A.X-K2-EAGLE3/snapshots/24958e91737d760908f73a8af4b6e06080fc5c1d","num_speculative_tokens":3,"kv_cache_dtype":"auto"}'
+          - --kv-cache-dtype
+          - fp8_ds_mla
+          - --gpu-memory-utilization
+          - '0.90'
+          - --max-num-seqs
+          - '32'
+          - --enable-prefix-caching
+          - --moe-backend
+          - flashinfer_cutlass
+          - --dyn-reasoning-parser
+          - deepseek_v3
+          - --dyn-tool-call-parser
+          - hermes
+          - --kv-events-config
+          - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+          - --disaggregation-mode
+          - prefill
+          - --kv-transfer-config
+          - $(KV_TRANSFER_CONFIG)
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":false}'
+          - --max-model-len
+          - '262144'
+          - --max-num-batched-tokens
+          - '8192'
+          - --enable-chunked-prefill
+          env:
+          - name: KV_TRANSFER_CONFIG
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - name: MODEL_NAME
+            value: /shared-model-cache/hub/models--skt--A.X-K2/snapshots/2287ca456927eed33b899c404c0b2ffaf17aa09f
+          - name: SERVED_MODEL_NAME
+            value: A.X-K2
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_CACHE_ROOT
+            value: /shared-model-cache/runtime-cache/ax-k2/nv-1.4.1-post1-2aa1db2002f5-eagle3/disagg/prefill/vllm
+          - name: TRITON_CACHE_DIR
+            value: /shared-model-cache/runtime-cache/ax-k2/nv-1.4.1-post1-2aa1db2002f5-eagle3/disagg/prefill/triton
+          - name: FLASHINFER_WORKSPACE_BASE
+            value: /shared-model-cache/runtime-cache/ax-k2/nv-1.4.1-post1-2aa1db2002f5-eagle3/disagg/prefill/flashinfer
+          - name: VLLM_SKIP_P2P_CHECK
+            value: '1'
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_IB_DISABLE
+            value: '0'
+          - name: NCCL_IGNORE_CPU_AFFINITY
+            value: '1'
+          - name: NCCL_IB_PCI_RELAXED_ORDERING
+            value: '1'
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: '0'
+          - name: UCX_MAX_RNDV_LANES
+            value: '4'
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          resources:
+            requests:
+              nvidia.com/gpu: '8'
+              cpu: '32'
+              memory: 512Gi
+            limits:
+              nvidia.com/gpu: '8'
+              cpu: '64'
+              memory: 768Gi
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
+  - name: DecodeWorker
+    type: decode
+    runtimeVersionOverride: 1.4.1
+    replicas: 2
+    sharedMemorySize: 64Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-a.x-k2-post.1@sha256:2aa1db2002f58d2a821f27908ef0e25e86b7c14b154249f7c68626c1c43dbccd
+          imagePullPolicy: IfNotPresent
+          workingDir: /workspace
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          command:
+          - python3
+          args:
+          - -m
+          - dynamo.vllm
+          - --model
+          - $(MODEL_NAME)
+          - --served-model-name
+          - $(SERVED_MODEL_NAME)
+          - --trust-remote-code
+          - --tensor-parallel-size
+          - '8'
+          - --enable-expert-parallel
+          - --speculative-config
+          - '{"method":"eagle3","model":"/shared-model-cache/hub/models--skt--A.X-K2-EAGLE3/snapshots/24958e91737d760908f73a8af4b6e06080fc5c1d","num_speculative_tokens":3,"kv_cache_dtype":"auto"}'
+          - --kv-cache-dtype
+          - fp8_ds_mla
+          - --gpu-memory-utilization
+          - '0.90'
+          - --max-num-seqs
+          - '64'
+          - --max-num-batched-tokens
+          - '2048'
+          - --enable-prefix-caching
+          - --moe-backend
+          - triton
+          - --dyn-reasoning-parser
+          - deepseek_v3
+          - --dyn-tool-call-parser
+          - hermes
+          - --disaggregation-mode
+          - decode
+          - --kv-transfer-config
+          - $(KV_TRANSFER_CONFIG)
+          - --kernel-config
+          - '{"enable_flashinfer_autotune":false}'
+          - --max-model-len
+          - '262144'
+          - --enable-chunked-prefill
+          env:
+          - name: KV_TRANSFER_CONFIG
+            value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+          - name: MODEL_NAME
+            value: /shared-model-cache/hub/models--skt--A.X-K2/snapshots/2287ca456927eed33b899c404c0b2ffaf17aa09f
+          - name: SERVED_MODEL_NAME
+            value: A.X-K2
+          - name: HF_HOME
+            value: /shared-model-cache
+          - name: HF_HUB_OFFLINE
+            value: '1'
+          - name: TRANSFORMERS_OFFLINE
+            value: '1'
+          - name: PYTHONHASHSEED
+            value: '0'
+          - name: VLLM_CACHE_ROOT
+            value: /shared-model-cache/runtime-cache/ax-k2/nv-1.4.1-post1-2aa1db2002f5-eagle3/disagg/decode/vllm
+          - name: TRITON_CACHE_DIR
+            value: /shared-model-cache/runtime-cache/ax-k2/nv-1.4.1-post1-2aa1db2002f5-eagle3/disagg/decode/triton
+          - name: FLASHINFER_WORKSPACE_BASE
+            value: /shared-model-cache/runtime-cache/ax-k2/nv-1.4.1-post1-2aa1db2002f5-eagle3/disagg/decode/flashinfer
+          - name: VLLM_SKIP_P2P_CHECK
+            value: '1'
+          - name: NCCL_CUMEM_ENABLE
+            value: '1'
+          - name: NCCL_IB_DISABLE
+            value: '0'
+          - name: NCCL_IGNORE_CPU_AFFINITY
+            value: '1'
+          - name: NCCL_IB_PCI_RELAXED_ORDERING
+            value: '1'
+          - name: UCX_TLS
+            value: rc_x,rc,cuda_copy,cuda_ipc
+          - name: UCX_RNDV_SCHEME
+            value: get_zcopy
+          - name: UCX_RNDV_THRESH
+            value: '0'
+          - name: UCX_MAX_RNDV_LANES
+            value: '4'
+          - name: UCX_RCACHE_MAX_UNRELEASED
+            value: '1024'
+          resources:
+            requests:
+              nvidia.com/gpu: '8'
+              cpu: '32'
+              memory: 512Gi
+            limits:
+              nvidia.com/gpu: '8'
+              cpu: '64'
+              memory: 768Gi
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
