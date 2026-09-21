@@ -137,6 +137,8 @@ pub struct SchedulingResponse {
     /// Greatest raw router-visible overlap among eligible workers, in tokens,
     /// when worker-stage telemetry is enabled.
     pub max_raw_cached_tokens: Option<usize>,
+    /// Raw prefix overlap for the selected worker and DP rank, in tokens.
+    pub selected_raw_cached_tokens: Option<usize>,
     pub selected_worker_tiers: SelectedWorkerTierSnapshot,
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,

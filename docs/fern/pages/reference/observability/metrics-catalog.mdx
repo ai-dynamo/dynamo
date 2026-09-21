@@ -303,9 +303,15 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### Cache-reuse funnel telemetry
 
-The optional cache-reuse funnel records prompt-token totals at each handoff from router selection through worker cache lookup. Comparing the stages shows where potential prefix reuse was lost.
+The optional cache-reuse funnel records token totals per routing attempt. It reuses `dynamo_component_router_input_sequence_tokens_sum` for F0; the stage-labeled funnel metric publishes F2 through F5. Query-only worker lookups are excluded from F0 because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
 
 F2 and F3 report raw contiguous prefix overlap in token units across device, host-pinned, and disk or external tiers. They do not apply the router's configurable cache-tier weights; those weights affect worker selection only.
+
+F2 and F3 are recorded at selection time. F4 and F5 require a complete worker outcome with a matching prompt length and a successfully completed stream. Missing or invalid outcomes increment `cache_loss_observations_total{result="incomplete"}` and contribute no tokens to F4/F5. F4 is GPU hits plus CPU/external lookup tokens; F5 is GPU hits plus successful CPU/external hits. Values are uncapped.
+
+F0 uses `request.token_ids.len()`, while prefix matching can use multimodal routing tokens. For multimodal requests these token counts need not match; stage differences are not necessarily cache losses.
+
+`dynamo_frontend_cached_tokens` reports reuse per logical frontend request, not per routing attempt. The Generate path records zero when matching backend usage is unavailable and increments `dynamo_frontend_cached_tokens_missing_total`, rather than substituting the router estimate. An explicit worker-reported zero is not missing usage. Removing this fallback does not make the frontend metric interchangeable with F5 during migration or disaggregated routing.
 
 Enable it on the router/frontend process:
 

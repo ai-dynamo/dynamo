@@ -1781,10 +1781,7 @@ where
             "find_best_match completed"
         );
 
-        let selected_raw_cached_tokens = response.max_raw_cached_tokens.map(|_| {
-            (response.selected_worker_tiers.disk_blocks as usize)
-                .saturating_mul(self.block_size as usize)
-        });
+        let selected_raw_cached_tokens = response.selected_raw_cached_tokens;
 
         match admission {
             FindBestMatchAdmission::WithAdmission { .. } => Ok(

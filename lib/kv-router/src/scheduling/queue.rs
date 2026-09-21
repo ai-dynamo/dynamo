@@ -1384,6 +1384,9 @@ impl<
                 effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                 cached_tokens: selected.selection.cached_tokens,
                 max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+                selected_raw_cached_tokens: selected.selection.max_raw_cached_tokens.map(|_| {
+                    request.raw_cached_tokens_for(selected.selection.worker, self.block_size)
+                }),
                 selected_worker_tiers: selected.selected_worker_tiers,
                 target_cached_prefix_blocks,
                 kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -1417,6 +1420,10 @@ impl<
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
             max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+            selected_raw_cached_tokens: selected
+                .selection
+                .max_raw_cached_tokens
+                .map(|_| request.raw_cached_tokens_for(selected.selection.worker, self.block_size)),
             selected_worker_tiers: selected.selected_worker_tiers,
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),

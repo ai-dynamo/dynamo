@@ -768,7 +768,7 @@ impl GenerateMetricCollector {
             .as_ref()
             // A migrated attempt includes already-delivered output tokens in
             // its prompt. Ignore that attempt-local usage for this logical
-            // request and let the RequestTracker fallback run on drop.
+            // request; missing matching usage contributes zero on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
             .and_then(|details| details.cached_tokens)
@@ -793,11 +793,7 @@ impl GenerateMetricCollector {
 
 impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
-        // Matching backend usage is authoritative when present. The response
-        // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
-        self.response
-            .observe_cached_tokens(self.tracker.cached_tokens());
+        self.response.finish_cached_tokens();
     }
 }
 
@@ -3020,7 +3016,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn generate_metrics_fall_back_to_tracker_cached_tokens() {
+    fn generate_metrics_do_not_fall_back_to_tracker_cached_tokens() {
         const MODEL: &str = "generate-tracker-cache-test-model";
 
         let tracker = Arc::new(RequestTracker::new());
@@ -3051,11 +3047,21 @@ pub(crate) mod tests {
         )
         .get_histogram();
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 2.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 0.0);
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_cached_tokens_missing_total",
+                &[("model", metric_model.as_str())],
+            )
+            .get_counter()
+            .value(),
+            1.0,
+        );
     }
 
     #[tokio::test]
-    async fn migrated_generate_uses_logical_request_cache_metrics() {
+    async fn migrated_generate_rejects_attempt_usage_without_estimate_fallback() {
         const MODEL: &str = "generate-migration-metric-test-model";
 
         let tracker = Arc::new(RequestTracker::new());
@@ -3143,7 +3149,17 @@ pub(crate) mod tests {
         let cached_tokens =
             metric_value(&families, "dynamo_frontend_cached_tokens", &model_labels).get_histogram();
         assert_eq!(cached_tokens.get_sample_count(), 1);
-        assert_eq!(cached_tokens.get_sample_sum(), 1.0);
+        assert_eq!(cached_tokens.get_sample_sum(), 0.0);
+        assert_eq!(
+            metric_value(
+                &families,
+                "dynamo_frontend_cached_tokens_missing_total",
+                &model_labels
+            )
+            .get_counter()
+            .value(),
+            1.0,
+        );
     }
 
     #[test]
