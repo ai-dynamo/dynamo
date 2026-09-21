@@ -274,12 +274,15 @@ def tool_calling_services(
     # Allocate from the disjoint bases in tests/utils/constants.py so this
     # module cannot land on the window another suite allocates from.
     allocated_ports: list[int] = []
-    system_port = allocate_port(DynamoPortRange.SERVE.value)
-    allocated_ports.append(system_port)
-    fpm_port = allocate_port(DynamoPortRange.FPM.value)
-    allocated_ports.append(fpm_port)
-
+    # Every allocation sits inside the try: each one registers its port before
+    # returning, so a raise from a later call would otherwise strand the
+    # earlier reservations.
     try:
+        system_port = allocate_port(DynamoPortRange.SERVE.value)
+        allocated_ports.append(system_port)
+        fpm_port = allocate_port(DynamoPortRange.FPM.value)
+        allocated_ports.append(fpm_port)
+
         with WorkerProcess(
             request, system_port=system_port, fpm_port=fpm_port, topology=topology
         ):
@@ -306,10 +309,14 @@ def tool_calling_services(
         # the next worker would race against pinned GPU memory or a stale
         # discovery registration. Followed by a brief settle delay so the OS
         # reclaims bound ports and the GPU frees its VRAM. The registry
-        # entries are released last so no other test is handed a live port.
-        _cleanup_sglang_stragglers()
-        time.sleep(3)
-        deallocate_ports(allocated_ports)
+        # entries are released last so no other test is handed a live port,
+        # and in a finally of their own so a raise from the sweep or the delay
+        # cannot leak them for the 900s the stale sweep takes to reclaim them.
+        try:
+            _cleanup_sglang_stragglers()
+            time.sleep(3)
+        finally:
+            deallocate_ports(allocated_ports)
 
 
 @pytest.fixture(scope="module")
