@@ -902,11 +902,8 @@ async def test_multimodal_prefill_rejects_parallel_sampling_before_generation():
     handler._generate_bootstrap_room = generate_bootstrap_room
 
     stream = handler.generate(request, _FakeContext("request-id"))
-    output = json.loads(await anext(stream))
-
-    assert output["finish_reason"] == "error"
-    assert "disaggregated serving supports only n=1" in output["error"]
-    assert not bootstrap_allocated
-
-    with pytest.raises(StopAsyncIteration):
+    with pytest.raises(
+        InvalidArgument, match="disaggregated serving supports only n=1"
+    ):
         await anext(stream)
+    assert not bootstrap_allocated
