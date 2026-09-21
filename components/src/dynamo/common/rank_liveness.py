@@ -48,6 +48,11 @@ from typing import Callable, Iterable, Optional
 
 from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.env import env_int as _int_env
+from gpu_memory_service.common.gpu_failure_marker import (
+    gpu_failure_marker_path,
+    read_gpu_failure_marker,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +134,19 @@ def leader_connect_addr(leader_host: str, cohort_identity: str | None = None) ->
     if template:
         return template.format(leader_host=leader_host)
     return f"tcp://{leader_host}:{liveness_port(cohort_identity)}"
+
+
+def configured_gpu_failure_marker() -> str | None:
+    """Return this boot's GMS crash marker path, when shared KV is active."""
+
+    for name in (
+        "GMS_VLLM_WRITER_COHORT_PATH",
+        "GMS_SGLANG_WRITER_COHORT_PATH",
+    ):
+        cohort = os.environ.get(name)
+        if cohort:
+            return str(gpu_failure_marker_path(cohort))
+    return None
 
 
 class RankLivenessClient:
@@ -331,6 +349,7 @@ class RankLivenessMonitor:
         startup_grace_ms_override: Optional[int] = None,
         runtime_armed: bool = True,
         broadcast_fence: bool = False,
+        failure_marker_path: Optional[str] = None,
     ):
         self._on_rank_lost = on_rank_lost
         self._bind_addr = bind_addr or leader_bind_addr()
@@ -352,6 +371,11 @@ class RankLivenessMonitor:
         self._runtime_armed = bool(runtime_armed)
         self._broadcast_fence_enabled = bool(broadcast_fence)
         self._stop = threading.Event()
+        self._failure_marker_path = (
+            configured_gpu_failure_marker()
+            if failure_marker_path is None
+            else failure_marker_path
+        )
         self._thread: Optional[threading.Thread] = None
         self._fired = False
         self._bind_ready = threading.Event()
@@ -459,6 +483,23 @@ class RankLivenessMonitor:
             while not self._stop.is_set():
                 cycle_started = time.monotonic()
                 # Recompute every cycle: set_timeout_ms() is used after model
+                if self._failure_marker_path:
+                    failure = read_gpu_failure_marker(self._failure_marker_path)
+                    if failure is not None:
+                        rank, pid, source = failure
+                        logger.warning(
+                            "[GMS liveness] GPU crash interlock reported rank %d "
+                            "pid %d (%s); writer fencing remains authoritative",
+                            rank,
+                            pid,
+                            source,
+                        )
+                        if self._broadcast_fence_enabled:
+                            self._broadcast_fence(
+                                sock, poller, last_seen, lost_rank=rank
+                            )
+                        self._fire(rank, "gpu-crash-interlock")
+                        return
                 # startup and must change both the deadline and observation
                 # cadence without recreating the bound ROUTER socket.
                 poll_ms = self._poll_interval_ms(self._timeout)

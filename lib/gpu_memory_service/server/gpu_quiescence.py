@@ -17,6 +17,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
+from gpu_memory_service.common.gpu_failure_marker import (
+    publish_gpu_failure_marker,
+)
+
 logger = logging.getLogger(__name__)
 
 _CRASH_MAGIC = 0x47534D43  # "GSMC": GMS crash notification.
@@ -271,6 +275,23 @@ class GPUQuiescenceManager:
             client.pid,
             source,
         )
+        # Wake the leader immediately. This marker is deliberately only a
+        # latency hint: takeover still waits for writer-cohort retirement and
+        # authoritative ring/CUDA recovery before granting writable ownership.
+        try:
+            publish_gpu_failure_marker(
+                client.cohort,
+                rank=client.rank,
+                pid=client.pid,
+                source=source,
+            )
+        except (OSError, ValueError):
+            logger.exception(
+                "Failed to publish GPU crash marker backend=%s cohort=%s pid=%d",
+                client.backend,
+                client.cohort,
+                client.pid,
+            )
         if not native_record:
             self._interlock_eof.add((client.backend, client.cohort, client.pid))
         async with self._lock:
