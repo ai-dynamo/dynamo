@@ -569,6 +569,7 @@ def _test_frontend_kv_routing(
     ]
 
     async def run_test() -> None:
+        """Warm both workers and verify event-driven routing converges."""
         with managed_runtime() as runtime:
             worker_ids = sorted(
                 await poll_for_worker_instances(
@@ -587,6 +588,7 @@ def _test_frontend_kv_routing(
                     query_only: bool = False,
                     worker_id: int | None = None,
                 ) -> tuple[int, float | None]:
+                    """Send one request and return its selected worker and KV hit rate."""
                     payload = {
                         "model": model_name,
                         "messages": [{"role": "user", "content": prompt}],

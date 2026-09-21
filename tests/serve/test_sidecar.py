@@ -33,6 +33,7 @@ trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
 
 
 def _sidecar_worker_gpu_env(backend: str) -> dict[str, str]:
+    """Build the two-worker GPU assignment environment for a sidecar backend."""
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
     env = {}
     for index in range(2):
@@ -188,6 +189,7 @@ def test_sidecar_kv_routing(
     predownload_models,
     monkeypatch,
 ):
+    """Verify native sidecar KV events route requests to the cached worker."""
     monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
