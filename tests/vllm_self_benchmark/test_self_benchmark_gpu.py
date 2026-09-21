@@ -199,8 +199,8 @@ class _DynamoBenchmarkWorker(ManagedProcess):
     ``DynamoWorkerProcess`` for the disagg worker pair's NixlConnector /
     kv-events / NIXL side-channel wiring. Every listener port this class
     controls is allocated from the shared ranges in
-    ``tests/utils/constants.py`` rather than hardcoded, so concurrent
-    runs on one host cannot collide on a bind.
+    ``tests/utils/constants.py`` rather than hardcoded, reducing the risk
+    of bind collisions between concurrent runs on one host.
     """
 
     def __init__(
@@ -211,6 +211,12 @@ class _DynamoBenchmarkWorker(ManagedProcess):
         bench_mode: str,
         is_prefill: bool | None,
     ):
+        """Configure a benchmark worker and register its allocated ports for cleanup.
+
+        ``is_prefill`` selects prefill (True), decode (False), or aggregated
+        (None) serving. Disaggregated workers receive a NIXL side-channel
+        port, and the prefill worker also receives a KV-event publisher port.
+        """
         self.bench_output_path = bench_output_path
         self.bench_mode = bench_mode
         self.is_prefill = is_prefill
