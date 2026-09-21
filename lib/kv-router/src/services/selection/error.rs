@@ -74,6 +74,7 @@ fn scheduler_error_status(error: &KvSchedulerError) -> StatusCode {
         | KvSchedulerError::AllEligibleWorkersFiltered
         | KvSchedulerError::SubscriberShutdown
         | KvSchedulerError::InitFailed(_) => StatusCode::SERVICE_UNAVAILABLE,
+        KvSchedulerError::DirectTargetRequired => StatusCode::BAD_REQUEST,
         KvSchedulerError::WorkerSelectionPolicy(_) => StatusCode::INTERNAL_SERVER_ERROR,
         // Deadline expiry is deliberately 429, not 504: the deadline elapsed
         // while waiting for capacity, so it is backpressure the client should
@@ -164,6 +165,10 @@ mod tests {
         assert_eq!(
             SelectionError::Scheduler(KvSchedulerError::DeadlineExceeded).status_code(),
             StatusCode::TOO_MANY_REQUESTS.as_u16()
+        );
+        assert_eq!(
+            SelectionError::Scheduler(KvSchedulerError::DirectTargetRequired).status_code(),
+            StatusCode::BAD_REQUEST.as_u16()
         );
     }
 

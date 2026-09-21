@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Worker-level routing target with an optional data-parallel rank.
 pub struct RouteTarget {
+    /// Runtime worker instance ID.
     pub worker_id: u64,
+    /// Data-parallel rank when routing is rank-specific.
     pub dp_rank: Option<u32>,
 }
 
 impl RouteTarget {
+    /// Construct a worker-level target without a data-parallel rank.
     pub const fn worker(worker_id: u64) -> Self {
         Self {
             worker_id,
@@ -15,6 +19,7 @@ impl RouteTarget {
         }
     }
 
+    /// Construct a target with an optional data-parallel rank.
     pub const fn new(worker_id: u64, dp_rank: Option<u32>) -> Self {
         Self { worker_id, dp_rank }
     }
@@ -30,20 +35,48 @@ pub(crate) enum RoutePolicy {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum RouteDevice {
+/// Device family consumed by device-aware worker selection.
+pub enum RouteDevice {
+    /// CPU worker.
     Cpu,
     #[default]
+    /// Accelerator worker, including unknown device metadata for compatibility.
     Accelerator,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RouteCandidate {
+/// One candidate for device-aware routing.
+pub struct RouteCandidate {
     pub(crate) target: RouteTarget,
     pub(crate) device: RouteDevice,
     pub(crate) cache_hits: usize,
 }
 
 impl RouteCandidate {
+    /// Construct one device-aware routing candidate.
+    pub const fn new(target: RouteTarget, device: RouteDevice, cache_hits: usize) -> Self {
+        Self {
+            target,
+            device,
+            cache_hits,
+        }
+    }
+
+    /// Return the candidate target.
+    pub const fn target(self) -> RouteTarget {
+        self.target
+    }
+
+    /// Return the candidate device class.
+    pub const fn device(self) -> RouteDevice {
+        self.device
+    }
+
+    /// Return request-specific multimodal cache hits for this candidate.
+    pub const fn cache_hits(self) -> usize {
+        self.cache_hits
+    }
+
     pub(crate) const fn worker(worker_id: u64) -> Self {
         Self {
             target: RouteTarget::worker(worker_id),
@@ -83,9 +116,30 @@ impl CandidateView<'_> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct RouteContext {
+/// Request-level context for device-aware routing.
+pub struct RouteContext {
     pub(crate) required_cache_hits: usize,
     pub(crate) non_cpu_to_cpu_ratio: usize,
+}
+
+impl RouteContext {
+    /// Construct device-aware request context.
+    pub const fn new(required_cache_hits: usize, non_cpu_to_cpu_ratio: usize) -> Self {
+        Self {
+            required_cache_hits,
+            non_cpu_to_cpu_ratio,
+        }
+    }
+
+    /// Return the hit count required for a complete request-cache hit.
+    pub const fn required_cache_hits(self) -> usize {
+        self.required_cache_hits
+    }
+
+    /// Return the accelerator-to-CPU weighting ratio.
+    pub const fn non_cpu_to_cpu_ratio(self) -> usize {
+        self.non_cpu_to_cpu_ratio
+    }
 }
 
 impl Default for RouteContext {

@@ -21,6 +21,7 @@ struct ReservationBooking {
     prefill_load_hint: Option<PrefillLoadHint>,
     expected_output_tokens: Option<u32>,
     track_prefill_tokens: bool,
+    occupancy_admission: bool,
     lora_name: Option<String>,
     /// Public block hashes to record into an approximate indexer once booked.
     routing_hashes: Option<Vec<LocalBlockHash>>,
@@ -232,6 +233,7 @@ impl SelectionCore {
                 prefill_load_hint: track_prefill_tokens.then_some(prefill_load_hint),
                 expected_output_tokens: pending.expected_output_tokens,
                 track_prefill_tokens,
+                occupancy_admission: pending.occupancy_admission,
                 lora_name: pending.lora_name.clone(),
                 routing_hashes: pending.routing_hashes.clone(),
                 session_id: pending.session_id.clone(),
@@ -340,6 +342,7 @@ impl SelectionCore {
                 prefill_load_hint,
                 expected_output_tokens: req.expected_output_tokens,
                 track_prefill_tokens,
+                occupancy_admission: true,
                 lora_name: req.prompt.lora_name,
                 routing_hashes,
                 session_id: None,
@@ -365,6 +368,7 @@ impl SelectionCore {
             prefill_load_hint,
             expected_output_tokens,
             track_prefill_tokens,
+            occupancy_admission,
             lora_name,
             routing_hashes,
             session_id,
@@ -393,6 +397,7 @@ impl SelectionCore {
                 prefill_load_hint,
                 worker,
                 lora_name,
+                occupancy_admission,
             })?;
         let affinity_lease = match session {
             Some((table, session_id, hold)) => {

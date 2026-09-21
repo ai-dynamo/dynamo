@@ -526,6 +526,7 @@ pub struct SchedulerQueue<
     queueing_enabled: bool,
     available_worker_provider: Option<WorkerAvailabilityProvider>,
     supports_overlap_refresh: bool,
+    requires_exact_target: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
     #[allow(clippy::type_complexity)]
     // Covariant type markers, without ownership or auto-trait bounds.
@@ -578,6 +579,7 @@ impl<
         available_worker_provider: Option<WorkerAvailabilityProvider>,
         admission_channel_capacity: usize,
     ) -> Self {
+        let requires_exact_target = selector.requires_exact_target();
         let pending = PolicyQueue::new(profile.clone());
         let queueing_enabled = profile
             .classes()
@@ -658,6 +660,7 @@ impl<
             queueing_enabled,
             available_worker_provider,
             supports_overlap_refresh: overlap_refresh_after.is_some(),
+            requires_exact_target,
             non_max_overlap_selection_observer,
             _marker: PhantomData,
         }
@@ -737,6 +740,14 @@ impl<
             request.respond(Err(KvSchedulerError::BookingFailed(
                 "admission-managed requests must be scheduled through LocalScheduler".to_string(),
             )));
+            return None;
+        }
+
+        if self.requires_exact_target
+            && request.pinned_worker.is_none()
+            && request.affinity_target.is_none()
+        {
+            request.respond(Err(KvSchedulerError::DirectTargetRequired));
             return None;
         }
 
@@ -1628,7 +1639,8 @@ impl<
                 .with_available_workers(available_worker_ids.as_deref());
             if self.selector.uses_exclusive_affinity_target()
                 && let Some(target) = request.affinity_target
-                && eligibility.affinity_target_is_eligible(&workers, target)
+                && (self.selector.requires_exact_target()
+                    || eligibility.affinity_target_is_eligible(&workers, target))
             {
                 eligibility = eligibility.with_affinity_target(target);
             }
@@ -1700,6 +1712,7 @@ impl<
                 target_cached_prefix_blocks,
                 kv_transfer_candidates: request.kv_transfer_candidates.take(),
                 potential_decode_blocks: selected.selection.potential_decode_blocks,
+                occupancy_admission: selected.selection.occupancy_admission,
             },
         })
     }
@@ -1732,6 +1745,7 @@ impl<
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
             potential_decode_blocks: selected.selection.potential_decode_blocks,
+            occupancy_admission: selected.selection.occupancy_admission,
         };
         let non_max_overlap_selection = selected.non_max_overlap_selection;
 
@@ -1760,6 +1774,7 @@ impl<
             prefill_load_hint,
             worker: selected.selection.worker,
             lora_name: request.lora_name.take(),
+            occupancy_admission: selected.selection.occupancy_admission,
         };
         self.book_and_respond(
             request,
@@ -2016,6 +2031,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 Instant::now(),
             )
@@ -2170,6 +2186,7 @@ mod tests {
                 cached_tokens: request.effective_cached_tokens_for(worker),
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
+                occupancy_admission: true,
             })
         }
     }
@@ -2618,6 +2635,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: Some(tx),
         };
         (req, rx)
@@ -4632,6 +4650,7 @@ policy_classes:
                     }),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now(),
             )

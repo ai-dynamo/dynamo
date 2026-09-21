@@ -163,6 +163,8 @@ impl SelectionPolicySource {
 pub struct PreparedSelectionPolicy {
     factory: WorkerSelectionPolicyFactory,
     inputs: WorkerInputs,
+    supports_lora: bool,
+    resolves_worker_only_target: bool,
 }
 
 impl PreparedSelectionPolicy {
@@ -178,6 +180,13 @@ impl PreparedSelectionPolicy {
             dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::required_worker_inputs(
                 &policy,
             );
+        let supports_lora =
+            dynamo_kv_router::selector::WorkerSelector::<ModelRuntimeConfig>::supports_lora(
+                &policy,
+            );
+        let resolves_worker_only_target = dynamo_kv_router::selector::WorkerSelector::<
+            ModelRuntimeConfig,
+        >::resolves_worker_only_target(&policy);
         let slot = Arc::new(parking_lot::Mutex::new(Some(policy)));
         let factory: WorkerSelectionPolicyFactory = Arc::new(
             move |config: &KvRouterConfig, worker_type, partition: RoutingPartitionRef<'_>| {
@@ -189,12 +198,27 @@ impl PreparedSelectionPolicy {
                 inner(config, worker_type, partition)
             },
         );
-        Self { factory, inputs }
+        Self {
+            factory,
+            inputs,
+            supports_lora,
+            resolves_worker_only_target,
+        }
     }
 
     /// The optional worker inputs the prepared instance consumes.
     pub fn inputs(&self) -> WorkerInputs {
         self.inputs
+    }
+
+    /// Whether the prepared policy preserves the configured LoRA-routing contract.
+    pub fn supports_lora(&self) -> bool {
+        self.supports_lora
+    }
+
+    /// Whether the prepared policy resolves a worker-only target to a DP rank.
+    pub fn resolves_worker_only_target(&self) -> bool {
+        self.resolves_worker_only_target
     }
 }
 
@@ -533,6 +557,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         }
         scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
+        scheduling::KvSchedulerError::DirectTargetRequired => (ErrorType::InvalidArgument, false),
         _ => return error.into(),
     };
 
@@ -584,6 +609,7 @@ pub struct KvRouter {
     indexer: Indexer,
     selection: embedded::EmbeddedSelection,
     required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
+    resolves_worker_only_target: bool,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
     kv_router_config: KvRouterConfig,
@@ -725,7 +751,14 @@ impl KvRouter {
             metric_worker_type,
             model_name.as_deref(),
         )?;
+        if lora_filter.is_some() && !prepared.supports_lora() {
+            anyhow::bail!(
+                "LoRA serving is not supported with the selected worker-selection policy; use \
+                 default, dynamo-round-robin, or dynamo-random, or disable LoRA serving."
+            );
+        }
         let required_worker_inputs = prepared.inputs();
+        let resolves_worker_only_target = prepared.resolves_worker_only_target();
         let policy_factory = prepared.factory;
         // ModelManager gates client construction as well, but preserve the capability boundary for
         // direct KvRouter callers.
@@ -890,6 +923,7 @@ impl KvRouter {
             indexer,
             selection,
             required_worker_inputs,
+            resolves_worker_only_target,
             workers_with_configs,
             block_size,
             kv_router_config,
@@ -989,6 +1023,10 @@ impl KvRouter {
 
     pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
         self.required_worker_inputs
+    }
+
+    pub(crate) fn resolves_worker_only_target(&self) -> bool {
+        self.resolves_worker_only_target
     }
 
     pub fn is_eagle(&self) -> bool {
@@ -1282,6 +1320,7 @@ impl KvRouter {
             strict_priority,
             policy_class,
             session_context,
+            None,
             expected_output_tokens,
             None,
             pinned_worker,
@@ -1307,6 +1346,7 @@ impl KvRouter {
         strict_priority: u32,
         policy_class: Option<String>,
         session_context: Option<dynamo_kv_router::SessionContext>,
+        device_aware_inputs: Option<dynamo_kv_router::selector::DeviceAwareRequestInputs>,
         expected_output_tokens: Option<u32>,
         affinity_target: Option<dynamo_kv_router::protocols::WorkerAffinityTarget>,
         pinned_worker: Option<WorkerWithDpRank>,
@@ -1362,6 +1402,7 @@ impl KvRouter {
                 strict_priority,
                 policy_class,
                 session_context,
+                device_aware_inputs,
                 session: SessionBinding::None,
                 affinity_target,
                 pinned_worker,
@@ -1566,6 +1607,7 @@ impl KvRouter {
                 prefill_load_hint,
                 worker,
                 lora_name,
+                occupancy_admission: true,
             })
             .await;
         let attempt_id = match admission {
@@ -2013,6 +2055,20 @@ mod tests {
             .expect("overloaded workers should produce a DynamoError");
 
         assert_eq!(dynamo_error.error_type(), ErrorType::ResourceExhausted);
+    }
+
+    #[test]
+    fn direct_target_required_maps_to_invalid_argument() {
+        let error = map_scheduler_error(KvSchedulerError::DirectTargetRequired);
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("direct target failure should produce a DynamoError");
+
+        assert_eq!(dynamo_error.error_type(), ErrorType::InvalidArgument);
+        assert_eq!(
+            dynamo_error.to_string(),
+            "Direct routing requires an exact affinity or request target"
+        );
     }
 
     #[test]
@@ -2638,6 +2694,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                     RoutingConstraints::default(),
                     admission,
                 )
@@ -2823,6 +2880,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                     RoutingConstraints::default(),
                     FindBestMatchAdmission::WithAdmission,
                 )
@@ -2876,6 +2934,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 })
                 .await
                 .expect("booking");
@@ -2965,6 +3024,7 @@ mod tests {
                 None,
                 0.0,
                 0,
+                None,
                 None,
                 None,
                 None,

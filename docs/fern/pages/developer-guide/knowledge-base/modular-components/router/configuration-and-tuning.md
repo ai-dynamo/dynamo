@@ -111,23 +111,67 @@ link no catalog and reject a configured policy type at startup.
 | Policy type | Behavior |
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `dynamo-round-robin` | Cycles through eligible worker IDs. Each routing partition owns its own cursor. |
+| `dynamo-random` | Samples one eligible worker uniformly. |
+| `dynamo-power-of-two-choices` | Samples two distinct workers when possible and selects the one with lower reservation-aware occupancy. |
+| `dynamo-least-loaded` | Selects a minimum-occupancy worker, using randomized reservoir tie-breaking. |
+| `dynamo-direct` | Requires an explicit request target or bound affinity target and never selects a fallback worker. |
+| `dynamo-device-aware-weighted` | Reuses device class, multimodal embedding-cache hits, occupancy, and `DYN_ENCODER_CUDA_TO_CPU_RATIO` from the top-level device-aware mode. An unconstrained complete cache hit wins without consuming occupancy; exact and affinity targets retain occupancy, matching the top-level mode. |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+
+The six `dynamo-*` adapters above are parameterless. Omit `parameters` or use an empty mapping;
+unknown keys fail startup. They choose at worker granularity, matching the corresponding top-level
+router modes. After a worker is chosen, round-robin, random, P2C, and least-loaded apply the same
+policy family among that worker's eligible data-parallel ranks. Device-aware weighted uses
+least-loaded rank selection because device and embedding-cache signals are worker-level. Direct
+uses the requested rank, or the lowest eligible rank for a worker-only target. None of these rules
+depends on hash-map row order.
+
+Hard pins and explicit targets remain host-enforced for every policy. Soft affinity is advisory for
+round-robin, random, P2C, least-loaded, and device-aware weighted. Direct treats either an explicit
+target or a bound affinity target as exclusive; a targetless request fails with
+`Direct routing requires an exact affinity or request target`.
+
+P2C, least-loaded, and device-aware weighted read the configured scheduler's atomically updated
+occupancy rather than the default selector's estimated load. Selection and booking run in the same
+scheduler actor turn, and normal response-stream cleanup releases the booking. Device-aware
+weighted excludes unconstrained complete embedding-cache hits from this occupancy while retaining
+normal request lifecycle tracking. An exact or affinity target is still admitted to occupancy, as
+it is in the top-level mode. Query-only selection reads occupancy but does not reserve it.
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
 ```yaml
 worker_selection:
-  aggregated: dynamo-two-tier-cost-fn
-  prefill: dynamo-two-tier-cost-fn
-  decode: dynamo-two-tier-cost-fn
+  aggregated: round-robin
+  prefill: p2c
+  decode: least-loaded
+  encode: device-aware
   instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
+    - name: round-robin
+      type: dynamo-round-robin
+    - name: p2c
+      type: dynamo-power-of-two-choices
+    - name: least-loaded
+      type: dynamo-least-loaded
+    - name: device-aware
+      type: dynamo-device-aware-weighted
 ```
 
 `aggregated`, `prefill`, `decode`, and `encode` each select a named instance, so prefill and decode
 pools can run different policies. An omitted stage falls back to the built-in selector. `name` is
 yours to choose; `type` must be one of the policy types above.
+
+`worker_selection` controls the configured selection step, so run the token-routing frontend with
+`--router-mode kv`. It does not reinterpret YAML as a top-level router-mode switch. An explicit
+encode policy also moves the surface-less multimodal encoder hop onto the configured scheduler;
+without an encode override, that legacy hop remains round-robin.
+
+This integration is larger than policy registration because legacy non-KV modes receive hosted
+worker IDs, while YAML policies receive configured worker-plus-rank rows. The adapters reuse the
+runtime's picker implementation, and the configured host supplies the missing exact-target,
+reservation occupancy, device-class, and multimodal-cache inputs. Discovery, eligibility,
+queueing, booking, dispatch, and cleanup remain scheduler-owned.
 
 ```bash
 python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
@@ -159,6 +203,9 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+The parameterless non-KV adapters have no tuning keys. Device-aware weighted continues to read
+`DYN_ENCODER_CUDA_TO_CPU_RATIO`; its default is `8`, exactly as in the top-level mode.
 
 #### Override the Selection
 
@@ -288,6 +335,11 @@ option to keep affinity disabled.
 With `DYN_LORA_ENABLED`, session affinity is supported in KV mode. It is rejected
 at startup with random or round-robin routing; the other router modes are not
 LoRA-aware and are rejected independently.
+
+The same restriction applies to worker-selection YAML: `dynamo-direct`,
+`dynamo-power-of-two-choices`, `dynamo-least-loaded`, and
+`dynamo-device-aware-weighted` fail startup when LoRA serving is enabled. The configured
+round-robin and random policies remain LoRA-filtered by the KV scheduler.
 
 When session affinity is enabled, routers synchronize affinity bindings through the
 Runtime event plane. The origin publishes a binding after successful dispatch so

@@ -49,6 +49,12 @@ impl BuiltinRoutePicker {
         }
     }
 
+    pub const fn device_aware_weighted() -> Self {
+        Self {
+            inner: RoutePicker::new(RoutePolicy::DeviceAwareWeighted),
+        }
+    }
+
     /// Select one worker and advance any policy state.
     pub fn select_worker(&self, worker_ids: &[u64], load: impl Fn(u64) -> u64) -> Option<u64> {
         self.inner
@@ -69,6 +75,27 @@ impl BuiltinRoutePicker {
                 load,
             )
             .map(|decision| decision.target.worker_id)
+    }
+
+    /// Select one device-aware worker with the same cache, weighting, tie-breaking, and
+    /// admission rule used by [`crate::pipeline::RouterMode::DeviceAwareWeighted`].
+    ///
+    /// The boolean is `true` when the caller must account the selected request in occupancy.
+    /// A complete multimodal-cache hit deliberately returns `false`, matching the legacy mode.
+    pub fn select_device_aware(
+        &self,
+        candidates: &[RouteCandidate],
+        context: RouteContext,
+        load: impl Fn(u64) -> u64,
+    ) -> Option<(RouteTarget, bool)> {
+        self.inner
+            .select(CandidateView::DeviceAware(candidates), context, load)
+            .map(|decision| {
+                (
+                    decision.target,
+                    decision.admission == AdmissionKind::Occupancy,
+                )
+            })
     }
 }
 

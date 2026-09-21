@@ -1402,6 +1402,20 @@ where
         }
     }
 
+    /// Materialize the request-plane signals used by the shared device-aware picker.
+    ///
+    /// Configured worker-selection hosts use this capability-gated bridge so they consume the
+    /// same discovery device classes, cache-key extractor, cache index, and weighting default as
+    /// the legacy top-level router mode.
+    pub fn device_aware_route_inputs(
+        &self,
+        request: &T,
+        instance_ids: &[u64],
+    ) -> (Vec<RouteCandidate>, RouteContext) {
+        let inputs = self.device_aware_candidates(request, instance_ids);
+        (inputs.candidates, inputs.context)
+    }
+
     /// Issue a request to the instance with the fewest active connections.
     pub async fn least_loaded(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         self.least_loaded_prepared(request, |_, _| Ok(()))

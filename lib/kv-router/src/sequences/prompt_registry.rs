@@ -30,6 +30,9 @@ pub struct WorkerLoadProjection {
     pub active_prefill_tokens: usize,
     pub active_decode_blocks: usize,
     pub active_requests: usize,
+    /// Requests admitted by occupancy-aware routing. Unlike `active_requests`, complete
+    /// device-cache hits are excluded to match hosted device-aware routing.
+    pub routing_occupancy: usize,
     /// Request blocks not already shared with active sequences on this worker.
     ///
     /// These blocks may still exist in an inactive cache; this field describes
@@ -59,6 +62,7 @@ pub type PotentialLoadMaps = (
 pub(super) struct WorkerLoadSnapshot {
     pub(super) active_blocks: usize,
     pub(super) active_requests: usize,
+    pub(super) routing_occupancy: usize,
     pub(super) prefill: PrefillLoadSnapshot,
 }
 
@@ -317,6 +321,7 @@ impl PromptRegistry {
                     active_prefill_tokens: load.active_tokens(decay_now),
                     active_decode_blocks: load.active_blocks,
                     active_requests: load.active_requests,
+                    routing_occupancy: load.routing_occupancy,
                     additional_active_blocks: query_len.saturating_sub(overlap_depth),
                 },
             );
@@ -425,6 +430,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            routing_occupancy: 0,
             prefill: PrefillLoadSnapshot::default(),
         }
     }
@@ -439,6 +445,7 @@ mod tests {
         WorkerLoadSnapshot {
             active_blocks,
             active_requests: 0,
+            routing_occupancy: 0,
             prefill: PrefillLoadSnapshot {
                 prefill_full_tokens_sum,
                 anchored_prefill: Some(AnchoredPrefillSnapshot {

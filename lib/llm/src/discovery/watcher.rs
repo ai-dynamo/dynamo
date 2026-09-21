@@ -644,11 +644,31 @@ impl ModelWatcher {
             };
 
             let encoder_chooser = if needs_preprocessed_routing {
-                Some(EncoderRouter::new_with_task_guard(
-                    model_name.clone(),
-                    namespace.clone(),
-                    allocator_trim.clone(),
-                ))
+                let selection_policy = self.plugins.selection_policy();
+                let configured_encode_policy =
+                    !matches!(&selection_policy, SelectionPolicySource::Registry)
+                        || router_config
+                            .kv_router_config
+                            .explicit_worker_selection_policy_types()?
+                            .contains(&WorkerType::Encode);
+                Some(if configured_encode_policy {
+                    EncoderRouter::new_with_selection_policy(
+                        model_name.clone(),
+                        namespace.clone(),
+                        self.manager.clone(),
+                        selection_policy,
+                        router_config.kv_router_config.clone(),
+                        card.kv_cache_block_size,
+                        load_thresholds.clone(),
+                        allocator_trim.clone(),
+                    )
+                } else {
+                    EncoderRouter::new_with_task_guard(
+                        model_name.clone(),
+                        namespace.clone(),
+                        allocator_trim.clone(),
+                    )
+                })
             } else {
                 None
             };

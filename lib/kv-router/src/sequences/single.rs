@@ -51,6 +51,7 @@ pub(super) struct RequestState {
     blocks: RequestBlockChain,
     started_at: Instant,
     expected_output_tokens: Option<u32>,
+    occupancy_admission: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -172,6 +173,7 @@ impl ActiveSequences {
 
     /// Add a new request with optional prompt-token load accounting.
     /// Returns block membership transitions plus any expired request IDs removed during cleanup.
+    #[cfg(test)]
     pub(super) fn add_request_with_prefill_tracking(
         &mut self,
         request_id: RequestId,
@@ -179,6 +181,29 @@ impl ActiveSequences {
         expected_output_tokens: Option<u32>,
         track_prefill_tokens: bool,
         prefill_load_hint: Option<PrefillLoadHint>,
+        decay_now: Instant,
+    ) -> SequenceMutationOutcome {
+        self.add_request_with_prefill_tracking_and_occupancy(
+            request_id,
+            token_sequence,
+            expected_output_tokens,
+            track_prefill_tokens,
+            prefill_load_hint,
+            true,
+            decay_now,
+        )
+    }
+
+    /// Add a request while explicitly controlling reservation-aware occupancy admission.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn add_request_with_prefill_tracking_and_occupancy(
+        &mut self,
+        request_id: RequestId,
+        token_sequence: Option<Vec<SequenceHash>>,
+        expected_output_tokens: Option<u32>,
+        track_prefill_tokens: bool,
+        prefill_load_hint: Option<PrefillLoadHint>,
+        occupancy_admission: bool,
         decay_now: Instant,
     ) -> SequenceMutationOutcome {
         if self.requests.contains_key(&request_id) {
@@ -221,6 +246,7 @@ impl ActiveSequences {
                 blocks,
                 started_at,
                 expected_output_tokens,
+                occupancy_admission,
             },
         );
 
@@ -336,6 +362,11 @@ impl ActiveSequences {
         WorkerLoadSnapshot {
             active_blocks: self.active_blocks(),
             active_requests: self.requests.len(),
+            routing_occupancy: self
+                .requests
+                .values()
+                .filter(|request| request.occupancy_admission)
+                .count(),
             prefill: self.prefill.snapshot(),
         }
     }

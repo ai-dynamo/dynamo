@@ -260,8 +260,13 @@ pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
         _ => create_affinity_coordinator(ttl, session_affinity_mode, router_client.clone()).await?,
     };
 
+    let configured_device_aware = chooser.as_ref().is_some_and(|chooser| {
+        chooser
+            .required_worker_inputs()
+            .contains(dynamo_kv_router::selector::WorkerInputs::DEVICE_AWARE)
+    });
     let embedding_cache_indexer = if enable_multimodal_cache_indexer
-        && matches!(router_mode, RouterMode::DeviceAwareWeighted)
+        && (matches!(router_mode, RouterMode::DeviceAwareWeighted) || configured_device_aware)
     {
         try_build_cache_indexer(&router_client.endpoint).await
     } else {

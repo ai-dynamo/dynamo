@@ -19,7 +19,9 @@ pub use config::{WorkerSelectionConfig, WorkerSelectionInstance};
 use std::ops::BitOr;
 use std::sync::Arc;
 
-use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
+use rustc_hash::FxHashMap;
+
+use crate::protocols::{WorkerAffinityTarget, WorkerId, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
 use crate::scheduling::selector::LogitWeights;
 use crate::{KvRouterConfig, RoutingPartitionRef, WorkerType};
@@ -48,6 +50,8 @@ pub struct WorkerCandidate {
     pub(crate) inputs: WorkerInputs,
     pub(crate) cache: WorkerCacheInput,
     pub(crate) load: WorkerLoadInput,
+    pub(crate) occupancy: WorkerOccupancyInput,
+    pub(crate) device_aware: WorkerDeviceAwareInput,
     pub(crate) preferred_taint_multiplier: Option<f64>,
 }
 
@@ -74,7 +78,8 @@ impl WorkerInputs {
     pub const PREFERRED_TAINT: Self = Self(1 << 2);
     /// Request host-owned active-request counts.
     pub const OCCUPANCY: Self = Self(1 << 5);
-    pub(crate) const ALL: Self = Self(Self::CACHE.0 | Self::LOAD.0 | Self::PREFERRED_TAINT.0);
+    /// Request device class and request-specific multimodal-cache hits.
+    pub const DEVICE_AWARE: Self = Self(1 << 6);
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -112,12 +117,75 @@ pub struct WorkerLoadInput {
     pub(crate) active_requests: usize,
 }
 
+/// Reservation-aware in-flight request count for one worker/rank candidate.
+#[derive(Clone, Copy, Default)]
+pub struct WorkerOccupancyInput {
+    pub(crate) active_requests: u64,
+}
+
+/// Device family used by device-aware routing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WorkerDevice {
+    /// Host CPU.
+    Cpu,
+    #[default]
+    /// Any non-CPU accelerator, or a worker whose device metadata is absent.
+    Accelerator,
+}
+
+/// Request-specific device-aware inputs for one worker/rank candidate.
+#[derive(Clone, Copy, Default)]
+pub struct WorkerDeviceAwareInput {
+    pub(crate) device: WorkerDevice,
+    pub(crate) cache_hits: usize,
+}
+
+/// Owned request-plane signals supplied only when a policy requests
+/// [`WorkerInputs::DEVICE_AWARE`].
+#[derive(Clone, Default)]
+pub struct DeviceAwareRequestInputs {
+    workers: FxHashMap<WorkerId, WorkerDeviceAwareInput>,
+    required_cache_hits: usize,
+    non_cpu_to_cpu_ratio: usize,
+}
+
+impl DeviceAwareRequestInputs {
+    /// Construct request-level device-aware signals keyed by worker ID.
+    pub fn new(
+        workers: impl IntoIterator<Item = (WorkerId, WorkerDeviceAwareInput)>,
+        required_cache_hits: usize,
+        non_cpu_to_cpu_ratio: usize,
+    ) -> Self {
+        Self {
+            workers: workers.into_iter().collect(),
+            required_cache_hits,
+            non_cpu_to_cpu_ratio: non_cpu_to_cpu_ratio.max(1),
+        }
+    }
+
+    pub(crate) fn worker(&self, worker_id: WorkerId) -> WorkerDeviceAwareInput {
+        self.workers.get(&worker_id).copied().unwrap_or_default()
+    }
+
+    /// Number of distinct request cache keys required for a complete hit.
+    pub fn required_cache_hits(&self) -> usize {
+        self.required_cache_hits
+    }
+
+    /// Relative accelerator-to-CPU weighting used by the shared picker.
+    pub fn non_cpu_to_cpu_ratio(&self) -> usize {
+        self.non_cpu_to_cpu_ratio
+    }
+}
+
 /// Borrowed, index-aligned view of one custom picker's requested worker inputs.
 #[derive(Clone, Copy)]
 pub struct WorkerInputView<'a> {
     pub(crate) candidates: &'a [ScoredWorkerCandidate],
     pub(crate) cache: Option<&'a [WorkerCacheInput]>,
     pub(crate) load: Option<&'a [WorkerLoadInput]>,
+    pub(crate) occupancy: Option<&'a [WorkerOccupancyInput]>,
+    pub(crate) device_aware: Option<&'a [WorkerDeviceAwareInput]>,
 }
 
 /// Adds one finite cost contribution to each eligible worker.
@@ -166,6 +234,45 @@ pub trait WorkerPicker: Send {
         context: &WorkerSelectionContext<'_>,
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError>;
+
+    /// Whether the selected request contributes to reservation-aware occupancy.
+    ///
+    /// Most policies admit every selected request. Device-aware routing overrides this for a
+    /// complete multimodal-cache hit, matching the legacy top-level mode.
+    fn occupancy_admission(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _input: WorkerInputView<'_>,
+        _selected_row: usize,
+    ) -> bool {
+        true
+    }
+
+    /// Whether an eligible affinity target must exclusively constrain selection.
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        false
+    }
+
+    /// Whether requests without an explicit or bound-affinity target must be rejected.
+    fn requires_exact_target(&self) -> bool {
+        false
+    }
+
+    /// Whether this picker resolves a worker-only exact target to a DP rank.
+    ///
+    /// The host preserves its legacy requirement for an explicit rank unless the selected picker
+    /// opts in. First-party non-KV adapters opt in because their source modes select workers before
+    /// resolving a configured worker/rank row.
+    fn resolves_worker_only_target(&self) -> bool {
+        false
+    }
+
+    /// Whether this picker supports requests carrying a LoRA adapter name.
+    ///
+    /// Custom policies retain the configured KV scheduler's existing LoRA behavior by default.
+    fn supports_lora(&self) -> bool {
+        true
+    }
 }
 
 impl WorkerSelectionContext<'_> {
@@ -195,6 +302,22 @@ impl WorkerSelectionContext<'_> {
     /// advisory context; it may be absent from their candidate set when unavailable or filtered.
     pub fn affinity_target(&self) -> Option<WorkerAffinityTarget> {
         self.request.affinity_target
+    }
+
+    /// Return the exact request or bound-affinity target, if one exists.
+    ///
+    /// An explicit request pin wins. A worker-only affinity target remains worker-only so the
+    /// policy can apply its documented DP-rank resolver.
+    pub fn exact_target(&self) -> Option<WorkerAffinityTarget> {
+        self.request
+            .pinned_worker
+            .map(WorkerAffinityTarget::from)
+            .or(self.request.affinity_target)
+    }
+
+    /// Return request-plane device-aware context when the picker requested it.
+    pub fn device_aware(&self) -> Option<&DeviceAwareRequestInputs> {
+        self.request.device_aware_inputs.as_ref()
     }
 
     /// Return the expected output length, if the request supplies one.
@@ -238,6 +361,22 @@ impl WorkerCandidate {
             .then_some(&self.load)
     }
 
+    /// Return reservation-aware occupancy when the component requested
+    /// [`WorkerInputs::OCCUPANCY`].
+    pub fn occupancy(&self) -> Option<&WorkerOccupancyInput> {
+        self.inputs
+            .contains(WorkerInputs::OCCUPANCY)
+            .then_some(&self.occupancy)
+    }
+
+    /// Return device-aware inputs when the component requested
+    /// [`WorkerInputs::DEVICE_AWARE`].
+    pub fn device_aware(&self) -> Option<&WorkerDeviceAwareInput> {
+        self.inputs
+            .contains(WorkerInputs::DEVICE_AWARE)
+            .then_some(&self.device_aware)
+    }
+
     /// Return the optional cost multiplier from preferred routing constraints when the component
     /// requested [`WorkerInputs::PREFERRED_TAINT`].
     ///
@@ -270,6 +409,24 @@ impl WorkerCandidate {
                 }
             } else {
                 WorkerLoadInput::default()
+            },
+            occupancy: if inputs.contains(WorkerInputs::OCCUPANCY) {
+                if self.inputs.contains(WorkerInputs::OCCUPANCY) {
+                    self.occupancy
+                } else {
+                    additional.occupancy
+                }
+            } else {
+                WorkerOccupancyInput::default()
+            },
+            device_aware: if inputs.contains(WorkerInputs::DEVICE_AWARE) {
+                if self.inputs.contains(WorkerInputs::DEVICE_AWARE) {
+                    self.device_aware
+                } else {
+                    additional.device_aware
+                }
+            } else {
+                WorkerDeviceAwareInput::default()
             },
             preferred_taint_multiplier: self
                 .preferred_taint_multiplier
@@ -335,6 +492,30 @@ impl WorkerLoadInput {
     }
 }
 
+impl WorkerOccupancyInput {
+    /// Return the atomically reserved in-flight request count for this worker/rank.
+    pub fn active_requests(&self) -> u64 {
+        self.active_requests
+    }
+}
+
+impl WorkerDeviceAwareInput {
+    /// Construct device and request-specific cache-hit input for one worker.
+    pub fn new(device: WorkerDevice, cache_hits: usize) -> Self {
+        Self { device, cache_hits }
+    }
+
+    /// Return the worker's discovered device class.
+    pub fn device(&self) -> WorkerDevice {
+        self.device
+    }
+
+    /// Return this worker's hit count for the request's cache keys.
+    pub fn cache_hits(&self) -> usize {
+        self.cache_hits
+    }
+}
+
 impl<'a> WorkerInputView<'a> {
     /// Return the eligible candidates and their total costs.
     pub fn candidates(self) -> &'a [ScoredWorkerCandidate] {
@@ -349,5 +530,15 @@ impl<'a> WorkerInputView<'a> {
     /// Return index-aligned active-load inputs when the picker requested them.
     pub fn load(self) -> Option<&'a [WorkerLoadInput]> {
         self.load
+    }
+
+    /// Return index-aligned reservation-aware occupancy when requested.
+    pub fn occupancy(self) -> Option<&'a [WorkerOccupancyInput]> {
+        self.occupancy
+    }
+
+    /// Return index-aligned device-aware inputs when requested.
+    pub fn device_aware(self) -> Option<&'a [WorkerDeviceAwareInput]> {
+        self.device_aware
     }
 }

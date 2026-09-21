@@ -16,13 +16,15 @@ use tokio_util::sync::CancellationToken;
 use dynamo_runtime::{
     engine::AsyncEngine,
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
-        async_trait,
+        Context, ManyOut, MultimodalCacheKeyExtractor, Operator, PushRouter, RouterMode,
+        ServerStreamingEngine, SingleIn, async_trait,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-use crate::discovery::{WorkerSetTarget, WorkerSetTargetId};
+use crate::discovery::{LoadThresholdHandle, ModelManager, WorkerSetTarget, WorkerSetTargetId};
+use crate::kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer};
+use crate::kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, SelectionPolicySource};
 use crate::protocols::common::{
     llm_backend::{LLMEngineOutput, PreprocessedRequest},
     preprocessor::TraceLink,
@@ -32,7 +34,34 @@ type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutpu
 
 struct EncoderBinding {
     target_id: WorkerSetTargetId,
-    router: Arc<EncodePushRouter>,
+    router: EncoderDispatch,
+}
+
+enum EncoderDispatch {
+    Hosted(Arc<EncodePushRouter>),
+    Configured(Arc<RoutingHost>),
+}
+
+impl EncoderDispatch {
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        Ok(match self {
+            Self::Hosted(router) => router.generate(request).await?,
+            Self::Configured(router) => router.generate(request).await?,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ConfiguredEncoderRouting {
+    model_manager: Arc<ModelManager>,
+    selection_policy: SelectionPolicySource,
+    kv_router_config: dynamo_kv_router::KvRouterConfig,
+    kv_cache_block_size: u32,
+    load_thresholds: LoadThresholdHandle,
+    task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,8 +87,9 @@ impl EncoderLifecycleState {
 ///
 /// The router is present on every token pipeline but remains a passthrough
 /// until discovery supplies an Encode endpoint for the same model namespace.
-/// Encode workers are selected round-robin independently of the downstream
-/// token router mode; they do not participate in KV-aware routing.
+/// Without an explicit encode worker-selection policy, workers retain the
+/// legacy round-robin path. An explicit policy activates a configured scheduler
+/// dedicated to the encode target; this does not turn the hop into KV-aware routing.
 pub struct EncoderRouter {
     binding: ArcSwapOption<EncoderBinding>,
     target: Mutex<Option<WorkerSetTargetId>>,
@@ -68,6 +98,7 @@ pub struct EncoderRouter {
     lifecycle: AtomicU8,
     model_name: String,
     namespace: String,
+    configured_routing: Option<ConfiguredEncoderRouting>,
 }
 
 impl Drop for EncoderRouter {
@@ -87,12 +118,13 @@ impl EncoderRouter {
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name: String::new(),
             namespace: String::new(),
+            configured_routing: None,
         })
     }
 
     /// Create a router whose endpoint is driven by committed discovery topology.
     pub fn new(model_name: String, namespace: String) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, None)
+        Self::new_inner(model_name, namespace, None, None)
     }
 
     pub(crate) fn new_with_task_guard(
@@ -100,13 +132,42 @@ impl EncoderRouter {
         namespace: String,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) -> Arc<Self> {
-        Self::new_inner(model_name, namespace, Some(task_guard))
+        Self::new_inner(model_name, namespace, Some(task_guard), None)
+    }
+
+    /// Create an encoder hop whose worker choice is owned by the configured scheduler.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_selection_policy(
+        model_name: String,
+        namespace: String,
+        model_manager: Arc<ModelManager>,
+        selection_policy: SelectionPolicySource,
+        kv_router_config: dynamo_kv_router::KvRouterConfig,
+        kv_cache_block_size: u32,
+        load_thresholds: LoadThresholdHandle,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) -> Arc<Self> {
+        let configured_routing = ConfiguredEncoderRouting {
+            model_manager,
+            selection_policy,
+            kv_router_config,
+            kv_cache_block_size,
+            load_thresholds,
+            task_guard: Some(task_guard.clone()),
+        };
+        Self::new_inner(
+            model_name,
+            namespace,
+            Some(task_guard),
+            Some(configured_routing),
+        )
     }
 
     fn new_inner(
         model_name: String,
         namespace: String,
         task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+        configured_routing: Option<ConfiguredEncoderRouting>,
     ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
         let (target_tx, target_rx) = watch::channel(None);
@@ -118,6 +179,7 @@ impl EncoderRouter {
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name,
             namespace,
+            configured_routing,
         });
 
         let router_weak = Arc::downgrade(&router);
@@ -132,16 +194,71 @@ impl EncoderRouter {
     async fn build(
         target: WorkerSetTarget,
         cancel_token: CancellationToken,
+        configured: Option<ConfiguredEncoderRouting>,
+        model_name: String,
     ) -> Result<EncoderBinding> {
         let target_id = target.id();
-        let client = target.client(cancel_token).await?;
-        let router =
-            EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
+        let client = target.client(cancel_token.child_token()).await?;
+        let router = if let Some(configured) = configured {
+            let load_context = RoutingLoadContext::start(
+                client.clone(),
+                RouterLoadSource::Encode,
+                configured.load_thresholds,
+                &cancel_token,
+                configured.task_guard,
+            )
+            .await?;
+            let chooser = configured
+                .model_manager
+                .kv_chooser_for_with_policy_and_client(
+                    client.clone(),
+                    configured.kv_cache_block_size.max(1),
+                    configured.selection_policy,
+                    Some(configured.kv_router_config),
+                    None,
+                    Some(crate::worker_type::WorkerType::Encode),
+                    crate::worker_type::WorkerType::Encode.as_str(),
+                    Some(model_name),
+                    false,
+                    load_context.scheduler_load_sender(),
+                    load_context.cancellation_token(),
+                )
                 .await?;
-        Ok(EncoderBinding {
-            target_id,
-            router: Arc::new(router),
-        })
+            let device_aware = chooser
+                .required_worker_inputs()
+                .contains(dynamo_kv_router::selector::WorkerInputs::DEVICE_AWARE);
+            let cache_indexer = if device_aware {
+                try_build_cache_indexer(&client.endpoint).await
+            } else {
+                None
+            };
+            let cache_key_extractor = cache_indexer.as_ref().map(|_| {
+                Arc::new(preprocessed_multimodal_cache_keys)
+                    as MultimodalCacheKeyExtractor<PreprocessedRequest>
+            });
+            let push_router = EncodePushRouter::from_client_with_state(
+                client,
+                RouterMode::KV,
+                None,
+                cache_indexer,
+                cache_key_extractor,
+            )
+            .await?;
+            EncoderDispatch::Configured(Arc::new(
+                RoutingHost::new_with_load_context_and_coordinator(
+                    push_router,
+                    chooser,
+                    load_context,
+                    None,
+                ),
+            ))
+        } else {
+            EncoderDispatch::Hosted(Arc::new(
+                EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
+                    .await?,
+            ))
+        };
+        Ok(EncoderBinding { target_id, router })
     }
 
     async fn drive_target(
@@ -184,7 +301,13 @@ impl EncoderRouter {
                 }
                 continue;
             }
-            let build = Self::build(target, cancel_token.child_token());
+            let Some(router_ref) = router.upgrade() else {
+                return;
+            };
+            let configured = router_ref.configured_routing.clone();
+            let model_name = router_ref.model_name.clone();
+            drop(router_ref);
+            let build = Self::build(target, cancel_token.child_token(), configured, model_name);
             tokio::pin!(build);
             let result = tokio::select! {
                 biased;

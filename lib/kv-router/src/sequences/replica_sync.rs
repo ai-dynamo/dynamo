@@ -182,6 +182,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 track_prefill_tokens,
                 expected_output_tokens,
                 prefill_load_hint,
+                occupancy_admission,
             } => {
                 let Ok(attempt_id) = self.request_index.try_insert_request(
                     request_id.clone(),
@@ -214,12 +215,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 let (expired_request_ids, load) = {
                     let slot = &table.slots[idx];
                     let mut seq = slot.sequences.write();
-                    let outcome = seq.add_request_with_prefill_tracking(
+                    let outcome = seq.add_request_with_prefill_tracking_and_occupancy(
                         request_id,
                         token_sequence,
                         expected_output_tokens,
                         track_prefill_tokens,
                         prefill_load_hint,
+                        occupancy_admission,
                         decay_now,
                     );
                     let load = seq.worker_load_snapshot();

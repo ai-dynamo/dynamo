@@ -241,6 +241,7 @@ fn lease_operation<'a>(
         strict_priority: 0,
         policy_class: None,
         session_context: None,
+        device_aware_inputs: None,
         session: SessionBinding::None,
         affinity_target: None,
         pinned_worker: None,
@@ -1689,6 +1690,7 @@ async fn replaced_claim_cannot_remove_or_overwrite_a_new_reservation(
         expected_output_tokens: None,
         prefill_load_hint: None,
         lora_name: None,
+        occupancy_admission: true,
     };
     let old_entry = core.entry(&key).unwrap();
     let new_entry = core.entry(&other_key).unwrap();
@@ -1891,6 +1893,7 @@ async fn early_peer_accounting_follows_host_policy_without_granting_eligibility(
                         track_prefill_tokens: false,
                         expected_output_tokens: None,
                         prefill_load_hint: None,
+                        occupancy_admission: true,
                     },
                     router_id: 99,
                     lora_name: None,
@@ -1969,6 +1972,7 @@ async fn mirrored_replica_bookings_are_indexed_until_freed() {
                 track_prefill_tokens: false,
                 expected_output_tokens: None,
                 prefill_load_hint: None,
+                occupancy_admission: true,
             },
         )
     };

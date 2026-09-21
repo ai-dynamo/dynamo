@@ -13,6 +13,7 @@ use std::{
 use crate::kv_router::SelectionPolicySource;
 use dynamo_kv_router::{
     config::KvRouterConfig,
+    plugins::RouterPluginRegistry,
     protocols::RoutingConstraints,
     scheduling::{
         ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
@@ -1346,6 +1347,123 @@ async fn router_with_recorded_dispatch_and_affinity(
     .unwrap();
     let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
     (router, dispatch, worker_id, runtime)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn configured_non_kv_policies_select_dispatch_and_release_through_routing_host() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    for (index, policy_type) in [
+        "dynamo-round-robin",
+        "dynamo-random",
+        "dynamo-power-of-two-choices",
+        "dynamo-least-loaded",
+        "dynamo-direct",
+        "dynamo-device-aware-weighted",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = distributed
+            .namespace(format!("configured-non-kv-{index}"))
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        endpoint.register_endpoint_instance().await.unwrap();
+        let worker_id = client.wait_for_instances().await.unwrap()[0].id();
+        let (_workers_tx, workers) =
+            watch::channel(HashMap::from([(worker_id, ModelRuntimeConfig::default())]));
+
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            format!(
+                "worker_selection:\n  aggregated: selected\n  instances:\n    - name: selected\n      type: {policy_type}\n"
+            ),
+        )
+        .unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        };
+        let mut registry = RouterPluginRegistry::default();
+        dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+        let factory = registry
+            .resolve(&config)
+            .unwrap()
+            .expect("selected built-in policy factory");
+        let chooser = Arc::new(
+            KvRouter::new(
+                endpoint,
+                client.clone(),
+                workers,
+                None,
+                16,
+                SelectionPolicySource::Factory(factory),
+                Some(config),
+                None,
+                "aggregated",
+                None,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let dispatch = Arc::new(PendingThenCompletedDispatch::default());
+        let inner = PushRouter::from_client_with_dispatch(
+            client,
+            RouterMode::KV,
+            Arc::clone(&dispatch) as Arc<dyn StreamingDispatch<_, _>>,
+        )
+        .await
+        .unwrap();
+        let host = RoutingHost::new(inner, Arc::clone(&chooser), None).unwrap();
+        host.inner
+            .client
+            .override_discovered_instances(vec![worker_id]);
+        host.inner.client.override_instance_avail(vec![worker_id]);
+
+        let mut content = request();
+        if policy_type == "dynamo-direct" {
+            content.routing_mut().backend_instance_id = Some(worker_id);
+        }
+        let mut stream = host
+            .generate(Context::with_id_and_metadata(
+                content,
+                format!("configured-non-kv-request-{index}"),
+                Default::default(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("{policy_type} selection failed: {error:#}"));
+        while stream.next().await.is_some() {}
+
+        assert_eq!(
+            dispatch.worker_ids.lock().unwrap().as_slice(),
+            &[worker_id],
+            "{policy_type} must dispatch exactly once"
+        );
+        let loads = chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().all(|load| load.active_requests == 0),
+            "{policy_type} must release its scheduler booking: {loads:?}"
+        );
+
+        drop(host);
+    }
+    runtime.shutdown();
 }
 
 /// Select and admit a request in the given phase, then stop its context, leaving

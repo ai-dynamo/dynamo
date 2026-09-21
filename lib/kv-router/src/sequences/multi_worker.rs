@@ -319,6 +319,7 @@ pub struct SequenceRequest {
     pub prefill_load_hint: Option<PrefillLoadHint>,
     pub worker: WorkerWithDpRank,
     pub lora_name: Option<String>,
+    pub occupancy_admission: bool,
 }
 
 /// Whether a lifecycle operation changed the tracked request state.
@@ -818,6 +819,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 track_prefill_tokens: req.track_prefill_tokens,
                 expected_output_tokens: req.expected_output_tokens,
                 prefill_load_hint: req.prefill_load_hint,
+                occupancy_admission: req.occupancy_admission,
             },
             router_id: self.router_id,
             lora_name: req.lora_name.clone(),
@@ -1451,6 +1453,7 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
             prefill_load_hint,
             worker,
             lora_name,
+            occupancy_admission,
         } = req;
 
         let mut attempted_lazy_registration = false;
@@ -1475,12 +1478,13 @@ impl<P: SequencePublisher + 'static> ActiveSequencesMultiWorker<P> {
                 })?;
             let slot = &table.slots[idx];
             let mut seq = slot.sequences.write();
-            let outcome = seq.add_request_with_prefill_tracking(
+            let outcome = seq.add_request_with_prefill_tracking_and_occupancy(
                 request_id,
                 token_sequence,
                 expected_output_tokens,
                 track_prefill_tokens,
                 prefill_load_hint,
+                occupancy_admission,
                 decay_now,
             );
             let load = seq.worker_load_snapshot();
@@ -2061,6 +2065,7 @@ mod tests {
                 track_prefill_tokens: true,
                 expected_output_tokens: None,
                 prefill_load_hint: tracking_hint(12),
+                occupancy_admission: true,
             },
             router_id: 99,
             lora_name: None,
@@ -2102,6 +2107,7 @@ mod tests {
             prefill_load_hint: tracking_hint(12),
             worker,
             lora_name: None,
+            occupancy_admission: true,
         }
     }
 
@@ -2457,6 +2463,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2484,6 +2491,7 @@ mod tests {
             prefill_load_hint: None,
             worker,
             lora_name: None,
+            occupancy_admission: true,
         };
 
         sequences.add_request(req(worker_a), decay_now).unwrap();
@@ -2515,6 +2523,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: booked_worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2546,6 +2555,7 @@ mod tests {
                     prefill_load_hint: modeled_hint(100, 10),
                     worker: worker_a,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 start,
             )
@@ -2560,6 +2570,7 @@ mod tests {
                     prefill_load_hint: modeled_hint(60, 4),
                     worker: worker_a,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 start + Duration::from_secs(1),
             )
@@ -2574,6 +2585,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker: worker_b,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 start,
             )
@@ -2615,6 +2627,7 @@ mod tests {
                     prefill_load_hint: modeled_hint(100, 10),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 start,
             )
@@ -2629,6 +2642,7 @@ mod tests {
                     prefill_load_hint: modeled_hint(40, 4),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 start,
             )
@@ -2684,6 +2698,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker: worker_a,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2705,6 +2720,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker: worker_b,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2733,6 +2749,7 @@ mod tests {
                 active_prefill_tokens: 0,
                 active_decode_blocks: 2,
                 active_requests: 1,
+                routing_occupancy: 1,
                 additional_active_blocks: 1,
             })
         );
@@ -2742,6 +2759,7 @@ mod tests {
                 active_prefill_tokens: 12,
                 active_decode_blocks: 3,
                 active_requests: 1,
+                routing_occupancy: 1,
                 additional_active_blocks: 2,
             })
         );
@@ -2763,6 +2781,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2775,6 +2794,37 @@ mod tests {
         );
 
         assert_eq!(potential_blocks.get(&worker).copied(), Some(6));
+    }
+
+    #[test]
+    fn routing_occupancy_can_exclude_a_tracked_request() {
+        let sequences = make_sequences();
+        let worker = WorkerWithDpRank::new(1, 0);
+        let decay_now = Instant::now();
+        sequences
+            .add_request(
+                SequenceRequest {
+                    request_id: "cache-hit".to_string(),
+                    token_sequence: None,
+                    track_prefill_tokens: false,
+                    expected_output_tokens: None,
+                    prefill_load_hint: None,
+                    worker,
+                    lora_name: None,
+                    occupancy_admission: false,
+                },
+                decay_now,
+            )
+            .unwrap();
+
+        let load = sequences.project_worker_loads(None, decay_now)[&worker];
+        assert_eq!(load.active_requests, 1);
+        assert_eq!(load.routing_occupancy, 0);
+
+        sequences.free(&"cache-hit".to_string(), decay_now).unwrap();
+        let load = sequences.project_worker_loads(None, decay_now)[&worker];
+        assert_eq!(load.active_requests, 0);
+        assert_eq!(load.routing_occupancy, 0);
     }
 
     #[test]
@@ -2799,6 +2849,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_a,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2813,6 +2864,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_b,
                     lora_name: Some("adapter-a".to_string()),
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2859,6 +2911,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_a,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2873,6 +2926,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker: worker_b,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -2931,6 +2985,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 Instant::now(),
             )
@@ -2975,6 +3030,7 @@ mod tests {
                         prefill_load_hint: tracking_hint(4),
                         worker,
                         lora_name: None,
+                        occupancy_admission: true,
                     },
                     Instant::now(),
                 )
@@ -3010,6 +3066,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 Instant::now(),
             )
@@ -3027,6 +3084,7 @@ mod tests {
                     prefill_load_hint: tracking_hint(12),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 Instant::now(),
             )
@@ -3438,6 +3496,7 @@ mod tests {
                         track_prefill_tokens: true,
                         expected_output_tokens: None,
                         prefill_load_hint: tracking_hint(12),
+                        occupancy_admission: true,
                     },
                     router_id: 99,
                     lora_name: None,
@@ -3486,6 +3545,7 @@ mod tests {
                             track_prefill_tokens: true,
                             expected_output_tokens: None,
                             prefill_load_hint: modeled_hint(12, 10),
+                            occupancy_admission: true,
                         },
                         router_id: 99,
                         lora_name: None,
@@ -3529,6 +3589,7 @@ mod tests {
                             track_prefill_tokens: true,
                             expected_output_tokens: None,
                             prefill_load_hint: modeled_hint(12, 6),
+                            occupancy_admission: true,
                         },
                         router_id: 99,
                         lora_name: None,
@@ -3587,6 +3648,7 @@ mod tests {
                                 track_prefill_tokens: true,
                                 expected_output_tokens: None,
                                 prefill_load_hint: modeled_hint(100, 10),
+                                occupancy_admission: true,
                             },
                             router_id: 99,
                             lora_name: None,
@@ -3599,6 +3661,7 @@ mod tests {
                                 track_prefill_tokens: true,
                                 expected_output_tokens: None,
                                 prefill_load_hint: modeled_hint(40, 4),
+                                occupancy_admission: true,
                             },
                             router_id: 99,
                             lora_name: None,
@@ -3663,6 +3726,7 @@ mod tests {
                     track_prefill_tokens: true,
                     expected_output_tokens: None,
                     prefill_load_hint: tracking_hint(12),
+                    occupancy_admission: true,
                 },
                 router_id: 99,
                 lora_name: None,
@@ -3752,6 +3816,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -3794,6 +3859,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 Instant::now(),
             )
@@ -3829,6 +3895,7 @@ mod tests {
                     prefill_load_hint: None,
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )
@@ -3880,6 +3947,7 @@ mod tests {
                     }),
                     worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 start,
             )

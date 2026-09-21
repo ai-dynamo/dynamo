@@ -5,6 +5,43 @@ use super::*;
 use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
 
 impl RoutingHost {
+    fn configured_device_aware_inputs(
+        &self,
+        request: &PreprocessedRequest,
+    ) -> Option<DeviceAwareRequestInputs> {
+        self.kv_router()
+            .required_worker_inputs()
+            .contains(WorkerInputs::DEVICE_AWARE)
+            .then(|| {
+                let worker_ids = self
+                    .kv_router()
+                    .workers_with_configs
+                    .borrow()
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+                let (candidates, context) =
+                    self.inner.device_aware_route_inputs(request, &worker_ids);
+                DeviceAwareRequestInputs::new(
+                    candidates.into_iter().map(|candidate| {
+                        let device = match candidate.device() {
+                            RouteDevice::Cpu => WorkerDevice::Cpu,
+                            RouteDevice::Accelerator => WorkerDevice::Accelerator,
+                        };
+                        (
+                            candidate.target().worker_id,
+                            dynamo_kv_router::selector::WorkerDeviceAwareInput::new(
+                                device,
+                                candidate.cache_hits(),
+                            ),
+                        )
+                    }),
+                    context.required_cache_hits(),
+                    context.non_cpu_to_cpu_ratio(),
+                )
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
@@ -24,6 +61,7 @@ impl RoutingHost {
             .as_ref()
             .map(to_worker_selection_session_context);
         let routing_parts = RoutingRequestParts::new(request);
+        let device_aware_inputs = self.configured_device_aware_inputs(request.content());
         let request_context = request.context().clone();
         let selection_future = self
             .select_worker_outcome(
@@ -44,6 +82,7 @@ impl RoutingHost {
                     planned_worker,
                     policy_class,
                     session_context,
+                    device_aware_inputs,
                     admission,
                 },
             )

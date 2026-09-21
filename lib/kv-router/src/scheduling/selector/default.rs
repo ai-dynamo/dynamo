@@ -260,7 +260,7 @@ fn default_row(
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
-        WorkerInputs::ALL,
+        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT,
         |effective_overlap_blocks, device_overlap_blocks| {
             context.device_overlap(effective_overlap_blocks, device_overlap_blocks)
         },
@@ -692,6 +692,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         };
         let mut selected = [false; 3];
@@ -1098,6 +1099,7 @@ mod tests {
                 preferred_taints: HashMap::new(),
             },
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         };
 
@@ -1157,6 +1159,7 @@ mod tests {
                 preferred_taints: HashMap::new(),
             },
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         };
 
@@ -1234,6 +1237,7 @@ mod tests {
                     preferred_taints: HashMap::new(),
                 },
                 shared_cache_hits: None,
+                device_aware_inputs: None,
                 resp_tx: None,
             };
 
@@ -1309,6 +1313,7 @@ mod tests {
                 preferred_taints: HashMap::from([("mdc-a".to_string(), 0.85)]),
             },
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         };
 
@@ -1380,6 +1385,7 @@ mod tests {
                 preferred_taints: HashMap::from([("mdc-a".to_string(), -0.25)]),
             },
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         };
 
@@ -1464,6 +1470,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: Some(shared_hits),
+            device_aware_inputs: None,
             resp_tx: Some(tx),
         };
 
@@ -1542,6 +1549,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: Some(tx),
         };
 
@@ -1643,6 +1651,7 @@ mod tests {
                 active_prefill_tokens: 16,
                 active_decode_blocks: 2,
                 active_requests: 0,
+                routing_occupancy: 0,
                 additional_active_blocks: 3,
             },
         );
@@ -1844,6 +1853,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: Some(tx),
         };
 
@@ -1934,6 +1944,7 @@ mod tests {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: Some(tx),
         };
 

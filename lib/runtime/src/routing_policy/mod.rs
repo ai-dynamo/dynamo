@@ -9,8 +9,5 @@ pub(crate) use occupancy::get_or_create_routing_occupancy_state;
 pub use occupancy::{OccupancyReservation, OccupancySelection, RoutingOccupancyState};
 pub use picker::BuiltinRoutePicker;
 pub(crate) use picker::RoutePicker;
-pub use types::RouteTarget;
-pub(crate) use types::{
-    AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
-    RoutePolicy,
-};
+pub(crate) use types::{AdmissionKind, CandidateView, RouteDecision, RoutePolicy};
+pub use types::{RouteCandidate, RouteContext, RouteDevice, RouteTarget};
