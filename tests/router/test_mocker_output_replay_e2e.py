@@ -74,6 +74,9 @@ async def _collect_output_token_ids(
         if not isinstance(response, dict):
             continue
 
+        assert response.get("text") is None, response
+        assert response.get("tokens") is None, response
+
         token_ids = response.get("token_ids")
         if isinstance(token_ids, list):
             output_token_ids.extend(token_ids)
