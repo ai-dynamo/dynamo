@@ -480,6 +480,11 @@ pub fn round_to_sig_figs(value: f64, sig_figs: u32) -> f64 {
 
 const MAX_BUCKET_COUNT: usize = 512;
 
+const DEFAULT_ITL_BUCKETS: [f64; 23] = [
+    0.002, 0.004, 0.006, 0.008, 0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040, 0.060, 0.080,
+    0.100, 0.200, 0.400, 0.600, 0.800, 1.000, 2.000, 4.000, 6.000, 8.000,
+];
+
 fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
     min.is_finite()
         && max.is_finite()
@@ -582,6 +587,58 @@ fn parse_bucket_config(
     }
 
     (min, max, count)
+}
+
+fn parse_bucket_list(value: &str) -> Option<Vec<f64>> {
+    let buckets = value
+        .split(',')
+        .map(|item| item.trim().parse::<f64>())
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    if buckets.is_empty()
+        || buckets.len() > MAX_BUCKET_COUNT
+        || buckets
+            .iter()
+            .any(|bucket| !bucket.is_finite() || *bucket < 0.0)
+        || buckets.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return None;
+    }
+
+    Some(buckets)
+}
+
+fn bucket_config_is_set(env: EnvLookup<'_>, env_prefix: &str) -> bool {
+    ["MIN", "MAX", "COUNT"].iter().any(|suffix| {
+        env(&format!("{env_prefix}_{suffix}")).is_some()
+            || env(&format!(
+                "{}{env_prefix}_{suffix}",
+                env_metrics::DEPRECATED_HISTOGRAM_PREFIX
+            ))
+            .is_some()
+    })
+}
+
+fn inter_token_latency_buckets(env: EnvLookup<'_>) -> Vec<f64> {
+    if let Some(value) = env(env_metrics::DYN_METRICS_ITL_BUCKETS) {
+        return parse_bucket_list(&value).unwrap_or_else(|| {
+            tracing::warn!(
+                env_var = env_metrics::DYN_METRICS_ITL_BUCKETS,
+                value,
+                "Invalid explicit ITL histogram buckets, using defaults"
+            );
+            DEFAULT_ITL_BUCKETS.to_vec()
+        });
+    }
+
+    if bucket_config_is_set(env, env_metrics::DYN_METRICS_ITL) {
+        let (min, max, count) =
+            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
+        return generate_log_buckets(min, max, count);
+    }
+
+    DEFAULT_ITL_BUCKETS.to_vec()
 }
 
 /// State for metrics handler.
@@ -857,14 +914,16 @@ impl Metrics {
     ///
     /// ## Histogram Bucket Configuration
     ///
-    /// All histograms use log-spaced buckets rounded to 2 significant figures. Bucket configuration
-    /// can be customized via environment variables (MIN: minimum value, MAX: maximum value, COUNT: number of buckets):
+    /// Histograms use log-spaced buckets rounded to 2 significant figures unless noted otherwise.
+    /// Bucket configuration can be customized via environment variables (MIN: minimum value,
+    /// MAX: maximum value, COUNT: number of buckets):
     ///
     /// - `DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}` - Request duration histogram (defaults: 1.0, 512.0, 10)
     /// - `DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}` - Input sequence length histogram (defaults: 50.0, 128000.0, 12)
     /// - `DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}` - Output sequence length histogram (defaults: 50.0, 32000.0, 10)
     /// - `DYN_METRICS_TTFT_{MIN,MAX,COUNT}` - Time to first token histogram (defaults: 0.001, 480.0, 18)
-    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Inter-token latency histogram (defaults: 0.001, 80.0, 20)
+    /// - `DYN_METRICS_ITL_BUCKETS` - Comma-separated inter-token latency bucket boundaries
+    /// - `DYN_METRICS_ITL_{MIN,MAX,COUNT}` - Legacy log-spaced inter-token latency configuration
     /// - `DYN_METRICS_EMBEDDING_LATENCY_{MIN,MAX,COUNT}` - End-to-end `/v1/embeddings` latency histogram (defaults: 0.001, 10.0, 14)
     ///
     /// ## Model Configuration Metrics
@@ -1059,10 +1118,8 @@ impl Metrics {
         )
         .unwrap();
 
-        // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) =
-            parse_bucket_config(env, env_metrics::DYN_METRICS_ITL, 0.001, 80.0, 20);
-        let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
+        // Explicit ITL boundaries take precedence over the legacy log-spaced configuration.
+        let inter_token_latency_buckets = inter_token_latency_buckets(env);
 
         let inter_token_latency = HistogramVec::new(
             HistogramOpts::new(
@@ -2852,10 +2909,7 @@ mod tests {
     }
 
     #[test]
-    fn itl_default_buckets_reach_80_seconds() {
-        // The ceiling was 2.0s, so any inter-token latency above it landed in `+Inf` and
-        // `histogram_quantile` pinned p99 at exactly 2.0 -- indistinguishable from a real
-        // 2s measurement. Guard the shipped default, not just the env-var override.
+    fn itl_default_buckets_match_sglang() {
         let registry = Registry::new();
         let metrics = Metrics::build(None, &fake_env(&[]));
         metrics.register(&registry).unwrap();
@@ -2872,16 +2926,49 @@ mod tests {
                 frontend_service::INTER_TOKEN_LATENCY_SECONDS
             ),
         );
-        // The exact set is the contract. Note the bottom edge of 0.0018: vLLM's equivalent
-        // starts at 0.01 and cannot resolve anything faster than 10ms per token, so raising
-        // the ceiling must not cost the low-end resolution Dynamo has and vLLM does not.
         assert_eq!(
             bounds,
             vec![
-                0.0, 0.0018, 0.0033, 0.0059, 0.011, 0.02, 0.035, 0.064, 0.12, 0.21, 0.38, 0.69,
-                1.2, 2.3, 4.1, 7.4, 13.0, 24.0, 44.0, 80.0
+                0.002, 0.004, 0.006, 0.008, 0.010, 0.015, 0.020, 0.025, 0.030, 0.035, 0.040, 0.060,
+                0.080, 0.100, 0.200, 0.400, 0.600, 0.800, 1.000, 2.000, 4.000, 6.000, 8.000,
             ],
         );
+    }
+
+    #[test]
+    fn explicit_itl_buckets_take_precedence_over_log_config() {
+        let env = fake_env(&[
+            ("DYN_METRICS_ITL_BUCKETS", "0.01, 0.02, 0.05"),
+            ("DYN_METRICS_ITL_MIN", "1"),
+            ("DYN_METRICS_ITL_MAX", "10"),
+            ("DYN_METRICS_ITL_COUNT", "3"),
+        ]);
+        let registry = Registry::new();
+        let metrics = Metrics::build(None, &env);
+        metrics.register(&registry).unwrap();
+        metrics
+            .inter_token_latency
+            .with_label_values(&["m"])
+            .observe(0.03);
+
+        let bounds = bucket_upper_bounds(
+            &registry,
+            &format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::INTER_TOKEN_LATENCY_SECONDS
+            ),
+        );
+        assert_eq!(bounds, vec![0.01, 0.02, 0.05]);
+    }
+
+    #[test]
+    fn invalid_explicit_itl_buckets_fall_back_to_defaults() {
+        for value in ["", "0.01,nope", "-0.01,0.02", "0.02,0.01", "0.01,0.01"] {
+            let pairs = [("DYN_METRICS_ITL_BUCKETS", value)];
+            let env = fake_env(&pairs);
+            assert_eq!(inter_token_latency_buckets(&env), DEFAULT_ITL_BUCKETS);
+        }
     }
 
     #[test]
