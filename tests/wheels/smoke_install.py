@@ -271,8 +271,8 @@ def create_venv(python_spec: str) -> Path:
     return venv_dir / "bin" / "python"
 
 
-# The public index carries only a placeholder aisimulate sdist whose build backend
-# downloads the real wheel; take the binary from NVIDIA's index instead.
+# For the pinned aisimulate 0.12.0 release, the public index carries only a placeholder
+# sdist whose build backend downloads the real wheel; use NVIDIA's binary instead.
 AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
 
 
