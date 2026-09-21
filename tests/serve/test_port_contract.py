@@ -276,6 +276,10 @@ _ASSIGNMENT = re.compile(r"\w+=\S*|\$\{?\S*")
 _PREFIX_COMMAND = re.compile(r"env|exec|nohup|setsid|stdbuf|time|sudo")
 # These reserved words introduce commands in a compound statement or pipeline.
 _COMMAND_RESERVED_WORD = re.compile(r"if|then|elif|else|while|until|do|!")
+_FUNCTION_HEADER = re.compile(
+    r"(?:function\s+([A-Za-z_][\w-]*)(?:\s*\(\s*\))?|"
+    r"([A-Za-z_][\w-]*)\s*\(\s*\))\s*"
+)
 
 
 class _Command(NamedTuple):
@@ -284,6 +288,7 @@ class _Command(NamedTuple):
     quoted: str  # per-character mask of text: "q" came from inside quotes
     terminator: str  # operator that ended the command; "&" backgrounds it
     segments: tuple[int, ...]  # offsets in text where each pipeline segment starts
+    body: tuple["_Command", ...] | None = None  # function definitions are not calls
 
 
 def _read_quoted(script: str, index: int, *, ansi_c: bool = False) -> tuple[int, str]:
@@ -343,7 +348,8 @@ def _split_commands(script: str) -> list[_Command]:
     line = 1
     start = 1
     group = 0  # index in commands of the first member of the open AND-OR list
-    scopes: list[tuple[str, int, int]] = []  # closer, first member, outer AND-OR list
+    # closer, first member, outer AND-OR list, function name, definition line
+    scopes: list[tuple[str, int, int, str, int]] = []
     scoped: set[int] = set()  # preserve inner terminators unless the group gets &
     index = 0
     size = len(script)
@@ -435,10 +441,24 @@ def _split_commands(script: str) -> list[_Command]:
                     line += script[index:end].count("\n")
                     index = end
                     continue
-        if not "".join(parts).strip() and (
+        header = "".join(parts).strip()
+        function = (
+            _FUNCTION_HEADER.fullmatch(header)
+            if char in "{\n" and "q" not in "".join(mask)
+            else None
+        )
+        if function and char == "\n":
+            add(" ", False)  # the opening brace may follow the header on a new line
+            line += 1
+            index += 1
+            continue
+        if (function or not header) and (
             char == "(" or (char == "{" and script[index + 1 : index + 2].isspace())
         ):
-            scopes.append((")" if char == "(" else "}", len(commands), group))
+            name = (function.group(1) or function.group(2)) if function else ""
+            scopes.append(
+                (")" if char == "(" else "}", len(commands), group, name, start)
+            )
             group = len(commands)
             parts.clear()
             mask.clear()
@@ -451,8 +471,16 @@ def _split_commands(script: str) -> list[_Command]:
         closes_scope = scopes and char == scopes[-1][0]
         if closes_scope and (char == ")" or not "".join(parts).strip()):
             flush("\n")
-            _, first, group = scopes.pop()
-            scoped.update(range(first, len(commands)))
+            _, first, group, name, definition_line = scopes.pop()
+            if name:
+                body = tuple(commands[first:])
+                del commands[first:]
+                scoped.intersection_update(range(first))
+                commands.append(
+                    _Command(definition_line, name, "." * len(name), "\n", (0,), body)
+                )
+            else:
+                scoped.update(range(first, len(commands)))
             prev_code = char
             pending = False
             index += 1
@@ -513,7 +541,7 @@ def _calls_wait_any_exit(script: str) -> bool:
     """Report whether the script runs ``wait_any_exit``, whatever follows the call."""
     return any(
         command.text.split()[:1] == ["wait_any_exit"] and command.quoted[0] == "."
-        for command in _split_commands(script)
+        for command in _executed_commands(script)
     )
 
 
@@ -534,10 +562,38 @@ def _in_command_position(command: _Command, start: int) -> bool:
     return True
 
 
+def _executed_commands(script: str) -> list[_Command]:
+    """Expand function calls, retaining body launches and invocation backgrounding."""
+    functions: dict[str, tuple[_Command, ...]] = {}
+    executed: list[_Command] = []
+
+    def visit(commands: tuple[_Command, ...], active: frozenset[str]) -> None:
+        for command in commands:
+            if command.body is not None:
+                functions[command.text] = command.body
+                continue
+            executed.append(command)
+            for match in re.finditer(r"\S+", command.text):
+                name = match.group()
+                if name not in functions or name in active:
+                    continue
+                if "q" in command.quoted[match.start() : match.end()]:
+                    continue
+                if not _in_command_position(command, match.start()):
+                    continue
+                body = functions[name]
+                if command.terminator == "&":
+                    body = tuple(part._replace(terminator="&") for part in body)
+                visit(body, active | {name})
+
+    visit(tuple(_split_commands(script)), frozenset())
+    return executed
+
+
 def _service_launches(script: str) -> list[tuple[int, str, bool]]:
     """Return (line, command, is_background) for each Dynamo service launched."""
     launches = []
-    for command in _split_commands(script):
+    for command in _executed_commands(script):
         # Every match, not just the first: a pipeline holds several commands, and
         # a quoted match early in one would otherwise hide a real launch after it.
         for match in _SERVICE.finditer(command.text):
@@ -655,6 +711,43 @@ def test_compound_command_keywords_expose_service_launches() -> None:
         (1, "python -m dynamo.vllm", False),
         (1, "python -m dynamo.frontend", False),
     ]
+
+
+def test_function_launches_inherit_each_invocation_background_status() -> None:
+    """A definition launches nothing; each call applies its own background status."""
+    script = (
+        "run_worker() {\n"
+        "    python -m dynamo.vllm\n"
+        "}\n"
+        "unused() {\n"
+        "    python -m dynamo.fake\n"
+        "}\n"
+        "run_worker &\n"
+        "run_worker\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [
+        (2, "python -m dynamo.vllm", True),
+        (2, "python -m dynamo.vllm", False),
+    ]
+
+
+def test_nested_function_calls_keep_inner_jobs_and_wait_detection() -> None:
+    """Expand nested calls without losing inner jobs or recursing indefinitely."""
+    script = (
+        "function worker\n{\n"
+        "    python -m dynamo.vllm &\n"
+        "    worker\n"
+        "}\n"
+        "launch() {\n"
+        "    worker\n"
+        "    wait_any_exit\n"
+        "}\n"
+        "launch\n"
+    )
+    assert _service_launches(script) == [(3, "python -m dynamo.vllm", True)]
+    assert _calls_wait_any_exit(script)
+    assert not _calls_wait_any_exit("unused() { wait_any_exit; }\n")
 
 
 def test_quoted_match_does_not_hide_a_later_launch() -> None:
