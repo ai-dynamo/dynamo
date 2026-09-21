@@ -205,8 +205,8 @@ Each config section maps to an env prefix. The suffix after the prefix is lowerc
 | `KVBM_MESSENGER_BACKEND_` | TCP transport | `TCP_ADDR`, `TCP_INTERFACE`, `TCP_PORT` (0 = OS-assigned) |
 | `KVBM_MESSENGER_DISCOVERY_` | Peer discovery | `CLUSTER_ID`, plus etcd/p2p/filesystem fields |
 | `KVBM_NIXL_` | NixL backends | `BACKENDS` (default `UCX`, `POSIX`) |
-| `KVBM_CACHE_HOST_` | Host tier | `SIZE_GB`, `NUM_BLOCKS` |
-| `KVBM_CACHE_DISK_` | Disk tier | `SIZE_GB`, `NUM_BLOCKS`, `USE_GDS` (false), `STORAGE_PATH` |
+| `KVBM_CACHE_HOST_` | Host tier | `CACHE_SIZE_GB`, `NUM_BLOCKS` |
+| `KVBM_CACHE_DISK_` | Disk tier | `CACHE_SIZE_GB`, `NUM_BLOCKS`, `USE_GDS` (false), `STORAGE_PATH` |
 | `KVBM_CACHE_PARALLELISM` | Parallelism mode | `tensor_parallel` (default) or `replicated_data` |
 | `KVBM_EVENTS_` | Event publishing | `ENABLED` (false), `SUBJECT` (`kvbm.events`), `CHANNEL_CAPACITY` (1024), `POLICY` (`power_of_two`) |
 | `KVBM_EVENTS_BATCHING_` | Event batching | `WINDOW_DURATION_MS` (10), `MAX_BATCH_SIZE` (1024) |
