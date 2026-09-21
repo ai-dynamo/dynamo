@@ -11,6 +11,8 @@ use dynamo_llm::kv_router::protocols::KvTransferEnforcement;
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use tokio::time::Instant;
 
+use dynamo_runtime::config::is_truthy;
+
 use crate::error::{BackendError, DynamoError, ErrorType};
 
 const DEFAULT_MOUNT_PATH: &str = "/etc/dynamo/topology";
@@ -38,7 +40,7 @@ async fn apply_from_env(
     poll_interval: Duration,
     poll_timeout: Duration,
 ) -> Result<(), DynamoError> {
-    if !env("DYN_TOPOLOGY_ENABLED").is_some_and(|value| value.trim().eq_ignore_ascii_case("true")) {
+    if !env("DYN_TOPOLOGY_ENABLED").is_some_and(|value| is_truthy(&value)) {
         return Ok(());
     }
 

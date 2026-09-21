@@ -10,7 +10,7 @@ and its contents as this worker's value for that domain. The Rust runtime
 derives canonical topology taints from the published topology domains.
 
 Environment variables:
-    DYN_TOPOLOGY_ENABLED: Set to "true" to enable topology reading.
+    DYN_TOPOLOGY_ENABLED: Set to a truthy value (true/1/on/yes) to enable topology reading.
     DYN_TOPOLOGY_MOUNT_PATH: Directory containing topology domain files
         (default: /etc/dynamo/topology).
     DYN_KV_TRANSFER_DOMAIN: Which topology domain the router should enforce
@@ -28,6 +28,8 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from dynamo.common.configuration.utils import parse_bool
 
 _TOPOLOGY_ENABLED_VAR = "DYN_TOPOLOGY_ENABLED"
 _TOPOLOGY_MOUNT_PATH_VAR = "DYN_TOPOLOGY_MOUNT_PATH"
@@ -142,8 +144,7 @@ def read_topology_config(
             not set, the transfer-domain topology file is still missing or
             empty after the timeout.
     """
-    enabled = os.environ.get(_TOPOLOGY_ENABLED_VAR, "").strip().lower()
-    if enabled != "true":
+    if not parse_bool(os.environ.get(_TOPOLOGY_ENABLED_VAR, "")):
         return TopologyConfig()
 
     (
