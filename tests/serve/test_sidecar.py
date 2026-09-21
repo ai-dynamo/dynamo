@@ -17,6 +17,7 @@ from tests.serve.common import (
 )
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
+from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import LONG_PROMPT_FOR_CACHING, chat_payload_default
 from tests.utils.payloads import ChatPayload, DisaggregatedChatPayload
 from tests.utils.port_utils import reserved_ports
@@ -32,13 +33,11 @@ trtllm_sidecar_dir = os.environ.get("TRTLLM_SIDECAR_DIR") or os.path.join(
 )
 
 
-def _sidecar_worker_gpu_env(
-    backend: str, roles: tuple[str, str] = ("WORKER1", "WORKER2")
-) -> dict[str, str]:
+def _sidecar_worker_gpu_env(backend: str) -> dict[str, str]:
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1").split(",")
     env = {}
-    for index, role in enumerate(roles):
-        key = f"{backend.upper()}_{role}_GPU"
+    for index in range(2):
+        key = f"{backend.upper()}_WORKER{index + 1}_GPU"
         device = os.environ.get(key)
         if device is None:
             assert len(devices) > index and devices[index].strip() not in (
@@ -134,7 +133,7 @@ sidecar_configs = {
         script_name="disagg.sh",
         marks=[
             pytest.mark.vllm,
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_vllm_kv_cache_bytes(1119388000),
@@ -152,7 +151,7 @@ sidecar_configs = {
         script_args=["--disable-cuda-graph"],
         marks=[
             pytest.mark.sglang,
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
             pytest.mark.requested_sglang_kv_tokens(2048),
@@ -197,8 +196,10 @@ def test_serve_deployment(
         monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
         backend = config.name.removesuffix("_disaggregated")
         roles = ("DECODE", "PREFILL") if backend == "vllm" else ("PREFILL", "DECODE")
+        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+        assert device != "-1", "One visible GPU is required"
         engine_env = {
-            **_sidecar_worker_gpu_env(backend, roles),
+            **{f"{backend.upper()}_{role}_GPU": device for role in roles},
             "DYN_NAMESPACE": f"sidecar-disagg-{generate_random_suffix()}",
             "MODEL": config.model,
         }

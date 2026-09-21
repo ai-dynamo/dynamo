@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Disaggregated serving through two SGLang native gRPC servers (2 GPUs).
+# Disaggregated serving through two SGLang native gRPC servers (2 workers).
 # Requires an SGLang build with native gRPC sidecar and disaggregated serving support.
 
 set -e
@@ -75,7 +75,7 @@ MAX_CONCURRENT_SEQS="${MAX_CONCURRENT_SEQS:-2}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-print_launch_banner "Launching SGLang Native-gRPC Sidecar (Disaggregated, 2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching SGLang Native-gRPC Sidecar (Disaggregated, 2 workers)" "$MODEL" "$HTTP_PORT" \
     "Prefill:     GPU ${SGLANG_PREFILL_GPU}, HTTP http://${SGLANG_HOST}:${SGLANG_PREFILL_HTTP_PORT}, gRPC ${SGLANG_HOST}:${SGLANG_PREFILL_GRPC_PORT}" \
     "Decode:      GPU ${SGLANG_DECODE_GPU}, HTTP http://${SGLANG_HOST}:${SGLANG_DECODE_HTTP_PORT}, gRPC ${SGLANG_HOST}:${SGLANG_DECODE_GRPC_PORT}" \
     "Bootstrap:   ${SGLANG_BOOTSTRAP_HOST}:${SGLANG_DISAGGREGATION_BOOTSTRAP_PORT}"
