@@ -660,6 +660,84 @@ mod tests {
         .unwrap();
     }
 
+    /// A backend that removes one instance when a watch opens. A list that ran before the watch
+    /// would still show the instance.
+    struct UnregisterOnWatch {
+        inner: MockDiscovery,
+        instance: std::sync::Mutex<Option<DiscoveryInstance>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Discovery for UnregisterOnWatch {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(
+            &self,
+            spec: DiscoverySpec,
+        ) -> anyhow::Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> anyhow::Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> anyhow::Result<Vec<DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel: Option<CancellationToken>,
+        ) -> anyhow::Result<dynamo_runtime::discovery::DiscoveryStream> {
+            let stale = self.instance.lock().unwrap().take();
+            if let Some(stale) = stale {
+                self.inner.unregister(stale).await?;
+            }
+            self.inner.list_and_watch(query, cancel).await
+        }
+    }
+
+    /// Startup opens the watch before it lists, so an instance that leaves as the watch opens
+    /// is not in the first membership.
+    #[tokio::test]
+    async fn startup_opens_the_watch_before_it_lists() {
+        let inner = MockDiscovery::new(Some(1), SharedMockRegistry::new());
+        let mut card = ModelDeploymentCard::with_name_only("a");
+        card.source_path = Some("test/a".into());
+        card.kv_cache_block_size = 64;
+        card.worker_type = Some(WorkerType::Aggregated);
+        let stale = inner
+            .register(DiscoverySpec::Model {
+                namespace: "a".into(),
+                component: "worker".into(),
+                endpoint: "generate".into(),
+                card_json: serde_json::to_value(card).unwrap(),
+                model_suffix: None,
+            })
+            .await
+            .unwrap();
+        let discovery: Arc<dyn Discovery> = Arc::new(UnregisterOnWatch {
+            inner,
+            instance: std::sync::Mutex::new(Some(stale)),
+        });
+        let membership = DcMembershipWatch::start_sources(
+            discovery,
+            crate::kv_dc_relay::host::KvDcRelaySources::Discovery(KvDcRelayDiscoveryConfig {
+                namespaces: vec!["a".into()],
+                ..Default::default()
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(membership.receiver.borrow().endpoints.is_empty());
+        membership.shutdown().await;
+    }
+
     #[tokio::test]
     async fn discovery_tracks_added_and_removed_namespaces_with_endpoint_filters() {
         let discovery: Arc<dyn Discovery> =
