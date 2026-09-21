@@ -122,6 +122,25 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 # expecting KV-transfer metadata from an upstream prefill worker.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
 
+_EXTERNAL_ENCODER_REQUEST_CONFLICTS = (
+    "multi_modal_data",
+    "multi_modal_uuids",
+    "prompt_embeds",
+    "mm_processor_kwargs",
+    "mm_routing_info",
+    "media_io_kwargs",
+)
+_EXTERNAL_ENCODER_EXTRA_ARG_CONFLICTS = (
+    "mm_processor_kwargs",
+    "mm_kwargs_shm",
+    "mm_kwargs_nixl",
+    "mm_hashes",
+    "mm_hashes_by_modality",
+    "mm_placeholders",
+    "mm_placeholders_by_modality",
+    "expanded_token_ids",
+)
+
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
@@ -3580,25 +3599,22 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         conflicts = [
             key
-            for key in (
-                "multi_modal_data",
-                "multi_modal_uuids",
-                "prompt_embeds",
-            )
+            for key in _EXTERNAL_ENCODER_REQUEST_CONFLICTS
             if request.get(key) is not None
         ]
         extra_args = request.get("extra_args")
         if isinstance(extra_args, Mapping):
             conflicts.extend(
                 f"extra_args.{key}"
-                for key in ("mm_kwargs_shm", "mm_kwargs_nixl")
+                for key in _EXTERNAL_ENCODER_EXTRA_ARG_CONFLICTS
                 if extra_args.get(key) is not None
             )
 
         if conflicts:
             raise InvalidArgument(
                 "encoder_result is authoritative and cannot be combined with "
-                f"raw multimodal or prompt embedding fields: {sorted(conflicts)}"
+                "multimodal inputs, transfer data, or routing metadata: "
+                f"{sorted(conflicts)}"
             )
         encoder_result = request.get("encoder_result")
         if not isinstance(encoder_result, Mapping):
@@ -3634,6 +3650,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             kv_params = None
 
         mode = cast(DisaggregationMode, self.config.disaggregation_mode)
+        is_decode_only = mode == DisaggregationMode.DECODE
+        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
+            request.get("annotations") or []
+        ):
+            logger.debug(
+                "DECODE: conditional-disagg bypass annotation present; "
+                "running request as AGG (prefill+decode on this worker)."
+            )
+            is_decode_only = False
+            mode = DisaggregationMode.AGGREGATED
+
         has_external_encoder_result = request.get("encoder_result") is not None
         if has_external_encoder_result and mode != DisaggregationMode.AGGREGATED:
             yield {
@@ -3645,16 +3672,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "token_ids": [],
             }
             return
-        is_decode_only = mode == DisaggregationMode.DECODE
-        if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
-            request.get("annotations") or []
-        ):
-            logger.debug(
-                "DECODE: conditional-disagg bypass annotation present; "
-                "running request as AGG (prefill+decode on this worker)."
-            )
-            is_decode_only = False
-            mode = DisaggregationMode.AGGREGATED
         has_mm_data = request.get("multi_modal_data") is not None
         assembled_prompt: EmbedsPrompt | TokensPrompt | None = None
 

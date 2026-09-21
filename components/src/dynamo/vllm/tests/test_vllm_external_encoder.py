@@ -16,7 +16,7 @@ from dynamo.common.external_encoder import (
 )
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.constants import DisaggregationMode
-from dynamo.vllm.handlers import DecodeWorkerHandler
+from dynamo.vllm.handlers import BYPASS_REMOTE_PREFILL_ANNOTATION, DecodeWorkerHandler
 from dynamo.vllm.multimodal_utils.external_encoder import ExternalEncoderPromptLoader
 
 pytestmark = [
@@ -153,6 +153,7 @@ async def test_handler_assembles_external_prompt_through_shared_loader() -> None
     request = {
         "token_ids": [_IMAGE_TOKEN_ID],
         "encoder_result": _encoder_result(row_splits=(0, 3)),
+        "extra_args": {"nvext": {"extra_fields": ["engine_data"]}},
     }
 
     prompt = await handler._assemble_external_encoder_prompt(request, "req-1")
@@ -164,15 +165,54 @@ async def test_handler_assembles_external_prompt_through_shared_loader() -> None
     )
 
 
-async def test_handler_rejects_competing_raw_media() -> None:
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("multi_modal_data", {"image_url": [{"Url": "unused"}]}),
+        ("multi_modal_uuids", {"image": ["unused"]}),
+        ("prompt_embeds", "unused"),
+        ("mm_processor_kwargs", {}),
+        ("mm_routing_info", {}),
+        ("media_io_kwargs", {}),
+    ],
+)
+async def test_handler_rejects_competing_top_level_multimodal_fields(
+    field: str,
+    value: object,
+) -> None:
     handler = _handler()
     request = {
         "token_ids": [_IMAGE_TOKEN_ID],
         "encoder_result": _encoder_result(row_splits=(0, 3)),
-        "multi_modal_data": {"image_url": [{"Url": "unused"}]},
+        field: value,
     }
 
-    with pytest.raises(InvalidArgument, match="authoritative"):
+    with pytest.raises(InvalidArgument, match=field):
+        await handler._assemble_external_encoder_prompt(request, "req-1")
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "mm_processor_kwargs",
+        "mm_kwargs_shm",
+        "mm_kwargs_nixl",
+        "mm_hashes",
+        "mm_hashes_by_modality",
+        "mm_placeholders",
+        "mm_placeholders_by_modality",
+        "expanded_token_ids",
+    ],
+)
+async def test_handler_rejects_competing_multimodal_extra_args(field: str) -> None:
+    handler = _handler()
+    request = {
+        "token_ids": [_IMAGE_TOKEN_ID],
+        "encoder_result": _encoder_result(row_splits=(0, 3)),
+        "extra_args": {field: {}},
+    }
+
+    with pytest.raises(InvalidArgument, match=rf"extra_args\.{field}"):
         await handler._assemble_external_encoder_prompt(request, "req-1")
 
 
@@ -204,6 +244,31 @@ async def test_handler_rejects_external_result_on_disaggregated_worker() -> None
 
     assert len(chunks) == 1
     assert "aggregated vLLM worker" in chunks[0]["finish_reason"]
+
+
+async def test_decode_bypass_selects_external_prompt_assembly() -> None:
+    handler = _handler(DisaggregationMode.DECODE)
+    handler._assemble_external_encoder_prompt = AsyncMock(
+        side_effect=InvalidArgument("stop after selection")
+    )
+    request = {
+        "encoder_result": _encoder_result(row_splits=(0, 3)),
+        "annotations": [BYPASS_REMOTE_PREFILL_ANNOTATION],
+    }
+
+    with pytest.raises(InvalidArgument, match="stop after selection"):
+        _ = [
+            chunk
+            async for chunk in handler._generate_token_mode(
+                request,
+                MagicMock(),
+                "req-1",
+            )
+        ]
+    handler._assemble_external_encoder_prompt.assert_awaited_once_with(
+        request,
+        "req-1",
+    )
 
 
 async def test_aggregated_token_path_selects_external_prompt_assembly() -> None:
