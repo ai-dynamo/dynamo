@@ -375,7 +375,7 @@ async def test_multimodal_prefill_overwrites_forwarded_thinking_budget(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_multimodal_prefill_returns_invalid_request_errors():
+async def test_multimodal_prefill_propagates_invalid_request_errors():
     handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
     handler.bootstrap_host = "prefill-host"
     handler.bootstrap_port = 1234
@@ -391,17 +391,12 @@ async def test_multimodal_prefill_returns_invalid_request_errors():
     stream = handler.generate(
         SimpleNamespace(sampling_params={}), _FakeContext("request-id")
     )
-    output = json.loads(await anext(stream))
-
-    assert output["finish_reason"] == "error"
-    assert "thinking_token_budget" in output["error"]
-
-    with pytest.raises(StopAsyncIteration):
+    with pytest.raises(InvalidArgument, match="thinking_token_budget"):
         await anext(stream)
 
 
 @pytest.mark.asyncio
-async def test_multimodal_decode_propagates_prefill_validation_errors():
+async def test_multimodal_decode_treats_prefill_errors_as_server_failures():
     handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
 
     async def prefill_error():
@@ -424,7 +419,7 @@ async def test_multimodal_decode_propagates_prefill_validation_errors():
         )
     )
 
-    with pytest.raises(InvalidArgument, match="thinking_token_budget"):
+    with pytest.raises(RuntimeError, match="thinking_token_budget"):
         await handler._get_bootstrap_from_prefill(request, {})
 
 

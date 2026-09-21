@@ -725,8 +725,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise RuntimeError("No bootstrap info received from prefill worker")
 
         if bootstrap_info.get("finish_reason") == "error":
-            raise InvalidArgument(
-                bootstrap_info.get("error", "Prefill worker rejected the request")
+            raise RuntimeError(
+                bootstrap_info.get("error", "Prefill worker failed the request")
             )
 
         return bootstrap_info
@@ -886,6 +886,8 @@ class MultimodalPrefillWorkerHandler(
                                 ),
                             )
 
+        except InvalidArgument:
+            raise
         except Exception as e:
             logger.error(f"Error in prefill generation: {e}", exc_info=True)
             extra_fields = (

@@ -670,6 +670,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         priority_kwargs = self._priority_kwargs(priority)
         sampling_params = self._build_sampling_params(request)
         logging.debug("SGLang sampling params configured")
+        thinking_budget = sampling_params.get("custom_params", {}).get("thinking_budget")
+        if thinking_budget is not None:
+            logging.debug("SGLang thinking budget configured: %s", thinking_budget)
         submitted_request_id = _ordered_cancellation_request_id(
             sglang_request_id,
             sampling_params,
