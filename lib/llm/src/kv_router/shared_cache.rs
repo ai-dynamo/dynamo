@@ -596,12 +596,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn sglang_group_id(logical_page_hash: &str, config: &SglangHicacheMooncakeConfig) -> String {
-    match config
-        .extra_backend_tag
+    let prefix = config
+        .hicache_object_layout
+        .key_prefix
         .as_deref()
-        .filter(|tag| !tag.is_empty())
-    {
-        Some(tag) => format!("sglang-hicache:{tag}_{logical_page_hash}"),
+        .or(config.extra_backend_tag.as_deref())
+        .filter(|tag| !tag.is_empty());
+    match prefix {
+        Some(prefix) => format!("sglang-hicache:{prefix}_{logical_page_hash}"),
         None => format!("sglang-hicache:{logical_page_hash}"),
     }
 }
@@ -995,6 +997,23 @@ mod tests {
         };
 
         assert_eq!(sglang_group_id("hash", &config), "sglang-hicache:tag_hash");
+    }
+
+    #[test]
+    fn test_sglang_group_id_uses_advertised_key_prefix() {
+        let config = SglangHicacheMooncakeConfig {
+            hicache_object_layout: HicacheObjectLayout {
+                pools: vec![all_pages_pool("__deepseek_v4_c4")],
+                key_prefix: Some("tag_deepseek-ai-DeepSeek-V4".to_string()),
+            },
+            extra_backend_tag: Some("tag".to_string()),
+            ..mooncake_config()
+        };
+
+        assert_eq!(
+            sglang_group_id("hash", &config),
+            "sglang-hicache:tag_deepseek-ai-DeepSeek-V4_hash"
+        );
     }
 
     #[test]
