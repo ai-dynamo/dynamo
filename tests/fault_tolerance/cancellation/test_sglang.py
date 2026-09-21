@@ -18,6 +18,7 @@ import pytest
 from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
     poll_for_pattern,
+    read_log_content,
     read_streaming_responses,
     send_cancellable_request,
     send_completion_request,
@@ -31,6 +32,7 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 
 FOLLOWUP_TIMEOUT_S = 30.0
 PREFILL_CANCELLATION_MAX_TOKENS = 1
+DECODE_HANDOFF_CANCELLATION_MAX_TOKENS = 256
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +55,7 @@ class DynamoWorkerProcess(ManagedProcess):
         system_port: int,
         frontend_port: int,
         mode: str = "agg",
+        serialize_requests: bool = False,
     ):
         """
         Initialize SGLang worker process.
@@ -62,6 +65,8 @@ class DynamoWorkerProcess(ManagedProcess):
             system_port: Port for system metrics server
             frontend_port: Port where frontend is running
             mode: One of "agg", "prefill", "decode"
+            serialize_requests: Disable CUDA graphs and run one request at a time for
+                cancellation timing tests.
         """
         command = [
             "python3",
@@ -76,10 +81,9 @@ class DynamoWorkerProcess(ManagedProcess):
             "--tp",
             "1",
             "--trust-remote-code",
-            "--disable-cuda-graph",
-            "--max-running-requests",
-            "1",
         ]
+        if serialize_requests:
+            command.extend(["--disable-cuda-graph", "--max-running-requests", "1"])
 
         # Add mode-specific arguments
         if mode == "agg":
@@ -432,8 +436,9 @@ def test_request_cancellation_sglang_decode_cancel(
 @pytest.mark.timeout(900)
 @pytest.mark.gpu_2
 @pytest.mark.pre_merge
+@pytest.mark.parametrize("cancel_phase", ["prefill_received", "decode_handoff"])
 def test_request_cancellation_sglang_prefill_cancel(
-    request, runtime_services_dynamic_ports, predownload_models
+    request, runtime_services_dynamic_ports, predownload_models, cancel_phase
 ):
     decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
     request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
@@ -446,19 +451,27 @@ def test_request_cancellation_sglang_prefill_cancel(
             system_port=decode_system_port,
             frontend_port=frontend.frontend_port,
             mode="decode",
+            serialize_requests=True,
         ) as decode_worker:
             with DynamoWorkerProcess(
                 request,
                 system_port=prefill_system_port,
                 frontend_port=frontend.frontend_port,
                 mode="prefill",
+                serialize_requests=True,
             ) as prefill_worker:
                 time.sleep(2)
+                decode_log_offset = len(read_log_content(decode_worker.log_path))
+                max_tokens = (
+                    PREFILL_CANCELLATION_MAX_TOKENS
+                    if cancel_phase == "prefill_received"
+                    else DECODE_HANDOFF_CANCELLATION_MAX_TOKENS
+                )
                 cancellable_req = send_cancellable_request(
                     frontend.frontend_port,
                     "completion",
                     use_long_prompt=True,
-                    max_tokens=PREFILL_CANCELLATION_MAX_TOKENS,
+                    max_tokens=max_tokens,
                 )
                 request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
@@ -468,6 +481,17 @@ def test_request_cancellation_sglang_prefill_cancel(
                     poll_interval_ms=50,
                     cancellable_request=cancellable_req,
                 )
+
+                if cancel_phase == "decode_handoff":
+                    poll_for_pattern(
+                        process=decode_worker,
+                        pattern="Using bootstrap_info:",
+                        log_offset=decode_log_offset,
+                        match_type="contains",
+                        max_wait_ms=15000,
+                        poll_interval_ms=50,
+                        cancellable_request=cancellable_req,
+                    )
 
                 cancellable_req.cancel()
                 poll_for_pattern(

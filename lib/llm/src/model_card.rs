@@ -1267,6 +1267,8 @@ impl ModelDeploymentCard {
                     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                 );
 
+                // Keep workers with different cancellation semantics out of the same
+                // admitted cohort during rolling upgrades. Missing and false stay compatible.
                 if self.runtime_config.runtime_flag_enabled(
                     crate::local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
                 ) {
