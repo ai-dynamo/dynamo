@@ -22,7 +22,11 @@ from dynamo.sglang.engine_generate import (
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
+from dynamo.sglang.request_handlers.llm.decode_handler import (
+    _native_payload_is_batched,
+    _ordered_cancellation_request_id,
+    _sampling_option_params,
+)
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
     raise_if_unextracted_multimodal,
@@ -89,11 +93,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         sglang_request_id = new_sglang_request_id()
-        submitted_request_id = (
-            sglang_request_id
-            if getattr(self, "_supports_ordered_cancellation", False)
-            else None
-        )
         logging.debug(
             "Submitted SGLang Request ID: %s, Context: %s",
             sglang_request_id,
@@ -182,6 +181,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         priority_kwargs = self._priority_kwargs(priority)
         if native_payload is not None:
             input_ids = input_param.get("input_ids")
+            native_payload_is_batched = _native_payload_is_batched(
+                {"input_ids": input_ids}
+            )
             if not isinstance(input_ids, list):
                 raise ValueError("native SGLang Generate requires token input")
             native_request = build_native_generate_request(
@@ -197,8 +199,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 routed_dp_rank=dp_rank,
                 lora_path=lora_path,
             )
+            submitted_request_id = _ordered_cancellation_request_id(
+                sglang_request_id,
+                native_request.sampling_params,
+                supported=getattr(self, "_supports_ordered_cancellation", False),
+                batched=native_payload_is_batched,
+            )
             results = native_generate_stream(self.engine, native_request)
         else:
+            submitted_request_id = _ordered_cancellation_request_id(
+                sglang_request_id,
+                sampling_params,
+                supported=getattr(self, "_supports_ordered_cancellation", False),
+                batched=False,
+            )
             results = await self.engine.async_generate(
                 **input_param,
                 **mm_kwargs,

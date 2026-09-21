@@ -12,7 +12,7 @@ from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHand
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.sglang,
-    pytest.mark.core,
+    pytest.mark.fault_tolerance,
     pytest.mark.gpu_0,
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
@@ -165,6 +165,68 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     assert aborted.is_set()
     assert drained.is_set()
     assert not registry
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_native_batched_prefill_disables_ordered_cancellation(monkeypatch):
+    captured_submitted_id = None
+    captured_native_request = None
+
+    async def native_results():
+        if False:
+            yield None
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace()
+    handler.bootstrap_host = "127.0.0.1"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+    handler._consume_tasks = set()
+    handler._supports_ordered_cancellation = True
+    handler._generate_bootstrap_room = lambda: 17
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+
+    async def capture_consume(_results, submitted_request_id, _context):
+        nonlocal captured_submitted_id
+        captured_submitted_id = submitted_request_id
+
+    def capture_native_stream(_engine, request):
+        nonlocal captured_native_request
+        captured_native_request = request
+        return native_results()
+
+    handler._consume_results = capture_consume
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.new_sglang_request_id",
+        lambda: "internal-request-id",
+    )
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.prefill_handler.native_generate_stream",
+        capture_native_stream,
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id", trace_id=None, trace_headers=lambda: {}
+    )
+    stream = handler.generate(
+        {
+            "request": {
+                "token_ids": [[1], [2]],
+                "routing": {},
+                "extra_args": {"sglang_tito": {}},
+            },
+            "sampling_params": {},
+        },
+        context,
+    )
+
+    await anext(stream)
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    assert captured_submitted_id is None
+    assert captured_native_request.input_ids == [[1], [2]]
 
 
 async def _drain(stream):
