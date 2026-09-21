@@ -305,6 +305,8 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 The optional cache-reuse funnel records prompt-token totals at each handoff from router selection through worker cache lookup. Comparing the stages shows where potential prefix reuse was lost.
 
+F2 and F3 report raw contiguous prefix overlap in token units across device, host-pinned, and disk or external tiers. They do not apply the router's configurable cache-tier weights; those weights affect worker selection only.
+
 Enable it on the router/frontend process:
 
 ```bash

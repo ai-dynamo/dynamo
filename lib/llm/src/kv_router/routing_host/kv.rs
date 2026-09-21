@@ -347,13 +347,16 @@ where
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
         let cache_loss_tracking = if !is_query_only && self.cache_reuse_funnel_f2_onward_enabled {
-            selection.max_cached_tokens.map(|max_cached_tokens| {
-                CacheLossTracking::new(RouteObservation {
-                    prompt_tokens: routing_parts.token_ids.len() as u64,
-                    best_router_tokens: max_cached_tokens as u64,
-                    selected_router_tokens: selection.cached_tokens as u64,
+            selection
+                .max_raw_cached_tokens
+                .zip(selection.selected_raw_cached_tokens)
+                .map(|(max_raw_cached_tokens, selected_raw_cached_tokens)| {
+                    CacheLossTracking::new(RouteObservation {
+                        prompt_tokens: routing_parts.token_ids.len() as u64,
+                        best_router_tokens: max_raw_cached_tokens as u64,
+                        selected_router_tokens: selected_raw_cached_tokens as u64,
+                    })
                 })
-            })
         } else {
             None
         };
