@@ -75,6 +75,29 @@ impl PrefillLifecycleState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefillDispatchErrorClass {
+    Cancelled,
+    AtCapacity,
+    Failed,
+}
+
+fn classify_prefill_dispatch_error(
+    error: &(dyn std::error::Error + 'static),
+) -> PrefillDispatchErrorClass {
+    if match_error_chain(error, &[ErrorType::Cancelled], &[]) {
+        PrefillDispatchErrorClass::Cancelled
+    } else if match_error_chain(
+        error,
+        &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
+        &[],
+    ) {
+        PrefillDispatchErrorClass::AtCapacity
+    } else {
+        PrefillDispatchErrorClass::Failed
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PrefillError {
     #[error("Prefill router not yet activated")]
@@ -505,18 +528,17 @@ impl
         let (outcome, topology_constraints) = match prefill_result {
             Ok(result) => result,
             Err(error) => {
-                use dynamo_runtime::error::{ErrorType, match_error_chain};
-                if match_error_chain(
-                    error.as_ref(),
-                    &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
-                    &[],
-                ) {
-                    tracing::warn!(
+                match classify_prefill_dispatch_error(error.as_ref()) {
+                    PrefillDispatchErrorClass::Cancelled => {
+                        tracing::debug!(error = %error, "Remote prefill cancelled");
+                    }
+                    PrefillDispatchErrorClass::AtCapacity => tracing::warn!(
                         error = %error,
                         "request rejected by prefill worker (at capacity)"
-                    );
-                } else {
-                    tracing::error!(error = %error, "Remote prefill failed, failing request");
+                    ),
+                    PrefillDispatchErrorClass::Failed => {
+                        tracing::error!(error = %error, "Remote prefill failed, failing request");
+                    }
                 }
                 return Err(error);
             }
@@ -836,6 +858,36 @@ mod tests {
             prefill.context().kill();
             assert!(prefill.context().is_killed());
         }
+    }
+
+    #[test]
+    fn prefill_dispatch_errors_distinguish_cancellation_from_worker_failure() {
+        use dynamo_runtime::error::DynamoError;
+
+        let cancelled: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client disconnected")
+            .build()
+            .into();
+        let at_capacity: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("worker at capacity")
+            .build()
+            .into();
+        let failed = anyhow::anyhow!("transport failed");
+
+        assert_eq!(
+            classify_prefill_dispatch_error(cancelled.as_ref()),
+            PrefillDispatchErrorClass::Cancelled
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(at_capacity.as_ref()),
+            PrefillDispatchErrorClass::AtCapacity
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(failed.as_ref()),
+            PrefillDispatchErrorClass::Failed
+        );
     }
 
     #[tokio::test]

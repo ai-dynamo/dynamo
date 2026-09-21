@@ -569,7 +569,7 @@ def verify_frontend_cancellation_metrics(
 
 def verify_runtime_cancellation_metrics(
     worker_system_port: int,
-    expected_count: int = 0,
+    expected_count: int | tuple[int, ...] = 0,
     component: str = "backend",
     max_wait_ms: int = 0,
     poll_interval_ms: int = 100,
@@ -579,7 +579,7 @@ def verify_runtime_cancellation_metrics(
 
     Args:
         worker_system_port: Port where the worker /metrics is served
-        expected_count: Expected cumulative cancellation count
+        expected_count: Expected cumulative cancellation count or accepted counts
         component: The dynamo_component label value (e.g. "backend", "prefill")
         max_wait_ms: If > 0, retry the scrape until the metric matches
             expected_count or the timeout expires. Use this when the counter
@@ -587,6 +587,9 @@ def verify_runtime_cancellation_metrics(
         poll_interval_ms: Interval between retries when max_wait_ms > 0.
     """
     worker_metrics_url = f"http://localhost:{worker_system_port}/metrics"
+    expected_counts = (
+        (expected_count,) if isinstance(expected_count, int) else expected_count
+    )
 
     deadline = time.monotonic() + max_wait_ms / 1000.0
     count = -1
@@ -601,14 +604,14 @@ def verify_runtime_cancellation_metrics(
 
         worker_text = response.text
         count = _parse_runtime_cancellation_metric(worker_text, component=component)
-        if count == expected_count or time.monotonic() >= deadline:
+        if count in expected_counts or time.monotonic() >= deadline:
             break
         time.sleep(poll_interval_ms / 1000.0)
 
     logger.info(f"Runtime cancellation metrics (component={component}): {count}")
 
-    assert count == expected_count, (
-        f"Runtime (component={component}): expected {expected_count} cancellations, "
+    assert count in expected_counts, (
+        f"Runtime (component={component}): expected one of {expected_counts} cancellations, "
         f"but got {count}"
     )
 

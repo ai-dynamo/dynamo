@@ -426,9 +426,10 @@ def test_request_cancellation_sglang_decode_cancel(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
                 )
+                # Prefill may finish draining before or receive this cancellation.
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
-                    expected_count=0,
+                    expected_count=(0, 1),
                     component="prefill",
                 )
 
