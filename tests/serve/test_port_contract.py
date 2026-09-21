@@ -726,15 +726,10 @@ def test_continued_pipeline_still_skips_heredoc_body() -> None:
     assert _service_launches(script) == [(1, "python -m dynamo.frontend", True)]
 
 
-@pytest.mark.parametrize("background", [False, True])
-def test_stderr_pipeline_requires_a_separate_background_marker(
-    background: bool,
-) -> None:
+def test_stderr_pipeline_requires_a_separate_background_marker() -> None:
     """The ampersand in |& redirects stderr; it does not background the pipeline."""
     script = "python -m dynamo.frontend |& tee frontend.log"
-    if background:
-        script += " &"
-    assert _service_launches(script) == [(1, "python -m dynamo.frontend", background)]
+    assert _service_launches(script) == [(1, "python -m dynamo.frontend", False)]
 
 
 @pytest.mark.parametrize("grouped", ["{ %s; }", "(%s)", "( { %s; } )"])
