@@ -43,6 +43,7 @@ def _install_ray_stub(
     delay=0.0,
     thread_log=None,
     gate=None,
+    gate_entered=None,
 ):
     """Register a fake ``ray`` package tree covering everything the handler imports.
 
@@ -53,6 +54,9 @@ def _install_ray_stub(
     ``gate``     -- threading.Event each query blocks on instead of sleeping, so a
                     test can hold a GCS query outstanding for exactly as long as it
                     needs rather than betting on a wall-clock margin.
+    ``gate_entered`` -- threading.Event set immediately before the gate is waited on,
+                    so a test can tell "the query is blocked in Ray" apart from "the
+                    worker thread has not been scheduled yet".
     """
     idle = dict(idle_by_node_id or {})
 
@@ -60,6 +64,8 @@ def _install_ray_stub(
         if thread_log is not None:
             thread_log.append(threading.get_ident())
         if gate is not None:
+            if gate_entered is not None:
+                gate_entered.set()
             # Capped so a test that never opens its gate fails on its own bound
             # instead of stranding this thread for the life of the interpreter.
             gate.wait(30.0)
@@ -230,11 +236,13 @@ def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
     # The gate stays shut for the whole call, so the snapshot cannot finish on its
     # own and the endpoint's deadline is the only thing that can return a result.
     gate = threading.Event()
+    entered = threading.Event()
     _install_ray_stub(
         monkeypatch,
         nodes=[_node("n1", "10.0.0.1", 4.0)],
         idle_by_node_id={"n1": {"GPU": 4.0}},
         gate=gate,
+        gate_entered=entered,
     )
     handler = _make_self(dp=3, tp=2, backend="ray")
 
@@ -253,8 +261,12 @@ def test_slow_ray_times_out_and_still_reports_dp_tp(monkeypatch):
 
         assert r["status"] == "error"
         assert "timed out" in r["message"].lower()
-        # The caller was released while the GCS query was still outstanding: the
-        # gate has not been opened yet, so the snapshot cannot have completed.
+        # A pending future alone would also describe a worker that never started,
+        # so wait until the query is demonstrably parked on the still-shut gate.
+        # The bound only has to outlast thread-pool startup, not the deadline.
+        assert entered.wait(10.0), "the stubbed GCS query never started"
+        # The caller was released while that query was still outstanding: the gate
+        # has not been opened yet, so the snapshot cannot have completed.
         assert handler._ep_capacity_inflight is not None
         assert not handler._ep_capacity_inflight.done()
     finally:
