@@ -33,7 +33,7 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
   > **Migrate:** Update any custom Validating/MutatingWebhookConfiguration (not managed by the bundled Helm chart) to point at the v1beta1 DGD admission paths with apiVersions: [v1beta1].
 
-<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Go EPP removed, and the Rust EPP shipped inside the Frontend image is the default Endpoint Picker, with `eppConfig` deprecated** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
+<span className="dynref-badge dynref-badge--red">Removed</span> **Go EPP removed, and the Rust EPP shipped inside the Frontend image is the default Endpoint Picker, with `eppConfig` deprecated** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
 
   > **Migrate:** Update EPP deployment manifests and flags to the Rust EPP (LW-EPP) contract.
 
