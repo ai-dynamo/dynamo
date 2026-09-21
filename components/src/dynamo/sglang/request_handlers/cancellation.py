@@ -131,6 +131,7 @@ class CancellationMixin:
                             return
                         continue
 
+                assert drain_deadline is not None
                 remaining = drain_deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     logging.warning(
