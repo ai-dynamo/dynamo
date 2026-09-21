@@ -14,6 +14,8 @@ surfaces the real materialization gap tested below.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 pytestmark = [
@@ -151,9 +153,26 @@ def test_backend_framework_is_written_into_the_dgd_spec() -> None:
 
 
 def test_backend_framework_set_once_per_dgd_not_per_disagg_role() -> None:
-    result = materialize_dgd_from_candidate(
-        REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE
-    )
+    """[P3 review fix] The name asserts "once per DGD, not per disagg role"
+    but the body only checked the resulting value -- a bug that called the
+    setter once per role (prefill, then decode) with the same backend would
+    have produced an identical final value and passed silently. Spying on
+    the real classmethod (wraps=, so materialization still runs for real)
+    makes the test check what its name promises: exactly one call for the
+    whole DGD, regardless of how many worker roles it has.
+    """
+    from dynamo.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
+
+    with patch.object(
+        VllmV1ConfigModifier,
+        "set_config_backend_framework",
+        wraps=VllmV1ConfigModifier.set_config_backend_framework,
+    ) as spy:
+        result = materialize_dgd_from_candidate(
+            REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE
+        )
+
+    assert spy.call_count == 1
     assert result.dgd["spec"]["backendFramework"] == "vllm"
 
 

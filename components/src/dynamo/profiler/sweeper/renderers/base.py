@@ -156,6 +156,25 @@ def patch_dgd_manifest(
     metadata["name"] = dgd_name
     if options.namespace:
         metadata["namespace"] = options.namespace
+
+    # [P2 review fix] spec.backendFramework must be set for every renderer,
+    # not just the direct renderer's config-modifier path
+    # (BaseConfigModifier.set_config_backend_framework, called from
+    # materializer.py before rendering). The AIC renderer never goes through
+    # CONFIG_MODIFIERS at all -- it lowers a Candidate through AIC's own
+    # generator -- so without this, AIC-rendered DGDs ship spec.
+    # backendFramework blank while direct-rendered ones don't.
+    # patch_dgd_manifest is the one function both renderers already call on
+    # every candidate (confirmed: aic/renderer.py's render() and direct/
+    # renderer.py's render() both return this call), so setting it here,
+    # after _materialize_dgd's finalization has already run, covers both
+    # paths from a single place without depending on what that finalization
+    # preserves. Setting it again for the direct renderer (which already set
+    # it once at the config-model level) is redundant but harmless -- same
+    # value, plain dict assignment.
+    backend = candidate.config.get("backend")
+    if backend:
+        dgd.setdefault("spec", {})["backendFramework"] = backend
     if evaluation_context:
         annotations = metadata.setdefault("annotations", {})
         if not isinstance(annotations, dict):
