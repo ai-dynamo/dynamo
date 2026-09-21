@@ -42,6 +42,22 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
 
+# Create the LD_PRELOAD target before the ENV below names it. ENV applies to
+# every RUN after it, so a preload path that does not exist yet costs one
+# `ld.so: object ... cannot be preloaded ... ignored` line per process for the
+# rest of the stage: 432 of them from the apt layer alone, measured by building
+# this stage against 1.3.0rc27. The lines are noise, and the preload the ENV
+# exists to apply is absent from exactly the steps that follow it.
+#
+# The symlink gives system libstdc++ a stable path, which keeps
+# PyInstaller-bundled tools (specifically `jet`, NVIDIA's internal
+# PyInstaller-packaged CI runner) from shadowing it with an older copy. The
+# `test -f` keeps the build honest if the base image moves the library.
+RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    mkdir -p /opt/dynamo && \
+    LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
+    test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+
 # LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
 # (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
 # NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
@@ -76,12 +92,9 @@ WORKDIR /workspace
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
 # tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
-# carries a single copy of each tool, drop the unused wandb developer tooling
-# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
-# symlink system libstdc++ to a stable
-# path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
-# NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
-# older copy.
+# carries a single copy of each tool, and drop the unused wandb developer
+# tooling the DLFW base carries (upstream removes it on main,
+# Dockerfile.multi).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -109,10 +122,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         /usr/local/bin/etcdutl && \
     /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
-    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
-    mkdir -p /opt/dynamo && \
-    LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
-    test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ]
 
 # Restore Triton's default CUDA header/tool paths for SSH-launched ranks that
 # lack the image ENV (GH-14864). Use per-file links inside real directories so
