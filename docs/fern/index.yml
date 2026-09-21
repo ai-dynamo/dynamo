@@ -787,19 +787,29 @@ navigation:
             slug: browse
           # Grouped by model provider. Each group uses skip-slug so page URLs
           # stay /recipes/<slug>; within a group, newest models come first.
-          - section: NVIDIA
+          - section: Z.ai
             skip-slug: true
             collapsed: true
             contents:
-              - page: Nemotron 3.5 Lightning
-                path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
-                slug: nemotron-3-5-lightning
-              - page: Nemotron 3 Ultra
-                path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
-                slug: nemotron-3-ultra
-              - page: Nemotron 3 Super
-                path: pages/recipes/model-recipes/nemotron-3-super.mdx
-                slug: nemotron-3-super
+              - page: GLM-5.3-Flash
+                path: pages/recipes/model-recipes/glm-5-3-flash.mdx
+                slug: glm-5-3-flash
+              - page: GLM-5.3/5.2
+                path: pages/recipes/model-recipes/glm-5-2.mdx
+                slug: glm-5-2
+              - page: GLM-5 NVFP4
+                path: pages/recipes/model-recipes/glm-5-nvfp4.mdx
+                slug: glm-5-nvfp4
+          - section: Moonshot AI
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Kimi-K3
+                path: pages/recipes/model-recipes/kimi-k3.mdx
+                slug: kimi-k3
+              - page: Kimi-K2.6
+                path: pages/recipes/model-recipes/kimi-k2-6.mdx
+                slug: kimi-k2-6
           - section: DeepSeek
             skip-slug: true
             collapsed: true
@@ -816,37 +826,6 @@ navigation:
               - page: DeepSeek-V4-Flash
                 path: pages/recipes/model-recipes/deepseek-v4-flash.mdx
                 slug: deepseek-v4-flash
-          - section: Google
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: Gemma-4-31B
-                path: pages/recipes/model-recipes/gemma-4-31b.mdx
-                slug: gemma-4-31b
-          - section: LG AI Research
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: K-EXAONE 2.0
-                path: pages/recipes/model-recipes/k-exaone-2.mdx
-                slug: k-exaone-2
-          - section: Moonshot AI
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: Kimi-K3
-                path: pages/recipes/model-recipes/kimi-k3.mdx
-                slug: kimi-k3
-              - page: Kimi-K2.6
-                path: pages/recipes/model-recipes/kimi-k2-6.mdx
-                slug: kimi-k2-6
-          - section: OpenAI
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: GPT-OSS-120B
-                path: pages/recipes/model-recipes/gpt-oss-120b.mdx
-                slug: gpt-oss-120b
           - section: Qwen
             skip-slug: true
             collapsed: true
@@ -872,13 +851,26 @@ navigation:
               - page: Qwen3-32B FP8
                 path: pages/recipes/model-recipes/qwen3-32b-fp8.mdx
                 slug: qwen3-32b-fp8
-          - section: SK Telecom
+          - section: NVIDIA
             skip-slug: true
             collapsed: true
             contents:
-              - page: A.X-K2
-                path: pages/recipes/model-recipes/ax-k2.mdx
-                slug: ax-k2
+              - page: Nemotron 3.5 Lightning
+                path: pages/recipes/model-recipes/nemotron-3-5-lightning.mdx
+                slug: nemotron-3-5-lightning
+              - page: Nemotron 3 Ultra
+                path: pages/recipes/model-recipes/nemotron-3-ultra.mdx
+                slug: nemotron-3-ultra
+              - page: Nemotron 3 Super
+                path: pages/recipes/model-recipes/nemotron-3-super.mdx
+                slug: nemotron-3-super
+          - section: Google
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Gemma-4-31B
+                path: pages/recipes/model-recipes/gemma-4-31b.mdx
+                slug: gemma-4-31b
           - section: Thinking Machines
             skip-slug: true
             collapsed: true
@@ -886,6 +878,27 @@ navigation:
               - page: Inkling NVFP4
                 path: pages/recipes/model-recipes/inkling-nvfp4.mdx
                 slug: inkling
+          - section: OpenAI
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: GPT-OSS-120B
+                path: pages/recipes/model-recipes/gpt-oss-120b.mdx
+                slug: gpt-oss-120b
+          - section: LG AI Research
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: K-EXAONE 2.0
+                path: pages/recipes/model-recipes/k-exaone-2.mdx
+                slug: k-exaone-2
+          - section: SK Telecom
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: A.X-K2
+                path: pages/recipes/model-recipes/ax-k2.mdx
+                slug: ax-k2
           - section: Upstage
             skip-slug: true
             collapsed: true
@@ -893,19 +906,6 @@ navigation:
               - page: Solar Open2 250B
                 path: pages/recipes/model-recipes/solar-open2-250b.mdx
                 slug: solar-open2-250b
-          - section: Z.ai
-            skip-slug: true
-            collapsed: true
-            contents:
-              - page: GLM-5.3-Flash
-                path: pages/recipes/model-recipes/glm-5-3-flash.mdx
-                slug: glm-5-3-flash
-              - page: GLM-5.3/5.2
-                path: pages/recipes/model-recipes/glm-5-2.mdx
-                slug: glm-5-2
-              - page: GLM-5 NVFP4
-                path: pages/recipes/model-recipes/glm-5-nvfp4.mdx
-                slug: glm-5-nvfp4
 
       # ==================== Kubernetes Templates ====================
       - section: Kubernetes Templates
