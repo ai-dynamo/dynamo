@@ -7,6 +7,7 @@ selects, reusing Dynamo's existing renderer/output pipeline."""
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -25,11 +26,25 @@ class DgdOutputConfigError(ValueError):
     """The resolved `dgd:` config section is missing or malformed."""
 
 
+def _validate_name_component(value: Any, field: str) -> str:
+    """Reject a dgd.name/name_prefix that could escape output_dir."""
+    if not value or not isinstance(value, str):
+        raise DgdOutputConfigError(f"dgd.{field} must be a non-empty string")
+    if Path(value).is_absolute() or any(sep in value for sep in ("/", "\\")) or value in (".", ".."):
+        raise DgdOutputConfigError(f"dgd.{field} must be a single path component, not {value!r}")
+    return value
+
+
 def _dgd_names(dgd_config: Mapping[str, Any], candidate_count: int) -> list[str]:
     """Returns dgd_config["name"] for a single candidate, or
     "{name_prefix}-{index:03d}" per candidate for a Pareto front."""
     name = dgd_config.get("name")
     name_prefix = dgd_config.get("name_prefix")
+
+    if name is not None:
+        name = _validate_name_component(name, "name")
+    if name_prefix is not None:
+        name_prefix = _validate_name_component(name_prefix, "name_prefix")
 
     if candidate_count == 1 and name:
         return [name]
@@ -55,22 +70,35 @@ def _generation_options(dgd_config: Mapping[str, Any]) -> DGDGenerationOptions:
         raise DgdOutputConfigError(f"dgd config missing required field: {exc}") from exc
 
 
+def _best_candidate(candidates: Sequence[Any]) -> Any:
+    """Match Sweeper's scalar ranking: highest score, then fewer GPUs.
+
+    Restores the selection rule from the deleted __main__.py's
+    _best_candidate -- the adapter that replaced it rendered every
+    candidate it was given instead of picking a winner for scalar mode.
+    """
+    return max(candidates, key=lambda candidate: (candidate.score, -candidate.used_gpus))
+
+
 def render_and_write_dgds(
     candidates: Sequence[Any],
     workload: Any,
     dgd_config: Mapping[str, Any],
     output_dir: Path,
 ) -> list[str]:
-    """Render every selected Candidate and write them with the resolved
-    `dgd:` config. Only calls already-shipped, already-tested Dynamo
-    functions (render_dgd, write_outputs). Returns paths as plain strings,
-    relative to output_dir -- matching what write_output_adapters' real
-    validation expects (Path(raw_path), rejecting absolute paths and `..`).
+    """Render the selected Candidate(s) and write them with the resolved
+    `dgd:` config.
+
+    Scalar mode (dgd.name set, no dgd.name_prefix): reduces `candidates` to
+    the single highest-scoring one (ties broken by fewer GPUs) before
+    rendering -- matching the deleted CLI's `_best_candidate` rule. Pareto
+    mode (dgd.name_prefix set): renders every candidate, skipping (not
+    aborting on) any that fails to materialize -- matching the deleted
+    `_render_pareto`'s per-candidate try/except, so one bad candidate
+    doesn't lose the rest of the front.
 
     Raises DgdOutputConfigError for a malformed config section, or
-    CandidateMaterializationError if a candidate cannot be rendered --
-    matching the DEP's own stated principle: "Candidate-to-DGD mapping
-    rejects unsupported or incomplete combinations instead of guessing."
+    CandidateMaterializationError if *no* candidate could be rendered.
     Both propagate out of write() below, where AISimulate's real
     write_output_adapters wraps any adapter exception into
     OutputAdapterExecutionError.
@@ -83,17 +111,32 @@ def render_and_write_dgds(
     raw_format = dgd_config.get("format", "manifest")
     output_format: OutputFormat = "dgd" if raw_format == "manifest" else raw_format
 
+    if dgd_config.get("name") and not dgd_config.get("name_prefix"):
+        # Scalar mode: one DGD, the highest-scoring candidate -- regardless
+        # of how many candidates were actually handed to us.
+        candidates = [_best_candidate(candidates)]
+
     names = _dgd_names(dgd_config, len(candidates))
 
-    rendered_dgds = [
-        render_dgd(candidate, workload, options, dgd_name=name, renderer=renderer)
-        for candidate, name in zip(candidates, names, strict=True)
-    ]
+    rendered_dgds: list[Any] = []
+    rendered_names: list[str] = []
+    for candidate, cand_name in zip(candidates, names, strict=True):
+        try:
+            rendered_dgds.append(
+                render_dgd(candidate, workload, options, dgd_name=cand_name, renderer=renderer)
+            )
+        except CandidateMaterializationError as exc:
+            print(f"skipping Pareto candidate {cand_name}: {exc}", file=sys.stderr)
+            continue
+        rendered_names.append(cand_name)
+
+    if not rendered_dgds:
+        raise CandidateMaterializationError("no candidate could be rendered")
 
     artifacts = write_outputs(
         rendered_dgds,
         output_dir,
-        stems=names,
+        stems=rendered_names,
         renderer=renderer,
         output=output_format,
     )

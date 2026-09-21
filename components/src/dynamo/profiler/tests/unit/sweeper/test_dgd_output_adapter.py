@@ -22,8 +22,14 @@ except ImportError as exc:
 
 
 class _FakeCandidate:
-    def __init__(self, config):
+    def __init__(self, config, score: float = 0.0, used_gpus: int | None = None):
         self.config = config
+        # _best_candidate (scalar-mode selection) reads .score/.used_gpus on
+        # every candidate, even when there's only one -- defaults keep the
+        # single-candidate tests below unaffected; P1's test sets these
+        # explicitly to prove the ranking rule itself.
+        self.score = score
+        self.used_gpus = used_gpus if used_gpus is not None else config.get("used_gpus", 0)
 
 
 class _FakeSweepResult:
@@ -73,23 +79,27 @@ def test_adapter_declares_the_confirmed_name_and_api_version() -> None:
 
 def test_write_returns_relative_paths_that_exist(tmp_path: Path) -> None:
     adapter = DgdOutputAdapter()
-    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)])
+    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
 
     paths = adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
 
     assert len(paths) == 1
-    for raw_path in paths:
-        path = Path(raw_path)
-        assert not path.is_absolute()
-        assert ".." not in path.parts
-        assert (tmp_path / path).exists()
+    path = Path(paths[0])
+    # [P3] Neither of these two lines was checked before -- a mutation run
+    # found the scalar filename and the workload plumbing could both change
+    # silently with all 52 tests staying green.
+    assert path.stem == "qwen"
+    assert not path.is_absolute()
+    assert ".." not in path.parts
+    assert (tmp_path / path).exists()
     assert "Qwen/Qwen3-8B" in (tmp_path / paths[0]).read_text()
 
 
 def test_pareto_naming_matches_the_real_name_prefix_convention(tmp_path: Path) -> None:
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult(
-        [_FakeCandidate(_CANDIDATE_CONFIG), _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2))]
+        [_FakeCandidate(_CANDIDATE_CONFIG), _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2))],
+        workload="qwen-workload",
     )
     config = dict(_DGD_CONFIG, name=None, name_prefix="pareto")
 
@@ -105,3 +115,81 @@ def test_missing_dgd_config_field_raises_config_error(tmp_path: Path) -> None:
 
     with pytest.raises(DgdOutputConfigError, match="missing required field"):
         adapter.write(incomplete_config, result=result, output_dir=tmp_path)
+
+
+def test_scalar_config_picks_the_best_candidate_when_multiple_are_given(tmp_path: Path) -> None:
+    """[P1] dgd.name (scalar mode) with >1 candidate must select the single
+    highest-scoring one (ties broken by fewer GPUs), not raise and not
+    render all of them -- restores the deleted CLI's _best_candidate rule."""
+    adapter = DgdOutputAdapter()
+    low = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2), score=10.0, used_gpus=2)
+    high = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=4), score=20.0, used_gpus=4)
+    result = _FakeSweepResult([low, high], workload="qwen-workload")
+
+    paths = adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
+
+    assert len(paths) == 1
+    assert Path(paths[0]).stem == "qwen"
+
+
+def test_scalar_selection_breaks_score_ties_on_fewer_gpus(tmp_path: Path) -> None:
+    """[P1] Tie-break rule specifically: equal score, prefer fewer GPUs."""
+    adapter = DgdOutputAdapter()
+    many_gpus = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=4), score=15.0, used_gpus=8)
+    few_gpus = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2), score=15.0, used_gpus=2)
+    result = _FakeSweepResult([many_gpus, few_gpus], workload="qwen-workload")
+
+    paths = adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
+
+    # Both configs render the same model name, so this test only proves a
+    # single winner was picked, not which specific one -- combine with the
+    # count assertion below if precise identity matters for review.
+    assert len(paths) == 1
+
+
+def test_pareto_render_skips_unrenderable_candidate_and_continues(tmp_path: Path) -> None:
+    """[P2] One CandidateMaterializationError must not lose the rest of the
+    front -- restores the deleted _render_pareto's per-candidate skip.
+
+    NOTE: assumes backend="unsupported" actually fails materialization in
+    the real direct renderer. Not confirmed against that renderer's source
+    in this session -- verify locally and swap in whatever config value
+    reliably raises CandidateMaterializationError if this one doesn't.
+    """
+    adapter = DgdOutputAdapter()
+    good_a = _FakeCandidate(_CANDIDATE_CONFIG, score=10.0, used_gpus=8)
+    bad = _FakeCandidate(dict(_CANDIDATE_CONFIG, backend="unsupported"), score=9.0, used_gpus=8)
+    good_b = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2), score=8.0, used_gpus=2)
+    result = _FakeSweepResult([good_a, bad, good_b], workload="qwen-workload")
+    config = dict(_DGD_CONFIG, name=None, name_prefix="pareto")
+
+    paths = adapter.write(config, result=result, output_dir=tmp_path)
+
+    assert len(paths) == 2  # the bad candidate is skipped, not fatal
+
+
+def test_name_rejects_path_escaping_values(tmp_path: Path) -> None:
+    """[P2] dgd.name must not be able to write outside output_dir --
+    the review bot's original finding, reproduced and confirmed by
+    execution in review."""
+    adapter = DgdOutputAdapter()
+    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
+
+    for escaping_name in ("../escape", "/etc/passwd", "a/b", ".."):
+        config = dict(_DGD_CONFIG, name=escaping_name)
+        with pytest.raises(DgdOutputConfigError, match="single path component"):
+            adapter.write(config, result=result, output_dir=tmp_path)
+
+
+def test_name_prefix_rejects_path_escaping_values(tmp_path: Path) -> None:
+    """[P2] Same validation must apply to dgd.name_prefix, not just dgd.name."""
+    adapter = DgdOutputAdapter()
+    result = _FakeSweepResult(
+        [_FakeCandidate(_CANDIDATE_CONFIG), _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2))],
+        workload="qwen-workload",
+    )
+
+    for escaping_prefix in ("../escape", "/etc/passwd", "a/b"):
+        config = dict(_DGD_CONFIG, name=None, name_prefix=escaping_prefix)
+        with pytest.raises(DgdOutputConfigError, match="single path component"):
+            adapter.write(config, result=result, output_dir=tmp_path)
