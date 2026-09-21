@@ -11,7 +11,7 @@ use dynamo_llm::kv_router::protocols::KvTransferEnforcement;
 use dynamo_llm::local_model::runtime_config::ModelRuntimeConfig;
 use tokio::time::Instant;
 
-use dynamo_runtime::config::is_truthy;
+use dynamo_runtime::config::parse_bool;
 
 use crate::error::{BackendError, DynamoError, ErrorType};
 
@@ -40,15 +40,27 @@ async fn apply_from_env(
     poll_interval: Duration,
     poll_timeout: Duration,
 ) -> Result<(), DynamoError> {
-    if !env("DYN_TOPOLOGY_ENABLED").is_some_and(|value| is_truthy(&value)) {
-        return Ok(());
+    let raw = env("DYN_TOPOLOGY_ENABLED").unwrap_or_default();
+    let trimmed = raw.trim();
+    match parse_bool(trimmed) {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(_) => {
+            if !trimmed.is_empty() {
+                tracing::warn!(
+                    value = %trimmed,
+                    "Unrecognized DYN_TOPOLOGY_ENABLED value, treating as disabled; use \"true\" or \"false\""
+                );
+            }
+            return Ok(());
+        }
     }
 
     let domain = env("DYN_KV_TRANSFER_DOMAIN")
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
-            invalid_config("DYN_TOPOLOGY_ENABLED=true requires DYN_KV_TRANSFER_DOMAIN")
+            invalid_config("DYN_TOPOLOGY_ENABLED is set but DYN_KV_TRANSFER_DOMAIN is not")
         })?;
     let enforcement = match env("DYN_KV_TRANSFER_ENFORCEMENT").as_deref() {
         None | Some("required") => KvTransferEnforcement::Required,
@@ -275,6 +287,58 @@ mod tests {
                 ErrorType::Backend(BackendError::InvalidArgument)
             );
             assert!(config.topology_domains.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn alt_truthy_values_enable_topology() {
+        // parse_bool accepts "1", "on", "yes" as truthy in addition to "true".
+        // Verify that the wider set enables topology so coverage tracks the helper.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("zone"), "zone-a").unwrap();
+        for value in ["1", "on", "yes"] {
+            let mut config = ModelRuntimeConfig::default();
+            apply_from_env(
+                &mut config,
+                |name| match name {
+                    "DYN_TOPOLOGY_ENABLED" => Some(value.into()),
+                    "DYN_TOPOLOGY_MOUNT_PATH" => Some(dir.path().display().to_string()),
+                    "DYN_KV_TRANSFER_DOMAIN" => Some("zone".into()),
+                    _ => None,
+                },
+                POLL_INTERVAL,
+                POLL_TIMEOUT,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("alt truthy {value:?} must enable topology: {e}"));
+            assert!(
+                !config.topology_domains.is_empty(),
+                "expected topology enabled for DYN_TOPOLOGY_ENABLED={value:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_enabled_values_disable_without_error() {
+        // Unrecognized values ("maybe", "2") must not crash the worker;
+        // they disable topology and log a warning.
+        for value in ["maybe", "2", "enabled", "truthy"] {
+            let mut config = ModelRuntimeConfig::default();
+            apply_from_env(
+                &mut config,
+                |name| match name {
+                    "DYN_TOPOLOGY_ENABLED" => Some(value.into()),
+                    _ => None,
+                },
+                POLL_INTERVAL,
+                POLL_TIMEOUT,
+            )
+            .await
+            .expect("invalid enabled value must not error");
+            assert!(
+                config.topology_domains.is_empty(),
+                "expected topology disabled for DYN_TOPOLOGY_ENABLED={value:?}"
+            );
         }
     }
 

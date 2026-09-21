@@ -22,6 +22,7 @@ Environment variables:
         enforcement is "preferred".
 """
 
+import argparse
 import logging
 import os
 import sys
@@ -102,7 +103,7 @@ def _read_kv_transfer_policy() -> tuple[str, str | None, float | None]:
 
     if not kv_transfer_domain:
         logger.error(
-            "DYN_TOPOLOGY_ENABLED=true but %s is not set. The deployment "
+            "DYN_TOPOLOGY_ENABLED is set but %s is not set. The deployment "
             "environment must set the KV transfer domain when topology is "
             "enabled. Exiting.",
             _KV_TRANSFER_DOMAIN_VAR,
@@ -121,7 +122,7 @@ def read_topology_config(
 
     The deployment environment injects env vars for topology location and
     transfer policy:
-      - DYN_TOPOLOGY_ENABLED=true
+      - DYN_TOPOLOGY_ENABLED=true  # only the literal "true" enables
       - DYN_TOPOLOGY_MOUNT_PATH=/etc/dynamo/topology
       - DYN_KV_TRANSFER_DOMAIN=zone
       - DYN_KV_TRANSFER_ENFORCEMENT=required
@@ -140,11 +141,21 @@ def read_topology_config(
         Empty config if topology is not enabled.
 
     Raises:
-        SystemExit: If DYN_TOPOLOGY_ENABLED=true but DYN_KV_TRANSFER_DOMAIN is
+        SystemExit: If DYN_TOPOLOGY_ENABLED is set but DYN_KV_TRANSFER_DOMAIN is
             not set, the transfer-domain topology file is still missing or
             empty after the timeout.
     """
-    if not parse_bool(os.environ.get(_TOPOLOGY_ENABLED_VAR, "")):
+    raw = os.environ.get(_TOPOLOGY_ENABLED_VAR, "").strip()
+    try:
+        enabled = parse_bool(raw)
+    except argparse.ArgumentTypeError:
+        if raw:
+            logger.warning(
+                "Unrecognized DYN_TOPOLOGY_ENABLED=%r, treating as disabled; use 'true' or 'false'",
+                raw,
+            )
+        return TopologyConfig()
+    if not enabled:
         return TopologyConfig()
 
     (
@@ -174,7 +185,7 @@ def read_topology_config(
 
     if kv_transfer_domain not in topology_domains:
         logger.error(
-            "DYN_TOPOLOGY_ENABLED=true but topology file %s was not populated "
+            "DYN_TOPOLOGY_ENABLED is set but topology file %s was not populated "
             "within %.0fs. This indicates the configured topology source did "
             "not publish the selected transfer domain. Exiting.",
             transfer_domain_file,
