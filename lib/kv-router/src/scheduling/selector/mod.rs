@@ -19,13 +19,10 @@ pub use crate::plugins::worker_selection::{
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
 pub use policy::WorkerSelectionPolicy;
-use policy::{
-    CustomWorkerSelectionState, WorkerSelectionPolicyStateRef, collect_custom_candidates,
-};
+use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
 use reference::pick_default_worker;
 
-use super::config::KvRouterConfig;
 use super::filter::{RoutingEligibility, WorkerEligibilityError};
 use super::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
@@ -342,7 +339,6 @@ fn log_selection<C: WorkerConfigLike>(
 // DefaultWorkerSelector and SelectionService both converge here. Only the scorer/picker stage is
 // dispatched; eligibility outcomes and result construction stay host-owned and shared.
 fn select_worker_with_policy<C: WorkerConfigLike>(
-    kv_router_config: &KvRouterConfig,
     worker_type: &'static str,
     state: WorkerSelectionPolicyStateRef<'_>,
     workers: &HashMap<WorkerId, C>,
@@ -365,24 +361,22 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
     }
 
-    #[cfg(not(any(test, feature = "bench")))]
-    let _ = kv_router_config;
     let mut input = MaterializedSelectionInput::new(request, block_size);
     input.context.pinned_worker = eligibility.pinned_worker();
     let selected = match state {
         #[cfg(any(test, feature = "bench"))]
-        WorkerSelectionPolicyStateRef::Default(picker) => {
+        WorkerSelectionPolicyStateRef::Reference(kv_router_config, picker) => {
             let scorer = DefaultWorkerScorer {
                 kv_router_config,
                 worker_type,
             };
             pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
         }
-        WorkerSelectionPolicyStateRef::Custom(state) => {
+        WorkerSelectionPolicyStateRef::Composed(state) => {
             let mut state = state.borrow_mut();
             let has_eligible_worker =
-                collect_custom_candidates(&mut state, &input, workers, request, eligibility)?;
-            let CustomWorkerSelectionState {
+                collect_policy_candidates(&mut state, &input, workers, request, eligibility)?;
+            let ComposedPolicyState {
                 picker,
                 picker_inputs,
                 candidates,

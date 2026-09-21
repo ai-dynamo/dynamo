@@ -44,6 +44,7 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 
 An external policy owns its filters, scorers, and picker. The default scorer and picker are private components of `dynamo-custom-policy-builtin`. They implement the same public traits as external policies.
 
+
 ## Public Plugin API and Compatibility
 
 Use `dynamo_kv_router::plugins` for plugin registration and these modules for plugin contracts:
@@ -626,9 +627,11 @@ The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/rout
 
 ## Default Policy Plugin
 
-The default worker selector lives in `dynamo-custom-policy-builtin`, beside the two-tier policy. Routing hosts install `default_registry()` even when they do not link a custom catalog. An omitted policy or the reserved `default` selection uses that factory. A Rust embedding that constructs `SelectionServiceBuilder` must supply a registry with a default factory or an explicit policy factory.
+The default worker selector lives in `dynamo-custom-policy-builtin`, beside the two-tier policy. Routing hosts install its default factory once, even without a custom catalog. An omitted policy or the reserved `default` selection uses that factory. Optional catalogs register named providers without replacing the default or existing classifiers.
 
-The default uses the same `RouterPluginRegistry` as custom worker policies and request classifiers. Installing it preserves the other registered providers. Resolving a classifier-only configuration still leaves worker selection on the builtin default; installing the default alone does not enable custom-plugin frontend restrictions.
+A Rust embedding that constructs `SelectionServiceBuilder` must supply a registry with a default factory, such as `default_registry()`, or an explicit policy factory. A missing factory fails construction before workers or synchronization resources start. Each routing partition receives its own policy instance.
+
+Resolving `RouterPlugins` from the host registry includes the default factory even when no named policy is selected. `RouterPlugins::default()` remains an empty builder input. Use `has_custom_worker_selection()` to detect an explicit named or programmatic policy, and `has_custom_plugins()` to detect that policy or a classifier. Factory presence alone does not imply a custom selection. These checks preserve stock frontend modes and avoid waiting for a typed model card solely because the builtin factory is present. A classifier-only configuration still uses the builtin default for worker selection.
 
 To configure a separate default-policy instance, use the named provider:
 

@@ -46,7 +46,7 @@ fn core_with_workers(
         CancellationToken::new(),
         SelectionCacheConfig::default(),
         std::sync::Arc::new(|config, role, _| {
-            dynamo_kv_router::WorkerSelectionPolicy::default(
+            dynamo_kv_router::WorkerSelectionPolicy::reference(
                 config.clone(),
                 role.default_selector_label(),
             )

@@ -108,27 +108,23 @@ pub enum SelectionPolicySource {
 }
 
 impl SelectionPolicySource {
-    /// Resolve to the factory the partition will call. `label` is the worker
-    /// pool name the default policy logs under.
+    /// Resolve to the factory the partition will call. The label argument is retained for
+    /// compatibility; the factory receives the typed worker role.
     pub fn resolve(
         &self,
         config: &KvRouterConfig,
         worker_type: WorkerType,
-        label: &'static str,
+        _label: &'static str,
     ) -> Result<WorkerSelectionPolicyFactory> {
         match self {
             Self::Factory(factory) => Ok(factory.clone()),
             Self::Prepared(prepared) => Ok(prepared.factory.clone()),
-            Self::Registry => Ok(
-                match worker_selection_policy_registry()
-                    .resolve_for_worker_type(config, worker_type)?
-                {
-                    Some(factory) => factory,
-                    None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-                        dynamo_custom_policy_builtin::default_policy(config.clone(), label)
-                    }),
-                },
-            ),
+            Self::Registry => worker_selection_policy_registry()
+                .resolve_for_worker_type(config, worker_type)?
+                .ok_or_else(|| {
+                    dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
+                        .into()
+                }),
         }
     }
 

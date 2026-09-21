@@ -8,6 +8,7 @@ mod picker;
 mod scorer;
 mod selector;
 
+use parameters::PolicyParameters;
 pub(super) use parameters::register;
 pub use selector::DefaultWorkerSelector;
 
@@ -21,31 +22,42 @@ use std::sync::Arc;
 /// Construct the builtin default from configured policy parameters.
 /// Per-request score overrides are not used. Request load-tracking remains host-owned.
 pub fn default_policy(config: KvRouterConfig, worker_label: &'static str) -> WorkerSelectionPolicy {
-    policy_with_rng(config, worker_label, None, false)
+    let parameters = PolicyParameters::from(&config);
+    policy_with_rng(config, parameters, worker_label, None, false)
 }
 
 fn policy_with_rng(
     config: KvRouterConfig,
+    parameters: PolicyParameters,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
     plain_decode: bool,
 ) -> WorkerSelectionPolicy {
-    let scorer = scorer::build(&config, worker_label, plain_decode);
-    let picker = picker::DefaultPicker::new(config.router_temperature, rng);
+    let scorer = scorer::build(&parameters, worker_label, plain_decode);
+    let picker = picker::DefaultPicker::new(parameters.router_temperature, rng);
     WorkerSelectionPolicy::new(config, worker_label, vec![scorer], Box::new(picker))
         .with_exclusive_affinity(true)
 }
 
 /// Factory installed by routing hosts, including hosts without a custom catalog.
 pub fn default_factory() -> WorkerSelectionPolicyFactory {
-    Arc::new(|config, role, _partition| policy_for_role(config.clone(), role))
+    Arc::new(|config, role, _partition| {
+        policy_for_role(config.clone(), role, PolicyParameters::from(config))
+    })
 }
 
 fn policy_for_role(
     config: KvRouterConfig,
     role: dynamo_kv_router::WorkerType,
+    parameters: PolicyParameters,
 ) -> WorkerSelectionPolicy {
     let plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
-    policy_with_rng(config, role.default_selector_label(), None, plain_decode)
+    policy_with_rng(
+        config,
+        parameters,
+        role.default_selector_label(),
+        None,
+        plain_decode,
+    )
 }

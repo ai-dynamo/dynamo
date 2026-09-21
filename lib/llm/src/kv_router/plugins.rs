@@ -52,6 +52,10 @@ impl RouterPluginBuilder {
         Ok(())
     }
 
+    pub(crate) fn has_custom_worker_selection(&self) -> bool {
+        self.plugins.has_custom_worker_selection()
+    }
+
     pub(crate) fn selection_policy(&self) -> SelectionPolicySource {
         self.plugins.worker_selection().cloned().map_or(
             SelectionPolicySource::Registry,

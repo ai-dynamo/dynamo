@@ -316,21 +316,11 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = match self.worker_selection_policy_factory.as_ref() {
-                    Some(factory) => {
-                        factory(&self.kv_router_config, self.worker_type, key.as_ref())
-                    }
-                    #[cfg(test)]
-                    None => {
-                        WorkerSelectionPolicy::default(self.kv_router_config.clone(), worker_label)
-                    }
-                    #[cfg(not(test))]
-                    None => {
-                        return Err(SelectionError::BadRequest(
-                            "routing host must supply a worker-selection policy factory".into(),
-                        ));
-                    }
-                };
+                let selector = (self.worker_selection_policy_factory)(
+                    &self.kv_router_config,
+                    self.worker_type,
+                    key.as_ref(),
+                );
                 let profile = self
                     .kv_router_config
                     .policy_profile(Some(&key.model_name))

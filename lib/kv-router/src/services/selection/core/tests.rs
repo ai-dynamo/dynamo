@@ -40,7 +40,7 @@ fn local_core_with(
         cancel_token,
         SelectionCacheConfig::default(),
         std::sync::Arc::new(|config, role, _| {
-            crate::WorkerSelectionPolicy::default(config.clone(), role.default_selector_label())
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         }),
     )
     .expect("valid test config")
@@ -63,7 +63,14 @@ fn core_with(
         1,
         CancellationToken::new(),
         None,
-        policy_factory,
+        policy_factory.unwrap_or_else(|| {
+            Arc::new(|config, role, _| {
+                crate::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })
+        }),
         host,
         worker_type,
         true,

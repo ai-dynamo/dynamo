@@ -19,7 +19,7 @@ pub fn default_registry() -> RouterPluginRegistry {
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
 
-/// Register every policy Dynamo ships.
+/// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
 /// `default` is reserved by the registry for Dynamo's built-in worker selector, so no policy here
 /// can shadow it. A later catalog that reuses one of these type names fails registration rather
@@ -27,7 +27,6 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegis
 pub fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    *registry = std::mem::take(registry).with_default_factory(default_factory());
     default::register(registry)?;
     two_tier_cost_fn::register(registry)
 }
@@ -54,7 +53,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut registry = RouterPluginRegistry::default();
+        let mut registry = default_registry();
         register(&mut registry).unwrap();
         let resolved = registry.resolve(&config);
         (config, resolved)

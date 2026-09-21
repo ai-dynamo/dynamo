@@ -25,7 +25,7 @@ fn bench(c: &mut Criterion) {
         .nresamples(1_000);
     for count in [8, 64, 512] {
         let reference: WorkerSelectionPolicyFactory = Arc::new(|config, role, _| {
-            WorkerSelectionPolicy::default(config.clone(), role.default_selector_label())
+            WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
         });
         for (label, factory) in [("reference", reference), ("plugin", default_factory())] {
             let core = SelectionCore::try_new_local(

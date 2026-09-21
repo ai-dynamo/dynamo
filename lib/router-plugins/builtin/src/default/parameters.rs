@@ -24,6 +24,52 @@ struct Parameters {
     router_temperature: Option<f64>,
 }
 
+/// Only the startup values consumed by the default scorer and picker.
+#[derive(Clone, Copy)]
+pub(super) struct PolicyParameters {
+    pub(super) overlap_score_credit: f64,
+    pub(super) overlap_score_credit_decay: f64,
+    pub(super) prefill_load_scale: f64,
+    pub(super) decode_active_request_weight: f64,
+    pub(super) host_cache_hit_weight: f64,
+    pub(super) disk_cache_hit_weight: f64,
+    pub(super) shared_cache_multiplier: f64,
+    pub(super) router_temperature: f64,
+}
+
+impl From<&KvRouterConfig> for PolicyParameters {
+    fn from(config: &KvRouterConfig) -> Self {
+        Parameters::default().resolve(config)
+    }
+}
+
+impl Parameters {
+    fn resolve(&self, config: &KvRouterConfig) -> PolicyParameters {
+        PolicyParameters {
+            overlap_score_credit: self
+                .overlap_score_credit
+                .unwrap_or(config.overlap_score_credit),
+            overlap_score_credit_decay: self
+                .overlap_score_credit_decay
+                .unwrap_or(config.overlap_score_credit_decay),
+            prefill_load_scale: self.prefill_load_scale.unwrap_or(config.prefill_load_scale),
+            decode_active_request_weight: self
+                .decode_active_request_weight
+                .unwrap_or(config.decode_active_request_weight),
+            host_cache_hit_weight: self
+                .host_cache_hit_weight
+                .unwrap_or(config.host_cache_hit_weight),
+            disk_cache_hit_weight: self
+                .disk_cache_hit_weight
+                .unwrap_or(config.disk_cache_hit_weight),
+            shared_cache_multiplier: self
+                .shared_cache_multiplier
+                .unwrap_or(config.shared_cache_multiplier),
+            router_temperature: self.router_temperature.unwrap_or(config.router_temperature),
+        }
+    }
+}
+
 pub(crate) fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
@@ -58,32 +104,7 @@ pub(crate) fn register(
             }
             Ok(Arc::new(
                 move |config: &KvRouterConfig, role, _partition| {
-                    let mut config = config.clone();
-                    if let Some(value) = parameters.overlap_score_credit {
-                        config.overlap_score_credit = value;
-                    }
-                    if let Some(value) = parameters.overlap_score_credit_decay {
-                        config.overlap_score_credit_decay = value;
-                    }
-                    if let Some(value) = parameters.prefill_load_scale {
-                        config.prefill_load_scale = value;
-                    }
-                    if let Some(value) = parameters.decode_active_request_weight {
-                        config.decode_active_request_weight = value;
-                    }
-                    if let Some(value) = parameters.host_cache_hit_weight {
-                        config.host_cache_hit_weight = value;
-                    }
-                    if let Some(value) = parameters.disk_cache_hit_weight {
-                        config.disk_cache_hit_weight = value;
-                    }
-                    if let Some(value) = parameters.shared_cache_multiplier {
-                        config.shared_cache_multiplier = value;
-                    }
-                    if let Some(value) = parameters.router_temperature {
-                        config.router_temperature = value;
-                    }
-                    policy_for_role(config, role)
+                    policy_for_role(config.clone(), role, parameters.resolve(config))
                 },
             ))
         }),

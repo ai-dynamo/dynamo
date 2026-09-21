@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::plugins::RouterPlugins;
 use dynamo_kv_router::plugins::request_classifier::{
     ClassifyFuture, ClassifyRequest, RequestClassifier,
 };
@@ -34,21 +34,24 @@ fn builtin_default_does_not_opt_into_custom_frontend_restrictions() {
     let (_file, explicit_default) = config("worker_selection:\n  aggregated: default\n");
     for config in [KvRouterConfig::default(), explicit_default] {
         assert!(registry.resolve(&config).unwrap().is_some());
-        assert!(registry.resolve_plugins(&config).unwrap().is_empty());
+        let plugins = registry.resolve_plugins(&config).unwrap();
+        assert!(plugins.worker_selection().is_some());
+        assert!(!plugins.has_custom_worker_selection());
+        assert!(!plugins.has_custom_plugins());
     }
 }
 
 #[test]
 fn builtin_registration_preserves_classifiers_and_resolves_mixed_pools() {
     for selection in ["default", "named-default"] {
-        let mut registry = RouterPluginRegistry::default();
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
         registry
             .register_request_classifier(
                 "pass-through",
                 Arc::new(|_| Ok(Arc::new(|_| Box::new(PassThrough)))),
             )
             .unwrap();
-        // Installing the default must preserve classifier providers already in the catalog.
+        // Registering named providers must preserve the fallback and classifier providers.
         dynamo_custom_policy_builtin::register(&mut registry).unwrap();
         let (_file, config) = config(&format!(
             r#"
@@ -64,7 +67,12 @@ worker_selection:
         let plugins = registry.resolve_plugins(&config).unwrap();
         assert!(!plugins.is_empty());
         assert!(plugins.request_classifier().is_some());
-        assert_eq!(plugins.worker_selection().is_some(), selection != "default");
+        assert!(plugins.worker_selection().is_some());
+        assert!(plugins.has_custom_plugins());
+        assert_eq!(
+            plugins.has_custom_worker_selection(),
+            selection != "default"
+        );
         // With only a classifier selected, the host still resolves the builtin policy.
         let factory = registry.resolve(&config).unwrap().unwrap();
         for role in [
@@ -76,4 +84,25 @@ worker_selection:
             factory(&config, role, RoutingPartitionRef::new("model", "default"));
         }
     }
+}
+
+#[test]
+fn programmatic_factory_is_an_explicit_custom_selection() {
+    let plugins = RouterPlugins::default()
+        .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+    assert!(plugins.has_custom_worker_selection());
+    assert!(plugins.has_custom_plugins());
+}
+
+#[test]
+fn registering_named_policies_does_not_replace_the_hosts_default() {
+    let fallback = dynamo_custom_policy_builtin::default_factory();
+    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default()
+        .with_default_factory(fallback.clone());
+    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    let resolved = registry
+        .resolve(&KvRouterConfig::default())
+        .unwrap()
+        .unwrap();
+    assert!(Arc::ptr_eq(&fallback, &resolved));
 }

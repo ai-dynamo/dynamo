@@ -43,6 +43,7 @@ impl DefaultWorkerSelector {
         Self {
             policy: Mutex::new(policy_with_rng(
                 config.clone(),
+                super::PolicyParameters::from(&config),
                 worker_type,
                 rng.clone(),
                 false,

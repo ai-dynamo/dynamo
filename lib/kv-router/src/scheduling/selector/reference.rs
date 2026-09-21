@@ -582,9 +582,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         select_worker_with_policy(
-            &self.kv_router_config,
             self.worker_type,
-            WorkerSelectionPolicyStateRef::Default(&self.picker),
+            WorkerSelectionPolicyStateRef::Reference(&self.kv_router_config, &self.picker),
             workers,
             request,
             eligibility,

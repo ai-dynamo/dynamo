@@ -13,8 +13,6 @@ use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
 };
-#[cfg(test)]
-use super::worker_selection::WorkerSelectionPolicy;
 use super::worker_selection::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
@@ -116,17 +114,11 @@ impl RouterPluginRegistry {
         config: &KvRouterConfig,
     ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
         Ok(super::RouterPlugins {
-            // The builtin default does not opt a frontend into custom-plugin restrictions.
-            // Embedded routers still obtain it from the registry when constructing a pool.
-            worker_selection: if config
+            worker_selection: self.resolve(config)?,
+            custom_worker_selection: config
                 .selected_worker_selection_policy_instance()
                 .map_err(WorkerSelectionPolicyRegistryError::from)?
-                .is_some()
-            {
-                self.resolve(config)?
-            } else {
-                None
-            },
+                .is_some(),
             request_classifier: self.resolve_request_classifier(config)?,
         })
     }
@@ -239,45 +231,25 @@ impl RouterPluginRegistry {
             return Ok(self.default_factory.clone());
         }
 
-        #[cfg(not(test))]
-        if self.default_factory.is_none()
-            && [
-                aggregated.is_none(),
-                prefill.is_none(),
-                decode.is_none(),
-                encode.is_none(),
-            ]
-            .contains(&true)
-        {
-            return Err(WorkerSelectionPolicyRegistryError::MissingDefault);
-        }
-        let default_factory = self.default_factory.clone();
+        let [aggregated, prefill, decode, encode] = [aggregated, prefill, decode, encode]
+            .map(|factory| factory.or_else(|| self.default_factory.clone()));
+        let required = |factory: Option<WorkerSelectionPolicyFactory>| {
+            factory.ok_or(WorkerSelectionPolicyRegistryError::MissingDefault)
+        };
+        let (aggregated, prefill, decode, encode) = (
+            required(aggregated)?,
+            required(prefill)?,
+            required(decode)?,
+            required(encode)?,
+        );
         Ok(Some(Arc::new(move |config, worker_type, partition| {
             let selected = match worker_type {
-                WorkerType::Aggregated => aggregated.as_ref(),
-                WorkerType::Prefill => prefill.as_ref(),
-                WorkerType::Decode => decode.as_ref(),
-                WorkerType::Encode => encode.as_ref(),
+                WorkerType::Aggregated => &aggregated,
+                WorkerType::Prefill => &prefill,
+                WorkerType::Decode => &decode,
+                WorkerType::Encode => &encode,
             };
-            match selected {
-                Some(factory) => factory(config, worker_type, partition),
-                None => {
-                    #[cfg(test)]
-                    if default_factory.is_none() {
-                        return WorkerSelectionPolicy::default(
-                            config.clone(),
-                            worker_type.default_selector_label(),
-                        );
-                    }
-                    default_factory
-                        .as_ref()
-                        .expect("default factory validated at resolution")(
-                        config,
-                        worker_type,
-                        partition,
-                    )
-                }
-            }
+            selected(config, worker_type, partition)
         })))
     }
 
@@ -571,6 +543,23 @@ worker_selection:
                 (2, "encode".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn partial_role_selection_requires_an_explicit_fallback() {
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry.register("alpha", Arc::new(provider)).unwrap();
+        let config = config();
+        let selections = WorkerSelectionPolicySelections {
+            aggregated: Some("first".to_string()),
+            prefill: None,
+            decode: None,
+            encode: None,
+        };
+        assert!(matches!(
+            registry.resolve_selections(Some(&config), selections),
+            Err(WorkerSelectionPolicyRegistryError::MissingDefault)
+        ));
     }
 
     #[test]

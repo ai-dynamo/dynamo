@@ -373,7 +373,7 @@ fn default_policy_wrapper(c: &mut Criterion) {
     for worker_count in [2, 32, 1_024] {
         let (workers, request) = fixture(worker_count);
         let direct = DefaultWorkerSelector::new(Some(config.clone()), "prefill");
-        let policy = WorkerSelectionPolicy::default(config.clone(), "prefill");
+        let policy = WorkerSelectionPolicy::reference(config.clone(), "prefill");
         group.throughput(Throughput::Elements(worker_count as u64));
 
         group.bench_with_input(

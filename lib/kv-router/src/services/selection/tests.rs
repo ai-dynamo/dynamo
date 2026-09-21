@@ -1783,7 +1783,14 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 crate::WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                    |config, role, _| {
+                        crate::WorkerSelectionPolicy::reference(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    },
+                )),
             )
             .build()
             .await
@@ -1793,7 +1800,14 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             crate::WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default(),
+            WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                |config, role, _| {
+                    crate::WorkerSelectionPolicy::reference(
+                        config.clone(),
+                        role.default_selector_label(),
+                    )
+                },
+            )),
         )
         .indexer_threads(1)
         .replica_sync(port_b, Vec::new())

@@ -3,7 +3,7 @@
 
 //! Cache and load cost calculation. The host owns snapshots and validates finite scores.
 
-use dynamo_kv_router::KvRouterConfig;
+use super::parameters::PolicyParameters;
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidate, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
@@ -11,7 +11,7 @@ use dynamo_kv_router::plugins::worker_selection::{
 /// Resolve optional terms once so disabled weights add neither branches nor conversions to
 /// each worker score. The shared-cache specialization also omits range traversal code.
 pub(super) fn build(
-    config: &KvRouterConfig,
+    config: &PolicyParameters,
     worker_label: &'static str,
     plain_decode: bool,
 ) -> Box<dyn WorkerScorer> {
@@ -103,7 +103,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
     pub(super) fn new(
-        config: &KvRouterConfig,
+        config: &PolicyParameters,
         worker_label: &'static str,
         plain_decode: bool,
     ) -> Self {

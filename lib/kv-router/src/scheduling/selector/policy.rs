@@ -23,18 +23,18 @@ use crate::plugins::worker_selection::{
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
     #[cfg(any(test, feature = "bench"))]
-    Default(DefaultWorkerPicker),
+    Reference(Box<KvRouterConfig>, DefaultWorkerPicker),
     /// Policy-local state owned and called serially by one scheduler queue actor.
-    Custom(RefCell<CustomWorkerSelectionState>),
+    Composed(RefCell<ComposedPolicyState>),
 }
 
 pub(super) enum WorkerSelectionPolicyStateRef<'a> {
     #[cfg(any(test, feature = "bench"))]
-    Default(&'a DefaultWorkerPicker),
-    Custom(&'a RefCell<CustomWorkerSelectionState>),
+    Reference(&'a KvRouterConfig, &'a DefaultWorkerPicker),
+    Composed(&'a RefCell<ComposedPolicyState>),
 }
 
-pub(super) struct CustomWorkerSelectionState {
+pub(super) struct ComposedPolicyState {
     pub(super) filters: Vec<Box<dyn WorkerFilter>>,
     pub(super) scorers: Vec<Box<dyn WorkerScorer>>,
     pub(super) picker: Box<dyn WorkerPicker>,
@@ -52,17 +52,17 @@ pub(super) struct CustomWorkerSelectionState {
 /// Routing hosts supply a policy factory. Both builtin and external policies compose
 /// scorers and a picker through [`Self::new`], with optional filters through [`Self::new_with_filters`].
 pub struct WorkerSelectionPolicy {
-    kv_router_config: KvRouterConfig,
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
     exclusive_affinity: bool,
 }
 
 impl WorkerSelectionPolicy {
-    /// Build a custom policy with no filters.
+    /// Build a policy with no filters.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
-    /// passes [`crate::WorkerType::as_str`].
+    /// passes [`crate::WorkerType::as_str`]. The config argument is retained for API compatibility;
+    /// policy parameters belong to the supplied scorers and picker and are not retained here.
     pub fn new(
         kv_router_config: KvRouterConfig,
         worker_label: &'static str,
@@ -72,12 +72,13 @@ impl WorkerSelectionPolicy {
         Self::new_with_filters(kv_router_config, worker_label, Vec::new(), scorers, picker)
     }
 
-    /// Build a custom policy from ordered filters, additive scorers, and one picker.
+    /// Build a policy from ordered filters, additive scorers, and one picker.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
-    /// passes [`crate::WorkerType::as_str`].
+    /// passes [`crate::WorkerType::as_str`]. The config argument is retained for API compatibility;
+    /// policy parameters belong to the supplied scorers and picker and are not retained here.
     pub fn new_with_filters(
-        kv_router_config: KvRouterConfig,
+        _kv_router_config: KvRouterConfig,
         worker_label: &'static str,
         filters: Vec<Box<dyn WorkerFilter>>,
         scorers: Vec<Box<dyn WorkerScorer>>,
@@ -91,10 +92,9 @@ impl WorkerSelectionPolicy {
             inputs | scorer.required_worker_inputs()
         });
         Self {
-            kv_router_config,
             worker_label,
             exclusive_affinity: false,
-            state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
+            state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
                 picker,
@@ -116,18 +116,17 @@ impl WorkerSelectionPolicy {
         self
     }
 
-    /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
+    /// Construct the native reference implementation for parity tests and benchmarks.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
     #[cfg(any(test, feature = "bench"))]
-    pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
+    pub fn reference(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new();
         Self {
-            kv_router_config,
             worker_label,
             exclusive_affinity: false,
-            state: WorkerSelectionPolicyState::Default(picker),
+            state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
 }
@@ -154,7 +153,7 @@ fn push_picker_candidate(
     }
 }
 
-impl CustomWorkerSelectionState {
+impl ComposedPolicyState {
     // Keep row construction and storage together to avoid passing a full row through a call.
     #[inline(always)]
     fn push_candidate(&mut self, candidate: WorkerCandidate) {
@@ -225,8 +224,8 @@ impl CustomWorkerSelectionState {
     }
 }
 
-pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
-    state: &mut CustomWorkerSelectionState,
+pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
+    state: &mut ComposedPolicyState,
     input: &MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
@@ -319,7 +318,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
         #[cfg(any(test, feature = "bench"))]
-        if matches!(&self.state, WorkerSelectionPolicyState::Default(_)) {
+        if matches!(&self.state, WorkerSelectionPolicyState::Reference(..)) {
             return true;
         }
         self.exclusive_affinity
@@ -328,8 +327,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
             #[cfg(any(test, feature = "bench"))]
-            WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
-            WorkerSelectionPolicyState::Custom(state) => {
+            WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
+            WorkerSelectionPolicyState::Composed(state) => {
                 let state = state.borrow();
                 state.filter_inputs | state.scorer_picker_inputs
             }
@@ -344,15 +343,14 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
             #[cfg(any(test, feature = "bench"))]
-            WorkerSelectionPolicyState::Default(picker) => {
-                WorkerSelectionPolicyStateRef::Default(picker)
+            WorkerSelectionPolicyState::Reference(config, picker) => {
+                WorkerSelectionPolicyStateRef::Reference(config, picker)
             }
-            WorkerSelectionPolicyState::Custom(state) => {
-                WorkerSelectionPolicyStateRef::Custom(state)
+            WorkerSelectionPolicyState::Composed(state) => {
+                WorkerSelectionPolicyStateRef::Composed(state)
             }
         };
         select_worker_with_policy(
-            &self.kv_router_config,
             self.worker_label,
             state,
             workers,
@@ -420,7 +418,7 @@ mod tests {
                 16,
             ))
             .unwrap();
-        let policy = WorkerSelectionPolicy::default(config, "test");
+        let policy = WorkerSelectionPolicy::reference(config, "test");
         assert!(uses_exclusive_affinity(&policy));
         let actual = policy
             .select_worker(WorkerSelectionInput::configured(
