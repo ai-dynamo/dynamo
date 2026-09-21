@@ -6,7 +6,6 @@
 import asyncio
 import json
 import logging
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -33,32 +32,30 @@ RSS_SETTLE_SECONDS = 60
 
 
 def _memory_probe(pod: Any) -> dict[str, int]:
-    """Read cgroup memory and PID 1 descriptor counts from a pod."""
     snippet = """
 import json
 import os
 from pathlib import Path
-memory_paths = (
-    Path("/sys/fs/cgroup/memory.current"),
-    Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
-)
-memory_bytes = next(
-    (int(path.read_text()) for path in memory_paths if path.exists()),
-    None,
-)
-if memory_bytes is None:
-    raise RuntimeError("No cgroup memory counter is available")
 
 targets = []
-for descriptor in Path("/proc/1/fd").iterdir():
+rss_kib = 0
+for process in Path("/proc").glob("[0-9]*"):
     try:
-        targets.append(os.readlink(descriptor))
-    except FileNotFoundError:
+        if int(process.name) == os.getpid():
+            continue
+        status = (process / "status").read_text().splitlines()
+        rss_kib += int(next(line for line in status if line.startswith("VmRSS:")).split()[1])
+        for descriptor in (process / "fd").iterdir():
+            try:
+                targets.append(os.readlink(descriptor))
+            except OSError:
+                pass
+    except (FileNotFoundError, PermissionError, ProcessLookupError, StopIteration):
         pass
 print(json.dumps({
     "fds": len(targets),
     "sockets": sum(target.startswith("socket:") for target in targets),
-    "rss_kib": memory_bytes // 1024,
+    "rss_kib": rss_kib,
 }))
 """
     result = pod.exec(["python3", "-c", snippet])
@@ -100,10 +97,10 @@ def _adapter_present(base_url: str) -> bool:
     )
 
 
-def _adapter_removed(base_url: str) -> bool:
-    loras = requests.get(f"{base_url}/v1/loras", timeout=10)
+def _adapter_removed(frontend_url: str, system_url: str) -> bool:
+    loras = requests.get(f"{system_url}/v1/loras", timeout=10)
     loras.raise_for_status()
-    return not _adapter_present(base_url) and loras.json().get("count") == 0
+    return not _adapter_present(frontend_url) and loras.json().get("count") == 0
 
 
 def _wait_for(predicate: Callable[[], bool], description: str) -> None:
@@ -115,20 +112,39 @@ def _wait_for(predicate: Callable[[], bool], description: str) -> None:
     pytest.fail(f"Timed out waiting for {description}")
 
 
-def _load_lora(base_url: str) -> None:
+def _load_lora(frontend_url: str, system_url: str) -> None:
     response = requests.post(
-        f"{base_url}/v1/loras",
+        f"{system_url}/v1/loras",
         json={"lora_name": LORA_NAME, "source": {"uri": LORA_SOURCE}},
         timeout=60,
     )
     assert response.ok, response.text
-    _wait_for(lambda: _adapter_present(base_url), "LoRA to appear in /v1/models")
+    _wait_for(lambda: _adapter_present(frontend_url), "LoRA to appear in /v1/models")
 
 
-def _unload_lora(base_url: str) -> None:
-    response = requests.delete(f"{base_url}/v1/loras/{LORA_NAME}", timeout=60)
+def _unload_lora(frontend_url: str, system_url: str) -> None:
+    response = requests.delete(f"{system_url}/v1/loras/{LORA_NAME}", timeout=60)
     assert response.ok, response.text
-    _wait_for(lambda: _adapter_removed(base_url), "LoRA to leave discovery")
+    _wait_for(
+        lambda: _adapter_removed(frontend_url, system_url), "LoRA to leave discovery"
+    )
+
+
+def _chat_with_lora(base_url: str) -> None:
+    response = send_request(
+        f"{base_url}/v1/chat/completions",
+        {
+            "model": LORA_NAME,
+            "messages": [{"role": "user", "content": "Reply with NVIDIA Dynamo."}],
+            "max_tokens": 16,
+            "temperature": 0,
+        },
+        timeout=60,
+    )
+    assert response.ok, response.text
+    body = response.json()
+    assert body.get("object") == "chat.completion", body
+    assert body.get("choices"), body
 
 
 def _assert_bounded_growth(
@@ -156,12 +172,6 @@ def _assert_bounded_growth(
         )
 
 
-@pytest.mark.framework_agnostic
-@pytest.mark.vllm
-@pytest.mark.model(BASE_MODEL)
-@pytest.mark.model(LORA_NAME)
-@pytest.mark.profiled_vram_gib(4.0)
-@pytest.mark.requested_vllm_kv_cache_bytes(941_712_000)
 @pytest.mark.nightly
 @pytest.mark.framework_only
 @pytest.mark.core
@@ -183,21 +193,12 @@ async def test_lora_registration_churn_has_bounded_resources(
     assert frontend_image, "--frontend-image is required for the frontend"
     assert namespace, "--namespace is required for the Kubernetes deployment"
 
-    kv_cache_marker = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
-    assert kv_cache_marker and kv_cache_marker.args, "vLLM KV cache budget is required"
-    kv_cache_bytes = os.environ.get(
-        "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(kv_cache_marker.args[0])
-    )
-
     deployment_spec = DeploymentSpec(str(_dgd_manifest_path(tmp_path)))
     deployment_spec.name = "vllm-lora-churn"
     deployment_spec.set_image(frontend_image, service_name="Frontend")
     deployment_spec.set_image(image, service_name="VllmDecodeWorker")
     deployment_spec.add_arg_to_service(
-        "VllmDecodeWorker", "--kv-cache-memory-bytes", kv_cache_bytes
-    )
-    deployment_spec.add_arg_to_service(
-        "VllmDecodeWorker", "--gpu-memory-utilization", "0.01"
+        "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
     )
     model_cache_pvc = request.config.getoption("--model-cache-pvc")
     if model_cache_pvc:
@@ -210,11 +211,22 @@ async def test_lora_registration_churn_has_bounded_resources(
         skip_service_restart=skip_service_restart,
         readiness_timeout=900,
     ) as deployment:
-        frontend = deployment.get_pods(["Frontend"])["Frontend"]
-        assert len(frontend) == 1, "Expected one frontend pod"
-        port_forward = deployment.port_forward(frontend[0], deployment_spec.port)
-        assert port_forward is not None, "Unable to port-forward the frontend"
-        base_url = f"http://localhost:{port_forward.local_port}"
+        frontend_pods = deployment.get_pods(["Frontend"])["Frontend"]
+        worker_pods = deployment.get_pods(["VllmDecodeWorker"])["VllmDecodeWorker"]
+        assert len(frontend_pods) == 1, "Expected one frontend pod"
+        assert len(worker_pods) == 1, "Expected one VllmDecodeWorker pod"
+        frontend_port_forward = deployment.port_forward(
+            frontend_pods[0], deployment_spec.port
+        )
+        worker_port_forward = deployment.port_forward(
+            worker_pods[0], deployment_spec.system_port
+        )
+        assert frontend_port_forward is not None, "Unable to port-forward the frontend"
+        assert worker_port_forward is not None, (
+            "Unable to port-forward the decode worker"
+        )
+        base_url = f"http://localhost:{frontend_port_forward.local_port}"
+        system_url = f"http://localhost:{worker_port_forward.local_port}"
         assert wait_for_model_availability(
             url=base_url,
             endpoint=deployment_spec.endpoint,
@@ -223,31 +235,17 @@ async def test_lora_registration_churn_has_bounded_resources(
             max_attempts=30,
         ), "Base model did not become available"
 
-        _load_lora(base_url)
-        _unload_lora(base_url)
+        _load_lora(base_url, system_url)
+        _chat_with_lora(base_url)
+        _unload_lora(base_url, system_url)
         baseline = _snapshot(deployment)
         logger.info("LoRA churn resource baseline: %s", baseline)
 
         for cycle in range(1, CHURN_CYCLES + 1):
-            _load_lora(base_url)
+            _load_lora(base_url, system_url)
             for _ in range(CHATS_PER_CYCLE):
-                response = send_request(
-                    f"{base_url}/v1/chat/completions",
-                    {
-                        "model": LORA_NAME,
-                        "messages": [
-                            {"role": "user", "content": "Reply with NVIDIA Dynamo."}
-                        ],
-                        "max_tokens": 16,
-                        "temperature": 0,
-                    },
-                    timeout=60,
-                )
-                assert response.ok, response.text
-                body = response.json()
-                assert body.get("object") == "chat.completion", body
-                assert body.get("choices"), body
-            _unload_lora(base_url)
+                _chat_with_lora(base_url)
+            _unload_lora(base_url, system_url)
             measurements = _snapshot(deployment)
             logger.info("LoRA churn cycle %d: %s", cycle, measurements)
             _assert_bounded_growth(baseline, measurements, cycle)
