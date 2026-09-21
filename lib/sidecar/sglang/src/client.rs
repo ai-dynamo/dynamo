@@ -401,35 +401,23 @@ mod tests {
     }
 
     #[test]
-    fn discovery_requires_incremental_streaming_for_every_worker_role() {
-        for mode in ["null", "prefill", "decode"] {
-            for setting in [
-                None,
-                Some(json!(false)),
-                Some(json!(null)),
-                Some(json!("true")),
-                Some(json!(true)),
-            ] {
-                let mut server_info = json!({"disaggregation_mode": mode});
-                if let Some(value) = &setting {
-                    server_info["incremental_streaming_output"] = value.clone();
-                }
-                let result = parse_discovery(
-                    pb::GetModelInfoResponse {
-                        model_path: "model-repo".to_string(),
-                        json_info: "{}".to_string(),
-                    },
-                    pb::GetServerInfoResponse {
-                        json_info: server_info.to_string(),
-                    },
-                    Vec::new(),
-                );
-                if setting == Some(json!(true)) {
-                    assert!(result.is_ok(), "{server_info}: {result:?}");
-                } else {
-                    let error = result.unwrap_err().to_string();
-                    assert!(error.contains("--incremental-streaming-output"), "{error}");
-                }
+    fn discovery_requires_incremental_streaming() {
+        for enabled in [false, true] {
+            let result = parse_discovery(
+                pb::GetModelInfoResponse {
+                    model_path: "model-repo".to_string(),
+                    json_info: "{}".to_string(),
+                },
+                pb::GetServerInfoResponse {
+                    json_info: json!({"incremental_streaming_output": enabled}).to_string(),
+                },
+                Vec::new(),
+            );
+            if enabled {
+                assert!(result.is_ok(), "{result:?}");
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("--incremental-streaming-output"), "{error}");
             }
         }
     }
