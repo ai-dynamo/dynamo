@@ -454,3 +454,202 @@ class TestEncodeVideoRoundTrip:
 
         psnr = _psnr(frames, decoded)
         assert psnr >= 35.0, f"round-trip PSNR too low: {psnr:.1f} dB"
+
+
+# ---------------------------------------------------------------------------
+# CMAF streaming
+#
+# The streaming path only ever *reads* MP4 boxes -- one ffmpeg process owns the
+# timeline -- so segment framing and codec detection are testable without an
+# encoder. No test below starts a process.
+# ---------------------------------------------------------------------------
+
+
+def _box(btype: bytes, payload: bytes = b"") -> bytes:
+    """Serialize one MP4 box."""
+    size = len(payload) + video_utils.MP4_BOX_HEADER_SIZE
+    return size.to_bytes(4, "big") + btype + payload
+
+
+# av1C: marker/version, then profile 0 / level 5, then tier M / 8-bit.
+_AV1C = bytes([0x81, 0x05, 0x00])
+# vpcC is a FullBox: version/flags, then profile 0, level 10, 8-bit in the
+# high nibble.
+_VPCC = bytes([1, 0, 0, 0, 0, 10, 0x80])
+
+
+def _init_segment(sample_entry: bytes, config_type: bytes, config: bytes) -> bytes:
+    """Minimal ftyp+moov nesting one codec configuration box where ffmpeg puts it."""
+    entry = _box(
+        sample_entry,
+        b"\x00" * video_utils._VISUAL_SAMPLE_ENTRY_BODY + _box(config_type, config),
+    )
+    stsd = _box(b"stsd", b"\x00" * 8 + entry)  # version/flags + entry count
+    moov = _box(
+        b"moov", _box(b"trak", _box(b"mdia", _box(b"minf", _box(b"stbl", stsd))))
+    )
+    return _box(b"ftyp", b"isom") + moov
+
+
+def _fragments(count: int) -> bytes:
+    """`count` media fragments, each a moof followed by its mdat."""
+    return b"".join(
+        _box(b"moof", b"moof-%d" % i) + _box(b"mdat", bytes([i]) * 16)
+        for i in range(count)
+    )
+
+
+class TestCodecStringFromInit:
+    """The codec string is read from the encode that actually ran."""
+
+    def test_reads_av1_profile_level_and_depth(self):
+        init = _init_segment(b"av01", b"av1C", _AV1C)
+        assert video_utils.codec_string_from_init(init) == "av01.0.05M.08"
+
+    def test_reads_vp9_profile_level_and_depth(self):
+        init = _init_segment(b"vp09", b"vpcC", _VPCC)
+        assert video_utils.codec_string_from_init(init) == "vp09.00.10.08"
+
+    def test_returns_none_when_the_sample_entry_is_missing(self):
+        assert video_utils.codec_string_from_init(_box(b"ftyp", b"isom")) is None
+
+    def test_truncated_init_does_not_raise(self):
+        init = _init_segment(b"vp09", b"vpcC", _VPCC)
+        assert video_utils.codec_string_from_init(init[:40]) is None
+
+    def test_encoder_fallback_covers_an_unreadable_init(self):
+        """The client cannot call isTypeSupported() without some codec string."""
+        enc = video_utils.StreamingCmafEncoder(16, 64, 64)
+        assert (
+            enc.codec_string()
+            == video_utils.CMAF_FALLBACK_VIDEO_CODEC[video_utils.SW_VIDEO_ENCODER]
+        )
+
+
+class TestFragmentedMp4Cutter:
+    """ftyp+moov is the init segment; every later moof+mdat is one segment."""
+
+    def test_splits_init_and_segments_verbatim(self):
+        init, body = _init_segment(b"vp09", b"vpcC", _VPCC), _fragments(3)
+        out = video_utils.FragmentedMp4Cutter().feed(init + body)
+
+        assert [kind for kind, _ in out] == ["init", "segment", "segment", "segment"]
+        # Byte-exact: the muxer owns the timeline, nothing is rewritten.
+        assert out[0][1] == init
+        assert b"".join(payload for _, payload in out[1:]) == body
+
+    def test_a_boundary_mid_read_costs_a_wait_not_a_segment(self):
+        init, body = _init_segment(b"av01", b"av1C", _AV1C), _fragments(2)
+        cutter = video_utils.FragmentedMp4Cutter()
+        out = []
+        for byte in init + body:
+            out += cutter.feed(bytes([byte]))
+
+        assert [kind for kind, _ in out] == ["init", "segment", "segment"]
+        assert out[0][1] == init
+        assert b"".join(payload for _, payload in out[1:]) == body
+
+    def test_skips_a_top_level_box_outside_a_fragment(self):
+        """The mfra ffmpeg writes after the last fragment is not playable data."""
+        init, body = _init_segment(b"vp09", b"vpcC", _VPCC), _fragments(1)
+        out = video_utils.FragmentedMp4Cutter().feed(init + body + _box(b"mfra", b"x"))
+
+        assert [kind for kind, _ in out] == ["init", "segment"]
+
+    def test_flush_emits_the_trailing_fragment(self):
+        """A last mdat that never completes is only closed by flush()."""
+        init, body = _init_segment(b"vp09", b"vpcC", _VPCC), _fragments(1)
+        cutter = video_utils.FragmentedMp4Cutter()
+
+        partial = cutter.feed(init + body[:-4])
+        assert [kind for kind, _ in partial] == ["init"]
+
+        rest = cutter.flush()
+        assert [kind for kind, _ in rest] == ["segment"]
+        assert rest[0][1] == body[:-4]
+
+    def test_rejects_an_impossible_box_size(self):
+        bad = (4).to_bytes(4, "big") + b"moov" + b"\x00" * 8
+        with pytest.raises(ValueError, match="invalid MP4 box size"):
+            video_utils.FragmentedMp4Cutter().feed(bad)
+
+
+class TestStreamingFfmpegResolution:
+    """DEP 0016's selection rule, applied to the CMAF path's CLI encoder."""
+
+    def test_hardware_wins_and_carries_a_render_node(self, monkeypatch, tmp_path):
+        exe = _executable_stub(tmp_path)
+        monkeypatch.setenv(video_utils.ENV_XPU_FFMPEG_PATH, exe)
+        assert video_utils.resolve_streaming_ffmpeg() == (
+            exe,
+            video_utils.DEFAULT_XPU_VIDEO_DEVICE,
+        )
+
+    def test_software_has_no_render_node(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(video_utils.ENV_XPU_FFMPEG_PATH, raising=False)
+        exe = _executable_stub(tmp_path)
+        monkeypatch.setenv(video_utils.ENV_FFMPEG_PATH, exe)
+        assert video_utils.resolve_streaming_ffmpeg() == (exe, None)
+
+    def test_a_missing_software_binary_is_a_hard_error(self, monkeypatch, tmp_path):
+        """Streaming needs a real binary: imageio cannot hand back fragments."""
+        monkeypatch.delenv(video_utils.ENV_XPU_FFMPEG_PATH, raising=False)
+        monkeypatch.setenv(video_utils.ENV_FFMPEG_PATH, str(tmp_path / "nope"))
+        with pytest.raises(RuntimeError, match="not an executable file"):
+            video_utils.resolve_streaming_ffmpeg()
+
+
+class TestStreamingCommandLine:
+    """Streaming adds fragmented-MP4 muxing without disturbing the batch argv."""
+
+    def _cmd(self, **kwargs):
+        return video_utils.build_ffmpeg_command(
+            "/usr/bin/ffmpeg",
+            width=832,
+            height=480,
+            fps=16,
+            output="pipe:1",
+            **kwargs,
+        )
+
+    @staticmethod
+    def _pairs(cmd):
+        return set(zip(cmd, cmd[1:]))
+
+    def test_software_streaming_flags(self):
+        cmd = self._cmd(gop=8, streaming=True)
+        pairs = self._pairs(cmd)
+
+        assert ("-c:v", video_utils.SW_VIDEO_ENCODER) in pairs
+        assert ("-movflags", video_utils.FRAGMENTED_MOVFLAGS) in pairs
+        # +faststart rewrites the file afterwards and needs a seekable output.
+        assert "+faststart" not in cmd
+        # 4:2:0, so the stream is VP9 profile 0: MSE support for vp09.01 is not
+        # dependable.
+        assert ("-pix_fmt", "yuv420p") in pairs
+        assert cmd[-1] == "pipe:1"
+
+    def test_the_gop_pins_a_keyframe_at_every_segment_start(self):
+        cmd = self._cmd(gop=8, streaming=True)
+        pairs = self._pairs(cmd)
+        assert ("-g", "8") in pairs
+        assert ("-keyint_min", "8") in pairs
+
+    def test_hardware_streaming_flags(self):
+        cmd = self._cmd(gop=8, streaming=True, hw_device="/dev/dri/renderD128")
+        pairs = self._pairs(cmd)
+
+        assert ("-c:v", video_utils.HW_VIDEO_ENCODER) in pairs
+        assert ("-vaapi_device", "/dev/dri/renderD128") in pairs
+        assert ("-vf", "format=nv12,hwupload") in pairs
+        assert ("-movflags", video_utils.FRAGMENTED_MOVFLAGS) in pairs
+        # Format conversion happens on the VA-API surface, not via -pix_fmt.
+        assert ("-pix_fmt", "yuv420p") not in pairs
+
+    def test_the_batch_command_is_untouched(self):
+        cmd = self._cmd()
+        pairs = self._pairs(cmd)
+
+        assert ("-movflags", "+faststart") in pairs
+        assert video_utils.FRAGMENTED_MOVFLAGS not in cmd
+        assert "-g" not in cmd

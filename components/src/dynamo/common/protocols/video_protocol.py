@@ -141,3 +141,11 @@ class NvVideosResponse(BaseModel):
 
     inference_time_s: Optional[float] = None
     """Inference time in seconds."""
+
+    cmaf: Optional[str] = None
+    """CMAF frame tag, set only on the CMAF streaming route.
+
+    One of 'cmaf:metadata', 'cmaf:init', or 'cmaf:segment:{n}' (see
+    dynamo.common.utils.cmaf_video); the frontend turns it into the frame's
+    one-byte kind and the payload travels in data[0].b64_json. Absent on every
+    other path."""

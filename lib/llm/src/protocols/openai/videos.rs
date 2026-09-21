@@ -128,6 +128,14 @@ pub struct NvVideosResponse {
     /// Inference time in seconds
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inference_time_s: Option<f64>,
+
+    /// CMAF frame tag, set only by the CMAF streaming route's backend.
+    ///
+    /// One of `cmaf:metadata`, `cmaf:init`, or `cmaf:segment:{n}`, mapped to a
+    /// wire kind byte by `cmaf_frame_kind`; the payload travels in
+    /// `data[0].b64_json`. Absent on every other path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cmaf: Option<String>,
 }
 
 fn default_object_type() -> String {
@@ -154,6 +162,7 @@ impl NvVideosResponse {
             data: vec![],
             error: None,
             inference_time_s: None,
+            cmaf: None,
         }
     }
 }

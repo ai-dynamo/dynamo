@@ -31,6 +31,7 @@ from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.protocols.image_protocol import ImageNvExt, NvCreateImageRequest
 from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
 from dynamo.common.rl import RLAdminValidationError
+from dynamo.common.utils.cmaf_video import CMAF_ANNOTATION
 from dynamo.common.utils.output_modalities import (
     RequestType,
     get_output_modalities,
@@ -93,6 +94,19 @@ def _apply_media_passthrough(
                 "no extra_args",
                 sorted(knobs),
             )
+
+
+def _has_cmaf_annotation(parsed_request: Any) -> bool:
+    """True when the frontend's CMAF route marked this request."""
+    nvext = getattr(parsed_request, "nvext", None)
+    if nvext is None and isinstance(parsed_request, dict):
+        nvext = parsed_request.get("nvext")
+    annotations = (
+        nvext.get("annotations")
+        if isinstance(nvext, dict)
+        else getattr(nvext, "annotations", None)
+    )
+    return CMAF_ANNOTATION in (annotations or [])
 
 
 @dataclass
@@ -352,6 +366,18 @@ class OmniHandler(BaseOmniHandler):
             parsed_request_raw,
         )
 
+        # Only the CMAF route sets this annotation; no request field does.
+        cmaf = request_type == RequestType.VIDEO_GENERATION and _has_cmaf_annotation(
+            parsed_request
+        )
+
+        def error_chunk(message: str) -> Dict[str, Any]:
+            # The frontend turns this into a terminal error frame; a bare end of
+            # stream would be indistinguishable from success.
+            if cmaf:
+                return self.output_formatter.cmaf_error(request_id, message)
+            return self._error_chunk(request_id, message, request_type)
+
         # Pre-load input image for I2V requests (async I/O before sync build)
         image = None
         if (
@@ -365,13 +391,16 @@ class OmniHandler(BaseOmniHandler):
                 )
             except Exception as e:
                 logger.warning("Failed to load I2V input_reference: %s", e)
-                yield {
-                    "id": request_id,
-                    "object": "video",
-                    "model": self.config.model,
-                    "status": "failed",
-                    "error": f"Failed to load input_reference: {e}",
-                }
+                if cmaf:
+                    yield error_chunk(f"Failed to load input_reference: {e}")
+                else:
+                    yield {
+                        "id": request_id,
+                        "object": "video",
+                        "model": self.config.model,
+                        "status": "failed",
+                        "error": f"Failed to load input_reference: {e}",
+                    }
                 return
 
         try:
@@ -380,7 +409,7 @@ class OmniHandler(BaseOmniHandler):
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
-            yield self._error_chunk(request_id, str(e), request_type)
+            yield error_chunk(str(e))
             return
 
         generate_kwargs: Dict[str, Any] = {
@@ -442,6 +471,17 @@ class OmniHandler(BaseOmniHandler):
                     per_request_kwargs["lora_request"] = admitted_lora_request
 
             async for stage_output in self.engine_client.generate(**per_request_kwargs):
+                if cmaf:
+                    # Only the diffusion stage carries frames; anything else on a
+                    # multi-stage video pipeline has no CMAF representation.
+                    if getattr(stage_output, "final_output_type", None) != "image":
+                        continue
+                    async for frame in self.output_formatter.stream_cmaf(
+                        stage_output, request_id, fps=inputs.fps
+                    ):
+                        yield {"stage_output": stage_output, "formatted_chunk": frame}
+                    continue
+
                 chunk = await self.output_formatter.format(
                     stage_output,
                     request_id,
@@ -482,7 +522,7 @@ class OmniHandler(BaseOmniHandler):
                 raise
             except Exception as e:
                 logger.error(f"Error during generation for request {request_id}: {e}")
-                yield self._error_chunk(request_id, str(e), inputs.request_type)
+                yield error_chunk(str(e))
 
     async def _generate_with_lora_admission_lock(
         self,
