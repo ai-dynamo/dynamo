@@ -135,13 +135,31 @@ def test_token_budget_matches_sglang_policy(
     assert _get_token_budget(engine, server_args) == expected
 
 
-def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    "disaggregation_mode, runtime_supported, enable_multimodal, capability_expected",
+    [
+        (None, True, False, False),
+        ("null", True, False, False),
+        ("prefill", False, False, False),
+        ("prefill", True, True, False),
+        ("prefill", True, False, True),
+        ("decode", True, False, True),
+    ],
+)
+def test_runtime_config_publishes_supported_disagg_capabilities(
+    monkeypatch,
+    caplog,
+    disaggregation_mode,
+    runtime_supported,
+    enable_multimodal,
+    capability_expected,
+):
     from dynamo.sglang import register
 
     server_args = SimpleNamespace(
         allow_auto_truncate=False,
         context_length=4096,
-        disaggregation_mode=None,
+        disaggregation_mode=disaggregation_mode,
         max_prefill_tokens=None,
         page_size=16,
         speculative_algorithm="NONE",
@@ -149,6 +167,7 @@ def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
     )
     dynamo_args = register.DynamoConfig()
     dynamo_args.enable_local_indexer = False
+    dynamo_args.enable_multimodal = enable_multimodal
     capacity = SimpleNamespace(
         max_num_seqs=None,
         max_num_batched_tokens=None,
@@ -164,12 +183,32 @@ def test_runtime_config_without_engine_omits_token_budget(monkeypatch, caplog):
     monkeypatch.setattr(register, "get_spec_decode_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "_get_mooncake_runtime_data", lambda _: None)
     monkeypatch.setattr(register, "runtime_capacity", lambda *_: capacity)
+    monkeypatch.setattr(
+        register, "supports_disagg_prefill_cancel_anytime", lambda _: runtime_supported
+    )
+    engine = None
+    if runtime_supported:
+        engine = SimpleNamespace(
+            tokenizer_manager=SimpleNamespace(
+                context_len=4096,
+                validate_total_tokens=True,
+                num_reserved_tokens=0,
+                rid_to_state={},
+            ),
+            _scheduler_init_result=SimpleNamespace(scheduler_infos=[{}]),
+        )
 
     runtime_config = asyncio.run(
-        register.get_runtime_config(None, server_args, dynamo_args)
+        register.get_runtime_config(engine, server_args, dynamo_args)
     )
 
-    assert TOKEN_BUDGET_RUNTIME_KEY not in runtime_config.runtime_data
+    assert (
+        TOKEN_BUDGET_RUNTIME_KEY in runtime_config.runtime_data
+    ) is runtime_supported
+    capability = register.DISAGG_PREFILL_CANCEL_ANYTIME_V1
+    assert (capability in runtime_config.runtime_data) is capability_expected
+    if capability_expected:
+        assert json.loads(runtime_config.runtime_data[capability]) is True
     assert "Failed to get runtime config" not in caplog.text
 
 

@@ -94,7 +94,7 @@ async def test_fetch_with_policy_returns_first_response(
 
     call_count = {"n": 0}
 
-    async def _fake(url, timeout, *, max_bytes=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None):
         call_count["n"] += 1
         return b"body-bytes", None
 
@@ -115,7 +115,7 @@ async def test_fetch_with_policy_follows_safe_redirect(
 
     hops: list[str] = []
 
-    async def _fake(url, timeout, *, max_bytes=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None):
         hops.append(url)
         if url == "https://example.com/x.png":
             return None, "https://example.com/final.png"
@@ -138,7 +138,7 @@ async def test_fetch_with_policy_blocks_redirect_to_private_ip(
 
     strict = UrlValidationPolicy(allow_private_ips=False)
 
-    async def _fake(url, timeout, *, max_bytes=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None):
         return None, "http://169.254.169.254/latest/meta-data/"
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
@@ -161,7 +161,7 @@ async def test_fetch_with_policy_enforces_redirect_limit(
         "https://example.com/d": "https://example.com/e",
     }
 
-    async def _fake(url, timeout, *, max_bytes=None):
+    async def _fake(url, timeout, *, max_bytes=None, policy=None):
         return None, chain[url]
 
     with patch.object(client, "_fetch_body_or_redirect", _fake):
