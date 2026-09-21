@@ -28,10 +28,11 @@ import psutil
 import pytest
 
 from tests.conftest import EtcdServer, NatsServer
+from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_models_api
-from tests.utils.port_utils import allocate_ports
+from tests.utils.port_utils import allocate_port, allocate_ports, deallocate_ports
 
 openai = pytest.importorskip("openai")
 OpenAI = openai.OpenAI
@@ -140,7 +141,15 @@ TOPOLOGIES = ("chat_processor_frontend", "rust_parsers")
 class WorkerProcess(ManagedProcess):
     """backend worker for the tool-calling tests."""
 
-    def __init__(self, request, *, system_port: int, fpm_port: int, topology: str):
+    def __init__(
+        self,
+        request,
+        *,
+        system_port: int,
+        fpm_port: int,
+        nccl_port: int,
+        topology: str,
+    ):
         env = os.environ.copy()
         env["DYN_LOG"] = "info"
         env["DYN_SYSTEM_PORT"] = str(system_port)
@@ -158,6 +167,14 @@ class WorkerProcess(ManagedProcess):
             "--served-model-name",
             MODEL_NAME,
             "--trust-remote-code",
+            # Without this flag SGLang picks the torch.distributed rendezvous
+            # port itself via get_free_port(), which binds port 0, reads the
+            # number and closes the socket well before init_process_group binds
+            # it for real. Nothing holds the port in between, and the number
+            # comes from the kernel's ephemeral range, so a concurrent listener
+            # can take it and startup dies with an address-in-use error.
+            "--nccl-port",
+            str(nccl_port),
         ]
         if topology == "rust_parsers":
             command += [
@@ -271,10 +288,19 @@ def tool_calling_services(
     """
     topology: str = request.param
     frontend_port, system_port, fpm_port = allocate_ports(count=3, start_port=10000)
+    # DynamoPortRange.NCCL is the base the suite reserves for torch.distributed
+    # rendezvous ports; it sits below the kernel's ephemeral range and the
+    # allocator's flock registry keeps concurrent test containers off it.
+    nccl_port = allocate_port(DynamoPortRange.NCCL.value)
+    allocated_ports = [frontend_port, system_port, fpm_port, nccl_port]
 
     try:
         with WorkerProcess(
-            request, system_port=system_port, fpm_port=fpm_port, topology=topology
+            request,
+            system_port=system_port,
+            fpm_port=fpm_port,
+            nccl_port=nccl_port,
+            topology=topology,
         ):
             # Allow worker to register with discovery.
             time.sleep(2)
@@ -297,6 +323,8 @@ def tool_calling_services(
         # reclaims bound ports and the GPU frees its VRAM.
         _cleanup_sglang_stragglers()
         time.sleep(3)
+        # Release the registry entries only once the owning processes are gone.
+        deallocate_ports(allocated_ports)
 
 
 @pytest.fixture(scope="module")
