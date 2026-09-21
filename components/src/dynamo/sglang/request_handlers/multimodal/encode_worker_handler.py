@@ -719,7 +719,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                 and not _software_video_decoder_imports()
             ):
                 raise video_decoder_missing("sglang", "decord2", "decord", None)
-            encode_inputs: list[Any] = []
+            fetched_inputs: list[Any] = []
             for media_input in validated:
                 if isinstance(media_input, str) and urlparse(media_input).scheme in (
                     "http",
@@ -731,8 +731,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
                         policy=self._url_policy,
                         max_bytes=max_media_bytes(),
                     )
-                encode_inputs.append(media_input)
-            return encode_inputs
+                fetched_inputs.append(media_input)
+            return fetched_inputs
         encode_inputs: list[Any] = []
         for media_input in media_inputs:
             if not isinstance(media_input, str):

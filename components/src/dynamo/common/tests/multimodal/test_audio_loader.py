@@ -7,12 +7,13 @@ import numpy as np
 import pytest
 
 from dynamo.common.http import HttpStatusError
-from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import audio_loader as audio_loader_module
 from dynamo.common.multimodal.audio_loader import AudioLoader
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB  # isort: skip
 
 pytestmark = [
     pytest.mark.unit,

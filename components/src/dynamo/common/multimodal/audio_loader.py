@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 import numpy as np
 
 from dynamo.common.http import HttpStatusError, fetch_bytes
-from dynamo.common.http.media_reference import max_media_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -21,6 +20,8 @@ from dynamo.common.multimodal.codec_errors import (
 )
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
+
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 
 logger = logging.getLogger(__name__)
 

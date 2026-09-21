@@ -24,7 +24,6 @@ from urllib.parse import urlparse
 import numpy as np
 
 from dynamo.common.http import HttpStatusError, fetch_bytes
-from dynamo.common.http.media_reference import max_media_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -44,6 +43,8 @@ from dynamo.common.multimodal.nvdec_decoder import (
     should_use_nvdec,
 )
 from dynamo.common.utils.runtime import run_async
+
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 
 logger = logging.getLogger(__name__)
 
