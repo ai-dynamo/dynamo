@@ -783,21 +783,31 @@ RUN set -eu; \
 # because `FROM ${RUNTIME_IMAGE}` here does not inherit runtime_full's config.
 # dev/local-dev create their own venv in a later stage, so the venv ENV is left
 # out for them — keeps this config identical to the unsquashed dev path.
+#
+# This is the block the shipped image carries, so a variable that exists only in
+# runtime_full is inert at run time. The MPI entries are here for that reason,
+# and the note above them in runtime_full explains what they select.
 {% if target in ("dev", "local-dev") %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/hpcx/ompi4/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/hpcx/ompi4/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/hpcx/ompi4 \
+    PRTE_PREFIX= \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/hpcx/ompi4/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/hpcx/ompi4/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/hpcx/ompi4 \
+    PRTE_PREFIX= \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% endif %}
