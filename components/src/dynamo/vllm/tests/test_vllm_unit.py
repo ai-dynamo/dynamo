@@ -233,6 +233,18 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
         parse_args()
 
 
+@pytest.mark.parametrize("value", ["none", "nixl", "kvbm"])
+def test_connector_flag_is_rejected(value, mock_vllm_cli, capsys):
+    """vLLM rejects the TensorRT-LLM-only connector flag at parse time."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", value)
+
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args()
+
+    assert exc_info.value.code == 2
+    assert f"unrecognized arguments: --connector {value}" in capsys.readouterr().err
+
+
 def test_model_express_url_is_accepted_for_compatibility(mock_vllm_cli):
     """Test that legacy ModelExpress manifests still parse."""
     mock_vllm_cli(

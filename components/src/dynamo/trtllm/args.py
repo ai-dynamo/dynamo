@@ -55,8 +55,8 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
         DynamoTrtllmConfig.validate(self)
         self.use_kv_events = self.publish_kv_events
 
-        # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
-        # while the runtime args accepts a list of connectors
+        # DynamoTrtllmArgGroup parses a list, but TensorRT-LLM accepts at most
+        # one connector from VALID_TRTLLM_CONNECTORS.
         if self.connector:
             if len(self.connector) > 1:
                 raise ValueError(
