@@ -412,9 +412,10 @@ async def test_multimodal_decode_propagates_prefill_validation_errors():
             }
         )
 
-    handler.prefill_client = SimpleNamespace(
-        generate=lambda *_args, **_kwargs: prefill_error()
-    )
+    async def generate(*_args, **_kwargs):
+        return prefill_error()
+
+    handler.prefill_client = SimpleNamespace(generate=generate)
     request = SglangMultimodalRequest(
         request=PreprocessedRequest(
             token_ids=[1, 2, 3],

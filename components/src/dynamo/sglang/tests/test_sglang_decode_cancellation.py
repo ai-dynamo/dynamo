@@ -138,7 +138,7 @@ def decode_cancellation_case(monkeypatch):
     handler._priority_kwargs = lambda priority: {}
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.llm.decode_handler.require_reasoning_kwargs",
-        lambda *args: {},
+        lambda *args, **kwargs: {},
     )
 
     monkeypatch.setattr(
