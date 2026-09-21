@@ -155,9 +155,7 @@ sglang_configs = {
         ],
     ),
     "thinking_token_budget": SGLangConfig(
-        # Exercise the full frontend-to-SGLang translation with the native
-        # strict-thinking grammar enabled. The worker log assertion proves
-        # the deployed worker receives SGLang's custom thinking budget.
+        # A successful response alone would not show that the budget reached SGLang.
         name="thinking_token_budget",
         directory=sglang_dir,
         script_name="agg.sh",
@@ -174,13 +172,14 @@ sglang_configs = {
             "--enable-strict-thinking",
             "--reasoning-parser",
             "qwen3",
+            "--dyn-reasoning-parser",
+            "qwen3",
             "--grammar-backend",
             "xgrammar",
         ],
         env={
             "DYN_CHAT_PROCESSOR": "sglang",
             "DYN_LOG": "debug",
-            "DYN_REASONING_PARSER": "qwen3",
         },
         frontend_port=DefaultPort.FRONTEND.value,
         request_payloads=[
