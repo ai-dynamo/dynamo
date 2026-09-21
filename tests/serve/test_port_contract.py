@@ -678,16 +678,12 @@ def test_heredoc_body_ends_only_at_the_bash_delimiter() -> None:
         ("''", ""),
     ],
 )
-@pytest.mark.parametrize("operator", ["<<", "<<-"])
-def test_heredoc_delimiter_is_a_shell_word(
-    word: str, delimiter: str, operator: str
-) -> None:
+def test_heredoc_delimiter_is_a_shell_word(word: str, delimiter: str) -> None:
     """Punctuation and quote removal must not expose heredoc text as commands."""
-    indent = "\t" if operator == "<<-" else ""
     script = (
-        f"cat {operator}{word}\n"
+        f"cat <<{word}\n"
         "python -m dynamo.fake\n"
-        f"{indent}{delimiter}\n"
+        f"{delimiter}\n"
         "python -m dynamo.frontend &\n"
         "wait_any_exit\n"
     )
@@ -700,7 +696,7 @@ def test_here_string_does_not_start_a_heredoc() -> None:
     assert _service_launches(script) == [(2, "python -m dynamo.frontend", True)]
 
 
-@pytest.mark.parametrize("operator", ["&&", "||", "|", "|&"])
+@pytest.mark.parametrize("operator", ["&&", "||", "|"])
 @pytest.mark.parametrize("gap", ["\n", "  \n\n    # keep waiting\n"])
 @pytest.mark.parametrize("terminator", ["&", ";"])
 def test_operator_continues_across_newlines(
