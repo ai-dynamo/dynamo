@@ -531,7 +531,7 @@ def _split_commands(script: str) -> list[_Command]:
             index += 2
             continue
         if char == "&":
-            if prev_code in "<>" or script.startswith("&>", index):  # a redirection
+            if prev_code in "<>" or script.startswith("&>", index):
                 add(char, False)
                 index += 1
                 continue
