@@ -32,7 +32,6 @@ from .sglang_prepost import (
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
-    _guided_tool_choice_requires_reasoning,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -357,9 +356,10 @@ def _preprocess_worker(
         pre.guided_decoding,
         pre.tool_call_parser,
         pre.reasoning_parser,
-        require_reasoning=_guided_tool_choice_requires_reasoning(
-            request, pre.force_reasoning
-        ),
+        # The engine only accounts reasoning tokens when the request declares
+        # reasoning (sglang serving_chat feeds thinking_mode the same way);
+        # force_reasoning is that per-request thinking decision.
+        require_reasoning=pre.force_reasoning,
     )
 
     effective_reasoning_parser_name = (
@@ -615,9 +615,9 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
                 pre.reasoning_parser,
-                require_reasoning=_guided_tool_choice_requires_reasoning(
-                    request, pre.force_reasoning
-                ),
+                # Same per-request thinking decision as the pool worker path;
+                # see the comment there for why the engine needs it.
+                require_reasoning=pre.force_reasoning,
             )
         except PreprocessError as exc:
             raise InvalidArgument(str(exc)) from exc
