@@ -28,8 +28,14 @@ use crate::disagg::DisaggregationMode;
 /// ```
 #[derive(Args, Clone, Debug)]
 pub struct CommonArgs {
-    /// Dynamo namespace for discovery routing.
-    #[arg(long, default_value = "dynamo", env = "DYN_NAMESPACE")]
+    /// Dynamo namespace for discovery routing. `DYN_NAMESPACE_WORKER_SUFFIX`
+    /// is appended as `-{suffix}` unless it is empty or already present.
+    #[arg(
+        long,
+        default_value = "dynamo",
+        env = "DYN_NAMESPACE",
+        value_parser = parse_worker_namespace
+    )]
     pub namespace: String,
 
     /// Component name within the namespace.
@@ -90,4 +96,64 @@ pub struct CommonArgs {
     /// shim does not read this env var.
     #[arg(long, default_value_t = false, env = "DYN_ROUTE_TO_ENCODER")]
     pub route_to_encoder: bool,
+
+    /// Publish this worker's engine control/update routes on the RL request-plane endpoint.
+    #[arg(long, default_value_t = false, env = "DYN_ENABLE_RL")]
+    pub enable_rl: bool,
+}
+
+fn parse_worker_namespace(namespace: &str) -> Result<String, std::convert::Infallible> {
+    let Ok(suffix) = std::env::var("DYN_NAMESPACE_WORKER_SUFFIX") else {
+        return Ok(namespace.to_owned());
+    };
+    if suffix.is_empty() {
+        return Ok(namespace.to_owned());
+    }
+    let suffix = format!("-{suffix}");
+    if namespace.ends_with(&suffix) {
+        return Ok(namespace.to_owned());
+    }
+    Ok(format!("{namespace}{suffix}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::CommonArgs;
+
+    #[derive(Parser)]
+    struct TestArgs {
+        #[command(flatten)]
+        common: CommonArgs,
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn worker_suffix_is_applied_once_to_namespace() {
+        for (namespace, suffix, argv, expected) in [
+            (Some("dynamo"), Some("qa1"), &["test"][..], "dynamo-qa1"),
+            (Some("dynamo-qa1"), Some("qa1"), &["test"][..], "dynamo-qa1"),
+            (Some("dynamo"), Some(""), &["test"][..], "dynamo"),
+            (Some("dynamo"), None, &["test"][..], "dynamo"),
+            (None, Some("qa1"), &["test"][..], "dynamo-qa1"),
+            (
+                Some("ignored"),
+                Some("qa1"),
+                &["test", "--namespace", "cli"][..],
+                "cli-qa1",
+            ),
+        ] {
+            temp_env::with_vars(
+                [
+                    ("DYN_NAMESPACE", namespace),
+                    ("DYN_NAMESPACE_WORKER_SUFFIX", suffix),
+                ],
+                || {
+                    let args = TestArgs::try_parse_from(argv).unwrap();
+                    assert_eq!(args.common.namespace, expected);
+                },
+            );
+        }
+    }
 }

@@ -1,6 +1,6 @@
 ---
 name: dynamo-interconnect-check
-description: Validate that a Dynamo deployment's NIXL/UCX/NCCL interconnect is ready for disaggregated serving over RDMA/NVLink. Use after recipe-runner brings a deployment up (especially disagg/multi-node) to confirm the KV transport is correct; use troubleshoot for diagnosing already-failed pods.
+description: Validate that a Dynamo deployment's NIXL/UCX/NCCL interconnect is ready for disaggregated serving over RDMA/NVLink. Use after deploy-dynamo-recipe brings a deployment up (especially disagg/multi-node) to confirm the KV transport is correct; use troubleshoot-dynamo for diagnosing already-failed pods.
 license: Apache-2.0
 metadata:
   author: Dan Gil <dagil@nvidia.com>
@@ -38,14 +38,14 @@ This skill is read-only. It never mutates the cluster and never prints secrets.
 
 ## When To Use
 
-- After `dynamo-recipe-runner` deploys a **disagg** or multi-node recipe.
+- After `deploy-dynamo-recipe` deploys a **disagg** or multi-node recipe.
 - Before reporting disagg throughput/latency, so numbers reflect the real
   transport.
 - When agg works but disagg is slow, hangs, or returns wrong output and you
   suspect the fabric rather than the model.
 
 For diagnosing pods that are already crashing or unschedulable, use
-`dynamo-troubleshoot` first.
+`troubleshoot-dynamo` first.
 
 ## Instructions
 
@@ -96,7 +96,7 @@ two scheduled GPU pods on the fabric.
 Invoke via the agentskills.io `run_script()` protocol:
 
 ```python
-run_script("scripts/check_interconnect.py", args=["env", "recipes/qwen3-coder-480b/sglang/disagg"])
+run_script("scripts/check_interconnect.py", args=["env", "recipes/qwen3-32b-fp8/vllm/disagg"])
 run_script("scripts/check_interconnect.py", args=["node", "--namespace", "dynamo-demo", "--pod", "qwen-worker-0"])
 ```
 
@@ -105,7 +105,7 @@ run_script("scripts/check_interconnect.py", args=["node", "--namespace", "dynamo
 Verify a disagg recipe's transport env shape before deploy:
 
 ```bash
-python3 scripts/check_interconnect.py env recipes/qwen3-coder-480b/sglang/disagg
+python3 scripts/check_interconnect.py env recipes/qwen3-32b-fp8/vllm/disagg
 ```
 
 After deploy, validate a worker pod's fabric:

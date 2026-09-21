@@ -256,6 +256,57 @@ cargo bench --package dynamo-bench --bench active_sequences_bench \
 The macOS timer is a correctness and profiling fallback. Do not publish local
 workstation throughput as an authoritative cross-system result.
 
+## Approximate retention replay
+
+`approximate_lru_bench` drives the production
+`ThreadPoolIndexer<ConcurrentRadixTreeCompressed>` directly. It supports a TTL
+arm and a capacity-bounded LRU arm in separate processes. Each request performs
+a prompt lookup and predicted insertion/acquire at its raw admission timestamp,
+then releases its LRU lease at the terminal output signal. Lanes are sticky by
+request attempt so same-rank lookups can still execute concurrently; the
+indexer's production worker/rank assignment preserves mutation FIFO.
+
+This is deliberately a prompt-lifecycle benchmark. It accounts for partial
+prompt tails as private LRU occupancy, but does not hash or materialize streamed
+output blocks. The result schema identifies that scope explicitly. Capacity is
+registered and acknowledged before timing, every LRU acquire must resolve to
+LRU rather than TTL fallback or ignored, and the final stats fence verifies that
+leases, active references, private occupancy, overcapacity, and queue backlog
+have drained.
+
+The default timed path is lean. It records only start/end wall and process CPU,
+issuer CPU, issue span, drain, queue depth at producer stop, acquire-mode counts,
+and final indexer state. It does not read clocks or maintain latency samples per
+operation. Use `perf` or Samply for CPU attribution; production mutation-queue
+statistics remain available in the final LRU snapshot.
+
+Build and run TTL and LRU in fresh processes:
+
+```bash
+cargo bench --package dynamo-bench --bench approximate_lru_bench \
+  --no-default-features --features approximate-lru --no-run
+
+cargo bench --package dynamo-bench --bench approximate_lru_bench \
+  --no-default-features --features approximate-lru -- \
+  testdata/mooncake_trace_approximate_pressure.jsonl \
+  --policy ttl --block-size 4 --benchmark-duration-ms 1000 \
+  --num-unique-inference-workers 1 --pre-run-quiescence-ms 0 \
+  --result-json-output /tmp/approx-ttl-smoke.json
+
+cargo bench --package dynamo-bench --bench approximate_lru_bench \
+  --no-default-features --features approximate-lru -- \
+  testdata/mooncake_trace_approximate_pressure.jsonl \
+  --policy lru --block-size 4 --capacity-blocks 2 --require-eviction \
+  --benchmark-duration-ms 1000 --num-unique-inference-workers 1 \
+  --pre-run-quiescence-ms 0 \
+  --result-json-output /tmp/approx-lru-smoke.json
+```
+
+The pressure arm exits nonzero if its prepared unique working set does not
+exceed capacity, any acquire falls back, eviction does not occur, or final
+invariants fail. macOS runs are functional smoke evidence only; authoritative
+CPU and throughput comparisons require pinned, exclusive Linux CPUs.
+
 ## Validation evidence
 
 The measurements below used one fixed host and one build:

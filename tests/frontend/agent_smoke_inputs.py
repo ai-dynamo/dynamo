@@ -35,6 +35,9 @@ non_code_mode_only = false
     (codex_home / "config.toml").write_text(
         f"""
 model_max_output_tokens = 4096
+# Dynamo's Responses adapter supports function tools, not hosted web search.
+# Disable Codex's default web-search tool for both parent and child smokes.
+web_search = "disabled"
 
 {multi_agent_config}
 

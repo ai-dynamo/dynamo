@@ -300,7 +300,6 @@ EXAMPLES:
 mod tests {
     use super::*;
     use dynamo_codegen::prometheus_parser::PrometheusParser;
-
     /// End-to-end: parse Rust source, generate the Python module, then actually import it
     /// with `python3` and read the attributes back. This is the only test that proves the
     /// whole chain — recursion, nested-class indentation, and black-canonical formatting —
@@ -375,5 +374,78 @@ pub mod empty_module {}
             code.contains("class empty_module:\n    pass"),
             "a module with no body must emit `pass`, not a syntax error:\n{code}"
         );
+    }
+
+    /// The committed Python module is a build artifact of this generator. If it
+    /// drifts, importers such as components/src/dynamo/common/utils/prometheus.py
+    /// fail with AttributeError at worker startup rather than here. Regenerate with:
+    ///     cargo run -p dynamo-codegen --bin gen-python-prometheus-names
+    #[test]
+    fn committed_python_matches_generated() {
+        let codegen_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let rust_source = codegen_dir.join("../../../runtime/src/metrics/prometheus_names.rs");
+        let python_module = codegen_dir.join("../src/dynamo/prometheus_names.py");
+
+        let rust_src = std::fs::read_to_string(&rust_source)
+            .unwrap_or_else(|e| panic!("read {}: {e}", rust_source.display()));
+        let parser = PrometheusParser::parse_file(&rust_src).expect("parse Rust source");
+        let generated = PythonGenerator::new(&parser).generate_python_file();
+
+        let committed = std::fs::read_to_string(&python_module)
+            .unwrap_or_else(|e| panic!("read {}: {e}", python_module.display()));
+
+        if generated == committed {
+            return;
+        }
+
+        // assert_eq! on two ~500-line strings prints both in full, which buries
+        // the one line that actually drifted. Report the first divergence instead.
+        let (mut gen_lines, mut got_lines) = (generated.lines(), committed.lines());
+        let mut lineno = 0;
+        loop {
+            lineno += 1;
+            match (gen_lines.next(), got_lines.next()) {
+                (None, None) => break,
+                (expected, actual) if expected == actual => continue,
+                (expected, actual) => panic!(
+                    "prometheus_names.py is out of sync with prometheus_names.rs at line {lineno}.\n  \
+                     expected (from generator): {:?}\n  \
+                     found    (committed file): {:?}\n\
+                     Regenerate: cargo run -p dynamo-codegen --bin gen-python-prometheus-names",
+                    expected.unwrap_or("<end of file>"),
+                    actual.unwrap_or("<end of file>"),
+                ),
+            }
+        }
+    }
+
+    /// Unit-test the line-wrapping helper so long `NAME = "value"` assignments are
+    /// emitted exactly the way black would format them.
+    #[test]
+    fn push_assignment_emits_black_compatible_lines() {
+        let mut lines = Vec::new();
+        push_assignment("    ", "SHORT", "short_value", &mut lines);
+        assert_eq!(lines, vec![r#"    SHORT = "short_value""#]);
+
+        lines.clear();
+        let long_name = "MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL";
+        push_assignment(
+            "    ",
+            long_name,
+            "model_migration_max_seq_len_exceeded_total",
+            &mut lines,
+        );
+        assert_eq!(
+            lines,
+            vec![
+                format!("    {long_name} = ("),
+                r#"        "model_migration_max_seq_len_exceeded_total""#.to_string(),
+                "    )".to_string(),
+            ]
+        );
+
+        for line in lines {
+            assert!(line.chars().count() <= MAX_LINE_LEN);
+        }
     }
 }

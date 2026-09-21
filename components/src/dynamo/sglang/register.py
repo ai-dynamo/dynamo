@@ -15,6 +15,10 @@ from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
+from dynamo.common.utils.media_decoder import (
+    build_frontend_image_decoder_options,
+    enable_frontend_video_decoding,
+)
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -26,6 +30,10 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
+from dynamo.sglang._compat import (
+    sglang_uses_mla_backend,
+    supports_disagg_prefill_cancel_anytime,
+)
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -35,7 +43,16 @@ from dynamo.sglang.capacity import (
     model_card_dp_rank_bounds,
     runtime_capacity,
 )
-from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+from dynamo.sglang.engine_generate import (
+    DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+    SGLANG_GENERATE_CAPABILITY,
+)
+from dynamo.sglang.gateway import (
+    GATEWAY_ENGINE_ID_KEY,
+    GATEWAY_WORKERS_KEY,
+    effective_gateway_workers,
+    gateway_engine_id,
+)
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
@@ -97,7 +114,8 @@ def _build_media_decoder_and_fetcher():
     Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
     """
     media_decoder = MediaDecoder()
-    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    media_decoder.enable_image(build_frontend_image_decoder_options())
+    enable_frontend_video_decoding(media_decoder)
 
     media_fetcher = MediaFetcher()
     media_fetcher.timeout_ms(30000)
@@ -140,14 +158,14 @@ async def _register_model_with_runtime_config(
     """
     runtime_config = await get_runtime_config(engine, server_args, dynamo_args)
 
-    if dynamo_args.use_sglang_tokenizer:
+    if dynamo_args.use_sglang_tokenizer and not (
+        output_type.supports_embedding() or output_type.supports_rerank()
+    ):
         logging.warning(
             "Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
-            output_type = ModelType.Chat
+        output_type = ModelType.Chat
 
     if runtime_config is not None and _supports_engine_generate(
         input_type, output_type, worker_type
@@ -158,7 +176,7 @@ async def _register_model_with_runtime_config(
         )
         logging.info("Published SGLang engine-native generate capability")
     # Configure the Rust frontend's media decoder so it ships pre-decoded
-    # images via NIXL RDMA instead of forwarding raw URLs / base64 to us.
+    # media via NIXL RDMA instead of forwarding raw URLs / base64 to us.
     media_decoder = None
     media_fetcher = None
     if getattr(dynamo_args, "frontend_decoding", False):
@@ -286,7 +304,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
     try:
-        is_mla_model = bool(server_args.use_mla_backend())
+        is_mla_model = sglang_uses_mla_backend(server_args)
     except Exception as e:
         logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
         is_mla_model = False
@@ -395,6 +413,22 @@ async def get_runtime_config(
     runtime_config = ModelRuntimeConfig()
     runtime_config.kv_state_endpoint = dynamo_args.kv_state_endpoint
     runtime_config.context_length = server_args.context_length
+    llm_handler = not dynamo_args.enable_multimodal
+    # Both disaggregated legs implement exact-RID cancellation before output,
+    # including waiting until the scheduler has accepted the request.
+    if (
+        server_args.disaggregation_mode
+        in {
+            "prefill",
+            "decode",
+        }
+        and llm_handler
+        and supports_disagg_prefill_cancel_anytime(engine)
+    ):
+        runtime_config.set_engine_specific(
+            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+            json.dumps(True),
+        )
     # Multimodal encode workers have no tokenizer manager and delegate
     # generation overflow handling to their downstream backend.
     if engine is not None:
@@ -449,6 +483,16 @@ async def get_runtime_config(
                 "Failed to attach SGLang worker group metadata to registration: %s",
                 e,
             )
+
+    gateway_engine = gateway_engine_id()
+    if gateway_engine is not None:
+        runtime_config.set_engine_specific(
+            GATEWAY_ENGINE_ID_KEY, json.dumps(gateway_engine)
+        )
+        runtime_config.set_engine_specific(
+            GATEWAY_WORKERS_KEY,
+            json.dumps(effective_gateway_workers(server_args, dynamo_args)),
+        )
 
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
@@ -508,6 +552,9 @@ async def get_runtime_config(
         return runtime_config
 
     try:
+        # TODO(rank-aware-kv-capacity): scheduler_infos[0] is only a representative rank.
+        # Collect every declared rank before the create-only MDC registration and publish one
+        # atomic rank-capacity snapshot; the card cannot be enriched after registration.
         scheduler_info = engine._scheduler_init_result.scheduler_infos[0]
         capacity = runtime_capacity(server_args, scheduler_info)
         max_total_tokens = scheduler_info.get("max_total_num_tokens")

@@ -275,6 +275,7 @@ impl MockerBackend {
             custom_jinja_template: args.common.custom_jinja_template,
             disaggregation_mode,
             route_to_encoder: args.common.route_to_encoder,
+            enable_rl: args.common.enable_rl,
             model_name: args.model_path,
             served_model_name: Some(args.model_name),
             tool_call_parser,
@@ -362,8 +363,10 @@ impl LLMEngine for MockerBackend {
                 total_kv_blocks: Some(self.engine_args.num_gpu_blocks as u64),
                 max_num_seqs: self.engine_args.max_num_seqs.map(|v| v as u64),
                 max_num_batched_tokens: self.engine_args.max_num_batched_tokens.map(|v| v as u64),
+                max_gpu_lora_count: None,
                 data_parallel_size: None,
                 data_parallel_start_rank: None,
+                enable_eagle: false,
                 // Mocker has no real KV transport, so it never advertises a
                 // bootstrap address.
                 bootstrap_host: None,
@@ -429,7 +432,7 @@ impl LLMEngine for MockerBackend {
         }
 
         let direct = DirectRequest {
-            tokens: request.token_ids.clone(),
+            tokens: request.token_ids.as_ref().clone(),
             max_output_tokens,
             uuid: Some(uuid),
             dp_rank: DP_RANK,

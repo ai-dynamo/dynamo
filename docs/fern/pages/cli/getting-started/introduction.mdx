@@ -1,13 +1,13 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: Local CLI User Guide
+title: Local Guide
 sidebar-title: Introduction
 subtitle: Install, deploy, and operate Dynamo without Kubernetes
 ---
 
 <Note>
-This page covers the **local CLI** path. For operator-managed deployments on a Kubernetes cluster, see the [Kubernetes User Guide](../../kubernetes/getting-started/introduction.mdx).
+This page covers local deployments on a workstation or virtual machine. For operator-managed deployments on a Kubernetes cluster, see the [Kubernetes Guide](../../kubernetes/getting-started/introduction.mdx).
 </Note>
 
 ## Jump Right In
@@ -21,7 +21,7 @@ This page covers the **local CLI** path. For operator-managed deployments on a K
   </Card>
 </CardGroup>
 
-## Browse the Local CLI Guide
+## Browse the Local Guide
 
 <AccordionGroup>
   <Accordion title="Getting Started">
@@ -46,7 +46,7 @@ This page covers the **local CLI** path. For operator-managed deployments on a K
   </Accordion>
 
   <Accordion title="Model Deployment" defaultOpen={true}>
-    Start with an aggregated deployment, then add routing, disaggregation, multiple nodes, or KV cache offloading as needed.
+    Start with an aggregated deployment, then add routing, disaggregation, or KV cache offloading as needed.
 
     <CardGroup cols={2}>
       <Card title="Model Deployment Overview" icon="regular circle-info" href="../model-deployment/introduction.mdx">
@@ -57,9 +57,6 @@ This page covers the **local CLI** path. For operator-managed deployments on a K
       </Card>
       <Card title="Disaggregated Serving" icon="regular arrows-split-up-and-left" href="../disaggregated-serving/overview.mdx">
         Run prefill and decode as separate workers.
-      </Card>
-      <Card title="Multi-Node Deployment" icon="regular network-wired" href="../model-deployment/multi-node-deployment.mdx">
-        Run a CLI deployment across multiple machines.
       </Card>
       <Card title="KV Cache Offloading" icon="regular layer-group" href="../kv-cache-offloading/overview.mdx">
         Extend KV cache capacity beyond GPU memory.

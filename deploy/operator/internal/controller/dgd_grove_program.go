@@ -58,10 +58,10 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		workloads: newGroveWorkloadsReconciler(
 			r.Client,
 			r.Recorder,
+			rollout,
 			r.Config,
 			r.RuntimeConfig,
 			r.DockerSecretRetriever,
-			r.ScaleClient,
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
@@ -77,6 +77,7 @@ func (p *groveProgram) Reconcile(
 	req workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
+	clearComponentGPUShapes(programResult.Status.Components)
 
 	// Fail a durable Grove selection when Grove is unavailable rather than falling back.
 	if !p.gate.Enabled(features.Grove) {
@@ -107,9 +108,6 @@ func (p *groveProgram) Reconcile(
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
-	if err := p.rollout.ReconcileUnsupported(ctx, req.DGD, true); err != nil {
-		return programResult, err
-	}
 	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
@@ -135,6 +133,10 @@ func (p *groveProgram) Reconcile(
 		checkpoints.Infos,
 	)
 	if err != nil {
+		// Preserve newly observed component status while leaving the generation unobserved.
+		if result.ComponentStatus != nil {
+			programResult.Status.Components = result.ComponentStatus
+		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)

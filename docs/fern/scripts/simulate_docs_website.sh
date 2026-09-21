@@ -80,6 +80,15 @@ assert() { # assert <label> <ok|FAIL>
 GEN_SEL='.navigation[] | select(.tab == "reference") | .layout[] | select([.. | select(has("path")) | .path] | all_c(test("/reference/general/")))'
 
 echo "=== SYNC JOB (replayed) ==="
+# The Python/Rust API references are publish-time artifacts (gitignored in the
+# source tree); the real sync job generates them before the pages-dev rsync,
+# so the replay must too or the synced nav dangles. Requires griffe, like CI.
+if ! "$PY" -c 'import griffe' 2>/dev/null; then
+  echo "error: griffe is required to generate the API references (python3 -m pip install 'griffe==2.1.0')" >&2
+  exit 1
+fi
+"$PY" "$SRC/scripts/gen_python_api.py"
+"$PY" "$SRC/scripts/gen_rust_api.py"
 rm -rf "$WT/fern/pages-dev"; mkdir -p "$WT/fern/pages-dev"
 rsync -a --exclude='/home/index.mdx' "$SRC/pages/" "$WT/fern/pages-dev/"
 "$PY" "$SRC/scripts/rewrite_snapshot_paths.py" "$WT/fern/pages-dev"
@@ -93,6 +102,12 @@ rm -f "$WT/fern/convert_callouts.py"
 mkdir -p "$WT/fern/scripts"
 [ -f "$SRC/scripts/convert_callouts.py" ] && cp "$SRC/scripts/convert_callouts.py" "$WT/fern/scripts/convert_callouts.py" || true
 rm -rf "$WT/fern/components"; cp -r "$SRC/components" "$WT/fern/components"
+# The nightly selector data is a publish-time artifact too. Generated after the
+# copy and into the checkout, so the replay never overwrites the source tree's
+# module. Offline: this gate checks composition, not nightly freshness, so it
+# must not depend on NGC being reachable.
+"$PY" "$SRC/scripts/gen_nightly_selector.py" --offline \
+  --out "$WT/fern/components/nightly-selector-data.generated.ts"
 rm -rf "$WT/fern/products"
 cp "$SRC/pages/home/index.mdx" "$WT/fern/index.mdx"
 perl -pi -e 's|\.\./\.\./assets/|./assets/|g' "$WT/fern/index.mdx"
