@@ -335,7 +335,7 @@ def _split_commands(script: str) -> list[_Command]:
     mask: list[str] = []
     heredocs: list[tuple[str, bool]] = []  # (delimiter, "<<-" drops leading tabs)
     segments: list[int] = [0]
-    prev = ""  # last character added, for comment detection
+    word_started = False  # quotes, including empty ones, start a shell word
     prev_code = ""  # last non-blank character added, for redirection detection
     pending = False  # an operator still needs its next command
     line = 1
@@ -347,19 +347,23 @@ def _split_commands(script: str) -> list[_Command]:
     size = len(script)
 
     def add(chunk: str, quoted: bool) -> None:
-        nonlocal prev, prev_code, pending
+        nonlocal word_started, prev_code, pending
+        if quoted:
+            word_started = True
+            pending = False
+        elif chunk:
+            word_started = chunk[-1] not in " \t\n"
         if not chunk:
             return
         parts.append(chunk)
         mask.append(("q" if quoted else ".") * len(chunk))
-        prev = chunk[-1]
         trimmed = chunk.rstrip()
         if trimmed:
             prev_code = trimmed[-1]
             pending = False
 
     def flush(terminator: str) -> None:
-        nonlocal prev, prev_code, start, group
+        nonlocal word_started, prev_code, start, group
         text = "".join(parts)
         lead = len(text) - len(text.lstrip())
         stripped = text.strip()
@@ -391,7 +395,7 @@ def _split_commands(script: str) -> list[_Command]:
             group = len(commands)
         parts.clear()
         mask.clear()
-        prev = ""
+        word_started = False
         prev_code = ""
         start = line
 
@@ -399,7 +403,6 @@ def _split_commands(script: str) -> list[_Command]:
         char = script[index]
         if char == "\\":
             if script.startswith("\\\n", index):
-                add(" ", False)
                 line += 1
                 index += 2
                 continue
@@ -413,7 +416,7 @@ def _split_commands(script: str) -> list[_Command]:
             add(chunk, True)
             index = end
             continue
-        if char == "#" and prev in ("", " ", "\t"):
+        if char == "#" and not word_started:
             end = script.find("\n", index)
             index = size if end < 0 else end
             continue
@@ -438,6 +441,7 @@ def _split_commands(script: str) -> list[_Command]:
             parts.clear()
             mask.clear()
             segments[:] = [0]
+            word_started = False
             pending = False
             start = line
             index += 1
@@ -447,7 +451,7 @@ def _split_commands(script: str) -> list[_Command]:
             flush("\n")
             _, first, group = scopes.pop()
             scoped.update(range(first, len(commands)))
-            prev = prev_code = char
+            prev_code = char
             pending = False
             index += 1
             continue
@@ -566,6 +570,21 @@ def test_foreground_service_detector_reads_bash_separators() -> None:
         for line, _, is_background in _service_launches(backgrounded)
         if not is_background
     ] == []
+
+
+def test_line_continuation_preserves_shell_words() -> None:
+    """Backslash-newline joins words without inserting a separator."""
+    script = "py\\\nthon -\\\nm dynamo.frontend\nwait_any_exit\n"
+    assert _service_launches(script) == [(1, "python -m dynamo.frontend", False)]
+
+
+@pytest.mark.parametrize("prefix", ['""', '"prefix "'])
+def test_hash_after_quoted_word_is_not_a_comment(prefix: str) -> None:
+    """Only unquoted whitespace separates a quoted word from a comment."""
+    script = f"echo {prefix}#literal; python -m dynamo.frontend\nwait_any_exit\n"
+    assert _service_launches(script) == [(1, "python -m dynamo.frontend", False)]
+    comment = f"echo {prefix} # comment; python -m dynamo.frontend\nwait_any_exit\n"
+    assert _service_launches(comment) == []
 
 
 _AND_OR_SAMPLE = """\
