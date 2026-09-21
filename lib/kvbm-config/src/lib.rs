@@ -136,17 +136,17 @@ impl KvbmConfig {
                 Env::prefixed("KVBM_MESSENGER_DISCOVERY_")
                     .map(|k| format!("messenger.discovery.{}", k.as_str().to_lowercase()).into()),
             )
-            // NixL config: KVBM_NIXL_BACKENDS (comma-separated list)
+            // NixL config: KVBM_NIXL_BACKENDS (backend-to-parameters map)
             .merge(
                 Env::prefixed("KVBM_NIXL_")
                     .map(|k| format!("nixl.{}", k.as_str().to_lowercase()).into()),
             )
-            // Cache host config: KVBM_CACHE_HOST_SIZE_GB, KVBM_CACHE_HOST_NUM_BLOCKS
+            // Cache host config: KVBM_CACHE_HOST_CACHE_SIZE_GB, KVBM_CACHE_HOST_NUM_BLOCKS
             .merge(
                 Env::prefixed("KVBM_CACHE_HOST_")
                     .map(|k| format!("cache.host.{}", k.as_str().to_lowercase()).into()),
             )
-            // Cache disk config: KVBM_CACHE_DISK_SIZE_GB, KVBM_CACHE_DISK_NUM_BLOCKS, etc.
+            // Cache disk config: KVBM_CACHE_DISK_CACHE_SIZE_GB, KVBM_CACHE_DISK_NUM_BLOCKS, etc.
             .merge(
                 Env::prefixed("KVBM_CACHE_DISK_")
                     .map(|k| format!("cache.disk.{}", k.as_str().to_lowercase()).into()),
@@ -360,6 +360,67 @@ mod tests {
                 assert_eq!(config.tokio.max_blocking_threads, Some(32));
             },
         );
+    }
+
+    #[test]
+    fn test_env_override_cache_sizes() {
+        temp_env::with_vars(
+            [
+                ("KVBM_CONFIG_PATH", None),
+                ("KVBM_CACHE_HOST_CACHE_SIZE_GB", Some("1.5")),
+                ("KVBM_CACHE_DISK_CACHE_SIZE_GB", Some("2.5")),
+                ("KVBM_CACHE_HOST_SIZE_GB", None),
+                ("KVBM_CACHE_DISK_SIZE_GB", None),
+            ],
+            || {
+                let config = KvbmConfig::from_env().unwrap();
+
+                assert_eq!(config.cache.host.cache_size_gb, Some(1.5));
+                assert_eq!(config.cache.disk.as_ref().unwrap().cache_size_gb, Some(2.5));
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_nixl_backends_map() {
+        temp_env::with_vars(
+            [
+                ("KVBM_CONFIG_PATH", None),
+                ("KVBM_NIXL_BACKENDS", Some("{UCX={},POSIX={}}")),
+            ],
+            || {
+                let config = KvbmConfig::from_env().unwrap();
+                let nixl = config.nixl.unwrap();
+
+                assert!(nixl.has_backend("UCX"));
+                assert!(nixl.has_backend("POSIX"));
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_discovery_requires_type() {
+        temp_env::with_vars(
+            [
+                ("KVBM_CONFIG_PATH", None),
+                ("KVBM_MESSENGER_DISCOVERY_TYPE", None),
+                ("KVBM_MESSENGER_DISCOVERY_CLUSTER_ID", Some("test")),
+            ],
+            || {
+                let error = KvbmConfig::from_env().unwrap_err();
+                assert!(error.to_string().contains("type"));
+            },
+        );
+    }
+
+    #[test]
+    fn test_s3_object_config_requires_bucket() {
+        temp_env::with_vars_unset(["KVBM_CONFIG_PATH"], || {
+            let json = r#"{"object": {"client": {"type": "s3"}}}"#;
+            let error = KvbmConfig::from_figment_with_json(json).unwrap_err();
+
+            assert!(error.to_string().contains("bucket"));
+        });
     }
 
     #[test]

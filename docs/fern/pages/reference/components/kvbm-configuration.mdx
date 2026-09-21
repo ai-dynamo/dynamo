@@ -205,10 +205,10 @@ Each config section maps to an env prefix. The suffix after the prefix is lowerc
 | `KVBM_TOKIO_` | Async runtime | `WORKER_THREADS` (1), `MAX_BLOCKING_THREADS` (Tokio default 512) |
 | `KVBM_RAYON_` | CPU thread pool | `NUM_THREADS` (logical CPUs) |
 | `KVBM_MESSENGER_BACKEND_` | TCP transport | `TCP_ADDR`, `TCP_INTERFACE`, `TCP_PORT` (0 = OS-assigned) |
-| `KVBM_MESSENGER_DISCOVERY_` | Peer discovery | `CLUSTER_ID`, plus etcd/p2p/filesystem fields |
-| `KVBM_NIXL_` | NixL backends | `BACKENDS` (default `UCX`, `POSIX`) |
-| `KVBM_CACHE_HOST_` | Host tier | `SIZE_GB`, `NUM_BLOCKS` |
-| `KVBM_CACHE_DISK_` | Disk tier | `SIZE_GB`, `NUM_BLOCKS`, `USE_GDS` (false), `STORAGE_PATH` |
+| `KVBM_MESSENGER_DISCOVERY_` | Peer discovery | `TYPE` (required), `CLUSTER_ID`, plus etcd/p2p/filesystem fields |
+| `KVBM_NIXL_` | NixL backends | `BACKENDS` (map, for example `{UCX={},POSIX={}}`) |
+| `KVBM_CACHE_HOST_` | Host tier | `CACHE_SIZE_GB`, `NUM_BLOCKS` |
+| `KVBM_CACHE_DISK_` | Disk tier | `CACHE_SIZE_GB`, `NUM_BLOCKS`, `USE_GDS` (false), `STORAGE_PATH` |
 | `KVBM_CACHE_PARALLELISM` | Parallelism mode | `tensor_parallel` (default) or `replicated_data` |
 | `KVBM_EVENTS_` | Event publishing | `ENABLED` (false), `SUBJECT` (`kvbm.events`), `CHANNEL_CAPACITY` (1024), `POLICY` (`power_of_two`) |
 | `KVBM_EVENTS_BATCHING_` | Event batching | `WINDOW_DURATION_MS` (10), `MAX_BATCH_SIZE` (1024) |
@@ -217,7 +217,7 @@ Nested sections without an env prefix (offload policies, onboard mode, object st
 
 - **Offload policies** (`offload.g1_to_g2`, `offload.g2_to_g3`): a `policies` list of `pass_all` / `presence` / `presence_lfu`, evaluated with AND logic. `presence_lfu.min_lfu_count` defaults to `8`.
 - **Onboard mode** (`onboard.mode`): `inter` (async, default) or `intra` (synchronous layer-wise).
-- **Object storage** (`object.client`): `s3` or `nixl` client; S3 fields `bucket` (`kvbm-blocks`), `region` (`us-east-1`), `endpoint_url`, `force_path_style`, `max_concurrent_requests` (16).
+- **Object storage** (`object.client`): `s3` or `nixl` client; S3 fields `bucket` (required), `region` (`us-east-1`), `endpoint_url`, `force_path_style`, `max_concurrent_requests` (16).
 
 ### TOML example
 
@@ -226,10 +226,10 @@ Nested sections without an env prefix (offload policies, onboard mode, object st
 worker_threads = 4
 
 [cache.host]
-size_gb = 100.0
+cache_size_gb = 100.0
 
 [cache.disk]
-size_gb = 200.0
+cache_size_gb = 200.0
 use_gds = true
 storage_path = "/mnt/nvme/kv_cache"
 
