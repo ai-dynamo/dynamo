@@ -350,7 +350,7 @@ def _split_commands(script: str) -> list[_Command]:
     line = 1
     start = 1
     group = 0  # index in commands of the first member of the open AND-OR list
-    substitutions = 0  # parentheses inside command substitutions are not group closers
+    substitutions = 0  # command/process substitution parentheses are not group closers
     # closer, first member, outer AND-OR list, function name, definition line
     scopes: list[tuple[str, int, int, str, int]] = []
     scoped: set[int] = set()  # preserve inner terminators unless the group gets &
@@ -444,8 +444,8 @@ def _split_commands(script: str) -> list[_Command]:
                     line += script[index:end].count("\n")
                     index = end
                     continue
-        if script.startswith("$(", index):
-            add("$(", False)
+        if script.startswith(("$(", "<(", ">("), index):
+            add(script[index : index + 2], False)
             substitutions += 1
             index += 2
             continue
@@ -892,16 +892,17 @@ def test_grouped_service_launches(grouped: str, terminator: str) -> None:
     ]
 
 
-def test_command_substitution_does_not_close_enclosing_group() -> None:
+def test_substitutions_do_not_close_enclosing_group() -> None:
     """Substitution parentheses, including nested subshells, preserve the outer job."""
     script = (
         "(\n"
         '    MODEL=$( (basename "$MODEL_PATH") )\n'
+        "    cat <(echo input) > >(cat)\n"
         "    python -m dynamo.vllm\n"
         ") &\n"
         "wait_any_exit\n"
     )
-    assert _service_launches(script) == [(3, "python -m dynamo.vllm", True)]
+    assert _service_launches(script) == [(4, "python -m dynamo.vllm", True)]
 
 
 def test_grouped_and_or_list_inherits_background_status() -> None:
