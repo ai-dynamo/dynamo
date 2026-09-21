@@ -115,6 +115,17 @@ class DynamoVllmArgGroup(ArgGroup):
             choices=[PREFILL_DECODE_DISAGGREGATION_MODE]
             + [m.value for m in DisaggregationMode],
         )
+        add_argument(
+            g,
+            flag_name="--decode-max-remote-prefill-inflight",
+            env_var="DYN_DECODE_MAX_REMOTE_PREFILL_INFLIGHT",
+            default=0,
+            arg_type=int,
+            help=(
+                "Maximum remote-prefill decode requests admitted before first "
+                "output per local data-parallel rank. Zero disables the limit."
+            ),
+        )
 
         add_negatable_bool_argument(
             g,
@@ -533,6 +544,7 @@ class DynamoVllmConfig(ConfigBase):
     disaggregation_mode: Union[
         None, str, DisaggregationMode
     ]  # None when not provided; resolved to enum in validate()
+    decode_max_remote_prefill_inflight: int = 0
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -604,6 +616,7 @@ class DynamoVllmConfig(ConfigBase):
         """Validate vLLM wrapper configuration."""
         _reject_removed_multimodal_env_vars()
         self._resolve_disaggregation_mode()
+        self._validate_decode_remote_prefill_admission()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
@@ -739,6 +752,12 @@ class DynamoVllmConfig(ConfigBase):
 
         if self.disaggregation_mode is None:
             self.disaggregation_mode = DisaggregationMode.AGGREGATED
+
+    def _validate_decode_remote_prefill_admission(self) -> None:
+        if self.decode_max_remote_prefill_inflight < 0:
+            raise ValueError(
+                "--decode-max-remote-prefill-inflight must be non-negative"
+            )
 
     def _validate_custom_encoder(self) -> None:
         """Validate the aggregated CustomEncoder configuration.
