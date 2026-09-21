@@ -724,6 +724,11 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         if not bootstrap_info:
             raise RuntimeError("No bootstrap info received from prefill worker")
 
+        if bootstrap_info.get("finish_reason") == "error":
+            raise InvalidArgument(
+                bootstrap_info.get("error", "Prefill worker rejected the request")
+            )
+
         return bootstrap_info
 
     def cleanup(self):

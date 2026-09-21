@@ -401,6 +401,33 @@ async def test_multimodal_prefill_returns_invalid_request_errors():
 
 
 @pytest.mark.asyncio
+async def test_multimodal_decode_propagates_prefill_validation_errors():
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+
+    async def prefill_error():
+        yield json.dumps(
+            {
+                "finish_reason": "error",
+                "error": "thinking_token_budget is not supported",
+            }
+        )
+
+    handler.prefill_client = SimpleNamespace(
+        generate=lambda *_args, **_kwargs: prefill_error()
+    )
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=1),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    with pytest.raises(InvalidArgument, match="thinking_token_budget"):
+        await handler._get_bootstrap_from_prefill(request, {})
+
+
+@pytest.mark.asyncio
 async def test_multimodal_prefill_rejects_custom_logit_processor():
     handler = _thinking_budget_prefill_handler(SimpleNamespace())
     request = _thinking_budget_prefill_request(
