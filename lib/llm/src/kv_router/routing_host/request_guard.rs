@@ -5,14 +5,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     kv_router::{
-        KvRouter,
-        indexer::ApproximateRequestLease,
-        metrics::RouterRequestMetrics,
-        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
-        request_lease::RequestAttemptLease,
-        scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
+        KvRouter, indexer::ApproximateRequestLease, metrics::RouterRequestMetrics,
+        prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION, request_lease::RequestAttemptLease,
     },
-    local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -27,8 +22,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::AdmissionAttempt,
-    selector::WorkerSelector,
+    scheduling::{AbortCause, RequestLifecycle, queue::BookingHandle},
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -393,49 +387,37 @@ struct OutputBlockTracker {
 
 /// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
 /// a KV worker is selected.
-pub(super) struct KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    chooser: Arc<KvRouter<Sel>>,
+pub(super) struct KvRequestCleanup {
+    chooser: Arc<KvRouter>,
     context_id: String,
     worker: WorkerWithDpRank,
     approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
+    /// Classifier lifecycle for this attempt. Living here keeps it structurally
+    /// tied to KV routing: builtin and occupancy cleanups cannot hold one.
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
-impl<Sel> KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl KvRequestCleanup {
     pub(super) fn new(
-        chooser: Arc<KvRouter<Sel>>,
+        chooser: Arc<KvRouter>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt: AdmissionAttempt,
+        booking: Option<BookingHandle>,
     ) -> Self {
-        let attempt_id = match attempt {
-            AdmissionAttempt::Untracked => None,
-            AdmissionAttempt::Tracked(attempt_id) => Some(attempt_id),
-        };
-        let approximate_lru = attempt_id
-            .and_then(|_| chooser.approximate_lru_rank_registration(worker))
-            .and_then(|registration| {
-                chooser.indexer().begin_approximate_lru_request(
-                    worker,
-                    registration.incarnation,
-                    attempt_id?,
-                )
-            });
-        let lifecycle = attempt_id.map(|attempt_id| {
-            chooser.request_lease_manager().register_local(
-                SchedulerBookingDescriptor {
-                    request_id: context_id.clone(),
-                    worker,
-                    attempt_id,
-                },
-                approximate_lru.clone(),
+        let booking = booking.map(BookingHandle::commit);
+        let approximate_lru = booking.as_ref().and_then(|booking| {
+            let registration = chooser.approximate_lru_rank_registration(worker)?;
+            chooser.indexer().begin_approximate_lru_request(
+                worker,
+                registration.incarnation,
+                booking.attempt_id,
             )
+        });
+        let lifecycle = booking.map(|booking| {
+            chooser
+                .request_lease_manager()
+                .register_local(booking, approximate_lru.clone())
         });
         Self {
             chooser,
@@ -443,6 +425,7 @@ where
             worker,
             approximate_lru,
             lifecycle,
+            request_lifecycle: None,
         }
     }
 
@@ -458,11 +441,8 @@ where
 }
 
 /// Policy-specific state released by the host's common request lifecycle.
-enum RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    Kv(KvRequestCleanup<Sel>),
+enum RequestCleanup {
+    Kv(KvRequestCleanup),
     Stateless {
         worker_id: u64,
     },
@@ -472,10 +452,7 @@ where
     },
 }
 
-impl<Sel> RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RequestCleanup {
     fn worker_id(&self) -> u64 {
         match self {
             Self::Kv(cleanup) => cleanup.worker.worker_id,
@@ -517,6 +494,20 @@ where
     fn lifecycle(&self) -> Option<&RequestAttemptLease> {
         match self {
             Self::Kv(cleanup) => cleanup.lifecycle(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
+    fn request_lifecycle_mut(&mut self) -> Option<&mut RequestLifecycle> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.as_deref_mut(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
+    fn take_request_lifecycle(&mut self) -> Option<Box<RequestLifecycle>> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.take(),
             Self::Stateless { .. } | Self::Occupancy { .. } => None,
         }
     }
@@ -567,13 +558,10 @@ impl OutputBlockTracker {
 
 /// Coordinates scheduler cleanup, observability, and streamed load tracking.
 ///
-/// Session-affinity lifetime is separate: `AffinityAcquire` and
+/// Session-affinity lifetime is separate: the affinity `Hold` and
 /// `AffinityLease` own binding commit, release, and invalidation.
-pub(super) struct RequestGuard<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    cleanup: RequestCleanup<Sel>,
+pub(super) struct RequestGuard {
+    cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateRequestLease>,
@@ -584,30 +572,34 @@ where
     _lora_load: Option<LoraLoadGuard>,
 }
 
-impl<Sel> RequestGuard<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RequestGuard {
     pub(super) fn new_kv(
-        chooser: Arc<KvRouter<Sel>>,
+        chooser: Arc<KvRouter>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
-        attempt: AdmissionAttempt,
+        booking: Option<BookingHandle>,
         request: &PreprocessedRequest,
+        request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
-            KvRequestCleanup::new(chooser, context_id, worker, attempt),
+            KvRequestCleanup::new(chooser, context_id, worker, booking),
             request,
+            request_lifecycle,
         )
     }
 
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
-        cleanup: KvRequestCleanup<Sel>,
+        mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
+        if let Some(lifecycle) = request_lifecycle.as_mut() {
+            lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
+        }
+        cleanup.request_lifecycle = request_lifecycle;
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
@@ -698,6 +690,12 @@ where
 
     pub(super) fn mark_dispatched(&mut self) {
         self.observability.mark_dispatched();
+        if let RequestCleanup::Kv(cleanup) = &mut self.cleanup {
+            let worker = cleanup.worker;
+            if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
+                lifecycle.sent(worker);
+            }
+        }
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {
@@ -735,6 +733,18 @@ where
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
             lifecycle.touch();
+        }
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.responding();
+            lifecycle.observe_output_tokens(new_tokens);
+            if let Some(total_tokens) = item
+                .data
+                .as_ref()
+                .and_then(|data| data.completion_usage.as_ref())
+                .map(|usage| usage.total_tokens as usize)
+            {
+                lifecycle.observe_context_tokens(total_tokens);
+            }
         }
         if !self.prefill_marked {
             let has_tokens = item
@@ -809,6 +819,9 @@ where
     }
 
     pub(super) async fn finish(&mut self) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.complete();
+        }
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability
             .record_metrics(self.record_itl_at_completion);
@@ -816,14 +829,31 @@ where
     }
 
     pub(super) async fn abort(&mut self) {
+        self.abort_with_error(None).await;
+    }
+
+    pub(super) async fn release_for_retry(&mut self) -> bool {
+        let Some(migration_state) = self.migration_state.as_ref() else {
+            return false;
+        };
+        let Some(mut lifecycle) = self.cleanup.take_request_lifecycle() else {
+            return false;
+        };
+        lifecycle.prepare_retry();
+        migration_state.store_request_lifecycle(lifecycle);
+        self.cleanup.finish().await;
+        true
+    }
+
+    pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
         self.cleanup.finish().await;
     }
 }
 
-impl<Sel> Drop for RequestGuard<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.observability
             .record_metrics(self.record_itl_at_completion);
