@@ -364,12 +364,14 @@ class _GMSClientSession:
         backend: str,
         predecessor_cohort: str | None,
         successor_cohort: str,
+        terminate_host: bool = False,
     ) -> QuiesceGPUCohortResponse:
         return self._transport.request(
             QuiesceGPUCohortRequest(
                 backend=backend,
                 predecessor_cohort=predecessor_cohort,
                 successor_cohort=successor_cohort,
+                terminate_host=terminate_host,
             ),
             QuiesceGPUCohortResponse,
         )

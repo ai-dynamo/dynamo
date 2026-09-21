@@ -262,6 +262,10 @@ class QuiesceGPUCohortRequest(msgspec.Struct, tag="quiesce_gpu_cohort_request"):
     # daemon has authoritative knowledge of every CUDA client for its pool.
     predecessor_cohort: str | None
     successor_cohort: str
+    # Proactive rank-loss teardown may ask GMS to terminate the predecessor
+    # host process, but only after MPS has certified CUDA client termination.
+    # Successor recovery leaves this disabled and remains proof-only.
+    terminate_host: bool = False
 
 
 class QuiesceGPUCohortResponse(msgspec.Struct, tag="quiesce_gpu_cohort_response"):

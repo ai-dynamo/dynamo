@@ -583,11 +583,26 @@ class GMS:
             )
 
         if msg_type is QuiesceGPUCohortRequest:
-            result = await self._gpu_quiescence.quiesce(
-                backend=msg.backend,
-                predecessor_cohort=msg.predecessor_cohort,
-                successor_cohort=msg.successor_cohort,
-            )
+            try:
+                result = await self._gpu_quiescence.quiesce(
+                    backend=msg.backend,
+                    predecessor_cohort=msg.predecessor_cohort,
+                    successor_cohort=msg.successor_cohort,
+                    terminate_host=msg.terminate_host,
+                )
+            except Exception as exc:  # Provider failure must not kill persistent GMS.
+                logger.exception("GPU cohort quiescence provider failed closed")
+                return (
+                    QuiesceGPUCohortResponse(
+                        quiesced=False,
+                        provider="gms-mps",
+                        client_count=0,
+                        detail=f"GPU quiescence provider failed: {exc}",
+                        elapsed_ms=0.0,
+                    ),
+                    -1,
+                    False,
+                )
             log = logger.info if result.quiesced else logger.warning
             log(
                 "GPU cohort quiescence backend=%s predecessor=%s clients=%d "

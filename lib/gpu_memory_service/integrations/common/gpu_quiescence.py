@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shlex
 import time
@@ -152,17 +153,22 @@ def arm_gpu_crash_interlock(notification_fd: int | None, *, backend_name: str) -
 def _timeout_s(backend_name: str) -> float:
     raw = os.environ.get(
         _backend_env(backend_name, "GPU_QUIESCENCE_TIMEOUT_SECS"),
-        os.environ.get("DYN_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", "1.0"),
+        os.environ.get("DYN_GMS_GPU_QUIESCENCE_TIMEOUT_SECS", "2.0"),
     )
     try:
-        return max(0.05, float(raw))
+        value = float(raw)
+        return max(0.05, value) if math.isfinite(value) else 1.0
     except ValueError:
         logger.warning("Ignoring invalid GPU quiescence timeout %r", raw)
         return 1.0
 
 
 def prove_predecessor_gpu_quiescence_sync(
-    *, backend_name: str, predecessor_cohort: str | None, device: int = 0
+    *,
+    backend_name: str,
+    predecessor_cohort: str | None,
+    device: int = 0,
+    terminate_host: bool = False,
 ) -> GPUQuiescenceProof:
     """Synchronously request the GMS-owned proof for one local GPU pool.
 
@@ -187,6 +193,85 @@ def prove_predecessor_gpu_quiescence_sync(
             backend=backend_name,
             predecessor_cohort=predecessor_cohort,
             successor_cohort=successor_cohort,
+            terminate_host=terminate_host,
+        )
+    return GPUQuiescenceProof(
+        response.quiesced,
+        response.provider,
+        response.detail,
+        response.elapsed_ms,
+    )
+
+
+def wait_for_predecessor_gpu_quiescence_sync(
+    *,
+    backend_name: str,
+    predecessor_cohort: str | None,
+    device: int = 0,
+    timeout_s: float | None = None,
+    retry_interval_s: float = 0.01,
+    terminate_host: bool = False,
+) -> GPUQuiescenceProof:
+    """Wait for an authoritative local proof before shared-HBM remapping.
+
+    TP ranks do not finish CUDA-context teardown simultaneously. A successor
+    may therefore reach its local remap while MPS is still retiring the old
+    client. Retrying the *proof* is safe; proceeding after elapsed time is not.
+    The final rejected proof is returned at the deadline so callers can fail
+    closed with the provider's diagnostic.
+    """
+
+    timeout = _timeout_s(backend_name) if timeout_s is None else timeout_s
+    timeout = max(0.0, float(timeout))
+    interval = max(0.001, float(retry_interval_s))
+    deadline = time.monotonic() + timeout
+    last = prove_predecessor_gpu_quiescence_sync(
+        backend_name=backend_name,
+        predecessor_cohort=predecessor_cohort,
+        device=device,
+        terminate_host=terminate_host,
+    )
+    while not last.quiesced and time.monotonic() < deadline:
+        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+        last = prove_predecessor_gpu_quiescence_sync(
+            backend_name=backend_name,
+            predecessor_cohort=predecessor_cohort,
+            device=device,
+            terminate_host=terminate_host,
+        )
+    return last
+
+
+def terminate_current_gpu_cohort_sync(
+    *, backend_name: str, device: int = 0
+) -> GPUQuiescenceProof:
+    """Prove and retire this process tree's local CUDA cohort.
+
+    A surviving TP leader calls this when another rank is lost, while its own
+    CUDA worker is still alive and visible to MPS.  Waiting for ordinary vLLM
+    teardown can make MPS forget the client before GMS obtains an authoritative
+    ``terminate_client`` result, which correctly forces the successor cold.
+    """
+    if not gms_mps_provider_enabled(backend_name):
+        return GPUQuiescenceProof(False, "quarantine-only", "GMS MPS is disabled")
+    cohort_env = f"GMS_{backend_name.upper().replace('-', '_')}_WRITER_COHORT_PATH"
+    current_cohort = os.environ.get(cohort_env, "").strip()
+    if not current_cohort:
+        raise RuntimeError("current writer cohort is unavailable")
+
+    from gpu_memory_service.client.session import _GMSClientSession
+    from gpu_memory_service.common.locks import RequestedLockType
+
+    with _GMSClientSession(
+        _socket_path(backend_name, device), RequestedLockType.RW_PERSISTENT, 1_000
+    ) as session:
+        response = session.quiesce_gpu_cohort(
+            backend=backend_name,
+            predecessor_cohort=current_cohort,
+            # This identity is never registered. It only makes the requested
+            # predecessor unambiguous to the existing protocol.
+            successor_cohort=f"{current_cohort}.rank-loss-successor",
+            terminate_host=True,
         )
     return GPUQuiescenceProof(
         response.quiesced,

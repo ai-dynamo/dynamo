@@ -357,6 +357,14 @@ def test_gpu_crash_interlock_fd_drives_daemon_quiescence_and_host_teardown(
             struct.pack("=IIii", 0x47534D43, 1, signal.SIGABRT, child.pid),
         )
         assert child.wait(timeout=2) == -signal.SIGKILL
+        # Host teardown precedes inventory retirement. Wait through the same
+        # serialized recovery API instead of racing the daemon's final check.
+        proof = registration.quiesce_gpu_cohort(
+            backend="vllm",
+            predecessor_cohort="old-interlock",
+            successor_cohort="new-interlock",
+        )
+        assert proof.quiesced
     finally:
         if crash_fd >= 0:
             os.close(crash_fd)

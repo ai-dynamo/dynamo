@@ -9,13 +9,71 @@ import signal
 import struct
 
 import pytest
-from gpu_memory_service.integrations.common.gpu_quiescence import (
-    arm_gpu_crash_interlock,
-)
 
 gms_rust_ring = pytest.importorskip("gms_rust_ring")
 
-pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.none]
+
+def arm_gpu_crash_interlock(notification_fd, *, backend_name):
+    # Test the native extension in a Python process that has not imported torch
+    # or initialized background CUDA/framework threads before fork.
+    gms_rust_ring.install_gpu_crash_interlock(
+        notification_fd,
+        [signal.SIGABRT, signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE],
+    )
+
+
+pytestmark = [
+    pytest.mark.pre_merge,
+    pytest.mark.integration,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(10),
+]
+
+
+def test_broken_notification_pipe_still_stops_client():
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    child = os.fork()
+    if child == 0:
+        arm_gpu_crash_interlock(write_fd, backend_name="vllm")
+        signal.raise_signal(signal.SIGABRT)
+        os._exit(3)
+    os.close(write_fd)
+    try:
+        _, status = os.waitpid(child, os.WUNTRACED)
+        assert os.WIFSTOPPED(status), (
+            "broken pipe killed client before GMS could fence it"
+        )
+    finally:
+        try:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
+
+
+def test_invalid_signal_installation_leaves_previous_handler_intact():
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        signal.signal(signal.SIGABRT, lambda *_args: os._exit(42))
+        try:
+            gms_rust_ring.install_gpu_crash_interlock(write_fd, [signal.SIGABRT, 9999])
+        except (ValueError, OSError):
+            os.kill(os.getpid(), signal.SIGABRT)
+        os._exit(3)
+    os.close(write_fd)
+    try:
+        _, status = os.waitpid(child, os.WUNTRACED)
+        assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 42
+    finally:
+        os.close(read_fd)
+        try:
+            os.kill(child, signal.SIGKILL)
+            os.waitpid(child, 0)
+        except (ProcessLookupError, ChildProcessError):
+            pass
 
 
 def test_native_handler_reports_signal_and_stops_until_authority_kills():
