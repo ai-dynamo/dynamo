@@ -22,12 +22,43 @@ import os
 from typing import Optional
 
 from huggingface_hub import HfApi
-from huggingface_hub.constants import DEFAULT_REVISION, HF_HUB_CACHE
+from huggingface_hub.constants import (
+    DEFAULT_REVISION,
+    ENV_VARS_TRUE_VALUES,
+    HF_HUB_CACHE,
+)
+from huggingface_hub.errors import (
+    DisabledRepoError,
+    GatedRepoError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
 from huggingface_hub.file_download import repo_folder_name
 
 _CONFIG_FILE = "config.json"
 
 _HUB_PROBE_TIMEOUT = 10.0
+
+# A refusal that names this repository: the Hub answered, so it is reachable.
+_HUB_ANSWERED_ERRORS = (
+    DisabledRepoError,
+    GatedRepoError,
+    RepositoryNotFoundError,
+    RevisionNotFoundError,
+)
+
+# A failure to get an answer at all. ``huggingface_hub``'s own HTTP and offline
+# errors derive from ``OSError``, but the transport underneath does not: on 1.x
+# an unreachable endpoint surfaces as ``httpx.ConnectError``, which is a plain
+# ``Exception``. Catching only ``OSError`` would leave the outage this module
+# exists for uncaught; 0.x uses ``requests``, whose errors are ``OSError``s.
+_UNREACHABLE_ERRORS: tuple[type[BaseException], ...] = (OSError,)
+try:
+    from httpx import HTTPError as _HttpxHTTPError
+except ImportError:
+    pass
+else:
+    _UNREACHABLE_ERRORS = (OSError, _HttpxHTTPError)
 
 
 def _hub_cache_dir() -> str:
@@ -78,6 +109,18 @@ def _ref_is_empty(ref_file: str) -> bool:
         return False
 
 
+def _offline_mode() -> bool:
+    """``huggingface_hub``'s own reading of the offline variables.
+
+    Only ``1``, ``ON``, ``YES`` and ``TRUE`` mean offline, case-insensitively;
+    anything else, ``false`` and ``no`` included, means online. Reading these
+    any other way would stop the probe on a machine the Hub is reachable from.
+    Read per call, since the library's constant is fixed at import time.
+    """
+    value = os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE")
+    return value is not None and value.upper() in ENV_VARS_TRUE_VALUES
+
+
 def _hub_is_unreachable(model: str) -> bool:
     """Whether the engine's own lookup can still ask the Hub.
 
@@ -85,12 +128,20 @@ def _hub_is_unreachable(model: str) -> bool:
     from a cache whose reference no longer describes it. Only once that has
     failed is the local snapshot the better answer. Asked only on the broken
     reference path, so a healthy start makes no request.
+
+    Only a missing answer counts as unreachable. A refusal naming the
+    repository proves the Hub is reachable, and any other exception is a defect
+    in this call rather than an outage: it propagates, because silently reading
+    it as an outage would substitute a snapshot on the strength of our own bug.
     """
-    if os.environ.get("HF_HUB_OFFLINE", "0") not in ("", "0"):
+    if _offline_mode():
         return True
     try:
         HfApi().model_info(model, timeout=_HUB_PROBE_TIMEOUT)
-    except Exception:
+    except _HUB_ANSWERED_ERRORS:
+        return False
+    except _UNREACHABLE_ERRORS as error:
+        logging.info("Hub lookup for %s failed: %s", model, error)
         return True
     return False
 

@@ -11,6 +11,7 @@ whose ``refs/main`` is empty, which made ``snapshot_download`` hand the engine
 import os
 
 import pytest
+from huggingface_hub.errors import GatedRepoError
 
 from dynamo.trtllm.utils import model_path as model_path_module
 from dynamo.trtllm.utils.model_path import resolve_model_path
@@ -39,8 +40,21 @@ class _UnreachableHub:
         raise OSError("no route to host")
 
 
+def _hub_raising(error):
+    class _Hub:
+        def model_info(self, *args, **kwargs):
+            raise error
+
+    return _Hub
+
+
 def _clear_cache_env(monkeypatch):
-    for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"):
+    for name in (
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_HOME",
+        "TRANSFORMERS_OFFLINE",
+    ):
         monkeypatch.delenv(name, raising=False)
     # Offline by default: the fallback is only for a Hub that cannot answer,
     # and no case here may depend on the runner having network.
@@ -173,6 +187,82 @@ def test_a_hub_that_cannot_answer_falls_back_to_the_cached_snapshot(
     monkeypatch.setattr(model_path_module, "HfApi", _UnreachableHub)
 
     assert resolve_model_path(MODEL) == str(snapshot)
+
+
+def test_a_connection_failure_falls_back_to_the_cached_snapshot(tmp_path, monkeypatch):
+    """The shape a real outage takes: the HTTP client's own transport error."""
+    httpx = pytest.importorskip("httpx")
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(
+        model_path_module, "HfApi", _hub_raising(httpx.ConnectError("no route"))
+    )
+
+    assert resolve_model_path(MODEL) == str(snapshot)
+
+
+def test_a_hub_that_refuses_the_repository_keeps_the_repository_id(
+    tmp_path, monkeypatch
+):
+    """A refusal naming the repository is an answer, so the Hub is reachable."""
+    httpx = pytest.importorskip("httpx")
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    refusal = GatedRepoError(
+        "gated",
+        response=httpx.Response(
+            403, request=httpx.Request("GET", "https://huggingface.co")
+        ),
+    )
+    monkeypatch.setattr(model_path_module, "HfApi", _hub_raising(refusal))
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+def test_an_unexpected_probe_error_is_not_read_as_an_outage(tmp_path, monkeypatch):
+    """A defect in this call must surface, not license a substitution."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setattr(
+        model_path_module, "HfApi", _hub_raising(TypeError("bad argument"))
+    )
+
+    with pytest.raises(TypeError):
+        resolve_model_path(MODEL)
+
+
+@pytest.mark.parametrize("variable", ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"])
+@pytest.mark.parametrize("value", ["1", "on", "Yes", "TRUE"])
+def test_the_offline_variables_are_read_as_huggingface_reads_them(
+    tmp_path, monkeypatch, variable, value
+):
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.setenv(variable, value)
+    # A probe would be a bug here: the variable already says there is no Hub.
+    monkeypatch.setattr(model_path_module, "HfApi", _ReachableHub)
+
+    assert resolve_model_path(MODEL) == str(snapshot)
+
+
+@pytest.mark.parametrize("value", ["0", "", "false", "no", "off"])
+def test_a_non_true_offline_value_still_probes_the_hub(tmp_path, monkeypatch, value):
+    """huggingface_hub treats only 1/ON/YES/TRUE as offline, so neither may this."""
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", value)
+    monkeypatch.setattr(model_path_module, "HfApi", _ReachableHub)
+
+    assert resolve_model_path(MODEL) == MODEL
 
 
 def test_legacy_cache_variable_locates_the_snapshot(tmp_path, monkeypatch):
