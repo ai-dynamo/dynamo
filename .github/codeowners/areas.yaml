@@ -259,6 +259,7 @@ areas:
   - lib/llm/src/perf/
   - lib/llm/src/utils/
   - lib/llm/tests/
+  - lib/model-protection/
   - lib/runtime/
   - lib/runtime/benches/
   - lib/runtime/docs/
@@ -390,6 +391,7 @@ areas:
   - deploy/helm/
   - deploy/helm/charts/
   - deploy/helm/charts/platform/
+  - deploy/model-protection/
   - deploy/operator/
   - deploy/operator/api/
   - deploy/operator/api/config/

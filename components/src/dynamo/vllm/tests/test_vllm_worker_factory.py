@@ -68,6 +68,25 @@ def _make_factory(**overrides) -> WorkerFactory:
     return WorkerFactory(**defaults)
 
 
+def test_protected_worker_registers_no_mutating_engine_routes():
+    factory = _make_factory()
+    runtime = Mock()
+    handler = Mock()
+
+    factory.register_engine_routes(
+        runtime,
+        Mock(),
+        handler,
+        protected=True,
+    )
+
+    routes = {
+        registered.args[0]
+        for registered in runtime.register_engine_route.call_args_list
+    }
+    assert routes == {"update/model_taints", "liveness_probe"}
+
+
 def test_decode_worker_lifecycle_cleanup_in_reverse_construction_order():
     calls = []
     shutdown_event = asyncio.Event()

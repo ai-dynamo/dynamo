@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-model-protection"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Protected model package verification and materialization"
+
+[features]
+tpm2 = ["dep:tss-esapi"]
+packager = [
+    "dep:aes-kw",
+    "dep:ed25519-dalek",
+    "dep:p256",
+    "dep:pkcs8",
+    "dep:rsa",
+]
+
+[[bin]]
+name = "model-protection-pack"
+path = "src/bin/model-protection-pack.rs"
+required-features = ["packager"]
+
+[[bin]]
+name = "model-protection-issue"
+path = "src/bin/model-protection-issue.rs"
+required-features = ["packager"]
+
+[dependencies]
+base64 = "0.22"
+aes-kw = { version = "0.2", optional = true }
+ed25519-dalek = { version = "2", features = ["pkcs8"], optional = true }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"], optional = true }
+pkcs8 = { version = "0.10", features = ["encryption", "pem"], optional = true }
+rsa = { version = "0.9", features = ["sha2"], optional = true }
+ring = { workspace = true }
+rustix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tss-esapi = { version = "7.6.0", optional = true }
+zeroize = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

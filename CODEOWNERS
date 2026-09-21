@@ -219,6 +219,7 @@
 /lib/bindings/python/                                                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/llm/src/kernels/                                                                                   @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/benches/                                                                                   @ai-dynamo/dynamo-runtime-codeowners
+/lib/model-protection/                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/runtime/examples/                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /lib/sidecar/README.md                                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /tests/serve/fixtures/                                                                                  @ai-dynamo/dynamo-runtime-codeowners
@@ -337,6 +338,7 @@
 /deploy/pre-deployment/                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/                                                                                @ai-dynamo/dynamo-operator-codeowners
 /deploy/utils/manifests/                                                                                @ai-dynamo/dynamo-operator-codeowners
+/deploy/model-protection/                                                                               @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/samples/                                                                               @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/                                                                              @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/api/config/                                                                            @ai-dynamo/dynamo-operator-codeowners

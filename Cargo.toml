@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "lib/llm",
+    "lib/model-protection",
     "lib/rl",
     "lib/runtime",
     "lib/tokens",
@@ -140,12 +141,14 @@ reqwest = { version = "0.12.24", default-features = false, features = [
     "stream",
     "rustls-tls",
 ] }
+ring = "0.17.14"
 rmp-serde = { version = "1" }
 serde_bytes = { version = "0.11" }
 seqlock = { version = "0.2.0" }
 # "rc" is for async-openai. Allows serializing Rc and Arc. Generally avoid doing that.
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1" }
+semver = "1"
 serde_path_to_error = "0.1"
 smallvec = "1"
 strum = { version = "0.27", features = ["derive"] }
@@ -207,6 +210,7 @@ sha2 = { version = "0.10" }
 tokio-rustls = { version = "0.26" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = { version = "2" }
+rustix = { version = "1.1.4", features = ["fs", "mm", "param", "process"] }
 
 [profile.dev.package]
 insta.opt-level = 3

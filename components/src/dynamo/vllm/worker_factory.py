@@ -1363,6 +1363,7 @@ class WorkerFactory:
             generate_endpoint,
             handler,
             lora_enabled=lora_enabled,
+            protected="_model_protection_bootstrap" in config.__dict__,
         )
 
         # Parse endpoint types from --endpoint-types flag
@@ -1668,6 +1669,7 @@ class WorkerFactory:
             generate_endpoint,
             handler,
             lora_enabled=config.engine_args.enable_lora,
+            protected="_model_protection_bootstrap" in config.__dict__,
         )
 
         was_failover = False
@@ -1814,6 +1816,7 @@ class WorkerFactory:
         generate_endpoint: Endpoint,
         handler: BaseWorkerHandler,
         lora_enabled: bool = False,
+        protected: bool = False,
     ) -> None:
         """Register all engine routes for this handler.
 
@@ -1822,6 +1825,10 @@ class WorkerFactory:
             generate_endpoint: Worker endpoint whose model taints can be updated.
         """
         register_model_taint_route(runtime, generate_endpoint)
+        if protected:
+            runtime.register_engine_route("liveness_probe", handler.liveness_probe)
+            logger.info("model_protection event=mutable_engine_routes status=disabled")
+            return
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)
         runtime.register_engine_route("control/sleep", handler.sleep)

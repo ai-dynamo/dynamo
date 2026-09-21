@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: protected-model
+spec:
+  backendFramework: vllm
+  components:
+  - name: frontend
+    replicas: 1
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: registry.example.com/dynamo-vllm-protected:VERSION
+          name: main
+          env:
+          - name: DYN_NAMESPACE
+            value: protected
+  - name: backend
+    replicas: 1
+    type: worker
+    podTemplate:
+      spec:
+        nodeSelector:
+          feature.node.kubernetes.io/tpm2: "true"
+        terminationGracePeriodSeconds: 180
+        initContainers:
+        - name: prepare-model-protection-runtime
+          image: registry.example.com/dynamo-vllm-protected:VERSION
+          command: ["/bin/sh", "-ceu"]
+          args:
+          - |
+            install -d -m 0700 /run/protected-models
+            install -d -m 0700 /runtime/license /runtime/trust
+            install -m 0400 /runtime-source/runtime.json /runtime/runtime.json
+            install -m 0400 /runtime-source/model.protection.license.json /runtime/license/model.protection.license.json
+            install -m 0400 /runtime-source/model.protection.license.sig /runtime/license/model.protection.license.sig
+            install -m 0400 /runtime-source/package-public.key /runtime/trust/package-public.key
+            install -m 0400 /runtime-source/license-public.key /runtime/trust/license-public.key
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+          - mountPath: /run/protected-models
+            name: protected-model-tmpfs
+          - mountPath: /runtime
+            name: model-protection-runtime
+          - mountPath: /runtime-source
+            name: model-protection-source
+            readOnly: true
+        containers:
+        - name: main
+          image: registry.example.com/dynamo-vllm-protected:VERSION
+          command: ["python3", "-m", "dynamo.vllm"]
+          args:
+          - --model
+          - /models/package
+          - --model-protection-config
+          - /runtime/runtime.json
+          - --load-format
+          - safetensors
+          env:
+          - name: DYN_NAMESPACE
+            value: protected
+          - name: DYN_NAMESPACE_WORKER_SUFFIX
+            value: ""
+          - name: HF_HOME
+            value: /tmp/huggingface
+          - name: XDG_CACHE_HOME
+            value: /tmp/cache
+          - name: TRITON_CACHE_DIR
+            value: /tmp/cache/triton
+          resources:
+            requests:
+              cpu: "4"
+              memory: 64Gi
+              nvidia.com/gpu: "1"
+            limits:
+              memory: 80Gi
+              nvidia.com/gpu: "1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          startupProbe:
+            tcpSocket:
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 180
+          volumeMounts:
+          - mountPath: /models/package
+            name: protected-package
+            readOnly: true
+          - mountPath: /run/protected-models
+            name: protected-model-tmpfs
+          - mountPath: /runtime
+            name: model-protection-runtime
+          - mountPath: /dev/tpmrm0
+            name: tpm-resource-manager
+          - mountPath: /tmp
+            name: process-tmp
+        volumes:
+        - name: protected-package
+          persistentVolumeClaim:
+            claimName: protected-model-package
+        - name: protected-model-tmpfs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 40Gi
+        - name: model-protection-runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Mi
+        - name: model-protection-source
+          secret:
+            defaultMode: 0400
+            secretName: model-protection-runtime
+        - name: process-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: tpm-resource-manager
+          hostPath:
+            path: /dev/tpmrm0
+            type: CharDevice
