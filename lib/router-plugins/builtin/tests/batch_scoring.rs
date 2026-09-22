@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercise batch scoring and private preparation using only public plugin inputs.
+//! Exercise the batch scoring contract using only public plugin inputs.
 mod support;
 
 use std::sync::{Arc, Mutex};
@@ -15,39 +15,14 @@ use support::fixture;
 
 #[derive(Debug, PartialEq)]
 enum Call {
-    Prepare(usize, Vec<u64>),
-    Score(usize),
+    Score(usize, Vec<u64>),
     Pick,
 }
 
 struct RelativeLoadScorer {
     index: usize,
-    minimum: usize,
     calls: Arc<Mutex<Vec<Call>>>,
 }
-impl RelativeLoadScorer {
-    fn prepare(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        assert_eq!(context.prompt_tokens(), 17);
-        assert!(candidates.iter().all(|c| c.cache().is_none()));
-        let mut ids: Vec<_> = candidates.iter().map(|c| c.worker().worker_id).collect();
-        ids.sort_unstable();
-        self.calls
-            .lock()
-            .unwrap()
-            .push(Call::Prepare(self.index, ids));
-        self.minimum = candidates
-            .iter()
-            .map(|c| c.load().unwrap().active_requests())
-            .min()
-            .unwrap();
-        Ok(())
-    }
-}
-
 impl WorkerScorer for RelativeLoadScorer {
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
@@ -59,10 +34,21 @@ impl WorkerScorer for RelativeLoadScorer {
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepare(context, candidates)?;
+        assert_eq!(context.prompt_tokens(), 17);
+        assert!(candidates.iter().all(|c| c.cache().is_none()));
+        let mut ids: Vec<_> = candidates.iter().map(|c| c.worker().worker_id).collect();
+        ids.sort_unstable();
+        self.calls
+            .lock()
+            .unwrap()
+            .push(Call::Score(self.index, ids));
+        let minimum = candidates
+            .iter()
+            .map(|c| c.load().unwrap().active_requests())
+            .min()
+            .unwrap();
         for (candidate, cost) in candidates.iter().zip(costs) {
-            self.calls.lock().unwrap().push(Call::Score(self.index));
-            *cost = (candidate.load().unwrap().active_requests() - self.minimum) as f64;
+            *cost = (candidate.load().unwrap().active_requests() - minimum) as f64;
         }
         Ok(())
     }
@@ -119,14 +105,13 @@ fn scores_batches_from_surviving_workers_and_resets_each_selection() {
             .map(|index| {
                 Box::new(RelativeLoadScorer {
                     index,
-                    minimum: usize::MAX,
                     calls: calls.clone(),
                 }) as Box<dyn WorkerScorer>
             })
             .collect(),
         Box::new(InspectCosts(calls.clone())),
     );
-    // Excluded workers have zero load. Neither may lower the preparation minimum.
+    // Excluded workers have zero load. Neither may lower the batch minimum.
     for round in 0..3 {
         for (worker, load) in &mut request.worker_loads {
             load.active_requests = match worker.worker_id {
@@ -148,40 +133,28 @@ fn scores_batches_from_surviving_workers_and_resets_each_selection() {
         } else {
             vec![2, 2, 3, 3]
         };
-        assert_eq!(calls.len(), 2 + expected.len() * 2 + 1);
-        for index in 0..2 {
-            let start = index * (expected.len() + 1);
-            assert_eq!(calls[start], Call::Prepare(index, expected.clone()));
-            for call in &calls[start + 1..start + 1 + expected.len()] {
-                assert_eq!(*call, Call::Score(index));
-            }
-        }
-        assert_eq!(calls.last(), Some(&Call::Pick));
+        assert_eq!(
+            *calls,
+            vec![
+                Call::Score(0, expected.clone()),
+                Call::Score(1, expected),
+                Call::Pick
+            ]
+        );
         calls.clear();
     }
 }
 
-struct FailPreparation(Arc<Mutex<usize>>);
-impl FailPreparation {
-    fn prepare(
+struct FailScoring(Arc<Mutex<usize>>);
+impl WorkerScorer for FailScoring {
+    fn score(
         &mut self,
         _: &WorkerSelectionContext<'_>,
         _: WorkerCandidates<'_>,
+        _: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
         *self.0.lock().unwrap() += 1;
-        Err(WorkerSelectionPolicyError::failed("prepare failed"))
-    }
-}
-
-impl WorkerScorer for FailPreparation {
-    fn score(
-        &mut self,
-        context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-        _costs: &mut [f64],
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepare(context, candidates)?;
-        panic!("preparation failure must stop scoring")
+        Err(WorkerSelectionPolicyError::failed("score failed"))
     }
 }
 struct NeverPick;
@@ -196,14 +169,14 @@ impl WorkerPicker for NeverPick {
 }
 
 #[test]
-fn skips_preparation_for_empty_sets_and_aborts_on_preparation_error() {
+fn skips_scoring_for_empty_sets_and_aborts_on_error() {
     let (workers, mut request) = fixture(2, 17);
     let calls = Arc::new(Mutex::new(0));
     let policy = WorkerSelectionPolicy::new_with_filters(
         KvRouterConfig::default(),
         "test",
         vec![Box::new(ExcludeWorkerOne)],
-        vec![Box::new(FailPreparation(calls.clone()))],
+        vec![Box::new(FailScoring(calls.clone()))],
         Box::new(NeverPick),
     );
     for allowed in [vec![], vec![1]] {
@@ -219,7 +192,7 @@ fn skips_preparation_for_empty_sets_and_aborts_on_preparation_error() {
     let error = policy
         .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap_err();
-    assert!(error.to_string().contains("prepare failed"));
+    assert!(error.to_string().contains("score failed"));
     assert_eq!(*calls.lock().unwrap(), 1);
 }
 
@@ -230,12 +203,10 @@ fn rejects_nonfinite_contributions_and_overflow_before_picking() {
         fn score(
             &mut self,
             _: &WorkerSelectionContext<'_>,
-            candidates: WorkerCandidates<'_>,
+            _: WorkerCandidates<'_>,
             costs: &mut [f64],
         ) -> Result<(), WorkerSelectionPolicyError> {
-            for (_candidate, cost) in candidates.iter().zip(costs) {
-                *cost = self.0;
-            }
+            costs.fill(self.0);
             Ok(())
         }
     }
