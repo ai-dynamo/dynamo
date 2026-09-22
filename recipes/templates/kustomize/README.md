@@ -47,11 +47,21 @@ positional structure (`cache-binding`, `registry-credentials`, `probes`,
 `scheduling`, `placement`) use guarded JSON 6902 patches. The networking
 Components and the case-local hook patches use strategic merge patches that
 address components, containers, environment entries, and volumes by name. Merge
-patches depend on the `components/dynamo-openapi` schema Component, a generated
-copy of the Dynamo CRD merge keys that the root Kustomization selects first.
+patches depend on the `components/dynamo-openapi` schema Component, which the
+root Kustomization selects first. The schema is generated from the Dynamo CRDs
+with an additional Kustomize-only merge rule for shared beta DGD `spec.env`.
+Both shared and container environment entries merge by `name`: patches add new
+names, update matching entries, and preserve unmentioned entries. The
+[recipe contribution guide](../../CONTRIBUTING.md#contribute-a-variant) shows a
+shared-env patch and explains the boundary with operator-side overrides.
+Refresh `components/dynamo-openapi/dynamo-openapi.json` in older private copies
+from this starter to pick up the rule.
+
 The validator lowers every merge patch into guarded JSON 6902 operations
 against the accumulated document, so both styles replay through one contract;
 merge-patch shape failures use the `merge-patch` diagnostic.
+The shared-env schema rule does not expand the starter validator's worker-only
+networking contract.
 
 ## Install the pinned renderer
 
@@ -500,8 +510,10 @@ review it as a separate compatibility path.
 
 ### Duplicate environment append
 
-Kustomize can successfully append a second environment entry with the same
-name. In the v5.8.1 verification fixture, a base value of `ens2f0` followed by
+JSON 6902 `add` operations at an environment list's `/-` path append literally,
+even when the OpenAPI schema is loaded. Unlike strategic merge patches, they
+can append a second entry with the same name. In the v5.8.1 verification fixture,
+a base value of `ens2f0` followed by
 the Component value `eth0` rendered this contiguous excerpt:
 
 ```yaml
@@ -514,6 +526,9 @@ the Component value `eth0` rendered this contiguous excerpt:
 ```
 
 Kubernetes does not make this a safe override contract.
+A later strategic merge patch can silently retain a duplicate's value instead
+of the requested update, even when Kustomize exits successfully. Keep
+environment names unique before applying subsequent patches.
 `scripts/validate-recipe-kustomization.py` rejects the duplicate at the layer
 that appends it. Override a Component-added value with a guarded `test` plus
 `replace` in the case patch instead of appending the same name again.
