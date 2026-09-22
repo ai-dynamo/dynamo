@@ -341,6 +341,7 @@ impl KvRouterConfig {
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
+            ..RsKvRouterConfig::default()
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
