@@ -72,6 +72,7 @@ impl RequestClassifier for LegacyClassifier {
     fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
         let _: Option<&str> = request.request_id();
         let _: usize = request.input_tokens();
+        let _: Option<&[u64]> = request.sequence_hashes();
         let _: &dynamo_kv_router::scheduling::RequestProgress = request.progress();
         let _: &request_classifier::RequestProgress = request.progress();
         let _: Option<tokio::time::Instant> = request.due_at();
