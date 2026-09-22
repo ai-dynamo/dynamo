@@ -1,20 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Adapter: EventEmitter protocol -> the new dynamo._core.SweeperEventPublisher
-PyO3 binding proposed in DEP #15073.
-
-This is the ONLY file that needs to change if the Rust binding's exact
-constructor/method names end up differing from the draft in
-`rust/sweeper_events.rs` in this same delivery -- everything in
-sweeper_event_plane.py is written against the transport-agnostic
-EventEmitter protocol and does not need to change.
-
-Not yet runnable: dynamo._core.SweeperEventPublisher does not exist until
-the Rust binding (see rust/sweeper_events.rs and RUST_BINDING_NOTES.md) is
-added and built with `maturin develop` in a real checkout. The import
-below is deliberately lazy (inside __init__) so importing this module
-elsewhere does not fail before that binding exists.
+"""Adapter: EventEmitter protocol -> dynamo._core.SweeperEventPublisher PyO3
+binding (DEP #15073). Isolates sweeper_event_plane.py's transport-agnostic
+logic from the Rust binding's exact constructor/method names -- this is the
+only file that needs to change if those names change.
 """
 
 from __future__ import annotations
@@ -35,8 +25,6 @@ class DynamoEventPlaneEmitter:
     """
 
     def __init__(self, endpoint: "Endpoint") -> None:
-        # Local import: see module docstring -- this binding does not exist
-        # in dynamo._core yet.
         from dynamo._core import SweeperEventPublisher as _RustPublisher
 
         # No run_uid here: subject strings already arrive fully built

@@ -54,7 +54,7 @@ def _make_process_local_runtime() -> "DistributedRuntime":
     # Per the real source comment in EventPublisher::new_internal, this
     # means the default event-plane transport is ZMQ (direct mode), not
     # NATS -- consistent with what DEP #15073 documents.
-    return DistributedRuntime(loop, "etcd", "tcp")
+    return DistributedRuntime(loop, "mem", "tcp")
 
 
 def test_publisher_subscriber_round_trip_over_real_event_plane():

@@ -2,27 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // PyO3 bindings for DEP #15073 (Sweeper event emission over Dynamo's event
-// plane). Modeled directly on the real FpmDirectPublisher/FpmEventSubscriber
-// in fpm_bindings.rs -- same `crate::Endpoint` argument convention, same
-// tokio::runtime::Handle acquisition
-// (`endpoint.inner.component().drt().runtime().secondary()`), same
-// spawn-a-background-task-and-blocking_recv-under-allow_threads pattern for
-// the subscriber side. Confirmed real, not guessed:
-//
-//   EventPublisher::for_endpoint(endpoint: &Endpoint, topic) -> Result<Self>
-//   EventPublisher::publish_bytes_ref(&self, &[u8]) -> Result<()>
-//   EventSubscriber::for_endpoint(endpoint: &Endpoint, topic) -> Result<Self>
-//   EventSubscriber::next(&mut self) -> Option<Result<EventEnvelope>>
-//   EventEnvelope { publisher_id: u64, sequence: u64, published_at: u64,
-//                   topic: String, payload: Bytes }
-//
-// where `Endpoint` here is `dynamo_runtime::component::Endpoint` -- the same
-// type already inside `crate::Endpoint.inner`. No DistributedRuntime/
-// EndpointId plumbing is needed: we already hold a live Endpoint handle.
-//
-// One subject per event type (DEP's "Subject naming"): SweeperEventPublisher
-// lazily creates and caches one EventPublisher per distinct `subject` string
-// it's asked to publish to.
+// plane).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -104,18 +84,12 @@ impl SweeperEventPublisher {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Subscriber: event plane -> consumer. Not required for item 4's scope
-// (emission only -- see DEP #15073's Non-goals), included because it's the
-// natural pair and is useful for integration-testing the publisher above
-// without a separate NATS/ZMQ inspection tool.
-// ---------------------------------------------------------------------------
-
 #[pyclass]
 pub(crate) struct SweeperEventSubscriber {
     endpoint: RuntimeEndpoint,
     runtime_handle: tokio::runtime::Handle,
     channels: Mutex<HashMap<String, Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>>,
+    cancel_txs: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
 }
 
 #[pymethods]
@@ -128,13 +102,17 @@ impl SweeperEventSubscriber {
             endpoint: endpoint.inner,
             runtime_handle,
             channels: Mutex::new(HashMap::new()),
+            cancel_txs: Mutex::new(HashMap::new()),
         })
     }
 
     /// Blocking receive of the next envelope payload on `subject`, or None if
     /// the stream ended. Releases the GIL while waiting. Spawns one
     /// background task per distinct subject, lazily, on first call --
-    /// mirrors FpmEventSubscriber's recv-mode pattern.
+    /// mirrors FpmEventSubscriber's recv-mode pattern. Each spawned task
+    /// selects between a per-subject cancellation signal and
+    /// `subscriber.next()`, so it exits promptly on `close()` or Drop even
+    /// while idle (no events arriving) on that subject.
     fn recv(&self, py: Python, subject: String) -> PyResult<Option<Vec<u8>>> {
         let rx_arc = {
             let mut channels = self
@@ -144,6 +122,7 @@ impl SweeperEventSubscriber {
 
             if !channels.contains_key(&subject) {
                 let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
                 let endpoint = self.endpoint.clone();
                 let topic = subject.clone();
 
@@ -160,27 +139,47 @@ impl SweeperEventSubscriber {
                         };
 
                     loop {
-                        match subscriber.next().await {
-                            Some(Ok(envelope)) => {
-                                if tx.send(envelope.payload.to_vec()).is_err() {
-                                    tracing::info!(
-                                        "Sweeper subscriber ({topic}): receiver dropped, exiting"
-                                    );
-                                    break;
-                                }
-                            }
-                            Some(Err(e)) => {
-                                tracing::warn!("Sweeper subscriber ({topic}): event error: {e}");
-                            }
-                            None => {
-                                tracing::info!("Sweeper subscriber ({topic}): stream ended");
+                        tokio::select! {
+                            // Fires on close()/Drop sending, or the sender
+                            // being dropped -- either way, stop.
+                            _ = &mut cancel_rx => {
+                                tracing::info!(
+                                    "Sweeper subscriber ({topic}): cancelled, exiting"
+                                );
                                 break;
+                            }
+                            next = subscriber.next() => {
+                                match next {
+                                    Some(Ok(envelope)) => {
+                                        if tx.send(envelope.payload.to_vec()).is_err() {
+                                            tracing::info!(
+                                                "Sweeper subscriber ({topic}): receiver dropped, exiting"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        tracing::warn!(
+                                            "Sweeper subscriber ({topic}): event error: {e}"
+                                        );
+                                    }
+                                    None => {
+                                        tracing::info!(
+                                            "Sweeper subscriber ({topic}): stream ended"
+                                        );
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
                 });
 
                 channels.insert(subject.clone(), Arc::new(Mutex::new(rx)));
+                self.cancel_txs
+                    .lock()
+                    .map_err(|e| to_pyerr(format!("SweeperEventSubscriber lock poisoned: {e}")))?
+                    .insert(subject.clone(), cancel_tx);
             }
 
             channels
@@ -196,11 +195,30 @@ impl SweeperEventSubscriber {
             Ok(rx.blocking_recv())
         })
     }
+
+    /// Cancel every outstanding per-subject subscriber task. Idempotent --
+    /// safe to call more than once, and Drop calls this too so an explicit
+    /// close() is not required for cleanup.
+    fn close(&self) -> PyResult<()> {
+        let mut cancel_txs = self
+            .cancel_txs
+            .lock()
+            .map_err(|e| to_pyerr(format!("SweeperEventSubscriber lock poisoned: {e}")))?;
+        for (_, tx) in cancel_txs.drain() {
+            // Err means the task already exited on its own (e.g. stream
+            // ended); nothing to do in that case either.
+            let _ = tx.send(());
+        }
+        Ok(())
+    }
 }
 
-// Registration: add both classes wherever FpmDirectPublisher/FpmEventRelay/
-// FpmEventSubscriber are registered today (same crate, so almost certainly
-// the same `m.add_class::<...>()` block as those three):
-//
-//   m.add_class::<SweeperEventPublisher>()?;
-//   m.add_class::<SweeperEventSubscriber>()?;
+impl Drop for SweeperEventSubscriber {
+    fn drop(&mut self) {
+        if let Ok(mut cancel_txs) = self.cancel_txs.lock() {
+            for (_, tx) in cancel_txs.drain() {
+                let _ = tx.send(());
+            }
+        }
+    }
+}

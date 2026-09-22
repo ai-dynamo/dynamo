@@ -23,16 +23,18 @@ from dynamo.profiler.v2.sweeper_event_plane import (
 class FakeEventEmitter:
     """Records every (subject, payload) publish call, in order. Thread-safe."""
 
-    def __init__(self, *, fail_on_publish: bool = False) -> None:
+    def __init__(self, *, fail_first_n_publishes: int = 0) -> None:
         self.published: list[tuple[str, bytes]] = []
         self.closed = False
         self._lock = threading.Lock()
-        self._fail_on_publish = fail_on_publish
+        self._fail_first_n_publishes = fail_first_n_publishes
+        self._publish_attempts = 0
 
     def publish(self, subject: str, payload: bytes) -> None:
-        if self._fail_on_publish:
-            raise RuntimeError("simulated transport failure")
         with self._lock:
+            self._publish_attempts += 1
+            if self._publish_attempts <= self._fail_first_n_publishes:
+                raise RuntimeError("simulated transport failure")
             self.published.append((subject, payload))
 
     def close(self) -> None:
@@ -132,12 +134,18 @@ def test_unknown_event_type_raises_immediately():
 
 
 def test_publish_failure_is_logged_and_does_not_kill_the_drain_loop():
-    emitter = FakeEventEmitter(fail_on_publish=True)
+    # Only the first publish fails -- proves the drain loop survives the
+    # exception and keeps draining, not just that close() still runs
+    # afterward (that path is already covered by
+    # test_close_flushes_pending_queue_before_stopping).
+    emitter = FakeEventEmitter(fail_first_n_publishes=1)
     with SweeperEventPublisher("run-8", emitter) as pub:
         pub.emit("round.completed", {"round_no": 1, "cumulative_candidates": 1})
-        # give the drain loop a chance to run and fail without crashing
-        time.sleep(0.2)
-    assert emitter.published == []
+        pub.emit("round.completed", {"round_no": 2, "cumulative_candidates": 2})
+        assert _wait_until(lambda: len(emitter.published) == 1)
+
+    envelope = json.loads(emitter.published[0][1])
+    assert envelope["data"]["round_no"] == 2
     assert emitter.closed is True
 
 

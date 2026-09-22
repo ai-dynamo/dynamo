@@ -10,21 +10,6 @@ It does not own how bytes actually leave the process -- that is delegated to
 whatever ``EventEmitter`` implementation is injected, so this logic is
 testable without a compiled ``dynamo._core`` binding and is not tied to
 either transport proposal (event-plane vs. the earlier custom Unix socket).
-
-Confirmed from real source, not assumed:
-- ``Sweeper.run``'s ``on_round: Callable[[int, list[Candidate]], None]`` is
-  called synchronously and unguarded inside the main search loop
-  (``aisimulate/sweeper/search.py``) -- the reason emission must only
-  enqueue and never perform I/O on the caller's thread.
-- ``MaterializationResult``'s real shape (``.dgd``/``.experimental``) from
-  ``materialize_dgd_from_candidate()`` is what ``search.resolved``'s
-  ``candidate`` field carries -- no new shape invented here.
-
-Not yet confirmed against a compiled binding: the exact Rust-side
-constructor signature for the event-plane publisher this module will be
-adapted to (see ``dynamo_event_plane_transport.py`` in this same directory
-and its docstring for the precise, minimal contract this module needs from
-it).
 """
 
 from __future__ import annotations
@@ -54,12 +39,7 @@ SUBJECT_SUFFIX = {
 
 
 class EventEmitter(Protocol):
-    """What any transport must provide. Implemented today by nothing real
-    yet -- see ``dynamo_event_plane_transport.py`` for the event-plane
-    adapter this is being built for, and the (already built, in a sibling
-    proposal) custom-socket transport for the other implementation of this
-    same protocol.
-    """
+    """What any transport must provide."""
 
     def publish(self, subject: str, payload: bytes) -> None:
         """Send one already-serialized envelope. May block -- callers of
@@ -104,6 +84,13 @@ class SweeperEventPublisher:
         *,
         pending_queue_size: int = 100,
     ) -> None:
+        if pending_queue_size <= 0:
+            # queue.Queue treats maxsize <= 0 as unbounded, which would
+            # silently disable the advertised bounded-backpressure
+            # guarantee instead of rejecting the bad config.
+            raise ValueError(
+                f"pending_queue_size must be positive, got {pending_queue_size}"
+            )
         self._run_uid = run_uid
         self._emitter = emitter
         self._queue: "queue.Queue[_PendingEvent]" = queue.Queue(maxsize=pending_queue_size)
