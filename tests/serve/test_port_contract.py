@@ -293,9 +293,16 @@ class _Command(NamedTuple):
     terminator: str  # operator that ended the command; "&" backgrounds it
     segments: tuple[int, ...]  # offsets in text where each pipeline segment starts
     body: tuple["_Command", ...] | None = None  # function definitions are not calls
+    expansions: tuple["_Command", ...] = ()  # substitutions execute before the command
 
 
-def _read_quoted(script: str, index: int, *, ansi_c: bool = False) -> tuple[int, str]:
+def _read_quoted(
+    script: str,
+    index: int,
+    *,
+    ansi_c: bool = False,
+    substitutions: list[tuple[int, int]] | None = None,
+) -> tuple[int, str]:
     """Return the index past a quoted span and the text inside it."""
     if script[index] == "'":
         end = index + 1
@@ -309,6 +316,13 @@ def _read_quoted(script: str, index: int, *, ansi_c: bool = False) -> tuple[int,
     chunk: list[str] = []
     cursor = index + 1
     while cursor < len(script) and script[cursor] != '"':
+        if script.startswith("$(", cursor):
+            end = _read_substitution(script, cursor)
+            if substitutions is not None:
+                substitutions.append((cursor, end))
+            chunk.append(script[cursor:end])
+            cursor = end
+            continue
         if script[cursor] == "\\" and cursor + 1 < len(script):
             following = script[cursor + 1]
             if following in '$`"\\\n':
@@ -319,6 +333,35 @@ def _read_quoted(script: str, index: int, *, ansi_c: bool = False) -> tuple[int,
         chunk.append(script[cursor])
         cursor += 1
     return cursor + 1, "".join(chunk)
+
+
+def _read_substitution(script: str, index: int) -> int:
+    """Find the end of a parenthesized substitution without consuming its caller."""
+    cursor = index + 2
+    depth = 1
+    word_started = False
+    while cursor < len(script):
+        char = script[cursor]
+        if char == "\\":
+            word_started = True
+            cursor += 2
+            continue
+        ansi_c = script.startswith("$'", cursor)
+        if char in "'\"" or ansi_c:
+            cursor, _ = _read_quoted(script, cursor + int(ansi_c), ansi_c=ansi_c)
+            word_started = True
+            continue
+        if char == "#" and not word_started:
+            end = script.find("\n", cursor)
+            cursor = len(script) if end < 0 else end
+            continue
+        if char in "()":
+            depth += 1 if char == "(" else -1
+            if not depth:
+                return cursor + 1
+        word_started = char not in " \t\n;|&()"
+        cursor += 1
+    return cursor
 
 
 def _read_heredoc_word(script: str, index: int) -> tuple[int, str]:
@@ -339,21 +382,22 @@ def _read_heredoc_word(script: str, index: int) -> tuple[int, str]:
     return index, "".join(chunks)
 
 
-def _split_commands(script: str) -> list[_Command]:
+def _split_commands(script: str, *, start_line: int = 1) -> list[_Command]:
     """Split a bash script on the separators bash itself honours."""
     commands: list[_Command] = []
     parts: list[str] = []
     mask: list[str] = []
+    expansions: list[_Command] = []
     heredocs: list[tuple[str, bool]] = []  # (delimiter, "<<-" drops leading tabs)
     segments: list[int] = [0]
     word_started = False  # quotes, including empty ones, start a shell word
     prev_code = ""  # last non-blank character added, for redirection detection
     pending = False  # an operator still needs its next command
-    line = 1
-    start = 1
+    line = start_line
+    start = line
     group = 0  # index in commands of the first member of the open AND-OR list
-    substitutions = 0  # command/process substitution parentheses are not group closers
     array_depth = 0
+    array_quoted = False
     # closer, first member, outer AND-OR list, function name, definition line
     scopes: list[tuple[str, int, int, str, int]] = []
     # awaiting pattern, first member, outer AND-OR list
@@ -401,6 +445,7 @@ def _split_commands(script: str) -> list[_Command]:
                             }
                         )
                     ),
+                    expansions=tuple(expansions),
                 )
             )
         segments[:] = [0]
@@ -414,6 +459,7 @@ def _split_commands(script: str) -> list[_Command]:
             group = len(commands)
         parts.clear()
         mask.clear()
+        expansions.clear()
         word_started = False
         prev_code = ""
         start = line
@@ -428,9 +474,45 @@ def _split_commands(script: str) -> list[_Command]:
             add(script[index + 1 : index + 2], True)
             index += 2
             continue
+        if array_depth and char == '"':
+            array_quoted = not array_quoted
+            add("", True)
+            index += 1
+            continue
+        if script.startswith("$(", index) or (
+            not array_quoted and script.startswith(("<(", ">("), index)
+        ):
+            end = _read_substitution(script, index)
+            children = _split_commands(script[index + 2 : end - 1], start_line=line)
+            if char in "<>":
+                # Process substitutions run asynchronously even in an assignment.
+                children = [child._replace(terminator="&") for child in children]
+            expansions.extend(children)
+            line += script[index:end].count("\n")
+            add("substitution", True)
+            index = end
+            continue
+        if array_quoted:
+            line += char == "\n"
+            add(char, True)
+            index += 1
+            continue
         ansi_c = script.startswith("$'", index)
         if char in "'\"" or ansi_c:
-            end, chunk = _read_quoted(script, index + int(ansi_c), ansi_c=ansi_c)
+            quoted_substitutions: list[tuple[int, int]] = []
+            end, chunk = _read_quoted(
+                script,
+                index + int(ansi_c),
+                ansi_c=ansi_c,
+                substitutions=quoted_substitutions,
+            )
+            for begin, finish in quoted_substitutions:
+                expansions.extend(
+                    _split_commands(
+                        script[begin + 2 : finish - 1],
+                        start_line=line + script[index:begin].count("\n"),
+                    )
+                )
             line += script[index:end].count("\n")
             add(chunk, True)
             index = end
@@ -461,16 +543,6 @@ def _split_commands(script: str) -> list[_Command]:
                     line += script[index:end].count("\n")
                     index = end
                     continue
-        if script.startswith(("$(", "<(", ">("), index):
-            add(script[index : index + 2], False)
-            substitutions += 1
-            index += 2
-            continue
-        if substitutions and char in "()":
-            add(char, False)
-            substitutions += 1 if char == "(" else -1
-            index += 1
-            continue
         raw_header = "".join(parts)
         header = raw_header.strip()
         array_assignment = _ARRAY_ASSIGNMENT.search(raw_header) if char == "(" else None
@@ -482,7 +554,7 @@ def _split_commands(script: str) -> list[_Command]:
                 index += 1
                 continue
         case_header = _CASE_HEADER.fullmatch(raw_header) if char.isspace() else None
-        if case_header and not substitutions:
+        if case_header:
             header_mask = "".join(mask)
             keywords_unquoted = all(
                 "q" not in header_mask[case_header.start(word) : case_header.end(word)]
@@ -523,7 +595,7 @@ def _split_commands(script: str) -> list[_Command]:
             continue
         brace_opener = char == "{" and script[index + 1 : index + 2].isspace()
         opens_scope = (char == "(" or brace_opener) and (function or not header)
-        if not substitutions and opens_scope:
+        if opens_scope:
             name = (function.group(1) or function.group(2)) if function else ""
             scopes.append(
                 (")" if char == "(" else "}", len(commands), group, name, start)
@@ -537,7 +609,7 @@ def _split_commands(script: str) -> list[_Command]:
             start = line
             index += 1
             continue
-        closes_scope = not substitutions and scopes and char == scopes[-1][0]
+        closes_scope = scopes and char == scopes[-1][0]
         if closes_scope and (char == ")" or not "".join(parts).strip()):
             flush("\n")
             _, first, group, name, definition_line = scopes.pop()
@@ -647,6 +719,10 @@ def _executed_commands(script: str) -> list[_Command]:
             if command.body is not None:
                 functions[command.text] = command.body
                 continue
+            children = command.expansions
+            if command.terminator == "&":
+                children = tuple(child._replace(terminator="&") for child in children)
+            visit(children, active)
             executed.append(command)
             for match in re.finditer(r"\S+", command.text):
                 name = match.group()
@@ -809,6 +885,47 @@ def test_array_elements_are_not_service_launches(operator: str) -> None:
         (9, "python -m dynamo.frontend", False),
     ]
     assert not _calls_wait_any_exit(script)
+
+
+def test_array_substitutions_execute_while_literal_elements_remain_data() -> None:
+    """Command substitutions block; process substitutions run asynchronously."""
+    script = (
+        "workers=(python -m dynamo.fake\n"
+        "    $(python -m dynamo.vllm)\n"
+        '    "$(printf \'%s\' "$(python -m dynamo.frontend)")"\n'
+        "    <(python -m dynamo.sglang) >(python -m dynamo.planner)\n"
+        "    '$(python -m dynamo.fake)' \"<(python -m dynamo.fake)\"\n"
+        '    "\\$(python -m dynamo.fake)"\n'
+        ")\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [
+        (2, "python -m dynamo.vllm", False),
+        (3, "python -m dynamo.frontend", False),
+        (4, "python -m dynamo.sglang", True),
+        (4, "python -m dynamo.planner", True),
+    ]
+
+
+def test_array_substitutions_keep_function_calls_and_enclosing_jobs() -> None:
+    """Substitution bodies retain command positions, source lines, and outer jobs."""
+    script = (
+        "worker() {\n"
+        "    python -m dynamo.vllm\n"
+        "}\n"
+        "(\n"
+        "    workers+=($( (worker) ))\n"
+        ") &\n"
+        "workers+=($(\n"
+        "    printf ')'; # ) does not close the substitution\n"
+        "    worker\n"
+        "))\n"
+        "wait_any_exit\n"
+    )
+    assert _service_launches(script) == [
+        (2, "python -m dynamo.vllm", True),
+        (2, "python -m dynamo.vllm", False),
+    ]
 
 
 def test_case_patterns_expose_branch_commands_only_in_case_context() -> None:
