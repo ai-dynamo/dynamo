@@ -137,6 +137,11 @@ pub(crate) struct StateTelemetry {
     pub(crate) tracked_requests: usize,
 }
 
+pub(crate) struct ReconcileOutcome {
+    pub(crate) changed: bool,
+    pub(crate) forced_resumes: usize,
+}
+
 #[derive(Default, Clone, Copy)]
 struct WorkerUsage {
     used: usize,
@@ -165,6 +170,7 @@ pub(crate) struct State {
     config: ThunderAgentConfig,
     pub(crate) programs: HashMap<String, Program>,
     paused_programs: HashSet<String>,
+    marked_for_pause: usize,
     normal_usage: HashMap<WorkerWithDpRank, usize>,
     pub(crate) requests: HashMap<String, RequestState>,
     sessions: HashMap<String, SessionRequests>,
@@ -180,6 +186,7 @@ impl State {
             config,
             programs: HashMap::new(),
             paused_programs: HashSet::new(),
+            marked_for_pause: 0,
             normal_usage: HashMap::new(),
             requests: HashMap::new(),
             sessions: HashMap::new(),
@@ -266,11 +273,7 @@ impl State {
             programs: self.programs.len(),
             active_programs: self.programs.len().saturating_sub(paused_programs),
             paused_programs,
-            marked_for_pause: self
-                .programs
-                .values()
-                .filter(|program| program.marked_for_pause)
-                .count(),
+            marked_for_pause: self.marked_for_pause,
             waiting_requests: self.waiting_arrivals.len(),
             tracked_requests: self.requests.len(),
         }
@@ -353,18 +356,19 @@ impl State {
         session_id: &str,
         update: impl FnOnce(&mut Program) -> R,
     ) -> Option<R> {
-        let before = self
-            .programs
-            .get(session_id)
-            .and_then(|program| self.program_charge(program));
+        let program = self.programs.get(session_id)?;
+        let before = self.program_charge(program);
+        self.marked_for_pause -= usize::from(program.marked_for_pause);
         self.subtract_charge(before);
         let result = update(self.programs.get_mut(session_id)?);
-        let (after, paused) = self.programs.get(session_id).map(|program| {
+        let (after, paused, marked_for_pause) = self.programs.get(session_id).map(|program| {
             (
                 self.program_charge(program),
                 program.lifecycle == ProgramLifecycle::Paused,
+                program.marked_for_pause,
             )
         })?;
+        self.marked_for_pause += usize::from(marked_for_pause);
         self.add_charge(after);
         if paused {
             self.paused_programs.insert(session_id.to_owned());
@@ -378,6 +382,7 @@ impl State {
         let charge = self.program_charge(&program);
         let paused = program.lifecycle == ProgramLifecycle::Paused;
         debug_assert!(!self.programs.contains_key(&session_id));
+        self.marked_for_pause += usize::from(program.marked_for_pause);
         self.programs.insert(session_id.clone(), program);
         self.add_charge(charge);
         if paused {
@@ -387,6 +392,7 @@ impl State {
 
     fn remove_program(&mut self, session_id: &str) -> Option<Program> {
         let program = self.programs.remove(session_id)?;
+        self.marked_for_pause -= usize::from(program.marked_for_pause);
         let charge = self.program_charge(&program);
         self.subtract_charge(charge);
         self.paused_programs.remove(session_id);
@@ -398,17 +404,25 @@ impl State {
         self.insert_program(session_id, program);
     }
 
-    pub(crate) fn reconcile(&mut self, capacities: &WorkerCapacitySnapshot, now: Instant) -> bool {
+    pub(crate) fn reconcile(
+        &mut self,
+        capacities: &WorkerCapacitySnapshot,
+        now: Instant,
+    ) -> ReconcileOutcome {
         self.refresh_normal_usage();
         let mut changed = self.expire_retained_programs(now);
         changed |= self.clear_removed_workers(capacities);
         changed |= self.admit_front_requests(capacities, now);
         let mut usage = self.worker_usage(now);
         changed |= self.greedy_resume(capacities, &mut usage, now);
-        changed |= self.force_timed_out(capacities, &mut usage, now);
+        let forced_resumes = self.force_timed_out(capacities, &mut usage, now);
+        changed |= forced_resumes > 0;
         changed |= self.pause_until_safe(capacities, &mut usage, now);
         self.compact_arrival_order();
-        changed
+        ReconcileOutcome {
+            changed,
+            forced_resumes,
+        }
     }
 
     pub(crate) fn scheduler_interval(&self) -> Duration {
@@ -763,7 +777,7 @@ impl State {
         capacities: &WorkerCapacitySnapshot,
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
         now: Instant,
-    ) -> bool {
+    ) -> usize {
         let timeout = self.config.resume_timeout();
         let timed_out: Vec<String> = self
             .paused_programs
@@ -778,7 +792,7 @@ impl State {
             .cloned()
             .collect();
 
-        let mut changed = false;
+        let mut forced_resumes = 0;
         for session_id in timed_out {
             let target = capacities
                 .iter()
@@ -805,10 +819,10 @@ impl State {
                         self.config.buffer_per_program,
                     );
                 }
-                changed = true;
+                forced_resumes += 1;
             }
         }
-        changed
+        forced_resumes
     }
 
     fn resume_program(&mut self, session_id: &str, worker: Option<WorkerWithDpRank>) -> bool {

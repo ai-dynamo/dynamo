@@ -73,6 +73,18 @@ Program state is local to each frontend's router instance. This is not a cluster
 
 The native plugin uses the existing [router plugin API](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#register-a-request-classifier). Its classifier and worker selector register together in Dynamo's builtin catalog. It does not expose the Python prototype's soft-demotion controls, priority boosts, host-cache budget, or separate status endpoints described below.
 
+### Native Plugin Logs
+
+The plugin logs its interval, deferral timeout, and tracking limit at INFO when admission is enabled. A WARN event reports the number of programs forcibly resumed after reaching the deferral timeout. These requests continue processing; they are not rejected. Timeout warnings are aggregated into one event per scheduler tick.
+
+To see scheduler state changes, enable DEBUG for the `thunderagent` log target before starting the frontend:
+
+```bash
+export DYN_LOG='info,thunderagent=debug'
+```
+
+Each changed tick reports counts of active, paused, and marked-for-pause programs, waiting requests, and tracked requests. Unchanged ticks are silent. Log snapshots use stored counts without scanning programs or requests, and log emission happens after releasing the scheduler lock.
+
 ## Python Router Prototype
 
 The remaining sections describe the older standalone Python implementation. Run that prototype from a source checkout. Its CLI flags and observability endpoints differ from the native plugin above.

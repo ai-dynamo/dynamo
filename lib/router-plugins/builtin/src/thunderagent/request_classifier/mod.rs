@@ -140,15 +140,25 @@ impl Inner {
             return;
         }
         let capacities = self.capacity_provider.snapshot();
-        let telemetry = {
+        let debug_enabled = tracing::enabled!(target: "thunderagent", tracing::Level::DEBUG);
+        let warn_enabled = tracing::enabled!(target: "thunderagent", tracing::Level::WARN);
+        let (outcome, telemetry) = {
             let mut state = self.state.lock();
-            let changed = state.reconcile(&capacities, Instant::now());
-            if !changed || !tracing::enabled!(target: "thunderagent", tracing::Level::INFO) {
+            let outcome = state.reconcile(&capacities, Instant::now());
+            if !outcome.changed || !(debug_enabled || warn_enabled && outcome.forced_resumes > 0) {
                 return;
             }
-            state.telemetry()
+            (outcome, state.telemetry())
         };
-        tracing::info!(
+        if outcome.forced_resumes > 0 {
+            tracing::warn!(
+                target: "thunderagent",
+                forced_resumes = outcome.forced_resumes,
+                waiting_requests = telemetry.waiting_requests,
+                "ThunderAgent deferral timeout forced program resumes"
+            );
+        }
+        tracing::debug!(
             target: "thunderagent",
             programs = telemetry.programs,
             active_programs = telemetry.active_programs,
@@ -252,6 +262,13 @@ impl ThunderAgentClassifier {
         capacity_provider: Arc<dyn WorkerCapacityProvider>,
     ) -> Result<Self, ConfigError> {
         config.validate()?;
+        tracing::info!(
+            target: "thunderagent",
+            scheduler_interval_seconds = config.scheduler_interval_seconds,
+            resume_timeout_seconds = config.resume_timeout_seconds,
+            max_tracked_requests = config.max_tracked_requests,
+            "ThunderAgent admission enabled"
+        );
         Ok(Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::new(config)),
@@ -360,6 +377,140 @@ mod tests {
         let snapshot = capacities(values);
         let provider: Arc<dyn WorkerCapacityProvider> = Arc::new(move || Arc::clone(&snapshot));
         ThunderAgentClassifier::new(config(), provider).unwrap()
+    }
+
+    #[test]
+    fn timeout_logs_are_aggregated_outside_the_lock_and_unchanged_ticks_are_silent() {
+        #[derive(Debug, PartialEq)]
+        struct Event {
+            level: tracing::Level,
+            forced_resumes: Option<u64>,
+        }
+        impl tracing::field::Visit for Event {
+            fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                if field.name() == "forced_resumes" {
+                    self.forced_resumes = Some(value);
+                }
+            }
+        }
+        struct Subscriber {
+            inner: std::sync::Weak<Inner>,
+            max_level: tracing::Level,
+            events: Arc<Mutex<Vec<Event>>>,
+        }
+        impl tracing::Subscriber for Subscriber {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                *metadata.level() <= self.max_level
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                assert!(self.inner.upgrade().unwrap().state.try_lock().is_some());
+                let mut captured = Event {
+                    level: *event.metadata().level(),
+                    forced_resumes: None,
+                };
+                event.record(&mut captured);
+                self.events.lock().push(captured);
+            }
+        }
+
+        for max_level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            let classifier = classifier(&[(1, 100)]);
+            let capacity = capacities(&[(1, 100)]);
+            let now = Instant::now() - Duration::from_secs(2);
+            for id in ["first", "second"] {
+                classifier
+                    .inner
+                    .state
+                    .lock()
+                    .register(
+                        RequestRegistration::new(
+                            id.into(),
+                            id.into(),
+                            120,
+                            RequestProgress::new(120).0,
+                            false,
+                        ),
+                        &capacity,
+                        now,
+                    )
+                    .unwrap();
+            }
+            let events = Arc::new(Mutex::new(Vec::new()));
+            tracing::subscriber::with_default(
+                Subscriber {
+                    inner: Arc::downgrade(&classifier.inner),
+                    max_level,
+                    events: Arc::clone(&events),
+                },
+                || {
+                    classifier.inner.reconcile();
+                    classifier.inner.reconcile();
+                },
+            );
+            let mut expected = vec![Event {
+                level: tracing::Level::WARN,
+                forced_resumes: Some(2),
+            }];
+            if max_level == tracing::Level::DEBUG {
+                expected.push(Event {
+                    level: tracing::Level::DEBUG,
+                    forced_resumes: None,
+                });
+            }
+            assert_eq!(*events.lock(), expected);
+        }
+    }
+
+    #[test]
+    fn marked_count_stays_current_after_completion_and_rollback() {
+        let mut state = State::new(config());
+        let capacity = capacities(&[(1, 100)]);
+        let now = Instant::now();
+        let (progress, updater) = RequestProgress::new(60);
+        state
+            .register(
+                RequestRegistration::new("first".into(), "first".into(), 60, progress, false),
+                &capacity,
+                now,
+            )
+            .unwrap();
+        state
+            .register(
+                RequestRegistration::new(
+                    "second".into(),
+                    "second".into(),
+                    30,
+                    RequestProgress::new(30).0,
+                    false,
+                ),
+                &capacity,
+                now,
+            )
+            .unwrap();
+        updater.update_context_tokens(120);
+        state.reconcile(&capacity, now);
+        assert_eq!(state.telemetry().marked_for_pause, 2);
+        state.cancel_request("first", &capacity, now);
+        assert_eq!(state.telemetry().marked_for_pause, 1);
+        state.on_event(
+            ClassifyEvent::Completed {
+                request_id: "second".into(),
+                worker: WorkerWithDpRank::new(1, 0),
+                context_tokens: Some(30),
+            },
+            &capacity,
+            now,
+        );
+        assert_eq!(state.telemetry().marked_for_pause, 0);
+        assert_eq!(state.telemetry().paused_programs, 1);
     }
 
     fn status(state: &State, request_id: &str) -> WaitStatus {
