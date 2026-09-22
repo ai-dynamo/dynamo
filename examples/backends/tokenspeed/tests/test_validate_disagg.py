@@ -167,9 +167,7 @@ async def test_full_validation_cannot_pass_bad_deployment(
         elif fault == "wrong-reuse" and not forced:
             owner = 3 - owner
         chunk = {
-            "choices": [
-                {"text": "WRONG" if fault == "wrong-text" else topics[index]}
-            ],
+            "choices": [{"text": "WRONG" if fault == "wrong-text" else topics[index]}],
             "nvext": {
                 "worker_id": {
                     "prefill_worker_id": owner,
