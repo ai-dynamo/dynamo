@@ -10,8 +10,9 @@ injectable dependency so it can be replaced without touching any caller.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, Protocol
 
 # TRT-LLM TEP and DEP strategies require the AIC renderer: the direct
 # renderer raises NotImplementedError for them.
@@ -40,7 +41,13 @@ class RuntimeBindingError(ValueError):
 
 class SupportChecker(Protocol):
     def __call__(
-        self, *, model: str, system: str, backend: str, version: str, architecture: str | None
+        self,
+        *,
+        model: str,
+        system: str,
+        backend: str,
+        version: str,
+        architecture: str | None,
     ) -> Any: ...
 
 
@@ -57,12 +64,14 @@ class RuntimeBinding:
 
 
 def _default_support_checker() -> SupportChecker:
-    from aiconfigurator.sdk import common  # noqa: PLC0415
+    from aiconfigurator.sdk import common
 
     return common.check_support
 
 
-def _candidate_strategies(candidate_config: Mapping[str, Any]) -> tuple[str | None, ...]:
+def _candidate_strategies(
+    candidate_config: Mapping[str, Any],
+) -> tuple[str | None, ...]:
     """Agg candidates carry a single `strategy`; disagg candidates carry
     per-role `prefill_strategy`/`decode_strategy` instead, and `strategy`
     itself is None for disagg. Returns every strategy that actually
@@ -128,7 +137,9 @@ def resolve_runtime_binding(
         version=backend_version,
         architecture=architecture,
     )
-    supported = result.disagg_supported if deployment_mode == "disagg" else result.agg_supported
+    supported = (
+        result.disagg_supported if deployment_mode == "disagg" else result.agg_supported
+    )
     if not supported:
         raise RuntimeBindingError(
             f"no matching performance data for model={model!r} system={hardware_sku!r} "
@@ -140,7 +151,10 @@ def resolve_runtime_binding(
     strategies = _candidate_strategies(candidate_config)
     renderer = (
         "aic"
-        if any((backend, strategy) in _DIRECT_RENDERER_UNSUPPORTED_STRATEGIES for strategy in strategies)
+        if any(
+            (backend, strategy) in _DIRECT_RENDERER_UNSUPPORTED_STRATEGIES
+            for strategy in strategies
+        )
         else "direct"
     )
 
@@ -150,9 +164,5 @@ def resolve_runtime_binding(
         runtime_image=f"{_RUNTIME_IMAGE_REGISTRY}/{backend}-runtime:{backend_version}",
         num_gpus_per_node=num_gpus_per_node,
         renderer=renderer,
-        # Only set when needed -- matches the established, confirmed
-        # behavior elsewhere (test_runtime_version_override_is_only_
-        # written_when_explicit): don't write it for an already-canonical
-        # tag that needs no override.
         runtime_version_override=None if is_canonical else dynamo_version,
     )

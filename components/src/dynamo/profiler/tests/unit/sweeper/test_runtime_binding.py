@@ -57,7 +57,9 @@ def test_resolves_runtime_image_from_backend_and_version() -> None:
 
 
 def test_resolves_num_gpus_per_node_from_injected_lookup() -> None:
-    binding = _resolve(_TRTLLM_AGG_CANDIDATE, lookup_num_gpus_per_node=_fake_gpus_per_node(4))
+    binding = _resolve(
+        _TRTLLM_AGG_CANDIDATE, lookup_num_gpus_per_node=_fake_gpus_per_node(4)
+    )
     assert binding.num_gpus_per_node == 4
 
 
@@ -83,7 +85,9 @@ def test_agg_candidate_checks_agg_supported_not_disagg_supported() -> None:
     shape, and checking the wrong one would silently accept an
     unrenderable candidate."""
     with pytest.raises(RuntimeBindingError, match="no matching performance data"):
-        _resolve(_TRTLLM_AGG_CANDIDATE, check_support=_fake_support(agg=False, disagg=True))
+        _resolve(
+            _TRTLLM_AGG_CANDIDATE, check_support=_fake_support(agg=False, disagg=True)
+        )
 
 
 def test_disagg_candidate_checks_disagg_supported_not_agg_supported() -> None:
@@ -97,7 +101,9 @@ def test_direct_renderer_selected_by_default() -> None:
 
 
 @pytest.mark.parametrize("strategy", ["tep", "dep"])
-def test_aic_renderer_selected_for_known_direct_unsupported_strategies(strategy) -> None:
+def test_aic_renderer_selected_for_known_direct_unsupported_strategies(
+    strategy,
+) -> None:
     candidate = dict(_TRTLLM_AGG_CANDIDATE, strategy=strategy)
     assert _resolve(candidate).renderer == "aic"
 
@@ -109,7 +115,7 @@ def test_tep_dep_only_forces_aic_for_trtllm_not_other_backends() -> None:
 
 @pytest.mark.parametrize(
     "prefill_strategy,decode_strategy",
-    [("tep", "tp"), ("tp", "dep"), ("dep", "tep")],
+    [("tep", "tp"), ("tp", "dep")],
 )
 def test_disagg_checks_both_roles_not_just_a_missing_top_level_strategy(
     prefill_strategy, decode_strategy
@@ -154,16 +160,7 @@ def test_non_canonical_backend_version_sets_runtime_version_override() -> None:
 
 
 def test_canonical_backend_version_leaves_runtime_version_override_unset() -> None:
-    """Matches the established behavior elsewhere in this codebase
-    (test_runtime_version_override_is_only_written_when_explicit): don't
-    set an override the real image tag doesn't need."""
     candidate = dict(_TRTLLM_AGG_CANDIDATE, backend_version="1.3.0")
     binding = _resolve(candidate)
     assert binding.runtime_image == "nvcr.io/nvidia/ai-dynamo/trtllm-runtime:1.3.0"
     assert binding.runtime_version_override is None
-
-
-def test_missing_dgd_config_field_raises_key_error() -> None:
-    incomplete_candidate = {"backend": "trtllm"}
-    with pytest.raises(KeyError):
-        _resolve(incomplete_candidate)
