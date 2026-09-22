@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod sync;
+
 use std::{
     collections::VecDeque,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
 };
@@ -28,6 +30,8 @@ pub(crate) fn enabled() -> bool {
 /// evictions so a recomputation cannot race an eviction and leave membership
 /// inconsistent. Duplicate hashes neither consume capacity nor refresh age. Each
 /// host applies the configured byte budget independently.
+/// With router replica sync enabled, peer completions also enter the same FIFO;
+/// otherwise the history remains local. Peer updates are best-effort, without replay.
 pub(crate) struct CacheHistory {
     block_tokens: u64,
     capacity_entries: usize,
@@ -35,6 +39,7 @@ pub(crate) struct CacheHistory {
     fifo: Mutex<VecDeque<u64>>,
     shards: Box<[RwLock<FxHashSet<u64>>]>,
     retained_entries: AtomicUsize,
+    sync: OnceLock<sync::HistorySync>,
 }
 
 impl CacheHistory {
@@ -74,6 +79,7 @@ impl CacheHistory {
             fifo: Mutex::new(VecDeque::new()),
             shards,
             retained_entries: AtomicUsize::new(0),
+            sync: OnceLock::new(),
         }
     }
 
@@ -97,6 +103,17 @@ impl CacheHistory {
     }
 
     pub(crate) fn record_completed<I>(&self, sequence_hashes: I) -> Option<CacheHistoryStats>
+    where
+        I: Iterator<Item = u64> + Clone,
+    {
+        let stats = self.insert(sequence_hashes.clone());
+        if let Some(sync) = self.sync.get() {
+            sync.publish(sequence_hashes);
+        }
+        stats
+    }
+
+    fn insert<I>(&self, sequence_hashes: I) -> Option<CacheHistoryStats>
     where
         I: Iterator<Item = u64> + Clone,
     {

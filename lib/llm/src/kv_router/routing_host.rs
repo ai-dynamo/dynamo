@@ -381,6 +381,7 @@ impl RoutingHost {
             cache_history::enabled().then(|| CacheHistory::from_env(kv_router.block_size()));
         if let Some(history) = &cache_history {
             request_metrics.set_cache_history_capacity(history.stats());
+            history.start_replica_sync(&kv_router, request_metrics.clone());
         }
 
         RoutingHost {
