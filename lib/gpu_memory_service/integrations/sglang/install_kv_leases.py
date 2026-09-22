@@ -780,10 +780,13 @@ def enter_exclusive_steady_state(self) -> int:
                     strict_preferred=True,
                 )
             )
-            pages = [int(lease.block_id) for lease in acquired]
-            return acquired, pages
+            return acquired
 
-        new_leases = cohort.run_agreed("steady:acquire-free", acquire_common_pages)
+        # Ranks can already hold different subsets from bounded standby warmup.
+        # Their *new* acquisition deltas therefore need not match. Require every
+        # local acquisition to succeed here, then agree the complete writable
+        # set below. Lease generations and acquisition history remain rank-local.
+        new_leases = cohort.run("steady:acquire-free", acquire_common_pages)
     except Exception:
         # No native mutation has happened yet. Return a locally acquired batch
         # before failing the cohort closed; an ambiguous release still raises.
