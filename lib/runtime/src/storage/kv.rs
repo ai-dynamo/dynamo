@@ -113,9 +113,8 @@ pub enum WatchEvent {
     Put(KeyValue),
     /// A key was deleted after the last snapshot.
     Delete(Key),
-    /// The full bucket at one moment. The first event of every stream is one of these, possibly
-    /// empty; a later one means the backend fell behind and re-read the bucket. A consumer that
-    /// holds state replaces it with the payload; nothing that arrived earlier is still valid.
+    /// The full bucket at one moment: the first event of every stream, possibly empty, and again
+    /// after the backend fell behind. It replaces any state held from earlier events.
     Resync(HashMap<Key, bytes::Bytes>),
 }
 
@@ -345,7 +344,7 @@ impl Manager {
     /// Returns a receiver for one snapshot of a bucket, and then for every later change.
     ///
     /// The first event is one [`WatchEvent::Resync`] with every existing key, empty when the
-    /// bucket is empty. A receiver that gets no event has not seen the bucket yet.
+    /// bucket is empty.
     ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
@@ -508,10 +507,9 @@ pub trait Bucket: Send + Sync {
     ///
     /// Implementations must establish the snapshot and incremental watch without a gap and must
     /// never emit an incremental value older than a value already emitted in the initial snapshot.
-    /// The first event is exactly one [`WatchEvent::Resync`] that holds every existing entry, and
-    /// is empty when the bucket is empty. Every later event is a change that follows the
-    /// snapshot, or a further `Resync` after the backend fell behind. [`Manager::watch`] and the
-    /// discovery layer depend on this order.
+    /// The first event is exactly one [`WatchEvent::Resync`] with every existing entry, empty for
+    /// an empty bucket. Later events are changes that follow it, or a further `Resync` after the
+    /// backend fell behind.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;

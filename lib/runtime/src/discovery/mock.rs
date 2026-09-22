@@ -308,7 +308,7 @@ impl Discovery for MockDiscovery {
             for event in events {
                 yield Ok(event);
             }
-            // The snapshot closes the establishment burst and is empty for an empty registry.
+            // The snapshot closes the establishment burst.
             yield Ok(DiscoveryEvent::Resync(known_instances.values().cloned().collect()));
 
             while let Some(instances) = changes.recv().await {
@@ -411,7 +411,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
-        // The snapshot closes the establishment burst and predates the unregister.
+        // The snapshot predates the unregister.
         let snapshot = timeout(Duration::from_secs(1), stream.next())
             .await
             .expect("the snapshot must follow the Added burst")

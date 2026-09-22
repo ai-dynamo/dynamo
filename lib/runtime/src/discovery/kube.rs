@@ -83,10 +83,7 @@ pub struct KubeDiscoveryClient {
 
 /// Wait until the daemon holds its first complete view of the cluster.
 ///
-/// # Errors
-///
-/// Returns an error when the daemon is stopped or failed, whether or not it was ready first, or
-/// when its state channel closed.
+/// Fails when the daemon stopped or failed, or when its state channel closed.
 async fn await_daemon_ready(mut daemon_state: watch::Receiver<DaemonState>) -> Result<()> {
     loop {
         match &*daemon_state.borrow_and_update() {
@@ -478,8 +475,7 @@ impl Discovery for KubeDiscoveryClient {
                     return;
                 }
             }
-            // The snapshot closes the establishment burst; a consumer that kept instances from an
-            // earlier stream replaces them with it.
+            // The snapshot closes the establishment burst.
             if out_tx
                 .send(Ok(DiscoveryEvent::Resync(initial_instances)))
                 .is_err()
@@ -608,8 +604,8 @@ mod tests {
         }
     }
 
-    /// A client over `instances` with no cluster behind it; nothing here sends a request. The
-    /// returned sender reports the daemon state, which starts `Pending`.
+    /// A client over `instances` with no cluster behind it, and the sender for its daemon
+    /// state, which starts `Pending`.
     fn client_with(
         instances: &[DiscoveryInstance],
     ) -> (KubeDiscoveryClient, watch::Sender<DaemonState>) {

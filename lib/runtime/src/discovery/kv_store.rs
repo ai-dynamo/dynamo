@@ -1287,7 +1287,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
-        // The snapshot closes the establishment burst and predates the unregister.
+        // The snapshot predates the unregister.
         let snapshot = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
             .await
             .unwrap()

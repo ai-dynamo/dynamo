@@ -26,9 +26,8 @@ const SOURCE_CHANNEL_CAPACITY: usize = 1024;
 
 /// The daemon's progress toward its first complete view of the cluster.
 ///
-/// A list or watch on [`super::KubeDiscoveryClient`] waits for `Ready`. `Stopped` and `Failed`
-/// end that wait with an error, so a caller never takes an empty `list_state` for an empty
-/// cluster.
+/// A list or watch waits for `Ready`. `Stopped` and `Failed` end that wait with an error, so a
+/// caller never takes an empty `list_state` for an empty cluster.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum DaemonState {
     /// A reflector has not completed its initial list.
@@ -251,9 +250,8 @@ impl DiscoveryDaemon {
         })
     }
 
-    /// The daemon reports `DaemonState::Ready` on `outputs.state_tx` after both reflectors
-    /// completed their initial list and `list_state` holds the result, and reports the terminal
-    /// state when it ends.
+    /// Reports `Ready` once both reflectors completed their initial list and `list_state` holds
+    /// the result, and the terminal state when it ends.
     pub async fn run(self, outputs: DaemonOutputs) {
         tracing::info!("Discovery daemon starting");
 
@@ -310,10 +308,9 @@ impl DiscoveryDaemon {
     }
 }
 
-/// Each reflector sends one `Rebuild` after its initial list. The loop reports
-/// `DaemonState::Ready` once both have, because only then does the join table hold every
-/// instance the cluster had at start. Returns `Ok` when `cancel_token` fires and an error when
-/// a reflector stream ends.
+/// Each reflector sends one `Rebuild` after its initial list. `Ready` waits for both, because
+/// only then does the join table hold every instance the cluster had at start. Returns `Ok` on
+/// cancellation and an error when a reflector stream ends.
 async fn event_loop(
     mut sources: DaemonSources,
     outputs: &DaemonOutputs,
@@ -383,8 +380,7 @@ async fn event_loop(
             }
         }
 
-        // Ready follows the list_state write above, so a caller that waits for Ready and then
-        // reads list_state sees every instance of the initial lists.
+        // Ready follows the list_state write, so a caller that waits for it sees both lists.
         if has_readiness_list && has_cr_list && *outputs.state_tx.borrow() == DaemonState::Pending {
             tracing::info!(
                 instances = join_table.known.len(),
@@ -689,7 +685,7 @@ mod tests {
         .await
         .expect("both initial lists must make the daemon ready")
         .unwrap();
-        // Ready follows the list_state write, so the instance is visible now.
+        // Ready followed the write, so the instance is visible now.
         let listed: Vec<_> = list_state
             .read()
             .await

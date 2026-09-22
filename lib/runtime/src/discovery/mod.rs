@@ -1195,12 +1195,10 @@ pub enum DiscoveryEvent {
     Removed(DiscoveryInstanceId),
     /// The full set of instances that match the query at one moment.
     ///
-    /// Every stream sends this event once at startup, after the `Added` events of the same
-    /// snapshot, and empty when nothing matches. The stream sends it again after the backend
-    /// fell behind and resynchronized, after the incremental events of that resync. A consumer
-    /// that builds its state only from this stream can ignore this event. A consumer that holds
-    /// state from another source, such as a [`Discovery::list`] call or an earlier stream, must
-    /// replace its state with the payload.
+    /// Sent once at startup, after the `Added` events of the same snapshot, and again after a
+    /// backend resync. A consumer that holds state from another source, such as an earlier
+    /// stream or a [`Discovery::list`] call, replaces it with the payload. One that builds its
+    /// state from this stream alone can ignore the event.
     Resync(Vec<DiscoveryInstance>),
 }
 
@@ -1671,26 +1669,18 @@ pub trait Discovery: Send + Sync {
 
     /// Returns a stream of discovery events for the given discovery query
     ///
-    /// An implementation establishes the watch before it returns. A backend that has not
-    /// completed its own initialization waits for it, and returns an error when that
-    /// initialization ends without completing, instead of opening a stream over an empty set.
+    /// The watch is established before this returns. A backend still initializing waits for it,
+    /// and fails the call if that initialization ends first.
     ///
-    /// The stream starts with the state at establishment: one `Added` event per matching
-    /// instance, then exactly one [`DiscoveryEvent::Resync`] that holds the same set. An empty
-    /// set gives no `Added` event and one empty `Resync`. Every change that follows establishment
-    /// comes after that `Resync`, so the snapshot never replays over a newer change.
+    /// The stream starts with the state at establishment: one `Added` per matching instance,
+    /// then one [`DiscoveryEvent::Resync`] holding the same set, empty when nothing matches.
+    /// Later changes follow that `Resync`, which never replays over them.
     ///
-    /// A backend can fall behind and resynchronize from an authoritative snapshot. The stream then
-    /// reports the changes between its own state and that snapshot, and after them one
-    /// [`DiscoveryEvent::Resync`] that holds the full set. A change that started and ended inside
-    /// the gap is not reported as a change.
+    /// A backend that falls behind sends the changes it missed, then one `Resync` of the full
+    /// set. A change that started and ended inside the gap is not reported.
     ///
-    /// A consumer that reopens a watch after losing one replaces its state with the first
-    /// `Resync` of the new stream: an instance that left during the gap is absent from that
-    /// snapshot, and no `Removed` event reports it. No [`Discovery::list`] call is needed. A
-    /// caller that also needs a `list` snapshot calls `list_and_watch` first, and replaces its
-    /// state on every `Resync`. A `list` before the watch can show an instance that an
-    /// unregister removes before the snapshot, and no event reports that removal.
+    /// Replace any state held from an earlier stream or a [`Discovery::list`] call on every
+    /// `Resync`. Instances that left are absent from it, with no `Removed` event to report them.
     ///
     /// The optional cancellation token can be used to stop the watch stream
     async fn list_and_watch(
@@ -1760,11 +1750,9 @@ pub(crate) mod startup_contract {
         assert_quiet(&mut stream).await;
     }
 
-    /// A watch sends the registry as `Added` events, in any order, then one `Resync` of the same
-    /// set. A registration, an update, and a removal made right after `list_and_watch` returns
-    /// follow that snapshot, which still holds the state at establishment.
-    ///
-    /// The three changes touch different keys, so their relative order is the backend's choice.
+    /// The registry arrives as `Added` events then one `Resync` of the same set. A registration,
+    /// an update, and a removal made right after `list_and_watch` returns follow that snapshot,
+    /// which still holds the pre-update state, in whatever order the backend chooses.
     pub(crate) async fn changes_follow_the_complete_initial_snapshot(discovery: &dyn Discovery) {
         let first = discovery.register(model_spec("first")).await.unwrap();
         let second = discovery.register(model_spec("second")).await.unwrap();
