@@ -568,6 +568,7 @@ def test_public_native_response_id_maps_only_derived_string_ids(
         _public_native_response_id(engine_id, index, "internal", public_id) == expected
     )
 
+
 async def test_token_stream_usage_includes_reasoning_tokens():
     """SGLang reports reasoning tokens at the top level of meta_info; the OpenAI
     usage contract expects them under usage.completion_tokens_details."""
@@ -653,6 +654,7 @@ async def test_token_stream_usage_preserves_reasoning_tokens_per_choice():
         "completion_tokens": 4,
         "total_tokens": 9,
     }
+
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
     handler = _new_decode_handler()
