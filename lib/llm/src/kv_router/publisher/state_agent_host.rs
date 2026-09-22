@@ -447,7 +447,8 @@ fn reconcile_intent_event(
         }
         DiscoveryEvent::Added(_)
         | DiscoveryEvent::Removed(_)
-        | DiscoveryEvent::ModelTaintsUpdated(_) => return Ok(None),
+        | DiscoveryEvent::ModelTaintsUpdated(_)
+        | DiscoveryEvent::Resync(_) => return Ok(None),
     };
     if scope
         != (EventScope::Component {

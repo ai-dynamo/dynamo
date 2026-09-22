@@ -17,6 +17,184 @@ Upgrading? Pick the version you run today to see the dependency migration and th
 
 <UpgradeSelector />
 
+<a id="v150"></a>
+
+## v1.5.0 — Sep 18, 2026
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **KVBM (KV Block Manager) is deprecated in v1.5.0 and removal is targeted for v1.6.0; the `kvbm` wheel and the vLLM KVBM launch and deploy examples ship unchanged for this release**.
+
+  > **Migrate:** Use the engine's native KV offloading for host and disk tiering. Cross-node KV cache sharing is the scope of the separate, early-stage KV Cache Runner (KVCR) project, which does not replace KVBM.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **CRD storage version promoted from v1alpha1 to v1beta1, with examples and Profiler output moving with it** ([#11904](https://github.com/ai-dynamo/dynamo/pull/11904), [#12375](https://github.com/ai-dynamo/dynamo/pull/12375), [#12506](https://github.com/ai-dynamo/dynamo/pull/12506)).
+
+  > **Migrate:** Upgrade the operator so the built-in CRD migrator converts stored objects.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **v1alpha1 admission webhook endpoints removed, and DGD and DCD validation served only at v1beta1 paths** ([#11177](https://github.com/ai-dynamo/dynamo/pull/11177)).
+
+  > **Migrate:** Update any custom Validating/MutatingWebhookConfiguration (not managed by the bundled Helm chart) to point at the v1beta1 DGD admission paths with apiVersions: [v1beta1].
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Go EPP removed, and the Rust EPP shipped inside the Frontend image is the default Endpoint Picker** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
+
+  > **Migrate:** Update EPP deployment manifests and flags to the Rust EPP (LW-EPP) contract.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **`eppConfig` deprecated; it remains honored so a `DynamoGraphDeployment` pinned to a 1.4 Go EPP image keeps working after the Operator upgrade** ([#11355](https://github.com/ai-dynamo/dynamo/pull/11355)).
+
+  > **Migrate:** Omit `eppConfig` to use the Rust EPP; the field goes away with the Go EPP contract in a later release.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Dynamo Snapshot moved to a standalone operator, removing the bundled chart, PodSnapshot CRDs, and reconciliation from Dynamo Operator** ([#13177](https://github.com/ai-dynamo/dynamo/pull/13177)).
+
+  > **Migrate:** Snapshot v0.1.0 now installs as its own operator from `oci://ghcr.io/ai-dynamo/snapshot/snapshot:0.1.0`. For evaluation, the Dynamo platform chart can install it as a subchart with `global.snapshot.install=true`, which is off by default. For production, install the Snapshot chart separately before upgrading Dynamo Operator, then set `checkpoint.enabled=true` on the operator to turn checkpoint and restore back on.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **DynamoCheckpoint CRD, its Helm values, and `DYN_SNAPSHOT_RESTORE_STANDBY` removed, and `checkpointRef` now names a PodSnapshot** ([#14076](https://github.com/ai-dynamo/dynamo/pull/14076)).
+
+  > **Migrate:** Delete legacy DynamoCheckpoint resources, create PodSnapshot resources through the Snapshot operator, and point `checkpointRef` at the PodSnapshot.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Unified-backend entry point and logits-processing adapters removed from the SGLang and vLLM workers** ([#12792](https://github.com/ai-dynamo/dynamo/pull/12792)).
+
+  > **Migrate:** Drop the unified-backend flag from SGLang/vLLM launch commands and use the standard worker invocation shown in the updated CLI templates.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **AIConfigurator renamed to AISimulate: aiconfigurator wheels replaced by the `aisimulate` package, and the `python -m dynamo.replay` CLI removed** ([#13665](https://github.com/ai-dynamo/dynamo/pull/13665)).
+
+  > **Migrate:** Install the consolidated `aisimulate` wheel/`aisimulate-core` crate instead of the separate `aiconfigurator` packages (compatibility import namespaces ship inside the AISimulate wheel).
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Planner performance-model and Mocker engine bindings removed from `dynamo._core`** ([#12454](https://github.com/ai-dynamo/dynamo/pull/12454), [#12446](https://github.com/ai-dynamo/dynamo/pull/12446), [#12525](https://github.com/ai-dynamo/dynamo/pull/12525)).
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Offline replay API returns a single `ReplayReport`, `--report-jsonl` renamed to `--per-request-jsonl`, and per-request capture is opt-in** ([#12363](https://github.com/ai-dynamo/dynamo/pull/12363)).
+
+  > **Migrate:** Update replay invocations/scripts to pass `--per-request-jsonl` instead of `--report-jsonl`.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **SGLang `call_tokenizer_manager` passthrough route and `RLMixin` export removed** ([#12246](https://github.com/ai-dynamo/dynamo/pull/12246)).
+
+  > **Migrate:** Declare each needed tokenizer-manager or engine method explicitly with `--engine-route` (or `DYN_SGLANG_ENGINE_ROUTES`) and call the configured `/engine/<path>` instead of the generic `call_tokenizer_manager` endpoint.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **PodSnapshot capture target now comes from the required `PodReference.Containers` field instead of a pod annotation** ([#12068](https://github.com/ai-dynamo/dynamo/pull/12068)).
+
+  > **Migrate:** Update the PodSnapshot/PodSnapshotContent CRDs and add exactly one entry to spec.source.podRef.containers in any hand-authored manifests, otherwise admission rejects them.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **GMS Snapshot feature gate removed, and IntraPod Snapshot enabled by default under the Checkpoint gate and unsupported combinations rejected** ([#12685](https://github.com/ai-dynamo/dynamo/pull/12685)).
+
+  > **Migrate:** Remove the GMS Snapshot feature-gate setting from your operator Helm values/args.
+
+<span className="dynref-badge dynref-badge--amber">Deprecated</span> **Automatic tokenizer fallback to Hugging Face is deprecated and will stop being the default** ([#12923](https://github.com/ai-dynamo/dynamo/pull/12923)).
+
+  > **Migrate:** Set --no-tokenizer-fallback or DYN_TOKENIZER_FALLBACK=false to adopt the future behavior now, and ensure your model's tokenizer.json is supported by the selected backend.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Removed `nsRestorePath` snapshot config/Helm value** ([#12626](https://github.com/ai-dynamo/dynamo/pull/12626)).
+
+  > **Migrate:** Delete any `nsRestorePath` setting from snapshot chart values/config.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Shared AWS EFA Kustomize components removed in favor of instance-type template selections** ([#13125](https://github.com/ai-dynamo/dynamo/pull/13125)).
+
+  > **Migrate:** Update overlays that referenced the aws-efa-p8d8/p8d16/p16d16 shared Components to select the new instance-type template (e.g. templates/aws-efa/p5.48xlarge) or the local components/efa Component.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Legacy Nemotron-3-Ultra Day-0 recipe manifests replaced by Refresh profile paths without the `nvcr-secret` imagePullSecret** ([#13226](https://github.com/ai-dynamo/dynamo/pull/13226)).
+
+  > **Migrate:** Update any references/automation pointing at the old Day-0 recipe directories to the corresponding new Refresh profile paths (SKU + context + serving shape).
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **Qwen3.8-2.4T-A95B recipe renamed with an `-fp8` suffix, changing the served model name and weight cache key** ([#13265](https://github.com/ai-dynamo/dynamo/pull/13265)).
+
+  > **Migrate:** Re-run the model-download Job to fetch Qwen/Qwen3.8-2.4T-A95B-FP8 and update any client requests to use the new served model name.
+
+<span className="dynref-badge dynref-badge--red">Removed</span> **DeepSeek-V4 model-download manifest split and renamed, and the default downloaded checkpoint is now FP8** ([#13034](https://github.com/ai-dynamo/dynamo/pull/13034)).
+
+  > **Migrate:** Apply the SKU-specific manifest (model-download-fp8.yaml for H200/most variants, model-download-nvfp4.yaml for B200 agentic variants) instead of the removed model-download.yaml, and update any references to the old Job name.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Guided tool calls stream incrementally by default instead of a single terminal chunk** ([#12576](https://github.com/ai-dynamo/dynamo/pull/12576)).
+
+  > **Migrate:** Clients that assumed a single complete tool-call chunk must accumulate incremental tool-call argument deltas, or set DYN_ENABLE_GUIDED_TOOL_STREAMING=0 to restore buffering.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Over-context requests rejected before streaming, and an omitted `max_tokens` now derives from the engine-published TokenBudget** ([#12092](https://github.com/ai-dynamo/dynamo/pull/12092)).
+
+  > **Migrate:** Update clients and retry/monitoring logic to handle a non-200 HTTP client error for over-context requests instead of an inline streamed error.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Thinking/reasoning controls resolved once with new precedence and written to all three template keys** ([#11739](https://github.com/ai-dynamo/dynamo/pull/11739)).
+
+  > **Migrate:** If you relied on the previous per-backend resolution or on only `enable_thinking` being set, drop manual chat_template_args thinking overrides and rely on the documented precedence order.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Gemma 4 reasoning parsing now requires explicit enable_thinking=true** ([#13061](https://github.com/ai-dynamo/dynamo/pull/13061)).
+
+  > **Migrate:** Set `chat_template_args: {"enable_thinking": true}` in requests to Gemma 4 models to keep receiving parsed reasoning_content.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Embedding tokenization adds special tokens by default and moves to the worker, with Frontend tokenization opt-in** ([#12157](https://github.com/ai-dynamo/dynamo/pull/12157)).
+
+  > **Migrate:** Set `add_special_tokens: false` on embedding requests or export DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS=false to keep the previous tokenization behavior.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **vLLM encode worker embedding cache now disabled by default (gated on --multimodal-embedding-cache-capacity-gb)** ([#14452](https://github.com/ai-dynamo/dynamo/pull/14452)).
+
+  > **Migrate:** Set --multimodal-embedding-cache-capacity-gb to a positive value to keep embedding caching in the vLLM encode worker.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DGD, DCD, and DGDR admission requires a main container image, and a non-semver image tag (digest, custom build tag, or `:latest`) requires `runtimeVersionOverride`** ([#10494](https://github.com/ai-dynamo/dynamo/pull/10494)).
+
+  > **Migrate:** Set the main container image on every component (`spec.components[*].podTemplate.spec.containers[name=main].image` in v1beta1, `spec.services.<name>.extraPodSpec.mainContainer.image` in v1alpha1) and add `runtimeVersionOverride: "<X.Y.Z>"` wherever the image tag is not a semantic version, including a DGDR whose `spec.image` is not. The checks are ratcheted: an unchanged existing component stays admissible, but adding or changing an image applies them, so set the override in the same update that changes the tag. Full details are in the [platform chart upgrading notes](https://github.com/ai-dynamo/dynamo/blob/release/1.5.0/deploy/helm/charts/platform/README.md#-upgrading-notes).
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **runtimeVersionOverride now participates in worker hash and can trigger rollouts** ([#12633](https://github.com/ai-dynamo/dynamo/pull/12633)).
+
+  > **Migrate:** Before upgrading, ensure runtimeVersionOverride matches the image's actual runtime version and expect a one-time worker rollout when the resolved version (>=1.5.0) changes.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker canary health checks enabled by default in operator-rendered pods** ([#11083](https://github.com/ai-dynamo/dynamo/pull/11083)).
+
+  > **Migrate:** Set DYN_HEALTH_CHECK_ENABLED=false explicitly in the worker container env if you need the previous behavior.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Worker liveness probe failureThreshold default raised from 1 to 3 for runtime >= 1.5.0** ([#13512](https://github.com/ai-dynamo/dynamo/pull/13512)).
+
+  > **Migrate:** No action needed unless you rely on immediate restart on first liveness failure.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`nvidia.com/workload-provider` is persisted and immutable, with no fallback to the Component provider when Grove is unavailable** ([#12942](https://github.com/ai-dynamo/dynamo/pull/12942)).
+
+  > **Migrate:** To change the workload provider of an existing DynamoGraphDeployment, delete and recreate the DGD instead of toggling nvidia.com/enable-grove or the Grove feature gate.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Elastic-EP components require an explicit container command, and single-pod components start a Ray head and inject `POD_IP` and `VLLM_DP_M*`** ([#12943](https://github.com/ai-dynamo/dynamo/pull/12943)).
+
+  > **Migrate:** If you set --enable-elastic-ep on a single-pod component and relied on it being a no-op, remove the flag.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **componentType/type fields are now immutable after being set** ([#13763](https://github.com/ai-dynamo/dynamo/pull/13763)).
+
+  > **Migrate:** Delete and recreate the DynamoComponentDeployment/DynamoGraphDeployment (or component) instead of editing its componentType/type field in place.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **vLLM STORAGE KV events now indexed on the Disk tier, and REMOTE or unknown-locality events dropped** ([#11571](https://github.com/ai-dynamo/dynamo/pull/11571)).
+
+  > **Migrate:** Expect STORAGE offload prefixes to be scored via the Disk tier and non-local (REMOTE/unknown locality) KV events to be ignored.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **`DYN_USE_KV_EVENTS` renamed to `DYN_ROUTER_USE_KV_EVENTS` (alias kept), and previously ignored `DYN_*` Router env vars now honored** ([#13840](https://github.com/ai-dynamo/dynamo/pull/13840)).
+
+  > **Migrate:** Switch to DYN_ROUTER_USE_KV_EVENTS.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **DYN_RUNTIME_NUM_WORKER_THREADS / DYN_RUNTIME_MAX_BLOCKING_THREADS now actually apply to the runtime serving traffic** ([#13849](https://github.com/ai-dynamo/dynamo/pull/13849)).
+
+  > **Migrate:** Re-check any explicit DYN_RUNTIME_NUM_WORKER_THREADS / DYN_RUNTIME_MAX_BLOCKING_THREADS values (and unset ones relying on the old per-CPU/512 sizing) since they now change frontend thread counts and concurrency.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **EPP replica sync validates `POD_IP` at config-parse time and no longer resolves the port from the `replica-agg` Service port** ([#13811](https://github.com/ai-dynamo/dynamo/pull/13811)).
+
+  > **Migrate:** Ensure every EPP replica binds the same replica-sync port (9092 by default) and set DYN_EPP_REPLICA_SYNC_PORT if your existing `replica-agg` targetPort differed.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Standalone router --endpoint namespace now overridden by DYN_NAMESPACE / worker suffix** ([#12160](https://github.com/ai-dynamo/dynamo/pull/12160)).
+
+  > **Migrate:** If you relied on the namespace embedded in --endpoint, unset/align DYN_NAMESPACE and DYN_NAMESPACE_WORKER_SUFFIX so the router resolves workers in the intended namespace.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Unsupported tool_call_parser names now rejected at model registration** ([#13828](https://github.com/ai-dynamo/dynamo/pull/13828)).
+
+  > **Migrate:** Set --tool-call-parser (or tool_call_parser in runtime config) to one of the parser names listed in the new validation error message before upgrading.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **tool_call arguments auto-normalized to JSON object for glm47 tool_call_parser** ([#12332](https://github.com/ai-dynamo/dynamo/pull/12332)).
+
+  > **Migrate:** If you rely on the raw JSON-string form of historical tool_call arguments with the glm47 tool_call_parser, explicitly set tool_call_arguments_format: json_string in the model runtime config.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Snapshot saver/loader CLI without --device now fans out to all visible GPUs** ([#13301](https://github.com/ai-dynamo/dynamo/pull/13301)).
+
+  > **Migrate:** Pass an explicit --device N to retain single-process behavior.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Planner Prometheus requests now time out after 10s and no longer retry** ([#13245](https://github.com/ai-dynamo/dynamo/pull/13245)).
+
+  > **Migrate:** If your Prometheus endpoint is slow, raise the limit via DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS or metric_pulling_prometheus_request_timeout_seconds, and expect failed queries to no longer be retried within a collection cycle.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **Profiler-generated vLLM worker args no longer pin --max-model-len, and naive fallback now sizes from declared workload isl/osl** ([#14205](https://github.com/ai-dynamo/dynamo/pull/14205)).
+
+  > **Migrate:** Re-run the profiler and, if a specific context length is required, set --max-model-len explicitly via DGD overrides since the generated config no longer pins it.
+
+<span className="dynref-badge dynref-badge--blue">Behavioral</span> **JPEG decoding switches to libjpeg-turbo by default when libturbojpeg is present** ([#11157](https://github.com/ai-dynamo/dynamo/pull/11157)).
+
+  > **Migrate:** Set DYN_MM_ENABLE_LIBJPEG=0 to keep the previous pure-Rust image::ImageReader JPEG decode path (pixel output may differ slightly from TurboJPEG).
+
 <a id="v140"></a>
 
 ## v1.4.0 — Aug 14, 2026

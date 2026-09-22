@@ -24,8 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -74,6 +77,8 @@ const (
 	// Annotation keys
 	AnnotationAdditionalResources = "dgdr.nvidia.com/additional-resources"
 	AnnotationGeneratedDGDSpec    = "nvidia.com/generated-dgd-spec"
+	AnnotationDGDRUID             = "nvidia.com/dgdr-uid"
+	AnnotationConfirmedDGDUID     = "nvidia.com/confirmed-dgd-uid"
 
 	// Size limits
 	MaxAnnotationSize = 250000 // ~250KB, below K8s 256KB limit
@@ -120,6 +125,10 @@ const (
 	MessageGenerationFailed         = "GenerationFailed"
 	MessageProfilingCheckFailed     = "ProfilingCheckFailed"
 	MessageModelCachePVCNotFound    = "model cache PVC %s not found in namespace %s"
+	MessageDeploymentNameCollision  = "DynamoGraphDeployment %s already exists in namespace %s and was not created by this request (%s). Refusing to adopt it. Delete this DynamoGraphDeploymentRequest and create a new one whose generated deployment uses a free name."
+
+	// ReasonDeploymentNameCollision marks a DGD identity mismatch.
+	ReasonDeploymentNameCollision = "DeploymentNameCollision"
 )
 
 var errProfilingOutputNotReady = errors.New("profiling output is not ready")
@@ -818,8 +827,14 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployingPhase(ctx contex
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if err := r.clearGeneratedSpecAnnotation(ctx, dgdr); err != nil {
+
+	// Confirm object identity before adopting resources or consuming deployment status.
+	mismatchReason, err := r.confirmDGDIdentity(ctx, dgdr, dgd)
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if mismatchReason != "" {
+		return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 	}
 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
@@ -882,6 +897,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) handleDeployedPhase(ctx context
 
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	// Confirm object identity before adopting resources or consuming deployment status.
+	mismatchReason, err := r.confirmDGDIdentity(ctx, dgdr, dgd)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if mismatchReason != "" {
+		return r.failDeploymentNameCollision(ctx, dgdr, dgd, mismatchReason)
 	}
 
 	if err := r.adoptAdditionalResources(ctx, dgdr, dgd); err != nil {
@@ -948,16 +972,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	logger := log.FromContext(ctx)
 
 	// Extract DGD spec from annotation (stored by generateDGDSpec)
-	dgdSpecYAML, ok := dgdr.Annotations[AnnotationGeneratedDGDSpec]
-	if !ok || dgdSpecYAML == "" {
-		return ctrl.Result{}, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
-	}
-
-	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
+		return ctrl.Result{}, err
 	}
-	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
 
 	// Determine DGD name and namespace from generated deployment
 	dgdName := generatedDGD.Name
@@ -986,6 +1004,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 			annotations[k] = v
 		}
 	}
+	annotations[AnnotationDGDRUID] = string(dgdr.UID)
 
 	// Create DGD from generated deployment
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -1006,9 +1025,10 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 
 	if err := r.Create(ctx, dgd); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			// The DGD watch reconciles again after the object is in the informer cache.
-			logger.Info("DGD already exists, waiting for informer observation")
-			return ctrl.Result{}, nil
+			// A foreign DGD may not route watch events to this request. Retry the
+			// level-driven observation path even when the informer has not caught up.
+			logger.Info("DGD already exists, requeueing for identity confirmation")
+			return ctrl.Result{RequeueAfter: dgdCollisionRequeueDelay}, nil
 		}
 		r.Recorder.Eventf(dgdr, dgd, corev1.EventTypeWarning, MessageDeploymentCreationFailed, "Create", "%s", err.Error())
 		// Admission webhook denials and other permanent API rejections (400/403/422)
@@ -1031,15 +1051,174 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	return ctrl.Result{}, nil
 }
 
-// clearGeneratedSpecAnnotation marks the DGD as observed in the informer cache.
-func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
+// dgdCollisionRequeueDelay retries the identity check after an AlreadyExists create
+// the cache cannot yet see. A foreign DGD carries no labels, so no watch delivers it.
+const dgdCollisionRequeueDelay = 5 * time.Second
+
+// generatedDGDFromAnnotation decodes the deployment this request intends to create
+// from the generated-spec annotation, applying the runtime version override to a fresh copy.
+func (r *DynamoGraphDeploymentRequestReconciler) generatedDGDFromAnnotation(
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
+	dgdSpecYAML := dgdr.Annotations[AnnotationGeneratedDGDSpec]
+	if dgdSpecYAML == "" {
+		return nil, fmt.Errorf("generated DGD spec not found in annotation %s", AnnotationGeneratedDGDSpec)
+	}
+
+	generatedDGD, err := r.extractDGDFromYAML([]byte(dgdSpecYAML))
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal generated deployment from annotation: %w", err)
+	}
+	applyDGDRRuntimeVersionOverride(dgdr, generatedDGD)
+
+	return generatedDGD, nil
+}
+
+// generatedSpecDivergence returns the first field path where liveDGD fails to carry what
+// generatedDGD asks for. Subset, not equality: only liveDGD has been through defaulting.
+func generatedSpecDivergence(liveDGD, generatedDGD *nvidiacomv1beta1.DynamoGraphDeployment) (string, error) {
+	liveSpec, err := specAsJSONValue(liveDGD)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the live deployment spec for comparison: %w", err)
+	}
+	generatedSpec, err := specAsJSONValue(generatedDGD)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode the generated deployment spec for comparison: %w", err)
+	}
+
+	return jsonSubsetDivergence(generatedSpec, liveSpec, "spec"), nil
+}
+
+// specAsJSONValue renders dgd's spec as the generic JSON value the API server saw,
+// so an omitempty field is absent here exactly when it was absent on the wire.
+func specAsJSONValue(dgd *nvidiacomv1beta1.DynamoGraphDeployment) (any, error) {
+	encoded, err := json.Marshal(dgd.Spec)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+// jsonSubsetDivergence returns the path of the first place where have does not carry
+// what want specifies. Keys walk in sorted order so the reported path is stable.
+func jsonSubsetDivergence(want, have any, path string) string {
+	switch wantValue := want.(type) {
+	case map[string]any:
+		haveObject, isObject := have.(map[string]any)
+		if !isObject {
+			return path
+		}
+		keys := make([]string, 0, len(wantValue))
+		for key := range wantValue {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			haveChild, present := haveObject[key]
+			if !present {
+				return path + "." + key
+			}
+			if divergence := jsonSubsetDivergence(wantValue[key], haveChild, path+"."+key); divergence != "" {
+				return divergence
+			}
+		}
+		return ""
+	case []any:
+		haveList, isList := have.([]any)
+		if !isList || len(haveList) != len(wantValue) {
+			return path
+		}
+		for index := range wantValue {
+			if divergence := jsonSubsetDivergence(wantValue[index], haveList[index], fmt.Sprintf("%s[%d]", path, index)); divergence != "" {
+				return divergence
+			}
+		}
+		return ""
+	default:
+		if !reflect.DeepEqual(want, have) {
+			return path
+		}
+		return ""
+	}
+}
+
+// failDeploymentNameCollision drives the request terminal. The status-only write preserves
+// the generated-spec annotation, so what this request meant to create stays inspectable.
+// The event follows the status write, so a failed write cannot leave a warning recorded
+// against a request that still reports Deploying and re-emit it on the next reconcile.
+func (r *DynamoGraphDeploymentRequestReconciler) failDeploymentNameCollision(
 	ctx context.Context,
 	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
-) error {
-	if dgdr.Annotations[AnnotationGeneratedDGDSpec] == "" {
-		return nil
+	liveDGD *nvidiacomv1beta1.DynamoGraphDeployment,
+	mismatchReason string,
+) (ctrl.Result, error) {
+	message := fmt.Sprintf(MessageDeploymentNameCollision, liveDGD.Name, dgdr.Namespace, mismatchReason)
+
+	log.FromContext(ctx).Info("Refusing to adopt an existing DGD that failed the DGDR identity contract",
+		"dgd", liveDGD.Name, "namespace", dgdr.Namespace, "reason", mismatchReason)
+
+	result, err := r.updatePhaseWithCondition(ctx, dgdr, nvidiacomv1beta1.DGDRPhaseFailed,
+		nvidiacomv1beta1.ConditionTypeDeploymentReady, metav1.ConditionFalse,
+		ReasonDeploymentNameCollision, message)
+	if err != nil {
+		return result, err
 	}
-	annotations := map[string]any{AnnotationGeneratedDGDSpec: ""}
+	r.Recorder.Eventf(dgdr, liveDGD, corev1.EventTypeWarning, ReasonDeploymentNameCollision, "Get", "%s", message)
+
+	return result, nil
+}
+
+// confirmDGDIdentity validates an unbound deployment and durably binds its UID before
+// resource adoption. Later observations compare UIDs without rechecking mutable specs.
+// dgdr and dgd must be non-nil; successful persistence updates dgdr's metadata in place.
+func (r *DynamoGraphDeploymentRequestReconciler) confirmDGDIdentity(
+	ctx context.Context,
+	dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (string, error) {
+	// A persisted binding rejects replacements even if they copy the tracking metadata.
+	if uid := dgdr.Annotations[AnnotationConfirmedDGDUID]; uid != "" {
+		if uid != string(dgd.UID) {
+			return "its UID differs from the confirmed deployment", nil
+		}
+		return "", nil
+	}
+
+	// Bootstrap legacy requests once from their tracking metadata. A missing DGD-side
+	// UID remains compatible with older operators; an explicit mismatch never does.
+	if dgd.Labels[nvidiacomv1beta1.LabelDGDRName] != dgdr.Name ||
+		dgd.Labels[nvidiacomv1beta1.LabelDGDRNamespace] != dgdr.Namespace ||
+		dgd.Labels[nvidiacomv1beta1.LabelManagedBy] != nvidiacomv1beta1.LabelValueDynamoOperator {
+		return "it does not carry this request's tracking labels", nil
+	}
+	if uid, bound := dgd.Annotations[AnnotationDGDRUID]; bound && uid != string(dgdr.UID) {
+		return "it is not bound to this request's UID", nil
+	}
+
+	// Validate generated intent only before the original confirmation marker is cleared.
+	if dgdr.Annotations[AnnotationGeneratedDGDSpec] != "" {
+		generatedDGD, err := r.generatedDGDFromAnnotation(dgdr)
+		if err != nil {
+			return "", err
+		}
+		divergence, err := generatedSpecDivergence(dgd, generatedDGD)
+		if err != nil {
+			return "", err
+		}
+		if divergence != "" {
+			return fmt.Sprintf("its %s differs from the spec this request generated", divergence), nil
+		}
+	}
+
+	// Commit the UID and marker together so an interrupted confirmation cannot lose identity.
+	annotations := map[string]any{
+		AnnotationGeneratedDGDSpec: "",
+		AnnotationConfirmedDGDUID:  string(dgd.UID),
+	}
 	if additionalResources := dgdr.Annotations[AnnotationAdditionalResources]; additionalResources != "" {
 		annotations[AnnotationAdditionalResources] = additionalResources
 	}
@@ -1054,11 +1233,15 @@ func (r *DynamoGraphDeploymentRequestReconciler) clearGeneratedSpecAnnotation(
 		},
 	}}
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(apply), client.FieldOwner("dynamo-operator-dgdr"), client.ForceOwnership); err != nil {
-		return fmt.Errorf("failed to clear generated DGD annotation: %w", err)
+		return "", fmt.Errorf("failed to persist confirmed DGD identity: %w", err)
+	}
+	if dgdr.Annotations == nil {
+		dgdr.Annotations = make(map[string]string)
 	}
 	dgdr.Annotations[AnnotationGeneratedDGDSpec] = ""
+	dgdr.Annotations[AnnotationConfirmedDGDUID] = string(dgd.UID)
 	dgdr.ResourceVersion = apply.GetResourceVersion()
-	return nil
+	return "", nil
 }
 
 // adoptAdditionalResources makes profiling-generated ConfigMaps follow the DGD lifecycle.

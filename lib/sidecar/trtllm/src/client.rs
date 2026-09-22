@@ -30,7 +30,10 @@ impl TrtllmClient {
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
     ) -> Result<Self, DynamoError> {
-        let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport).await?;
+        // bootstrap=false: TrtllmClient::connect's only call site is
+        // LLMEngine::start (lib/sidecar/trtllm/src/engine.rs), after the
+        // tracing subscriber is installed. See GrpcChannelPool::connect.
+        let pool = GrpcChannelPool::connect("TensorRT-LLM", endpoint, transport, false).await?;
         Ok(Self { pool })
     }
 
