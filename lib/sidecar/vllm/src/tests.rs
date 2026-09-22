@@ -1045,7 +1045,7 @@ fn frontend_router_metadata_does_not_require_engine_support() {
         DisaggregationMode::Aggregated,
     )
     .unwrap();
-    for (fields, supported) in [
+    for (fields, is_supported) in [
         (json!(["worker_id", "timing"]), true),
         (json!(["worker_id", "engine_data"]), false),
     ] {
@@ -1056,7 +1056,7 @@ fn frontend_router_metadata_does_not_require_engine_support() {
             "request-1".to_string(),
             DisaggregationMode::Aggregated,
         );
-        if supported {
+        if is_supported {
             assert_eq!(result.unwrap(), baseline);
         } else {
             assert!(result.is_err());

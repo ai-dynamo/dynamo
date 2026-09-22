@@ -569,7 +569,6 @@ def _test_frontend_kv_routing(
     ]
 
     async def run_test() -> None:
-        """Warm both workers and verify event-driven routing converges."""
         with managed_runtime() as runtime:
             worker_ids = sorted(
                 await poll_for_worker_instances(
@@ -585,7 +584,7 @@ def _test_frontend_kv_routing(
                 async def send(
                     prompt: str,
                     *,
-                    query_only: bool = False,
+                    is_query_only: bool = False,
                     worker_id: int | None = None,
                 ) -> tuple[int, float | None]:
                     """Send one request and return its selected worker and KV hit rate."""
@@ -597,7 +596,9 @@ def _test_frontend_kv_routing(
                         "stream": True,
                         "nvext": {
                             "extra_fields": ["worker_id", "timing"],
-                            "annotations": ["query_instance_id:"] if query_only else [],
+                            "annotations": ["query_instance_id:"]
+                            if is_query_only
+                            else [],
                         },
                     }
                     headers = (
@@ -608,7 +609,7 @@ def _test_frontend_kv_routing(
                         if worker_id is not None
                         else None
                     )
-                    nvext, generated = await send_router_chat_request(
+                    nvext, has_generated_text = await send_router_chat_request(
                         session, url, payload, headers
                     )
                     selected = require_router_worker_id({"nvext": nvext})
@@ -617,11 +618,13 @@ def _test_frontend_kv_routing(
                     assert selected["prefill_worker_id"] == selected_id, selected
                     assert selected["decode_dp_rank"] == 0, selected
                     hit_rate = nvext.get("timing", {}).get("kv_hit_rate")
-                    if query_only:
-                        assert not generated, nvext
+                    if is_query_only:
+                        assert not has_generated_text, nvext
                         assert len(nvext.get("token_ids", [])) >= block_size * 4, nvext
                     else:
-                        assert generated, "Request completed without generating text"
+                        assert (
+                            has_generated_text
+                        ), "Request completed without generating text"
                         assert isinstance(hit_rate, (int, float)), nvext
                         assert 0 <= hit_rate <= 1, nvext
                     return selected_id, hit_rate
@@ -631,7 +634,7 @@ def _test_frontend_kv_routing(
                     for port in system_ports
                 }
                 for prompt in prompts:
-                    await send(prompt, query_only=True)
+                    await send(prompt, is_query_only=True)
                 for prompt, worker_id in zip(prompts, worker_ids):
                     selected, _ = await send(prompt, worker_id=worker_id)
                     assert selected == worker_id, (selected, worker_id)
@@ -640,8 +643,10 @@ def _test_frontend_kv_routing(
                 observed = []
                 counts = {}
                 while time.monotonic() < deadline:
+                    # Pinned completions expose timing without warming the other worker.
                     observed = [
-                        await send(prompt, query_only=True) for prompt in prompts
+                        await send(prompt, worker_id=worker_id)
+                        for prompt, worker_id in zip(prompts, worker_ids)
                     ]
                     counts = {
                         port: await get_stored_kv_event_counts(session, port)
@@ -649,7 +654,9 @@ def _test_frontend_kv_routing(
                     }
                     if all(
                         selected == expected
-                        for (selected, _), expected in zip(observed, worker_ids)
+                        and hit_rate is not None
+                        and hit_rate >= 0.5
+                        for (selected, hit_rate), expected in zip(observed, worker_ids)
                     ) and all(
                         all(
                             current > baseline

@@ -57,17 +57,17 @@ async def send_router_chat_request(
 
     assert "data: [DONE]" in body, f"Incomplete SSE response: {body}"
     nvext: dict[str, Any] = {}
-    generated = False
+    has_generated_text = False
     for chunk in parse_sse_json_chunks(body):
         assert "error" not in chunk, chunk
         nvext.update(chunk.get("nvext") or {})
         for choice in chunk.get("choices", []):
             delta = choice.get("delta") or {}
-            generated |= any(
+            has_generated_text |= any(
                 delta.get(field)
                 for field in ("content", "reasoning_content", "reasoning")
             )
-    return nvext, generated
+    return nvext, has_generated_text
 
 
 async def get_stored_kv_event_counts(
