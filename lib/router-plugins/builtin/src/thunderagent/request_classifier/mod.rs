@@ -140,33 +140,24 @@ impl Inner {
             return;
         }
         let capacities = self.capacity_provider.snapshot();
-        let mut state = self.state.lock();
-        let before = state.telemetry();
-        let changed = state.reconcile(&capacities, Instant::now());
-        let after = state.telemetry();
-        macro_rules! reconcile_log {
-            ($level:expr) => {
-                tracing::event!(
-                    target: "thunderagent",
-                    $level,
-                    changed,
-                    programs = after.programs,
-                    active_programs = after.active_programs,
-                    paused_before = before.paused_programs,
-                    paused_programs = after.paused_programs,
-                    marked_before = before.marked_for_pause,
-                    marked_for_pause = after.marked_for_pause,
-                    waiting_requests = after.waiting_requests,
-                    tracked_requests = after.tracked_requests,
-                    "ThunderAgent reconcile"
-                );
-            };
-        }
-        if changed {
-            reconcile_log!(tracing::Level::INFO);
-        } else {
-            reconcile_log!(tracing::Level::DEBUG);
-        }
+        let telemetry = {
+            let mut state = self.state.lock();
+            let changed = state.reconcile(&capacities, Instant::now());
+            if !changed || !tracing::enabled!(target: "thunderagent", tracing::Level::INFO) {
+                return;
+            }
+            state.telemetry()
+        };
+        tracing::info!(
+            target: "thunderagent",
+            programs = telemetry.programs,
+            active_programs = telemetry.active_programs,
+            paused_programs = telemetry.paused_programs,
+            marked_for_pause = telemetry.marked_for_pause,
+            waiting_requests = telemetry.waiting_requests,
+            tracked_requests = telemetry.tracked_requests,
+            "ThunderAgent scheduler state changed"
+        );
     }
 
     fn on_event(&self, event: ClassifyEvent) {

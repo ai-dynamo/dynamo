@@ -271,11 +271,7 @@ impl State {
                 .values()
                 .filter(|program| program.marked_for_pause)
                 .count(),
-            waiting_requests: self
-                .requests
-                .values()
-                .filter(|request| request.phase == RequestPhase::Waiting)
-                .count(),
+            waiting_requests: self.waiting_arrivals.len(),
             tracked_requests: self.requests.len(),
         }
     }
