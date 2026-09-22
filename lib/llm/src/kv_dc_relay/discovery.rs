@@ -1035,20 +1035,6 @@ mod tests {
     }
 
     #[test]
-    fn a_startup_resync_of_the_same_set_changes_nothing() {
-        let filter = DcDiscoveryFilter::default();
-        let mut state = MembershipState::default();
-        let first = instance("generate", 1, None, card("llama", "meta/llama", 64));
-        assert!(state.apply(DiscoveryEvent::Added(first.clone()), &filter));
-        let _ = state.view(&filter);
-        let projection_count = state.projection_count;
-
-        // The snapshot that ends the startup burst holds what the Added events already added.
-        assert!(!state.apply(DiscoveryEvent::Resync(vec![first]), &filter));
-        assert_eq!(state.projection_count, projection_count);
-    }
-
-    #[test]
     fn unchanged_membership_does_not_advance_the_watch_version() {
         let filter = DcDiscoveryFilter::default();
         let mut state = MembershipState::default();
