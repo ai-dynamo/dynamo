@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+
 from dynamo.profiler.sweeper.runtime_binding import (
     RuntimeBindingError,
     resolve_runtime_binding,
