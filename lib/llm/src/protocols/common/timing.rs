@@ -43,13 +43,26 @@ pub enum RequestPhase {
     Aggregated,
 }
 
+impl RequestPhase {
+    /// Stable label value, shared by every metric labelled `phase`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            RequestPhase::Prefill => "prefill",
+            RequestPhase::Decode => "decode",
+            RequestPhase::Aggregated => "aggregated",
+        }
+    }
+
+    pub const ALL: [RequestPhase; 3] = [
+        RequestPhase::Prefill,
+        RequestPhase::Decode,
+        RequestPhase::Aggregated,
+    ];
+}
+
 impl std::fmt::Display for RequestPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RequestPhase::Prefill => write!(f, "prefill"),
-            RequestPhase::Decode => write!(f, "decode"),
-            RequestPhase::Aggregated => write!(f, "aggregated"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

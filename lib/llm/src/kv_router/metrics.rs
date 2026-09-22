@@ -63,6 +63,7 @@ use prometheus::{
 };
 
 use crate::http::service::metrics::generate_log_buckets;
+use crate::protocols::common::timing::RequestPhase;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
@@ -857,17 +858,22 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    /// F2: raw cached prefix tokens on the best eligible worker, one observation per tracked attempt.
-    pub kv_best_eligible_cached_prefix_tokens: prometheus::Histogram,
-    /// F3: raw cached prefix tokens on the selected worker and DP rank, one observation per tracked attempt.
-    pub kv_selected_cached_prefix_tokens: prometheus::Histogram,
-    /// F4: worker-reported GPU hits plus external lookup tokens, one observation per complete report.
-    pub kv_worker_lookup_tokens: prometheus::Histogram,
-    /// F5: worker-reported GPU hits plus successful external hits, one observation per complete report.
-    pub kv_worker_reused_tokens: prometheus::Histogram,
-    /// Worker cache-hit report per tracked attempt: `result="complete"` or `"incomplete"`.
+    /// F2: raw cached prefix tokens on the best eligible worker, one observation per tracked
+    /// attempt, labelled by request `phase` (aggregated | prefill | decode).
+    pub kv_best_eligible_cached_prefix_tokens: HistogramVec,
+    /// F3: raw cached prefix tokens on the selected worker and DP rank, per attempt, by `phase`.
+    pub kv_selected_cached_prefix_tokens: HistogramVec,
+    /// F4: worker-reported GPU hits plus external lookup tokens, per complete report, by `phase`.
+    pub kv_worker_lookup_tokens: HistogramVec,
+    /// F5: worker-reported GPU hits plus successful external hits, per complete report, by `phase`.
+    pub kv_worker_reused_tokens: HistogramVec,
+    /// Worker cache-hit report per tracked attempt: labels `phase` and `result` (complete | incomplete).
     pub kv_worker_outcomes_total: IntCounterVec,
 }
+
+/// Label carrying the request phase on the KV-cache reuse series; same name and values as
+/// the frontend stage metrics (`stage_duration_seconds{stage,phase}`).
+const KV_PHASE_LABEL: &str = "phase";
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
@@ -989,14 +995,19 @@ impl RouterRequestMetrics {
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 let kv_tokens_hist = |name: &str, help: &str| {
-                    metrics
-                        .create_histogram(
+                    let hist = metrics
+                        .create_histogramvec(
                             &router_metric(name),
                             help,
+                            &[KV_PHASE_LABEL],
                             extra_labels,
                             Some(generate_log_buckets(50.0, 128000.0, 12)),
                         )
-                        .unwrap_or_else(|_| panic!("failed to create {}", router_metric(name)))
+                        .unwrap_or_else(|_| panic!("failed to create {}", router_metric(name)));
+                    for phase in RequestPhase::ALL {
+                        hist.with_label_values(&[phase.as_str()]);
+                    }
+                    hist
                 };
                 let kv_best_eligible_cached_prefix_tokens = kv_tokens_hist(
                     frontend_service::KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS,
@@ -1017,13 +1028,15 @@ impl RouterRequestMetrics {
                 let kv_worker_outcomes_total = metrics
                     .create_intcountervec(
                         &router_metric(frontend_service::KV_WORKER_OUTCOMES_TOTAL),
-                        "Worker cache-hit reports per tracked routing attempt, by result",
-                        &["result"],
+                        "Worker cache-hit reports per tracked routing attempt, by phase and result",
+                        &[KV_PHASE_LABEL, "result"],
                         extra_labels,
                     )
                     .expect("failed to create router_kv_worker_outcomes_total");
-                kv_worker_outcomes_total.with_label_values(&["complete"]);
-                kv_worker_outcomes_total.with_label_values(&["incomplete"]);
+                for phase in RequestPhase::ALL {
+                    kv_worker_outcomes_total.with_label_values(&[phase.as_str(), "complete"]);
+                    kv_worker_outcomes_total.with_label_values(&[phase.as_str(), "incomplete"]);
+                }
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -1065,11 +1078,14 @@ impl RouterRequestMetrics {
         fn hist(name: &str) -> prometheus::Histogram {
             prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
         }
-        fn kv_hist(registry: &prometheus::Registry, name: &str) -> prometheus::Histogram {
-            let h = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
-                format!("dynamo_component_{}", router_metric(name)),
-                "test",
-            ))
+        fn kv_hist(registry: &prometheus::Registry, name: &str) -> HistogramVec {
+            let h = HistogramVec::new(
+                prometheus::HistogramOpts::new(
+                    format!("dynamo_component_{}", router_metric(name)),
+                    "test",
+                ),
+                &[KV_PHASE_LABEL],
+            )
             .unwrap();
             registry.register(Box::new(h.clone())).unwrap();
             h
@@ -1082,7 +1098,7 @@ impl RouterRequestMetrics {
                 ),
                 "test",
             ),
-            &["result"],
+            &[KV_PHASE_LABEL, "result"],
         )
         .unwrap();
         registry
@@ -1136,26 +1152,43 @@ impl RouterRequestMetrics {
     }
 
     /// F2/F3 for one tracked routing attempt, recorded at selection time.
-    pub fn observe_kv_route_estimate(&self, best_tokens: u64, selected_tokens: u64) {
+    pub fn observe_kv_route_estimate(
+        &self,
+        phase: RequestPhase,
+        best_tokens: u64,
+        selected_tokens: u64,
+    ) {
+        let phase = &[phase.as_str()];
         self.kv_best_eligible_cached_prefix_tokens
+            .with_label_values(phase)
             .observe(best_tokens as f64);
         self.kv_selected_cached_prefix_tokens
+            .with_label_values(phase)
             .observe(selected_tokens as f64);
     }
 
     /// F4/F5 for one attempt whose stream completed with a valid worker report.
-    pub fn observe_kv_worker_hit(&self, [lookup_tokens, reused_tokens]: [u64; 2]) {
-        self.kv_worker_lookup_tokens.observe(lookup_tokens as f64);
-        self.kv_worker_reused_tokens.observe(reused_tokens as f64);
+    pub fn observe_kv_worker_hit(
+        &self,
+        phase: RequestPhase,
+        [lookup_tokens, reused_tokens]: [u64; 2],
+    ) {
+        let phase = phase.as_str();
+        self.kv_worker_lookup_tokens
+            .with_label_values(&[phase])
+            .observe(lookup_tokens as f64);
+        self.kv_worker_reused_tokens
+            .with_label_values(&[phase])
+            .observe(reused_tokens as f64);
         self.kv_worker_outcomes_total
-            .with_label_values(&["complete"])
+            .with_label_values(&[phase, "complete"])
             .inc();
     }
 
     /// A tracked attempt that ended without a usable worker report.
-    pub fn observe_kv_worker_incomplete(&self) {
+    pub fn observe_kv_worker_incomplete(&self, phase: RequestPhase) {
         self.kv_worker_outcomes_total
-            .with_label_values(&["incomplete"])
+            .with_label_values(&[phase.as_str(), "incomplete"])
             .inc();
     }
 }
@@ -1399,13 +1432,13 @@ mod tests {
     #[test]
     fn kv_cache_hit_metrics_export_same_totals_as_counters() {
         // Same inputs the previous counter-based export test used (96/64/80/72, one
-        // complete and one incomplete report): the histogram _sum must carry the
-        // identical totals and _count the number of observations.
+        // complete and one incomplete report), now under the `phase` label: the
+        // histogram _sum must carry the identical totals and _count the observations.
         let registry = prometheus::Registry::new();
         let metrics = RouterRequestMetrics::for_test(&registry);
-        metrics.observe_kv_route_estimate(96, 64);
-        metrics.observe_kv_worker_hit([80, 72]);
-        metrics.observe_kv_worker_incomplete();
+        metrics.observe_kv_route_estimate(RequestPhase::Prefill, 96, 64);
+        metrics.observe_kv_worker_hit(RequestPhase::Prefill, [80, 72]);
+        metrics.observe_kv_worker_incomplete(RequestPhase::Decode);
 
         let output = gather_pef(&registry);
         for (name, value) in [
@@ -1415,16 +1448,28 @@ mod tests {
             ("kv_worker_reused_tokens", 72),
         ] {
             assert!(
-                output.contains(&format!("dynamo_component_router_{name}_sum {value}\n")),
+                output.contains(&format!(
+                    "dynamo_component_router_{name}_sum{{phase=\"prefill\"}} {value}\n"
+                )),
                 "{output}"
             );
             assert!(
-                output.contains(&format!("dynamo_component_router_{name}_count 1\n")),
+                output.contains(&format!(
+                    "dynamo_component_router_{name}_count{{phase=\"prefill\"}} 1\n"
+                )),
                 "{output}"
             );
         }
-        assert!(output.contains("router_kv_worker_outcomes_total{result=\"complete\"} 1"));
-        assert!(output.contains("router_kv_worker_outcomes_total{result=\"incomplete\"} 1"));
+        assert!(
+            output.contains(
+                "router_kv_worker_outcomes_total{phase=\"prefill\",result=\"complete\"} 1"
+            )
+        );
+        assert!(
+            output.contains(
+                "router_kv_worker_outcomes_total{phase=\"decode\",result=\"incomplete\"} 1"
+            )
+        );
         assert!(!output.contains("cache_loss"));
         assert!(!output.contains("funnel"));
         assert!(!output.contains("stage="));

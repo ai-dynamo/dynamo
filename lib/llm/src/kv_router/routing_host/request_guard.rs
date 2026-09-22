@@ -324,6 +324,14 @@ impl RequestObservability {
         &self.request_metrics
     }
 
+    /// Phase label for per-attempt metrics; requests without a tracker are aggregated.
+    fn phase(&self) -> RequestPhase {
+        self.tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or_default()
+    }
+
     fn start_dispatch(&mut self, phase_label: &str) {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
@@ -677,8 +685,16 @@ where
             request_metrics.requests_started_total.inc();
         }
         if let Some(route) = kv_route {
-            request_metrics
-                .observe_kv_route_estimate(route.best_router_tokens, route.selected_router_tokens);
+            let phase = request
+                .tracker
+                .as_ref()
+                .map(|tracker| tracker.phase())
+                .unwrap_or_default();
+            request_metrics.observe_kv_route_estimate(
+                phase,
+                route.best_router_tokens,
+                route.selected_router_tokens,
+            );
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -908,10 +924,11 @@ where
             return;
         }
         let hit = kv_worker_hit_for(stream_completed, self.kv_worker_report.take());
+        let phase = self.observability.phase();
         let metrics = self.observability.request_metrics();
         match hit {
-            Some(tokens) => metrics.observe_kv_worker_hit(tokens),
-            None => metrics.observe_kv_worker_incomplete(),
+            Some(tokens) => metrics.observe_kv_worker_hit(phase, tokens),
+            None => metrics.observe_kv_worker_incomplete(phase),
         }
     }
 }

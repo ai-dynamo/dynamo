@@ -303,7 +303,7 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 
 ### KV-cache reuse telemetry (F0–F5)
 
-KV-cache reuse telemetry records one observation per routing attempt. F2 through F5 are always enabled, each as a histogram whose `_sum` carries the token total and `_count` the number of observations. F0 reuses the existing input-token sum. Query-only worker lookups are excluded because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
+KV-cache reuse telemetry records one observation per routing attempt. F2 through F5 are always enabled, each as a histogram whose `_sum` carries the token total and `_count` the number of observations. Every series carries a `phase` label (`aggregated`, `prefill`, or `decode`, the same vocabulary as `stage_duration_seconds{phase}`): inside one router process the prefill and decode attempts of a disaggregated request are recorded on the same `router_id`, so compare stages within one `phase` rather than summing across phases. Migration retries are additional attempts in the same series and are not labelled. F0 reuses the existing input-token sum. Query-only worker lookups are excluded because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
 
 | Stage | Metric |
 | --- | --- |
