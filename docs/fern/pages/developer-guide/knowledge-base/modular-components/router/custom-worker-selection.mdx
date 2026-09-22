@@ -57,6 +57,14 @@ The module organization changes no signal accessor, callback signature, signal m
 
 Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection` or `plugins::request_classifier`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7. The signal methods themselves are unchanged.
 
+## Embedded Hosts and Simulation Time
+
+An embedded Rust host can call the native selector through `WorkerSelector` while managing its own worker snapshots, dispatch, and affinity lifecycle. Before selection, apply `RoutingEligibility::with_eligible_affinity_target` only when the selector's `uses_exclusive_affinity_target()` returns `true` and the request has an affinity target. The helper checks the target against the host's eligibility constraints; an ineligible target leaves the candidate set unchanged. A custom policy that treats affinity as advisory continues to receive the full eligible set.
+
+For virtual time, construct `SessionAffinity` with `with_manual_clock` and call `advance_clock` before lifecycle events, including the final lease release that starts idle expiry. Keep separate affinity tables and worker inputs for prefill and decode pools. The host owns dispatch acceptance and binding invalidation; filter, scorer, and picker callbacks retain their existing request-context and worker-signal APIs.
+
+See [Native Routing Policy in a Simulation Host](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/simulation-policy.md) for the public host API, executable lifecycle example, and immutable-revision build instructions. These host additions are unreleased and require a separate downstream integration before a consumer CLI can use them.
+
 ## Build the Policy
 
 ### Create the Policy and Catalog Crates
