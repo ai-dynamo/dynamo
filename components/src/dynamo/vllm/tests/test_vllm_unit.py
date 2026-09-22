@@ -2622,11 +2622,17 @@ async def test_gms_preinit_liveness_keeps_lock_until_exit_and_is_reused(monkeypa
 
     class Monitor:
         def __init__(
-            self, callback, expected_ranks, timeout_ms_override, broadcast_fence
+            self,
+            callback,
+            expected_ranks,
+            timeout_ms_override,
+            runtime_armed,
+            broadcast_fence,
         ):
             callbacks.append(callback)
             assert list(expected_ranks) == [1]
-            assert timeout_ms_override == rank_liveness.DEFAULT_TIMEOUT_MS
+            assert timeout_ms_override == rank_liveness.startup_timeout_ms()
+            assert runtime_armed is False
             assert broadcast_fence is False
 
         def start(self):

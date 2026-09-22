@@ -1360,9 +1360,8 @@ class WorkerFactory:
             # Model/process startup can starve Python heartbeat threads for
             # hundreds of milliseconds. Use the conservative default until the
             # serving handler is attached, then adopt the configured deadline.
-            monitor_kwargs["timeout_ms_override"] = max(
-                rl.timeout_ms(), rl.DEFAULT_TIMEOUT_MS
-            )
+            monitor_kwargs["timeout_ms_override"] = rl.startup_timeout_ms()
+            monitor_kwargs["runtime_armed"] = False
         monitor = rl.RankLivenessMonitor(on_rank_lost, **monitor_kwargs)
         setattr(monitor, "_gms_handler_ref", handler_ref)
         if handler is None:
