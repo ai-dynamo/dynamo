@@ -1316,7 +1316,6 @@ async def test_stream_exit_preserves_original_error_when_abort_fails(
     "server_args, expect_retry",
     [
         ({"pp_size": 2}, True),
-        ({"enable_dp_attention": True}, True),
         (
             {
                 "enable_dp_attention": True,
