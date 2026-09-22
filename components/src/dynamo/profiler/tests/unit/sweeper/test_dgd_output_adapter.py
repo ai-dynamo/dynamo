@@ -95,6 +95,34 @@ def test_write_returns_relative_paths_that_exist(tmp_path: Path) -> None:
     assert "Qwen/Qwen3-8B" in (tmp_path / paths[0]).read_text()
 
 
+def test_write_passes_the_result_workload_through_to_the_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[P3] The existing workload="qwen-workload" argument above pins
+    nothing: _DGD_CONFIG uses the "direct" renderer, whose render() takes
+    workload as an unused `_workload` parameter, so a mutation to
+    workload=None left every adapter test green. Spy on render_dgd itself
+    (renderer-agnostic) to actually pin the value SweepResult.workload is
+    passed through with."""
+    from dynamo.profiler.sweeper import dgd_output_adapter as mod
+
+    seen = []
+    real = mod.render_dgd
+
+    def spy(candidate, workload, options, **kwargs):
+        seen.append(workload)
+        return real(candidate, workload, options, **kwargs)
+
+    monkeypatch.setattr(mod, "render_dgd", spy)
+
+    adapter = DgdOutputAdapter()
+    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
+
+    adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
+
+    assert seen == ["qwen-workload"]
+
+
 def test_pareto_naming_matches_the_real_name_prefix_convention(tmp_path: Path) -> None:
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult(
@@ -118,7 +146,7 @@ def test_missing_dgd_config_field_raises_config_error(tmp_path: Path) -> None:
 
 
 def test_scalar_config_picks_the_best_candidate_when_multiple_are_given(tmp_path: Path) -> None:
-    """[P1] dgd.name (scalar mode) with >1 candidate must select the single
+    """dgd.name (scalar mode) with >1 candidate must select the single
     highest-scoring one (ties broken by fewer GPUs), not raise and not
     render all of them -- restores the deleted CLI's _best_candidate rule."""
     adapter = DgdOutputAdapter()
@@ -133,7 +161,7 @@ def test_scalar_config_picks_the_best_candidate_when_multiple_are_given(tmp_path
 
 
 def test_scalar_selection_breaks_score_ties_on_fewer_gpus(tmp_path: Path) -> None:
-    """[P1] Tie-break rule specifically: equal score, prefer fewer GPUs."""
+    """Tie-break rule specifically: equal score, prefer fewer GPUs."""
     adapter = DgdOutputAdapter()
     many_gpus = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=4), score=15.0, used_gpus=8)
     few_gpus = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2), score=15.0, used_gpus=2)
@@ -141,21 +169,18 @@ def test_scalar_selection_breaks_score_ties_on_fewer_gpus(tmp_path: Path) -> Non
 
     paths = adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
 
-    # Both configs render the same model name, so this test only proves a
-    # single winner was picked, not which specific one -- combine with the
-    # count assertion below if precise identity matters for review.
     assert len(paths) == 1
+    # Both configs render the same model name, so len(paths) alone can't
+    # tell the two candidates apart -- this asserts the manifest content
+    # that actually names the winner (fewer-GPU candidate, tp=2), so a
+    # wrong winner (max-instead-of-min, an inverted tie-break, or ignoring
+    # score entirely) fails this test instead of passing silently.
+    assert "nvidia.com/gpu: '2'" in (tmp_path / paths[0]).read_text()
 
 
 def test_pareto_render_skips_unrenderable_candidate_and_continues(tmp_path: Path) -> None:
-    """[P2] One CandidateMaterializationError must not lose the rest of the
-    front -- restores the deleted _render_pareto's per-candidate skip.
-
-    NOTE: assumes backend="unsupported" actually fails materialization in
-    the real direct renderer. Not confirmed against that renderer's source
-    in this session -- verify locally and swap in whatever config value
-    reliably raises CandidateMaterializationError if this one doesn't.
-    """
+    """One CandidateMaterializationError must not lose the rest of the
+    front -- restores the deleted _render_pareto's per-candidate skip."""
     adapter = DgdOutputAdapter()
     good_a = _FakeCandidate(_CANDIDATE_CONFIG, score=10.0, used_gpus=8)
     bad = _FakeCandidate(dict(_CANDIDATE_CONFIG, backend="unsupported"), score=9.0, used_gpus=8)
@@ -169,9 +194,7 @@ def test_pareto_render_skips_unrenderable_candidate_and_continues(tmp_path: Path
 
 
 def test_name_rejects_path_escaping_values(tmp_path: Path) -> None:
-    """[P2] dgd.name must not be able to write outside output_dir --
-    the review bot's original finding, reproduced and confirmed by
-    execution in review."""
+    """dgd.name must not be able to write outside output_dir."""
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
 
@@ -182,7 +205,7 @@ def test_name_rejects_path_escaping_values(tmp_path: Path) -> None:
 
 
 def test_name_prefix_rejects_path_escaping_values(tmp_path: Path) -> None:
-    """[P2] Same validation must apply to dgd.name_prefix, not just dgd.name."""
+    """Same validation must apply to dgd.name_prefix, not just dgd.name."""
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult(
         [_FakeCandidate(_CANDIDATE_CONFIG), _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2))],

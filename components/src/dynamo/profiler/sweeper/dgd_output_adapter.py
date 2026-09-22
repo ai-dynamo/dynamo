@@ -114,24 +114,41 @@ def render_and_write_dgds(
     if dgd_config.get("name") and not dgd_config.get("name_prefix"):
         # Scalar mode: one DGD, the highest-scoring candidate -- regardless
         # of how many candidates were actually handed to us.
+        if not candidates:
+            raise CandidateMaterializationError(
+                "no candidates were selected for this run; nothing to pick a "
+                "scalar winner from"
+            )
         candidates = [_best_candidate(candidates)]
 
     names = _dgd_names(dgd_config, len(candidates))
 
     rendered_dgds: list[Any] = []
     rendered_names: list[str] = []
+    failures: list[str] = []
+    last_exc: CandidateMaterializationError | None = None
     for candidate, cand_name in zip(candidates, names, strict=True):
         try:
             rendered_dgds.append(
                 render_dgd(candidate, workload, options, dgd_name=cand_name, renderer=renderer)
             )
         except CandidateMaterializationError as exc:
-            print(f"skipping Pareto candidate {cand_name}: {exc}", file=sys.stderr)
+            # Not "Pareto candidate": this loop runs in scalar mode too
+            # (a single-candidate list after the reduction above), where
+            # calling it Pareto would mislabel the failure.
+            print(f"skipping candidate {cand_name}: {exc}", file=sys.stderr)
+            failures.append(f"{cand_name}: {exc}")
+            last_exc = exc
             continue
         rendered_names.append(cand_name)
 
     if not rendered_dgds:
-        raise CandidateMaterializationError("no candidate could be rendered")
+        # Keep the real cause: both in the message (so it's visible even
+        # without a traceback) and chained via `from`, rather than the
+        # stderr-only print above being the last anyone sees of it.
+        raise CandidateMaterializationError(
+            "no candidate could be rendered: " + "; ".join(failures)
+        ) from last_exc
 
     artifacts = write_outputs(
         rendered_dgds,
