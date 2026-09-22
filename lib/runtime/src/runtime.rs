@@ -76,6 +76,7 @@ pub struct Runtime {
     /// could exit with the lease still held, which is the stale-registration
     /// symptom this teardown exists to remove.
     teardown_tasks: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    shutdown_completion: Arc<std::sync::OnceLock<tokio::sync::watch::Receiver<bool>>>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
 }
@@ -119,6 +120,7 @@ impl Runtime {
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             active_drain_timeout: Arc::new(std::sync::OnceLock::new()),
             teardown_tasks: Arc::new(std::sync::Mutex::new(Vec::new())),
+            shutdown_completion: Arc::new(std::sync::OnceLock::new()),
             compute_pool,
             block_in_place_permits,
         })
@@ -384,8 +386,7 @@ impl Runtime {
     /// not guaranteed to run. Use [`shutdown_and_wait`](Self::shutdown_and_wait)
     /// when the teardown must actually finish.
     pub fn shutdown(&self) {
-        let sequence = self.shutdown_sequence(None);
-        self.primary().spawn(sequence);
+        self.start_shutdown(None);
     }
 
     /// [`shutdown`](Self::shutdown) that resolves once the three-phase
@@ -405,7 +406,30 @@ impl Runtime {
     /// bounded by [`TEARDOWN_TASK_JOIN_TIMEOUT`], so an unreachable etcd delays
     /// the exit by seconds rather than indefinitely.
     pub async fn shutdown_and_wait(&self, drain_timeout: Option<Duration>) {
-        self.shutdown_sequence(drain_timeout).await
+        let mut completion = self.start_shutdown(drain_timeout);
+        if completion.wait_for(|done| *done).await.is_err() {
+            tracing::error!("Runtime shutdown task terminated before completing teardown");
+            self.cancellation_token.cancel();
+        }
+    }
+
+    // The first caller selects the drain bound. All callers join the same task;
+    // cancelling a waiter must not cancel teardown or lose its lease handles.
+    fn start_shutdown(
+        &self,
+        drain_timeout: Option<Duration>,
+    ) -> tokio::sync::watch::Receiver<bool> {
+        self.shutdown_completion
+            .get_or_init(|| {
+                let (complete, receiver) = tokio::sync::watch::channel(false);
+                let sequence = self.shutdown_sequence(drain_timeout);
+                self.primary().spawn(async move {
+                    sequence.await;
+                    complete.send_replace(true);
+                });
+                receiver
+            })
+            .clone()
     }
 
     /// The three-phase teardown shared by [`shutdown`](Self::shutdown) and
@@ -617,10 +641,12 @@ mod tests {
     /// its `lease.revoke()` in response. Returning without joining that task let
     /// the process exit with the lease still held, leaving the instance
     /// advertised until its TTL expired.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test(start_paused = true)]
     async fn shutdown_and_wait_joins_post_cancellation_teardown_tasks() {
         let runtime = Runtime::from_current().unwrap();
         let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (revoking, started) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
 
         // Stands in for the lease keep-alive: cleanup runs only once the
         // primary token is cancelled, and takes a moment to finish.
@@ -628,13 +654,25 @@ mod tests {
         let flag = revoked.clone();
         runtime.register_teardown_task(tokio::spawn(async move {
             token.cancelled().await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            revoking.send(()).unwrap();
+            released.await.unwrap();
             flag.store(true, Ordering::SeqCst);
         }));
 
-        runtime
-            .shutdown_and_wait(Some(Duration::from_millis(50)))
-            .await;
+        runtime.shutdown();
+        started.await.unwrap();
+        // The detached sequence already owns the handles. A second caller must
+        // still wait, and abandoning that caller must not abandon revocation.
+        let waiter = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.shutdown_and_wait(Some(Duration::ZERO)).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        waiter.abort();
+        let _ = waiter.await;
+        release.send(()).unwrap();
+        runtime.shutdown_and_wait(Some(Duration::ZERO)).await;
 
         assert!(
             revoked.load(Ordering::SeqCst),
