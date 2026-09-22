@@ -21,9 +21,18 @@ const (
 
 	sglangEmbeddingWorkerFlag           = "--embedding-worker"
 	sglangNoEmbeddingWorkerFlag         = "--no-embedding-worker"
+	healthCheckPayloadFlag              = "--health-check-payload"
 	sglangEmbeddingWorkerEnv            = "DYN_SGL_EMBEDDING_WORKER"
 	healthCheckPayloadEnv               = "DYN_HEALTH_CHECK_PAYLOAD"
 	sglang15EmbeddingHealthCheckPayload = `{"model":"health-check","input":"Test"}`
+)
+
+type sglangEmbeddingWorkerMode int
+
+const (
+	sglangEmbeddingWorkerUnknown sglangEmbeddingWorkerMode = iota
+	sglangEmbeddingWorkerDisabled
+	sglangEmbeddingWorkerEnabled
 )
 
 type SGLangBackend struct{}
@@ -49,12 +58,24 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Supply the embedding request shape that Dynamo 1.5.0 cannot derive for its active canary.
 	if version, err := runtimeversion.Resolve(container.Image, component.RuntimeVersionOverride); err == nil &&
 		version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) &&
-		sglangEmbeddingWorkerEnabled(container) &&
-		findEnvVar(container.Env, healthCheckPayloadEnv) == nil {
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  healthCheckPayloadEnv,
-			Value: sglang15EmbeddingHealthCheckPayload,
-		})
+		!sglangHealthCheckPayloadConfigured(container) {
+		switch sglangEmbeddingWorkerModeForContainer(container) {
+		case sglangEmbeddingWorkerEnabled:
+			if envFromMayDefine(container.EnvFrom, healthCheckPayloadEnv) {
+				return fmt.Errorf(
+					"%s may be supplied through envFrom, so the operator cannot inject the Dynamo 1.5.0 embedding payload without shadowing a user override; set %s explicitly in env or %s in args",
+					healthCheckPayloadEnv, healthCheckPayloadEnv, healthCheckPayloadFlag)
+			}
+
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  healthCheckPayloadEnv,
+				Value: sglang15EmbeddingHealthCheckPayload,
+			})
+		case sglangEmbeddingWorkerUnknown:
+			return fmt.Errorf(
+				"%s may be supplied through valueFrom or envFrom, so the operator cannot determine whether this Dynamo 1.5.0 worker needs the embedding health-check payload; set %s explicitly in env or %s in args, or configure %s as a literal env value or CLI flag",
+				sglangEmbeddingWorkerEnv, healthCheckPayloadEnv, healthCheckPayloadFlag, sglangEmbeddingWorkerEnv)
+		}
 	}
 
 	if component.CompilationCache != nil {
@@ -89,29 +110,62 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	return nil
 }
 
-// sglangEmbeddingWorkerEnabled resolves literal environment and CLI configuration with runtime-equivalent precedence.
-func sglangEmbeddingWorkerEnabled(container *corev1.Container) bool {
-	enabled := false
+// sglangEmbeddingWorkerModeForContainer resolves literal environment and CLI configuration with runtime-equivalent precedence.
+func sglangEmbeddingWorkerModeForContainer(container *corev1.Container) sglangEmbeddingWorkerMode {
+	mode := sglangEmbeddingWorkerDisabled
 
-	// A literal environment value supplies argparse's default; valueFrom remains unknown until container startup.
-	if env := findEnvVar(container.Env, sglangEmbeddingWorkerEnv); env != nil && env.ValueFrom == nil {
-		switch strings.ToLower(strings.TrimSpace(env.Value)) {
-		case booleanTrueValue, "1", "yes", "on":
-			enabled = true
+	// An explicit environment entry overrides envFrom, while valueFrom remains unknown until container startup.
+	if env := findEnvVar(container.Env, sglangEmbeddingWorkerEnv); env != nil {
+		if env.ValueFrom != nil {
+			mode = sglangEmbeddingWorkerUnknown
+		} else {
+			switch strings.ToLower(strings.TrimSpace(env.Value)) {
+			case booleanTrueValue, "1", "yes", "on":
+				mode = sglangEmbeddingWorkerEnabled
+			}
 		}
+	} else if envFromMayDefine(container.EnvFrom, sglangEmbeddingWorkerEnv) {
+		mode = sglangEmbeddingWorkerUnknown
 	}
 
 	// CLI flags override the environment-derived default in their original order.
 	for _, arg := range getExpandedCommandLine(container) {
 		switch arg {
 		case sglangEmbeddingWorkerFlag:
-			enabled = true
+			mode = sglangEmbeddingWorkerEnabled
 		case sglangNoEmbeddingWorkerFlag:
-			enabled = false
+			mode = sglangEmbeddingWorkerDisabled
 		}
 	}
 
-	return enabled
+	return mode
+}
+
+// sglangHealthCheckPayloadConfigured reports whether an explicit env entry or CLI flag already owns the payload.
+func sglangHealthCheckPayloadConfigured(container *corev1.Container) bool {
+	if findEnvVar(container.Env, healthCheckPayloadEnv) != nil {
+		return true
+	}
+
+	// Argparse accepts the payload in both separated and --flag=value forms.
+	for _, arg := range getExpandedCommandLine(container) {
+		if arg == healthCheckPayloadFlag || strings.HasPrefix(arg, healthCheckPayloadFlag+"=") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// envFromMayDefine reports whether a source prefix can produce the requested environment variable name.
+func envFromMayDefine(envFrom []corev1.EnvFromSource, name string) bool {
+	for _, source := range envFrom {
+		if strings.HasPrefix(name, source.Prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.

@@ -564,6 +564,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 	backend := &SGLangBackend{}
 	customPayload := `{"model":"custom","input":"probe"}`
+	workerConfigName := "worker-config"
 
 	t.Log("define the runtime, worker mode, and user-override compatibility cases")
 	tests := []struct {
@@ -571,8 +572,11 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 		image       string
 		args        []string
 		env         []corev1.EnvVar
+		envFrom     []corev1.EnvFromSource
 		wantPayload string
 		wantEnv     bool
+		wantSourced bool
+		wantErr     string
 	}{
 		{
 			name:        "Dynamo 1.5 embedding worker gets compatible payload",
@@ -611,12 +615,77 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 			wantPayload: customPayload,
 			wantEnv:     true,
 		},
+		{
+			name:  "embedding worker valueFrom requires explicit payload",
+			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			env: []corev1.EnvVar{{
+				Name: sglangEmbeddingWorkerEnv,
+				ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
+					Key:                  "embedding-worker",
+				}},
+			}},
+			wantErr: sglangEmbeddingWorkerEnv + " may be supplied through valueFrom or envFrom",
+		},
+		{
+			name:    "embedding worker envFrom requires explicit payload",
+			image:   "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{}}},
+			wantErr: sglangEmbeddingWorkerEnv + " may be supplied through valueFrom or envFrom",
+		},
+		{
+			name:    "payload envFrom is not shadowed",
+			image:   "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			args:    []string{sglangEmbeddingWorkerFlag},
+			envFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{}}},
+			wantErr: healthCheckPayloadEnv + " may be supplied through envFrom",
+		},
+		{
+			name:  "explicit sourced payload resolves unknown embedding mode",
+			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			env: []corev1.EnvVar{
+				{
+					Name: sglangEmbeddingWorkerEnv,
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
+						Key:                  "embedding-worker",
+					}},
+				},
+				{
+					Name: healthCheckPayloadEnv,
+					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
+						Key:                  "health-check-payload",
+					}},
+				},
+			},
+			wantEnv:     true,
+			wantSourced: true,
+		},
+		{
+			name:  "explicit CLI payload resolves unknown embedding mode",
+			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			args:  []string{healthCheckPayloadFlag + "=" + customPayload},
+			env: []corev1.EnvVar{{
+				Name: sglangEmbeddingWorkerEnv,
+				ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
+					Key:                  "embedding-worker",
+				}},
+			}},
+		},
+		{
+			name:    "negative CLI flag resolves unknown envFrom mode",
+			image:   "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			args:    []string{sglangNoEmbeddingWorkerFlag},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{}}},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("apply the SGLang container compatibility settings")
-			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env}
+			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env, EnvFrom: tt.envFrom}
 			err := backend.UpdateContainer(
 				container,
 				1,
@@ -626,6 +695,10 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 				&GroveMultinodeDeployer{},
 				staticContainerGPUCount(0),
 			)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
 			require.NoError(t, err)
 
 			t.Log("verify the payload is injected only for the affected compatibility case")
@@ -635,6 +708,11 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 				return
 			}
 			require.NotNil(t, payload)
+			if tt.wantSourced {
+				require.NotNil(t, payload.ValueFrom)
+				return
+			}
+			require.Nil(t, payload.ValueFrom)
 			require.Equal(t, tt.wantPayload, payload.Value)
 		})
 	}
