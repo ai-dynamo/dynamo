@@ -4,10 +4,7 @@
 use dynamo_kv_router::KvRouterConfig;
 use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPlugins};
 
-const EXAMPLE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../examples/router/thunderagent.yaml"
-));
+const EXAMPLE: &str = include_str!("../examples/thunderagent.yaml");
 
 fn resolve(yaml: &str) -> (KvRouterConfig, RouterPlugins) {
     let file = tempfile::NamedTempFile::new().unwrap();
