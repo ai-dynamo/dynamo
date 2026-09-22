@@ -121,6 +121,10 @@ class DynamoReplayRunner:
             # explicitly request detailed output through the Runner contract.
             "capture_per_request": output_requirements.capture_per_request,
             "capture_planner_details": output_requirements.include_raw_report,
+            "capture_telemetry": output_requirements.capture_telemetry,
+            "telemetry_sample_interval_ms": (
+                output_requirements.telemetry_sample_interval_ms
+            ),
             **self._goodput_sla_kwargs(spec),
         }
 
@@ -432,6 +436,7 @@ class DynamoReplayRunner:
         if (
             output_requirements.include_raw_report
             or output_requirements.capture_per_request
+            or output_requirements.capture_telemetry
         ):
             if hasattr(report, "to_dict"):
                 native_report = report.to_dict()

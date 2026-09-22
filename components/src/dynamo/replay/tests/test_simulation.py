@@ -26,6 +26,7 @@ from aisimulate.sweeper.replay import (
 from dynamo.replay import (
     PlannerReplayDetails,
     ReplayReport,
+    ReplayTelemetryDetails,
     run_trace_replay,
     simulation,
 )
@@ -189,6 +190,47 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
     assert seen["arrival_speedup_ratio"] == 2.0
     assert seen["agentic_lanes"] == 4
     assert report.metrics["completed_requests"] == 2.0
+
+
+def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
+    seen = {}
+    sample = {"sample_ordinal": 0, "kind": "baseline", "sampled_at_ms": 0.0}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return ReplayReport(
+            summary={"completed_requests": 1},
+            per_request=None,
+            coverage={},
+            planner=None,
+            telemetry=ReplayTelemetryDetails(
+                sample_interval_ms=2_500.0,
+                samples=[sample],
+            ),
+        )
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+    )
+
+    report = simulation.DynamoReplayRunnerFactory().create(2).run(
+        spec,
+        output_requirements=ReplayOutputRequirements(
+            capture_telemetry=True,
+            telemetry_sample_interval_ms=2_500.0,
+        ),
+    )
+
+    assert seen["capture_telemetry"] is True
+    assert seen["telemetry_sample_interval_ms"] == 2_500.0
+    assert report.metadata["native_report"]["telemetry"] == {
+        "sample_interval_ms": 2_500.0,
+        "samples": [sample],
+    }
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:

@@ -25,8 +25,9 @@ use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, Sglang
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
-    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
-    SlaThresholds, TraceSimulationReport, effective_agentic_lanes,
+    OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode,
+    ReplayTelemetryOptions, ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
+    effective_agentic_lanes,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -93,6 +94,7 @@ fn run_aggregated(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let capture_options = ReplayCaptureOptions {
         capture_per_request: record_per_request,
@@ -113,6 +115,7 @@ fn run_aggregated(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -129,6 +132,7 @@ fn run_aggregated_with_capture_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let (engine, factory) = aggregated_replay_setup(&args)?;
@@ -146,28 +150,42 @@ fn run_aggregated_with_capture_options(
     )?;
 
     match router_mode {
-        ReplayRouterMode::RoundRobin => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            RoundRobinReplayComposition::new(scaling_policy),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
-        ReplayRouterMode::KvRouter => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            KvReplayComposition::aggregated(
-                args,
-                num_workers,
-                router_config,
-                prefill_load_estimator,
-                scaling_policy,
-            ),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
+        ReplayRouterMode::RoundRobin => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                RoundRobinReplayComposition::new(scaling_policy),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            let replayer = match telemetry {
+                Some(options) => replayer
+                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
+                None => replayer,
+            };
+            Ok(replayer.run()?)
+        }
+        ReplayRouterMode::KvRouter => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                KvReplayComposition::aggregated(
+                    args,
+                    num_workers,
+                    router_config,
+                    prefill_load_estimator,
+                    scaling_policy,
+                ),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            let replayer = match telemetry {
+                Some(options) => replayer
+                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
+                None => replayer,
+            };
+            Ok(replayer.run()?)
+        }
     }
 }
 
@@ -183,6 +201,7 @@ fn run_disaggregated(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let capture_options = ReplayCaptureOptions {
         capture_per_request: record_per_request,
@@ -202,6 +221,7 @@ fn run_disaggregated(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -217,6 +237,7 @@ fn run_disaggregated_with_capture_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let (engine, factory) = disaggregated_replay_setup(&config.prefill_args, &config.decode_args)?;
@@ -236,30 +257,44 @@ fn run_disaggregated_with_capture_options(
     )?;
 
     match router_mode {
-        ReplayRouterMode::RoundRobin => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            RoundRobinReplayComposition::new(scaling_policy),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
-        ReplayRouterMode::KvRouter => Ok(Replayer::with_composition(
-            spec,
-            factory,
-            KvReplayComposition::disaggregated(
-                config.prefill_args,
-                config.decode_args,
-                config.num_prefill_workers,
-                config.num_decode_workers,
-                router_config,
-                prefill_load_estimator,
-                scaling_policy,
-            ),
-        )?
-        .with_capture_options(capture_options)
-        .with_runtime_input(input)
-        .run()?),
+        ReplayRouterMode::RoundRobin => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                RoundRobinReplayComposition::new(scaling_policy),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            let replayer = match telemetry {
+                Some(options) => replayer
+                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
+                None => replayer,
+            };
+            Ok(replayer.run()?)
+        }
+        ReplayRouterMode::KvRouter => {
+            let replayer = Replayer::with_composition(
+                spec,
+                factory,
+                KvReplayComposition::disaggregated(
+                    config.prefill_args,
+                    config.decode_args,
+                    config.num_prefill_workers,
+                    config.num_decode_workers,
+                    router_config,
+                    prefill_load_estimator,
+                    scaling_policy,
+                ),
+            )?
+            .with_capture_options(capture_options)
+            .with_runtime_input(input);
+            let replayer = match telemetry {
+                Some(options) => replayer
+                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
+                None => replayer,
+            };
+            Ok(replayer.run()?)
+        }
     }
 }
 
@@ -380,6 +415,7 @@ pub(crate) fn simulate_trace_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     run_aggregated(
@@ -394,6 +430,7 @@ pub(crate) fn simulate_trace_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -410,6 +447,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     run_aggregated(
         args,
@@ -423,6 +461,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -439,6 +478,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let mut driver = trace_workload_driver(trace, args.block_size, router_mode, false)?;
@@ -457,6 +497,7 @@ pub(crate) fn simulate_trace_workload_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -490,6 +531,7 @@ pub(crate) fn simulate_trace_workload_with_capture_options(
         max_sim_time_ms,
         sla,
         None,
+        None,
     )
 }
 
@@ -504,6 +546,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let driver = trace_workload_driver(trace, args.block_size, router_mode, true)?;
@@ -519,6 +562,7 @@ pub(crate) fn simulate_trace_workload_accumulating_deltas(
         max_sim_time_ms,
         sla,
         None,
+        telemetry,
     )
 }
 
@@ -535,6 +579,7 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let driver =
@@ -551,6 +596,7 @@ pub(crate) fn simulate_concurrency_workload_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -566,6 +612,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let driver =
@@ -582,6 +629,7 @@ pub(crate) fn simulate_concurrency_workload_accumulating_deltas(
         max_sim_time_ms,
         sla,
         None,
+        telemetry,
     )
 }
 
@@ -597,6 +645,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
     sla: SlaThresholds,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
@@ -617,6 +666,7 @@ pub(crate) fn simulate_agentic_trace_workload(
         max_sim_time_ms,
         sla,
         None,
+        telemetry,
     )
 }
 
@@ -631,6 +681,7 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
     max_sim_time_ms: Option<f64>,
     agentic_lanes: Option<usize>,
     sla: SlaThresholds,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
@@ -650,6 +701,7 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
         max_sim_time_ms,
         sla,
         None,
+        telemetry,
     )
 }
 
@@ -665,6 +717,7 @@ pub(crate) fn simulate_trace_disagg_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let pending = normalize_trace_requests(requests, arrival_speedup_ratio)?;
     run_disaggregated(
@@ -678,6 +731,7 @@ pub(crate) fn simulate_trace_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -693,6 +747,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     run_disaggregated(
         config,
@@ -705,6 +760,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -720,6 +776,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let mut driver =
@@ -738,6 +795,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
 
@@ -770,6 +828,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_capture_options(
         max_sim_time_ms,
         sla,
         None,
+        None,
     )
 }
 
@@ -785,6 +844,7 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    telemetry: Option<ReplayTelemetryOptions>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let driver = concurrency_workload_driver(
@@ -805,5 +865,6 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        telemetry,
     )
 }
