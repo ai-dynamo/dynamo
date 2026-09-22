@@ -15,9 +15,11 @@ use crate::to_pyerr;
 use dynamo_runtime::component::Endpoint as RuntimeEndpoint;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 
-// ---------------------------------------------------------------------------
-// Publisher: Sweeper process -> event plane
-// ---------------------------------------------------------------------------
+/// Bound on each subject's Rust-task-to-Python-recv() channel. Matches the
+/// Python-side default `pending_queue_size` in sweeper_event_plane.py so
+/// this internal hop shares the same backpressure budget, rather than
+/// growing without limit while a caller isn't calling recv().
+const SUBSCRIBER_CHANNEL_CAPACITY: usize = 100;
 
 /// Publishes Sweeper progress/outcome events onto the Dynamo event plane.
 /// Lazily creates one EventPublisher per distinct subject passed to
@@ -27,7 +29,10 @@ use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 pub(crate) struct SweeperEventPublisher {
     endpoint: RuntimeEndpoint,
     runtime_handle: tokio::runtime::Handle,
-    publishers: Mutex<HashMap<String, EventPublisher>>,
+    // Arc, not a bare EventPublisher: publish_subject clones one out and
+    // drops the map lock before awaiting the actual publish (see there for
+    // why), so the entry has to survive independently of the map.
+    publishers: Mutex<HashMap<String, Arc<EventPublisher>>>,
 }
 
 #[pymethods]
@@ -48,32 +53,45 @@ impl SweeperEventPublisher {
     /// Blocking publish of one pre-serialized envelope onto `subject`.
     /// Intended to be called from a background thread (the drain loop in
     /// sweeper_event_plane.py), never from a latency-sensitive caller.
-    /// Releases the GIL while the underlying publish awaits.
+    /// Releases the GIL while the underlying publish awaits. The map lock
+    /// is held only to look up or create the publisher, never across the
+    /// publish itself -- otherwise a stalled transport would block close()
+    /// behind this call indefinitely, defeating close()'s bounded-shutdown
+    /// contract.
     fn publish_subject(&self, py: Python, subject: String, payload: Vec<u8>) -> PyResult<()> {
         py.allow_threads(|| {
-            let mut publishers = self
-                .publishers
-                .lock()
-                .map_err(|e| to_pyerr(format!("SweeperEventPublisher lock poisoned: {e}")))?;
+            let publisher = {
+                let mut publishers = self
+                    .publishers
+                    .lock()
+                    .map_err(|e| to_pyerr(format!("SweeperEventPublisher lock poisoned: {e}")))?;
 
-            if !publishers.contains_key(&subject) {
-                let publisher = self
-                    .runtime_handle
-                    .block_on(EventPublisher::for_endpoint(&self.endpoint, subject.clone()))
-                    .map_err(to_pyerr)?;
-                publishers.insert(subject.clone(), publisher);
-            }
+                if !publishers.contains_key(&subject) {
+                    let created = self
+                        .runtime_handle
+                        .block_on(EventPublisher::for_endpoint(
+                            &self.endpoint,
+                            subject.clone(),
+                        ))
+                        .map_err(to_pyerr)?;
+                    publishers.insert(subject.clone(), Arc::new(created));
+                }
 
-            let publisher = publishers.get(&subject).expect("just inserted");
+                publishers.get(&subject).expect("just inserted").clone()
+            }; // map lock released here, before the awaited publish below
+
             self.runtime_handle
                 .block_on(publisher.publish_bytes_ref(&payload))
                 .map_err(to_pyerr)
         })
     }
 
-    /// Drop all underlying publishers. Each one unregisters itself from
-    /// discovery on drop (EventPublisher's own Drop impl) -- nothing extra
-    /// to do here.
+    /// Drop all underlying publishers, unblocking close() even if a
+    /// publish_subject call is still in flight on another thread: that
+    /// call holds its own Arc clone, so the underlying EventPublisher (and
+    /// its discovery-unregister-on-drop) is only actually dropped once
+    /// that in-flight call finishes, but close() itself returns immediately
+    /// rather than waiting on it.
     fn close(&self) -> PyResult<()> {
         let mut publishers = self
             .publishers
@@ -88,7 +106,7 @@ impl SweeperEventPublisher {
 pub(crate) struct SweeperEventSubscriber {
     endpoint: RuntimeEndpoint,
     runtime_handle: tokio::runtime::Handle,
-    channels: Mutex<HashMap<String, Arc<Mutex<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>>>>,
+    channels: Mutex<HashMap<String, Arc<Mutex<tokio::sync::mpsc::Receiver<Vec<u8>>>>>>,
     cancel_txs: Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>,
 }
 
@@ -121,7 +139,7 @@ impl SweeperEventSubscriber {
                 .map_err(|e| to_pyerr(format!("SweeperEventSubscriber lock poisoned: {e}")))?;
 
             if !channels.contains_key(&subject) {
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(SUBSCRIBER_CHANNEL_CAPACITY);
                 let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
                 let endpoint = self.endpoint.clone();
                 let topic = subject.clone();
@@ -151,11 +169,27 @@ impl SweeperEventSubscriber {
                             next = subscriber.next() => {
                                 match next {
                                     Some(Ok(envelope)) => {
-                                        if tx.send(envelope.payload.to_vec()).is_err() {
-                                            tracing::info!(
-                                                "Sweeper subscriber ({topic}): receiver dropped, exiting"
-                                            );
-                                            break;
+                                        // Bounded channel: send() applies
+                                        // backpressure (waits here) instead
+                                        // of growing memory without limit
+                                        // when recv() isn't keeping up --
+                                        // still cancellable via the same
+                                        // signal while waiting.
+                                        tokio::select! {
+                                            _ = &mut cancel_rx => {
+                                                tracing::info!(
+                                                    "Sweeper subscriber ({topic}): cancelled, exiting"
+                                                );
+                                                break;
+                                            }
+                                            send_result = tx.send(envelope.payload.to_vec()) => {
+                                                if send_result.is_err() {
+                                                    tracing::info!(
+                                                        "Sweeper subscriber ({topic}): receiver dropped, exiting"
+                                                    );
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                     Some(Err(e)) => {

@@ -53,8 +53,6 @@ def _wait_until(predicate, timeout=2.0, interval=0.01):
 def test_emit_does_not_block_caller():
     emitter = FakeEventEmitter()
     pub = SweeperEventPublisher("run-1", emitter)
-    # No start() called -- nothing draining the queue -- emit must still
-    # return immediately rather than block.
     start = time.monotonic()
     pub.emit("round.completed", {"round_no": 1, "cumulative_candidates": 1})
     assert time.monotonic() - start < 0.5
@@ -105,8 +103,6 @@ def test_close_flushes_pending_queue_before_stopping():
 
 def test_pending_queue_drops_oldest_when_full_without_blocking():
     emitter = FakeEventEmitter()
-    # Tiny queue, never started -- nothing drains it, so every emit past
-    # capacity must drop the oldest rather than block or raise.
     pub = SweeperEventPublisher("run-5", emitter, pending_queue_size=2)
     for i in range(10):
         pub.emit("round.completed", {"round_no": i, "cumulative_candidates": i})

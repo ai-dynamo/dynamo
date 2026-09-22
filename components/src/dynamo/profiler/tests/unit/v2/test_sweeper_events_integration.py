@@ -50,10 +50,6 @@ pytestmark = pytest.mark.skipif(
 
 def _make_process_local_runtime() -> "DistributedRuntime":
     loop = asyncio.new_event_loop()
-    # "mem" discovery backend -> no external NATS/etcd/Kubernetes needed.
-    # Per the real source comment in EventPublisher::new_internal, this
-    # means the default event-plane transport is ZMQ (direct mode), not
-    # NATS -- consistent with what DEP #15073 documents.
     return DistributedRuntime(loop, "mem", "tcp")
 
 
