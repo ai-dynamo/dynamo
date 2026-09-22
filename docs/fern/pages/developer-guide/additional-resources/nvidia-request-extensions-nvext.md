@@ -36,7 +36,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `backend_instance_id` | `u64` | `None` | Router | Routes the request to a specific backend instance. |
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
-| `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. vLLM and TensorRT-LLM also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
+| `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. Supported backends also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
 | `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"detailed_finish_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
@@ -95,7 +95,19 @@ KV-cache entries:
 |---------|---------|----------|
 | vLLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
-| SGLang | Not supported end to end | Dynamo request hashes are namespaced, but the embedded SGLang engine does not receive the salt. SGLang KV events and radix-cache reuse remain unsalted. Do not rely on `cache_salt` for tenant cache isolation with SGLang. |
+| SGLang | Supported for Python text workers | Workers started with `python -m dynamo.sglang` isolate router matching and backend KV-cache reuse in aggregated and disaggregated text generation, including native `/generate`, with SGLang 0.5.18 and 0.5.19. |
+
+SGLang cache salt routing is available in Dynamo development builds that include
+[PR #14803](https://github.com/ai-dynamo/dynamo/pull/14803). Updating SGLang alone does not
+enable this support. The SGLang sidecar, dedicated multimodal workers, LoRA combinations,
+diffusion, and storage extensions do not provide this cache salt isolation guarantee.
+
+Before sending salted requests to SGLang, update all Dynamo SGLang workers and router KV-event
+consumers to a build with this support. Unsalted requests continue to work during the upgrade.
+The pinned XPU image with SGLang 0.5.11 supports unsalted requests only; salted requests
+produce an unsupported-feature error.
+Native SGLang `/generate` accepts its top-level `cache_salt` body field as a string; it does not
+use `x-tenant-id`. An empty string is treated as absent.
 
 Chat completion and completion requests accept three inputs, in descending precedence:
 
@@ -138,7 +150,7 @@ The `agent_hints` sub-object carries per-request hints that the router uses for 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `priority` | `i32` | `None` | Unified soft request priority. Used for router policy scoring and backend scheduling/eviction. |
-| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values. Unset is equivalent to `0`. |
+| `strict_priority` | `u32` | `None` | Router pending-queue tier. Higher values always precede lower values; see [Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for due-time ordering within a tier. Unset is equivalent to `0`. |
 | `osl` | `u32` | `None` | Expected output sequence length (tokens). Used for output block tracking and resource estimation. |
 | `speculative_prefill` | `bool` | `false` | When `true`, speculatively prefills the predicted next-turn prompt after the current turn completes to warm the KV cache. |
 
@@ -166,8 +178,10 @@ For layer-by-layer behavior and backend requirements, see
 
 `strict_priority` is an unsigned router-only tier for requests waiting in a
 router scheduler queue. The queue orders requests by
-`(strict_priority, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
-requests within the same tier.
+`(strict_priority, due_at, configured_policy_key)`, so FCFS, LCFS, or WSPT still orders
+requests within the same tier; see
+[Priority Scheduling](../../use-cases/agents/priority-scheduling.md) for how due-time
+ordering applies within a tier.
 
 This field does not change backend engine priority, preempt running work, or
 provide ordering across router replicas. It also does not prevent an eligible

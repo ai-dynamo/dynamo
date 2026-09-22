@@ -15,11 +15,58 @@ For the routing cost model and worker-selection behavior, see
 
 The Frontend configuration is the default for worker sets that do not advertise router settings. A worker set that advertises router configuration replaces that default for requests routed to the set; it does not merge individual settings with the Frontend configuration.
 
-Every replica in a worker set must advertise the same routing configuration. A worker set is defined by namespace, component, endpoint, model, and worker type. Mixed router settings split the set into conflicting cohorts, so Dynamo admits no instances from that set.
+Every replica admitted to a worker set must have the same model deployment card (MDC) checksum after discovery normalization and tokenizer overrides. A worker set is defined by namespace, component, endpoint, model, and worker type. The first valid card observed by a Frontend reserves the set's configuration; replicas with a different checksum receive no traffic and cannot disrupt that configuration.
 
 When a worker set advertises `--router-mode kv`, restate every non-default setting that it needs. An omitted worker flag selects the shared default, not the Frontend's tuned value. This distinction matters most when the Frontend and workers receive different environment variables, such as separate Kubernetes services.
 
 For example, if the Frontend sets `--router-kv-overlap-score-credit 2.5` but a worker set advertises only `--router-mode kv`, the worker set uses the default overlap credit of `1.0`. If both processes inherit the same environment variable, they resolve to the same value. Check the `Activating prefill router` log line to confirm the resolved configuration for each hop.
+
+### Worker-Set Admission and Succession
+
+The first configuration retains its reservation while any matching workers remain,
+including during queued construction, failed construction, and retries. Workers
+with a different checksum form rejected cohorts. Their registration, removal,
+and adapter updates cannot change the incumbent's admissions, serving state,
+routing configuration, or retry schedule. A larger rejected cohort has no priority
+over the incumbent. The Frontend logs each newly rejected cohort at `ERROR`.
+
+Checksum equality is stricter than equivalent serving behavior. Different advertised
+router settings, absent versus explicit defaults, and different model `source_path`
+values can produce different checksums even when workers could serve requests the
+same way. These differences reject only the newcomer. Supported legacy cards still
+join when existing discovery-boundary normalization produces matching checksums;
+there is no additional equivalence check or normalized materialization fingerprint.
+The MDC checksum algorithm and metadata-cache identity are unchanged.
+
+When the last incumbent worker disappears, the Frontend withdraws its pipeline and
+starts a fresh pipeline for the oldest remaining cohort. Duplicate discovery events
+and snapshots preserve cohort order. A cohort that disappears completely and later
+returns joins the end. Old pipelines cannot route through the successor, even if it
+uses the same endpoint or checksum.
+
+For example, a rolling update can serve `model-a` from both `dgd-name-v1` and
+`dgd-name-v2`. These versioned namespaces identify separate worker sets, each with
+its own admitted configuration and routing pipeline. Their cards do not need to
+match each other. Within either set, a replica advertising a different local model
+directory is rejected if that difference changes its MDC checksum.
+
+Admission applies to every discovery-managed Frontend routing hop, including
+prefill and encoder requests. Each hop uses its committed worker set's selected
+card and admitted instances. Prefill routing mode and KV block size come from that
+card. Compatible replicas can join without rebuilding the hop; succession replaces
+its configuration even if the endpoint is unchanged.
+
+> [!NOTE]
+> Selection is local to each Frontend. Frontends that observe conflicting cards in
+> different orders may choose different incumbents; no cross-Frontend agreement is
+> promised. This intentionally favors serving each Frontend's admitted incumbent
+> over serving none. Different local winners are expected; discovery does not
+> withdraw service or run a shared election to force agreement.
+>
+> Frontend readiness reflects committed membership. The KV DC Relay
+> evaluates discovery independently and may remain conservative while a Frontend
+> serves its incumbent. The shared readiness evaluator produces the same answer
+> only for equivalent input units.
 
 ## Routing Behavior
 
@@ -46,8 +93,9 @@ For how queue backpressure differs from candidate filtering and busy-threshold o
 YAML accept only `fcfs` and `wspt`.
 
 For each policy, the complete pending-queue key is
-`(strict_priority, policy_key)`. Higher strict tiers always win; the selected
-policy orders requests within a tier.
+`(strict_priority, due_at, policy_key)`. Higher strict tiers always win; see
+[Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
+ordering applies within a tier.
 
 ### Worker-Selection Policies
 
@@ -221,6 +269,12 @@ The first successfully dispatched request binds the session ID to its selected w
 |---|---|
 | `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
+
+**Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.
+
+One behavior is known and unresolved: because siblings share one binding, a concurrent fan-out waits for the first sibling's dispatch to commit before the others are placed.
+
+Dynamo resolves the parent session id from the agent headers it already recognizes (`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`, `x-parent-session-id`). On a backend that routes again internally the group can still split across ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled, set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the one the engine records.
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 

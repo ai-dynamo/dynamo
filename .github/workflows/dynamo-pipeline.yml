@@ -189,9 +189,11 @@ jobs:
       - name: Run mypy (components)
         working-directory: /workspace
         shell: bash
+        # We have to exclude the components/src/dynamo/triton folder from the mypy check
+        # due its required dependencies not being available at verification time.
         run: |
           MYPYPATH=components/src:lib/bindings/python/src
-          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d | sort | tr "\n" " ")
+          TARGETS=$(find components/src/dynamo -maxdepth 1 -mindepth 1 -type d ! -name "triton" | sort | tr "\n" " ")
           MYPYPATH=$MYPYPATH mypy --explicit-package-bases $TARGETS
       - name: Run mypy (bindings)
         working-directory: /workspace
@@ -207,6 +209,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
+      framework: dynamo  # matches the framework passed to image
       test_type: parallel
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
@@ -228,6 +231,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
+      framework: dynamo  # matches the framework passed to image
       test_type: sequential
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
@@ -249,6 +253,7 @@ jobs:
     uses: $/.github/workflows/shared-test.yml
     with:
       test_suite_name: dynamo
+      framework: dynamo  # matches the framework passed to image
       test_type: gpu
       amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}

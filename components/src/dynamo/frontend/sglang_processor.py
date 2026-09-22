@@ -32,15 +32,17 @@ from .sglang_prepost import (
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
-    _guided_tool_choice_requires_reasoning,
+    _guided_output_requires_reasoning,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
     preprocess_chat_request,
+    resolve_skip_special_tokens,
 )
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
+    as_error_envelope,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -356,8 +358,8 @@ def _preprocess_worker(
         pre.guided_decoding,
         pre.tool_call_parser,
         pre.reasoning_parser,
-        require_reasoning=_guided_tool_choice_requires_reasoning(
-            request, pre.force_reasoning
+        require_reasoning=_guided_output_requires_reasoning(
+            request, pre.force_reasoning, _w_reasoning_parser_name
         ),
     )
 
@@ -415,6 +417,22 @@ def _build_dynamo_preproc(
     nvext_routing = (
         _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
     )
+    if isinstance(nvext, dict):
+        # Preserve explicit targets for the router to resolve in the current phase.
+        # Rank zero is a valid target; only absent/null values are omitted.
+        worker_routing = {
+            key: nvext[key]
+            for key in (
+                "backend_instance_id",
+                "decode_worker_id",
+                "prefill_worker_id",
+                "dp_rank",
+                "prefill_dp_rank",
+            )
+            if nvext.get(key) is not None
+        }
+        if worker_routing:
+            nvext_routing = {**(nvext_routing or {}), **worker_routing}
     if isinstance(routing, dict):
         if nvext_routing:
             routing = {**nvext_routing, **routing}
@@ -450,8 +468,9 @@ def _build_dynamo_preproc(
             "prompt_logprobs": None,
             # Preserve special tokens when a parser is active so delimiters
             # remain visible. Mirrors the post-processor's decode behavior.
-            "skip_special_tokens": (
-                tool_call_parser is None and reasoning_parser is None
+            "skip_special_tokens": resolve_skip_special_tokens(
+                request.get("skip_special_tokens"),
+                has_parser=tool_call_parser is not None or reasoning_parser is not None,
             ),
             "return_tokens_as_token_ids": request.get("return_tokens_as_token_ids"),
         },
@@ -597,8 +616,8 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
                 pre.reasoning_parser,
-                require_reasoning=_guided_tool_choice_requires_reasoning(
-                    request, pre.force_reasoning
+                require_reasoning=_guided_output_requires_reasoning(
+                    request, pre.force_reasoning, self.reasoning_parser_name
                 ),
             )
         except PreprocessError as exc:
@@ -622,6 +641,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
@@ -685,6 +705,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            skip_special_tokens=request.get("skip_special_tokens"),
             stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
@@ -847,7 +868,7 @@ class SglangProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
@@ -860,7 +881,9 @@ class SglangProcessor:
                     not isinstance(engine_response, dict)
                     or "token_ids" not in engine_response
                 ):
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -923,7 +946,7 @@ class SglangProcessor:
                     yield envelope
                     if post.locally_finished:
                         break
-        except Unknown:
+        except (InvalidArgument, Unknown):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)

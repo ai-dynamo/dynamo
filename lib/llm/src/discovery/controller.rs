@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
@@ -45,8 +45,10 @@ pub(crate) struct DesiredInstance {
     pub(crate) endpoint_id: EndpointId,
     pub(crate) card: ModelDeploymentCard,
     pub(crate) group_key: GroupKey,
-    pub(crate) fingerprint: String,
+    pub(crate) mdc_checksum: String,
     pub(crate) projection_fingerprint: String,
+    /// Digest of this worker's Qwen video prompt-expansion contract.
+    pub(crate) video_contract: Option<String>,
 }
 
 impl DesiredInstance {
@@ -55,12 +57,43 @@ impl DesiredInstance {
     }
 }
 
+/// Returns the cohort's shared contract, if every member publishes one.
+///
+/// A WorkerSet has one video-routing processor, so exact video routing is
+/// enabled only when all members agree.
+fn cohort_video_contract(members: &[DesiredInstance]) -> Option<String> {
+    let mut members = members.iter();
+    let agreed = members.next()?.video_contract.clone()?;
+    members
+        .all(|member| member.video_contract.as_deref() == Some(agreed.as_str()))
+        .then_some(agreed)
+}
+
+/// Identifies a cohort's active video contract without changing its MDC checksum.
+fn cohort_fingerprint(mdc_checksum: &str, video_contract: Option<&str>) -> String {
+    match video_contract {
+        Some(contract) => format!("{mdc_checksum}\0video_contract\0{contract}"),
+        None => mdc_checksum.to_string(),
+    }
+}
+
+/// Splits a fingerprint back into the MDC checksum and video contract it carries.
+fn fingerprint_parts(fingerprint: &str) -> (&str, Option<&str>) {
+    match fingerprint.split_once("\0video_contract\0") {
+        Some((mdc_checksum, contract)) => (mdc_checksum, Some(contract)),
+        None => (fingerprint, None),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct GroupSpec {
     pub(crate) key: GroupKey,
+    pub(crate) mdc_checksum: String,
     pub(crate) fingerprint: String,
     pub(crate) generation: u64,
     pub(crate) representative: DesiredInstance,
+    /// Contract shared by the cohort, if any.
+    pub(crate) video_contract: Option<String>,
 }
 
 #[async_trait]
@@ -95,6 +128,14 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()>;
 
+    fn replace_prepared_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Self::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()>;
+
     fn remove_group(&self, key: &GroupKey);
 
     fn discard_prepared(&self, prepared: Self::Prepared);
@@ -106,38 +147,54 @@ pub(crate) trait ControllerHost: Send + Sync + 'static {
 enum GroupStatus {
     Idle,
     Queued {
-        fingerprint: String,
+        mdc_checksum: String,
+        committed_members: Option<BTreeSet<String>>,
     },
     Building {
-        fingerprint: String,
+        mdc_checksum: String,
         generation: u64,
         cancellation: CancellationToken,
+        committed_members: Option<BTreeSet<String>>,
     },
     Ready {
-        fingerprint: String,
+        mdc_checksum: String,
         committed_members: BTreeSet<String>,
     },
     Retrying {
-        fingerprint: String,
+        mdc_checksum: String,
         deadline: Instant,
+        committed_members: Option<BTreeSet<String>>,
     },
-    Conflict,
     Blocked {
-        fingerprint: String,
+        mdc_checksum: String,
         deadline: Instant,
+        committed_members: Option<BTreeSet<String>>,
     },
     BlockedReady {
-        fingerprint: String,
+        mdc_checksum: String,
         committed_members: BTreeSet<String>,
         deadline: Instant,
     },
 }
 
+/// The committed pipeline that keeps serving while its replacement is prepared.
+/// Retired once the replacement commits or the commit is withdrawn.
+struct RetainedPipeline {
+    admission_tx: watch::Sender<Vec<u64>>,
+    /// Contract this pipeline expands video prompts with. Held here because the
+    /// group's status carries the *replacement's* fingerprint while a rebuild is
+    /// pending, so it is the only record of what the retained workers must publish.
+    /// `None` means it was built without exact video routing.
+    contract: Option<String>,
+}
+
 struct DesiredGroup {
-    generation: u64,
     retry_attempt: u32,
     cohorts: HashMap<String, BTreeSet<String>>,
+    cohort_order: VecDeque<String>,
+    reported_rejections: HashSet<String>,
     admission_tx: watch::Sender<Vec<u64>>,
+    retained: Option<RetainedPipeline>,
     status: GroupStatus,
 }
 
@@ -145,28 +202,59 @@ impl DesiredGroup {
     fn new() -> Self {
         let (admission_tx, _) = watch::channel(Vec::new());
         Self {
-            generation: 0,
             retry_attempt: 0,
             cohorts: HashMap::new(),
+            cohort_order: VecDeque::new(),
+            reported_rejections: HashSet::new(),
             admission_tx,
+            retained: None,
             status: GroupStatus::Idle,
         }
     }
 
     fn insert(&mut self, instance: &DesiredInstance) {
+        if !self.cohorts.contains_key(&instance.mdc_checksum) {
+            self.cohort_order.push_back(instance.mdc_checksum.clone());
+        }
         self.cohorts
-            .entry(instance.fingerprint.clone())
+            .entry(instance.mdc_checksum.clone())
             .or_default()
             .insert(instance.key.clone());
     }
 
     fn remove(&mut self, instance: &DesiredInstance) {
-        let Some(cohort) = self.cohorts.get_mut(&instance.fingerprint) else {
+        let Some(cohort) = self.cohorts.get_mut(&instance.mdc_checksum) else {
             return;
         };
         cohort.remove(&instance.key);
         if cohort.is_empty() {
-            self.cohorts.remove(&instance.fingerprint);
+            self.cohorts.remove(&instance.mdc_checksum);
+            self.cohort_order
+                .retain(|checksum| checksum != &instance.mdc_checksum);
+            self.reported_rejections.remove(&instance.mdc_checksum);
+        }
+    }
+
+    fn selected_checksum(&self) -> Option<&str> {
+        self.cohort_order.front().map(String::as_str)
+    }
+
+    fn report_rejections(&mut self, key: &GroupKey) {
+        let Some(incumbent) = self.cohort_order.front() else {
+            return;
+        };
+        for checksum in self.cohort_order.iter().skip(1) {
+            if !self.reported_rejections.insert(checksum.clone()) {
+                continue;
+            }
+            tracing::error!(
+                model = %key.model_name,
+                worker_set = %key.worker_set_key,
+                incumbent_checksum = %incumbent,
+                rejected_checksum = %checksum,
+                instance = ?self.cohorts.get(checksum).and_then(|members| members.first()),
+                "Rejected incompatible workers; the first accepted configuration retains the WorkerSet"
+            );
         }
     }
 }
@@ -193,6 +281,9 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     groups: HashMap<GroupKey, DesiredGroup>,
     revision: u64,
     instance_revisions: HashMap<String, u64>,
+    /// The revision at the last `DiscoveryEvent::Resync`. A periodic list that started before
+    /// it can carry an instance the resync removed, so its result is discarded.
+    resync_revision: u64,
     builds: JoinSet<BuildResult<H::Prepared>>,
     reconciliations: JoinSet<ReconciliationResult>,
     active_builds: usize,
@@ -212,6 +303,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             groups: HashMap::new(),
             revision: 0,
             instance_revisions: HashMap::new(),
+            resync_revision: 0,
             builds: JoinSet::new(),
             reconciliations: JoinSet::new(),
             active_builds: 0,
@@ -303,19 +395,37 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 tracing::error!("Unexpected non-model removal in model discovery stream");
                 false
             }
+            DiscoveryEvent::Resync(instances) => {
+                // A resync supersedes every list that started before it, including one that
+                // started at the current revision: the events it missed never reached the
+                // controller, so nothing advanced the revision on their behalf.
+                self.revision = self.revision.wrapping_add(1);
+                self.resync_revision = self.revision;
+                self.apply_reconciliation(
+                    ReconciliationResult {
+                        revision: self.revision,
+                        instances: Ok(instances),
+                    },
+                    namespace_filter,
+                );
+                false
+            }
         };
     }
 
     fn apply_added(&mut self, instance: DesiredInstance) -> bool {
         if let Some(existing) = self.desired.get(&instance.key) {
-            if existing.fingerprint == instance.fingerprint
+            if existing.mdc_checksum == instance.mdc_checksum
                 && existing.projection_fingerprint == instance.projection_fingerprint
+                && existing.video_contract == instance.video_contract
             {
+                // A repeated registration still confirms liveness after an older snapshot.
+                self.record_mutation(instance.key.clone());
                 return false;
             }
             if existing.materializes_worker_set()
                 && (existing.group_key != instance.group_key
-                    || existing.fingerprint != instance.fingerprint)
+                    || existing.mdc_checksum != instance.mdc_checksum)
             {
                 tracing::error!(
                     instance = instance.key,
@@ -323,6 +433,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     candidate_group = %instance.group_key.id(),
                     "Rejected an in-place materialization change; worker instance paths identify immutable incarnations"
                 );
+                self.record_mutation(instance.key.clone());
                 return false;
             }
         }
@@ -332,17 +443,23 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let instance_id = instance.mcid.instance_id;
         let instance_key = instance.key.clone();
         let materializes_worker_set = instance.materializes_worker_set();
+        let mut affects_selected = false;
         if materializes_worker_set {
-            self.groups
+            let group = self
+                .groups
                 .entry(group_key.clone())
-                .or_insert_with(DesiredGroup::new)
-                .insert(&instance);
+                .or_insert_with(DesiredGroup::new);
+            group.insert(&instance);
+            affects_selected = group.selected_checksum() == Some(instance.mdc_checksum.as_str());
+            group.report_rejections(&group_key);
         }
         self.desired.insert(instance.key.clone(), instance);
         self.record_mutation(instance_key);
 
         if materializes_worker_set {
-            self.reconcile_group(&group_key, true);
+            if affects_selected {
+                self.reconcile_group(&group_key, true);
+            }
         } else {
             for key in self.materialization_groups_for(&endpoint_id, instance_id) {
                 self.reconcile_group(&key, true);
@@ -358,7 +475,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             return false;
         };
         let affected_groups = if instance.materializes_worker_set() {
-            vec![instance.group_key.clone()]
+            self.groups
+                .get(&instance.group_key)
+                .filter(|group| group.selected_checksum() == Some(instance.mdc_checksum.as_str()))
+                .map(|_| vec![instance.group_key.clone()])
+                .unwrap_or_default()
         } else {
             self.materialization_groups_for(&instance.endpoint_id, instance.mcid.instance_id)
         };
@@ -381,6 +502,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
 
         if group.cohorts.is_empty() {
             group.admission_tx.send_replace(Vec::new());
+            if let Some(retained) = group.retained.take() {
+                retained.admission_tx.send_replace(Vec::new());
+            }
             cancel_build(&old_status);
             if status_has_commit(&old_status) {
                 self.host.remove_group(key);
@@ -388,46 +512,109 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             return;
         }
 
-        if group.cohorts.len() > 1 {
-            group.admission_tx.send_replace(Vec::new());
-            cancel_build(&old_status);
-            if status_has_commit(&old_status) {
-                self.host.remove_group(key);
-            }
-            if !matches!(old_status, GroupStatus::Conflict) {
-                group.generation = group.generation.wrapping_add(1);
-                group.retry_attempt = 0;
-            }
-            group.status = GroupStatus::Conflict;
-            self.groups.insert(key.clone(), group);
-            return;
-        }
-
-        let (fingerprint, member_keys) = group
-            .cohorts
-            .iter()
-            .next()
-            .map(|(fingerprint, members)| (fingerprint.clone(), members.clone()))
-            .expect("non-empty group has one cohort");
+        let mdc_checksum = group
+            .selected_checksum()
+            .expect("non-empty group has a cohort")
+            .to_string();
+        let member_keys = group.cohorts[&mdc_checksum].clone();
         let members = self.members(&member_keys);
+        let fingerprint =
+            cohort_fingerprint(&mdc_checksum, cohort_video_contract(&members).as_deref());
+        let fingerprint_changed =
+            status_checksum(&old_status).is_some_and(|previous| previous != fingerprint);
+        let mut retained_commit = status_committed_members(&old_status).cloned();
+        // The contract the currently committed pipeline serves with. While a rebuild
+        // is pending, `old_status` names the replacement, so the retained pipeline is
+        // the authority on what its own workers must publish.
+        let committed_contract = match &group.retained {
+            Some(retained) => retained.contract.clone(),
+            None => fingerprint_parts(status_checksum(&old_status).unwrap_or_default())
+                .1
+                .map(str::to_string),
+        };
+        if fingerprint_changed {
+            retained_commit = retained_commit.and_then(|committed_members| {
+                let (previous_checksum, _) = fingerprint_parts(status_checksum(&old_status)?);
+                if previous_checksum != mdc_checksum {
+                    return None;
+                }
+                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+            });
+            cancel_build(&old_status);
+            if retained_commit.is_some() {
+                // The retained pipeline keeps its own sender, or its client leaves the
+                // update loop and freezes on the worker list it last saw. Retained
+                // pipeline clients must never observe the successor's IDs, so the
+                // successor builds against a fresh channel.
+                let (successor_tx, _) = watch::channel(Vec::new());
+                let previous_tx = std::mem::replace(&mut group.admission_tx, successor_tx);
+                group.retained.get_or_insert_with(|| RetainedPipeline {
+                    admission_tx: previous_tx,
+                    contract: committed_contract,
+                });
+            } else {
+                group.admission_tx.send_replace(Vec::new());
+                if let Some(retained) = group.retained.take() {
+                    retained.admission_tx.send_replace(Vec::new());
+                }
+                if status_has_commit(&old_status) {
+                    self.host.remove_group(key);
+                }
+                // Retained pipeline clients must never observe the successor's IDs.
+                let (admission_tx, _) = watch::channel(Vec::new());
+                group.admission_tx = admission_tx;
+            }
+            group.reported_rejections.clear();
+            group.retry_attempt = 0;
+        } else if group.retained.is_some() {
+            // A rebuild is already pending, so the fingerprint tracks the replacement
+            // and can stay put while the retained workers change underneath it. Its
+            // contract is checked again here, or a worker that republished a different
+            // one keeps receiving requests expanded with the contract it dropped.
+            let had_commit = retained_commit.is_some();
+            retained_commit = retained_commit.and_then(|committed_members| {
+                surviving_commit(&members, &committed_members, committed_contract.as_deref())
+            });
+            if had_commit && retained_commit.is_none() {
+                self.host.remove_group(key);
+            }
+        }
+        // Follow the retained pipeline's membership until it is retired, so a worker
+        // that leaves during a slow or failing rebuild stops receiving requests.
+        if let Some(retained_members) = &retained_commit {
+            if let Some(retained) = &group.retained {
+                let still_serving = members
+                    .iter()
+                    .filter(|member| retained_members.contains(&member.key))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                retained
+                    .admission_tx
+                    .send_replace(admitted_ids(&still_serving));
+            }
+        } else if let Some(retained) = group.retained.take() {
+            retained.admission_tx.send_replace(Vec::new());
+        }
+        group.report_rejections(key);
         let admitted = admitted_ids(&members);
         if !matches!(
             &old_status,
             GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-        ) {
+        ) || (fingerprint_changed && retained_commit.is_some())
+        {
             group.admission_tx.send_replace(admitted);
         }
 
         group.status = match old_status {
             GroupStatus::Ready {
-                fingerprint: ready_fingerprint,
+                mdc_checksum: ready_checksum,
                 committed_members,
             }
             | GroupStatus::BlockedReady {
-                fingerprint: ready_fingerprint,
+                mdc_checksum: ready_checksum,
                 committed_members,
                 ..
-            } if ready_fingerprint == fingerprint => {
+            } if ready_checksum == fingerprint => {
                 let current_members = member_keys;
                 let old_admitted = group.admission_tx.borrow().clone();
                 let new_admitted = admitted_ids(&members);
@@ -445,7 +632,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         group.admission_tx.send_replace(new_admitted);
                         group.retry_attempt = 0;
                         GroupStatus::Ready {
-                            fingerprint,
+                            mdc_checksum: fingerprint,
                             committed_members: current_members,
                         }
                     }
@@ -460,7 +647,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group replacement blocked; retaining the last safe commit"
                         );
                         GroupStatus::BlockedReady {
-                            fingerprint,
+                            mdc_checksum: fingerprint,
                             committed_members,
                             deadline: Instant::now() + delay,
                         }
@@ -468,7 +655,6 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     Err(error) => {
                         group.admission_tx.send_replace(Vec::new());
                         self.host.remove_group(key);
-                        group.generation = group.generation.wrapping_add(1);
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         tracing::warn!(
                             group = %key.id(),
@@ -476,48 +662,60 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                             "Discovery-group membership replacement failed; withdrawing stale commit"
                         );
                         GroupStatus::Blocked {
-                            fingerprint,
+                            mdc_checksum: fingerprint,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
+                            committed_members: None,
                         }
                     }
                 }
             }
+            // These arms hold a replacement whose fingerprint has not moved. They carry
+            // `retained_commit` rather than the commit the status arrived with, so a
+            // commit withdrawn above is not claimed again by the pending rebuild.
             GroupStatus::Building {
-                fingerprint: building_fingerprint,
+                mdc_checksum: building_checksum,
                 generation,
                 cancellation,
-            } if building_fingerprint == fingerprint => GroupStatus::Building {
-                fingerprint,
+                ..
+            } if building_checksum == fingerprint => GroupStatus::Building {
+                mdc_checksum: fingerprint,
                 generation,
                 cancellation,
+                committed_members: retained_commit,
             },
             GroupStatus::Queued {
-                fingerprint: queued_fingerprint,
-            } if queued_fingerprint == fingerprint => GroupStatus::Queued { fingerprint },
+                mdc_checksum: queued_checksum,
+                ..
+            } if queued_checksum == fingerprint => GroupStatus::Queued {
+                mdc_checksum: fingerprint,
+                committed_members: retained_commit,
+            },
             GroupStatus::Retrying {
-                fingerprint: retry_fingerprint,
+                mdc_checksum: retry_checksum,
                 deadline,
-            } if retry_fingerprint == fingerprint && !desired_changed => GroupStatus::Retrying {
-                fingerprint,
+                ..
+            } if retry_checksum == fingerprint && !desired_changed => GroupStatus::Retrying {
+                mdc_checksum: fingerprint,
                 deadline,
+                committed_members: retained_commit,
             },
             GroupStatus::Blocked {
-                fingerprint: blocked_fingerprint,
+                mdc_checksum: blocked_checksum,
                 deadline,
-            } if blocked_fingerprint == fingerprint && !desired_changed => GroupStatus::Blocked {
-                fingerprint,
+                ..
+            } if blocked_checksum == fingerprint && !desired_changed => GroupStatus::Blocked {
+                mdc_checksum: fingerprint,
                 deadline,
+                committed_members: retained_commit,
             },
             previous => {
                 cancel_build(&previous);
-                if status_has_commit(&previous) {
-                    group.admission_tx.send_replace(Vec::new());
-                    self.host.remove_group(key);
-                    group.admission_tx.send_replace(admitted_ids(&members));
-                }
-                group.generation = group.generation.wrapping_add(1);
+                group.admission_tx.send_replace(admitted_ids(&members));
                 group.retry_attempt = 0;
-                GroupStatus::Queued { fingerprint }
+                GroupStatus::Queued {
+                    mdc_checksum: fingerprint,
+                    committed_members: retained_commit,
+                }
             }
         };
         self.groups.insert(key.clone(), group);
@@ -561,6 +759,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 instance.materializes_worker_set()
                     && &instance.endpoint_id == endpoint_id
                     && instance.mcid.instance_id == instance_id
+                    && self.groups.get(&instance.group_key).is_some_and(|group| {
+                        group.selected_checksum() == Some(instance.mdc_checksum.as_str())
+                    })
             })
             .map(|instance| instance.group_key.clone())
             .collect::<HashSet<_>>()
@@ -593,34 +794,47 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             let Some(group) = self.groups.get_mut(&key) else {
                 continue;
             };
-            let GroupStatus::Queued { fingerprint } = &group.status else {
+            let GroupStatus::Queued { .. } = &group.status else {
                 continue;
             };
-            let fingerprint = fingerprint.clone();
-            let Some(member_key) = group
-                .cohorts
-                .get(&fingerprint)
-                .and_then(|members| members.first())
-            else {
+            let committed_members = match &group.status {
+                GroupStatus::Queued {
+                    committed_members, ..
+                } => committed_members.clone(),
+                _ => unreachable!("queued status was checked above"),
+            };
+            let Some(mdc_checksum) = group.selected_checksum().map(str::to_string) else {
                 continue;
             };
-            let Some(representative) = self.desired.get(member_key).cloned() else {
+            let Some(member_keys) = group.cohorts.get(&mdc_checksum) else {
                 continue;
             };
+            let members = member_keys
+                .iter()
+                .filter_map(|member_key| self.desired.get(member_key).cloned())
+                .collect::<Vec<_>>();
+            let Some(representative) = members.first().cloned() else {
+                continue;
+            };
+            let video_contract = cohort_video_contract(&members);
+            let fingerprint = cohort_fingerprint(&mdc_checksum, video_contract.as_deref());
 
             let cancellation = CancellationToken::new();
             let generation = self.next_build_generation;
             self.next_build_generation = self.next_build_generation.wrapping_add(1).max(1);
             let spec = GroupSpec {
                 key: key.clone(),
+                mdc_checksum: mdc_checksum.clone(),
                 fingerprint: fingerprint.clone(),
                 generation,
                 representative,
+                video_contract,
             };
             group.status = GroupStatus::Building {
-                fingerprint,
+                mdc_checksum: fingerprint,
                 generation,
                 cancellation: cancellation.clone(),
+                committed_members,
             };
 
             let host = self.host.clone();
@@ -631,7 +845,11 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => BuildOutcome::Cancelled,
-                        result = host.prepare(task_spec.clone(), admitted_ids, cancellation.clone()) => {
+                        result = host.prepare(
+                            task_spec.clone(),
+                            admitted_ids,
+                            cancellation.clone(),
+                        ) => {
                             match result {
                                 Ok(prepared) => BuildOutcome::Prepared(prepared),
                                 Err(error) => BuildOutcome::Failed(error),
@@ -641,9 +859,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 });
                 let outcome = match future.catch_unwind().await {
                     Ok(outcome) => outcome,
-                    Err(_) => BuildOutcome::Failed(anyhow::anyhow!(
-                        "model materialization panicked"
-                    )),
+                    Err(_) => {
+                        BuildOutcome::Failed(anyhow::anyhow!("model materialization panicked"))
+                    }
                 };
                 BuildResult {
                     spec: task_spec,
@@ -664,12 +882,27 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let is_current = matches!(
             &group.status,
             GroupStatus::Building {
-                fingerprint,
+                mdc_checksum,
                 generation,
                 ..
-            } if fingerprint == &result.spec.fingerprint && *generation == result.spec.generation
-        ) && group.cohorts.len() == 1
-            && group.cohorts.contains_key(&result.spec.fingerprint);
+            } if mdc_checksum == &result.spec.fingerprint && *generation == result.spec.generation
+        ) && group.selected_checksum() == Some(result.spec.mdc_checksum.as_str())
+            && group.cohorts.contains_key(&result.spec.mdc_checksum)
+            && group
+                .cohorts
+                .get(&result.spec.mdc_checksum)
+                .is_some_and(|member_keys| {
+                    cohort_fingerprint(
+                        &result.spec.mdc_checksum,
+                        cohort_video_contract(&self.members(member_keys)).as_deref(),
+                    ) == result.spec.fingerprint
+                });
+        let committed_members = match &group.status {
+            GroupStatus::Building {
+                committed_members, ..
+            } => committed_members.clone(),
+            _ => None,
+        };
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -682,20 +915,27 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             BuildOutcome::Prepared(prepared) => {
                 let member_keys = group
                     .cohorts
-                    .get(&result.spec.fingerprint)
+                    .get(&result.spec.mdc_checksum)
                     .cloned()
                     .unwrap_or_default();
                 let members = self.members(&member_keys);
                 let adapters = self.adapters_for_members(&member_keys);
                 group.admission_tx.send_replace(admitted_ids(&members));
-                match self
-                    .host
-                    .commit_group(&result.spec, prepared, &members, &adapters)
-                {
+                let commit_result = if committed_members.is_some() {
+                    self.host
+                        .replace_prepared_group(&result.spec, prepared, &members, &adapters)
+                } else {
+                    self.host
+                        .commit_group(&result.spec, prepared, &members, &adapters)
+                };
+                match commit_result {
                     Ok(()) => {
+                        // The replacement has taken over, so retire the sender the
+                        // superseded pipeline was watching.
+                        group.retained = None;
                         group.retry_attempt = 0;
                         group.status = GroupStatus::Ready {
-                            fingerprint: result.spec.fingerprint,
+                            mdc_checksum: result.spec.fingerprint,
                             committed_members: member_keys,
                         };
                     }
@@ -708,8 +948,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                         );
                         group.retry_attempt = group.retry_attempt.saturating_add(1);
                         group.status = GroupStatus::Blocked {
-                            fingerprint: result.spec.fingerprint,
+                            mdc_checksum: result.spec.fingerprint,
                             deadline: Instant::now() + retry_delay(group.retry_attempt),
+                            committed_members,
                         };
                     }
                 }
@@ -725,13 +966,15 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                     "Model materialization failed; scheduling retry"
                 );
                 group.status = GroupStatus::Retrying {
-                    fingerprint: result.spec.fingerprint,
+                    mdc_checksum: result.spec.fingerprint,
                     deadline: Instant::now() + delay,
+                    committed_members,
                 };
             }
             BuildOutcome::Cancelled => {
                 group.status = GroupStatus::Queued {
-                    fingerprint: result.spec.fingerprint,
+                    mdc_checksum: result.spec.fingerprint,
+                    committed_members,
                 };
             }
         }
@@ -754,22 +997,24 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         let now = Instant::now();
         let mut retained_retries = Vec::new();
         for (key, group) in &mut self.groups {
-            let (fingerprint, deadline) = match &group.status {
+            let (mdc_checksum, deadline, committed_members) = match &group.status {
                 GroupStatus::Retrying {
-                    fingerprint,
+                    mdc_checksum,
                     deadline,
+                    committed_members,
                 }
                 | GroupStatus::Blocked {
-                    fingerprint,
+                    mdc_checksum,
                     deadline,
-                } => (fingerprint, deadline),
+                    committed_members,
+                } => (mdc_checksum, deadline, committed_members.clone()),
                 GroupStatus::BlockedReady {
-                    fingerprint,
+                    mdc_checksum,
                     committed_members,
                     deadline,
                 } if *deadline <= now => {
                     group.status = GroupStatus::Ready {
-                        fingerprint: fingerprint.clone(),
+                        mdc_checksum: mdc_checksum.clone(),
                         committed_members: committed_members.clone(),
                     };
                     retained_retries.push(key.clone());
@@ -779,7 +1024,8 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             };
             if *deadline <= now {
                 group.status = GroupStatus::Queued {
-                    fingerprint: fingerprint.clone(),
+                    mdc_checksum: mdc_checksum.clone(),
+                    committed_members,
                 };
             }
         }
@@ -791,6 +1037,9 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
     async fn shutdown_builds(&mut self) {
         for group in self.groups.values_mut() {
             group.admission_tx.send_replace(Vec::new());
+            if let Some(retained) = group.retained.take() {
+                retained.admission_tx.send_replace(Vec::new());
+            }
             cancel_build(&group.status);
         }
         self.builds.abort_all();
@@ -815,6 +1064,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         result: ReconciliationResult,
         namespace_filter: &NamespaceFilter,
     ) {
+        if result.revision < self.resync_revision {
+            tracing::debug!(
+                "Discarding a model reconciliation snapshot that predates a discovery resync"
+            );
+            return;
+        }
         let instances = match result.instances {
             Ok(instances) => instances,
             Err(error) => {
@@ -888,11 +1143,80 @@ fn cancel_build(status: &GroupStatus) {
     }
 }
 
-fn status_has_commit(status: &GroupStatus) -> bool {
-    matches!(
-        status,
-        GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
+/// The committed workers that may keep serving: those still present, provided they
+/// all still publish `contract`. `None` withdraws the commit.
+fn surviving_commit(
+    members: &[DesiredInstance],
+    committed_members: &BTreeSet<String>,
+    contract: Option<&str>,
+) -> Option<BTreeSet<String>> {
+    // Keep serving the committed workers that are still here rather than demanding
+    // the whole membership, so dropping the last worker of a rolling upgrade does
+    // not withdraw a healthy group.
+    let surviving = members
+        .iter()
+        .filter(|member| committed_members.contains(&member.key))
+        .collect::<Vec<_>>();
+    if surviving.is_empty() {
+        return None;
+    }
+    // The committed pipeline expands video prompts with the contract it was built
+    // from, so every worker it still serves must publish that same contract; one
+    // that republished a different contract under the same ID would otherwise keep
+    // receiving requests against the old one.
+    if let Some(contract) = contract
+        && !surviving
+            .iter()
+            .all(|member| member.video_contract.as_deref() == Some(contract))
+    {
+        return None;
+    }
+    Some(
+        surviving
+            .into_iter()
+            .map(|member| member.key.clone())
+            .collect(),
     )
+}
+
+fn status_checksum(status: &GroupStatus) -> Option<&str> {
+    match status {
+        GroupStatus::Idle => None,
+        GroupStatus::Queued { mdc_checksum, .. }
+        | GroupStatus::Building { mdc_checksum, .. }
+        | GroupStatus::Ready { mdc_checksum, .. }
+        | GroupStatus::Retrying { mdc_checksum, .. }
+        | GroupStatus::Blocked { mdc_checksum, .. }
+        | GroupStatus::BlockedReady { mdc_checksum, .. } => Some(mdc_checksum),
+    }
+}
+
+fn status_has_commit(status: &GroupStatus) -> bool {
+    status_committed_members(status).is_some()
+}
+
+fn status_committed_members(status: &GroupStatus) -> Option<&BTreeSet<String>> {
+    match status {
+        GroupStatus::Ready {
+            committed_members, ..
+        }
+        | GroupStatus::BlockedReady {
+            committed_members, ..
+        } => Some(committed_members),
+        GroupStatus::Queued {
+            committed_members, ..
+        }
+        | GroupStatus::Building {
+            committed_members, ..
+        }
+        | GroupStatus::Retrying {
+            committed_members, ..
+        }
+        | GroupStatus::Blocked {
+            committed_members, ..
+        } => committed_members.as_ref(),
+        GroupStatus::Idle => None,
+    }
 }
 
 async fn wait_for_deadline(deadline: Option<Instant>) {
@@ -923,6 +1247,8 @@ mod tests {
     };
     use tokio::sync::{Semaphore, mpsc};
 
+    use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
     struct Prepared(u64);
 
     struct FakeHost {
@@ -935,8 +1261,10 @@ mod tests {
         committed: Mutex<HashMap<String, BTreeSet<String>>>,
         adapters: Mutex<HashMap<String, BTreeSet<String>>>,
         adapter_projections: Mutex<HashMap<String, HashMap<String, String>>>,
+        admissions: Mutex<Vec<watch::Receiver<Vec<u64>>>>,
         removed_groups: AtomicUsize,
         discarded: AtomicUsize,
+        prepared_replacements: AtomicUsize,
     }
 
     impl FakeHost {
@@ -953,8 +1281,10 @@ mod tests {
                     committed: Mutex::new(HashMap::new()),
                     adapters: Mutex::new(HashMap::new()),
                     adapter_projections: Mutex::new(HashMap::new()),
+                    admissions: Mutex::new(Vec::new()),
                     removed_groups: AtomicUsize::new(0),
                     discarded: AtomicUsize::new(0),
+                    prepared_replacements: AtomicUsize::new(0),
                 }),
                 start_rx,
             )
@@ -1042,19 +1372,21 @@ mod tests {
                     name: endpoint,
                 },
                 group_key: group_key(),
+                mdc_checksum: card.mdcsum().to_string(),
+                projection_fingerprint: card.source_path.clone().unwrap(),
+                video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
                 card,
-                fingerprint: "spec".to_string(),
-                projection_fingerprint: "projection".to_string(),
             }))
         }
 
         async fn prepare(
             &self,
             spec: GroupSpec,
-            _admitted_ids: watch::Receiver<Vec<u64>>,
+            admitted_ids: watch::Receiver<Vec<u64>>,
             _cancellation: CancellationToken,
         ) -> anyhow::Result<Self::Prepared> {
             let build = self.starts.fetch_add(1, Ordering::SeqCst) as u64;
+            self.admissions.lock().unwrap().push(admitted_ids);
             self.start_tx.send(spec).unwrap();
             self.release.acquire().await.unwrap().forget();
             if self
@@ -1086,6 +1418,12 @@ mod tests {
             {
                 anyhow::bail!("injected commit conflict");
             }
+            // `ModelManager::commit_discovery_group` refuses a group ID it already holds.
+            anyhow::ensure!(
+                !self.committed.lock().unwrap().contains_key(&spec.key.id()),
+                "discovery group {:?} is already committed",
+                spec.key.id()
+            );
             self.committed.lock().unwrap().insert(
                 spec.key.id(),
                 members.iter().map(|member| member.key.clone()).collect(),
@@ -1109,12 +1447,30 @@ mod tests {
             {
                 anyhow::bail!("injected replacement conflict");
             }
+            // `ModelManager::replace_discovery_group` requires a committed group ID.
+            anyhow::ensure!(
+                self.committed.lock().unwrap().contains_key(&key.id()),
+                "committed discovery group {:?} not found",
+                key.id()
+            );
             self.committed.lock().unwrap().insert(
                 key.id(),
                 members.iter().map(|member| member.key.clone()).collect(),
             );
             self.store_adapters(key, adapters);
             Ok(())
+        }
+
+        fn replace_prepared_group(
+            &self,
+            spec: &GroupSpec,
+            prepared: Self::Prepared,
+            members: &[DesiredInstance],
+            adapters: &[DesiredInstance],
+        ) -> anyhow::Result<()> {
+            let Prepared(_build) = prepared;
+            self.prepared_replacements.fetch_add(1, Ordering::SeqCst);
+            self.replace_group(&spec.key, members, adapters)
         }
 
         fn remove_group(&self, key: &GroupKey) {
@@ -1141,7 +1497,23 @@ mod tests {
         }
     }
 
-    fn instance(id: u64, fingerprint: &str) -> DesiredInstance {
+    fn instance(id: u64, mdc_checksum: &str) -> DesiredInstance {
+        build_instance(id, mdc_checksum, None)
+    }
+
+    fn build_instance(
+        id: u64,
+        mdc_checksum: &str,
+        video_contract: Option<serde_json::Value>,
+    ) -> DesiredInstance {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.source_path = Some(mdc_checksum.to_string());
+        if let Some(contract) = video_contract {
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+        }
         let mcid = ModelCardInstanceId {
             namespace: "namespace".to_string(),
             component: "worker".to_string(),
@@ -1157,11 +1529,39 @@ mod tests {
                 component: "worker".to_string(),
                 name: "generate".to_string(),
             },
-            card: ModelDeploymentCard::with_name_only("model"),
             group_key: group_key(),
-            fingerprint: fingerprint.to_string(),
-            projection_fingerprint: fingerprint.to_string(),
+            mdc_checksum: card.mdcsum().to_string(),
+            projection_fingerprint: mdc_checksum.to_string(),
+            video_contract: crate::discovery::watcher::qwen_video_contract_digest(&card),
+            card,
         }
+    }
+
+    /// Builds a worker that publishes a Qwen video prompt-expansion contract.
+    ///
+    /// The contract stays out of `mdcsum()`, so workers that differ only in
+    /// `resize_mode` share a cohort and disagree only on the contract.
+    fn instance_with_contract(id: u64, mdc_checksum: &str, resize_mode: &str) -> DesiredInstance {
+        let instance = build_instance(
+            id,
+            mdc_checksum,
+            Some(serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": resize_mode,
+            })),
+        );
+        assert!(instance.video_contract.is_some());
+        assert_eq!(
+            instance.mdc_checksum,
+            self::instance(id, mdc_checksum).mdc_checksum
+        );
+        instance
+    }
+
+    fn contract_digest(resize_mode: &str) -> String {
+        instance_with_contract(0, "spec", resize_mode)
+            .video_contract
+            .unwrap()
     }
 
     fn discovery_instance(instance: &DesiredInstance) -> DiscoveryInstance {
@@ -1179,6 +1579,235 @@ mod tests {
         let result = controller.builds.join_next().await.unwrap().unwrap();
         controller.active_builds -= 1;
         controller.apply_build_result(result);
+    }
+
+    #[tokio::test]
+    async fn contract_agreement_drives_the_fingerprint_and_survives_a_rolling_upgrade() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        // A legacy worker that predates the contract, alongside one that publishes it.
+        let legacy = instance(1, "same");
+        let upgraded = instance_with_contract(2, "same", "round_ties_even");
+        assert_eq!(legacy.mdc_checksum, upgraded.mdc_checksum);
+
+        controller.apply_added(legacy.clone());
+        controller.apply_added(upgraded.clone());
+        controller.start_queued_builds();
+        let mixed_spec = starts.recv().await.unwrap();
+        // The cohort disagrees, so exact video routing stays off.
+        assert_eq!(mixed_spec.video_contract, None);
+        assert_eq!(mixed_spec.fingerprint, mixed_spec.mdc_checksum);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([legacy.key.clone(), upgraded.key.clone()])
+        );
+        let committed_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+
+        // Removing the last legacy worker changes membership and contract agreement
+        // at once. Text service must keep running while the replacement is prepared.
+        controller.apply_removed(&legacy.key);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([legacy.key.clone(), upgraded.key.clone()]),
+            "the committed group must survive the upgrade's last legacy worker leaving"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        // The retained pipeline keeps its channel and stops admitting the worker
+        // that left, so it never routes to a worker that is gone.
+        assert_eq!(*committed_admissions.borrow(), vec![2]);
+        assert!(committed_admissions.has_changed().is_ok());
+
+        controller.start_queued_builds();
+        let upgraded_spec = starts.recv().await.unwrap();
+        assert_eq!(
+            upgraded_spec.video_contract,
+            Some(contract_digest("round_ties_even"))
+        );
+        assert_eq!(
+            upgraded_spec.fingerprint,
+            cohort_fingerprint(
+                &upgraded_spec.mdc_checksum,
+                Some(&contract_digest("round_ties_even"))
+            )
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+
+        // A retained commit is replaced in place, never committed a second time.
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 1);
+        assert_eq!(host.members(&group_key()), BTreeSet::from([upgraded.key]));
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn republished_contract_withdraws_the_commit_it_no_longer_matches() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let worker = instance_with_contract(1, "same", "round_ties_even");
+        let peer = instance_with_contract(2, "same", "round_ties_even");
+
+        controller.apply_added(worker.clone());
+        controller.apply_added(peer.clone());
+        controller.start_queued_builds();
+        let spec = starts.recv().await.unwrap();
+        assert_eq!(
+            spec.video_contract,
+            Some(contract_digest("round_ties_even"))
+        );
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()).len(), 2);
+
+        // The same instance ID republishes a different contract. The committed
+        // pipeline expands video prompts with the old one, so it cannot be kept.
+        let republished = instance_with_contract(1, "same", "legacy_ceil");
+        assert_eq!(republished.key, worker.key);
+        assert_ne!(republished.video_contract, worker.video_contract);
+        assert!(controller.apply_added(republished));
+
+        assert!(
+            host.members(&group_key()).is_empty(),
+            "a worker serving a contract it no longer publishes must lose its commit"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+
+        // The cohort now disagrees, so the rebuild turns exact video routing off.
+        controller.start_queued_builds();
+        let rebuilt = starts.recv().await.unwrap();
+        assert_eq!(rebuilt.video_contract, None);
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 0);
+        assert_eq!(host.members(&group_key()).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_republished_contract_during_a_pending_rebuild_withdraws_the_retained_commit() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "same", "round_ties_even");
+        let second = instance_with_contract(2, "same", "round_ties_even");
+
+        controller.apply_added(first.clone());
+        controller.apply_added(second.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let committed_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+
+        // A worker without a contract joins, so the cohort stops agreeing and a
+        // replacement with exact video routing off is queued. The commit built from
+        // `round_ties_even` keeps serving while that replacement is prepared.
+        let legacy = instance(3, "same");
+        controller.apply_added(legacy.clone());
+        assert_eq!(host.members(&group_key()).len(), 2);
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+
+        // Before that rebuild completes, a retained worker republishes a different
+        // contract. The cohort still has no common contract, so the replacement's
+        // fingerprint does not move -- but the retained pipeline still expands video
+        // prompts with `round_ties_even`, which worker 1 no longer publishes.
+        let republished = instance_with_contract(1, "same", "legacy_ceil");
+        assert_eq!(republished.key, first.key);
+        assert!(controller.apply_added(republished));
+
+        assert!(
+            host.members(&group_key()).is_empty(),
+            "a retained pipeline must not keep serving a worker that republished a different contract"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert!(committed_admissions.borrow().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_republished_contract_during_a_failed_rebuild_withdraws_the_retained_commit() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "same", "round_ties_even");
+        let second = instance_with_contract(2, "same", "round_ties_even");
+
+        controller.apply_added(first.clone());
+        controller.apply_added(second.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let committed_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+
+        // A worker without a contract joins and the replacement build fails, so the
+        // commit built from `round_ties_even` keeps serving across the retry.
+        host.failures.store(1, Ordering::SeqCst);
+        controller.apply_added(instance(3, "same"));
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()).len(), 2);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+
+        // A retained worker republishes a different contract while the failed rebuild
+        // waits to retry. The retained pipeline still expands video prompts with
+        // `round_ties_even`, so it cannot keep serving that worker.
+        let republished = instance_with_contract(1, "same", "legacy_ceil");
+        assert_eq!(republished.key, first.key);
+        assert!(controller.apply_added(republished));
+
+        assert!(
+            host.members(&group_key()).is_empty(),
+            "a failed rebuild must not keep a commit whose worker republished a different contract"
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert!(committed_admissions.borrow().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retained_pipeline_keeps_receiving_worker_updates_while_rebuilding() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance_with_contract(1, "same", "round_ties_even");
+        let second = instance_with_contract(2, "same", "round_ties_even");
+        let legacy = instance(3, "same");
+
+        controller.apply_added(first.clone());
+        controller.apply_added(second.clone());
+        controller.apply_added(legacy.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        let committed_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2, 3]);
+
+        // Dropping the legacy worker retains the commit and starts a rebuild that fails.
+        host.failures.store(1, Ordering::SeqCst);
+        controller.apply_removed(&legacy.key);
+        assert_eq!(*committed_admissions.borrow(), vec![1, 2]);
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()).len(), 3);
+
+        // A worker leaving during the failed rebuild must still reach the retained
+        // pipeline, or it keeps routing to a worker that is gone.
+        controller.apply_removed(&second.key);
+        assert_eq!(*committed_admissions.borrow(), vec![1]);
+        assert!(committed_admissions.has_changed().is_ok());
+
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
+        assert_eq!(host.prepared_replacements.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1234,7 +1863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conflict_fails_ready_group_closed_and_recovers_after_clear() {
+    async fn competing_cohorts_preserve_serving_until_complete_incumbent_drain() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
         let compatible = instance(1, "first-spec");
@@ -1247,34 +1876,44 @@ mod tests {
 
         let conflicting = instance(2, "second-spec");
         controller.apply_added(conflicting.clone());
-        assert!(host.members(&group_key()).is_empty());
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        controller.apply_added(instance(3, "second-spec"));
+        controller.apply_added(instance(4, "third-spec"));
+        let old_admissions = host.admissions.lock().unwrap()[0].clone();
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([compatible.key.clone()])
+        );
+        assert_eq!(*old_admissions.borrow(), vec![1]);
 
-        controller.apply_removed(&conflicting.key);
+        controller.apply_removed(&compatible.key);
+        assert!(host.members(&group_key()).is_empty());
+        assert!(old_admissions.borrow().is_empty());
+        assert!(old_admissions.has_changed().is_err());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
         finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([conflicting.key, instance(3, "second-spec").key])
+        );
+        assert_eq!(*host.admissions.lock().unwrap()[1].borrow(), vec![2, 3]);
+        assert!(old_admissions.borrow().is_empty());
     }
 
     #[tokio::test]
-    async fn conflict_during_build_cancels_without_publishing_either_cohort() {
+    async fn first_cohort_reserves_queued_and_active_construction() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
         let first = instance(1, "first-spec");
         let conflicting = instance(2, "second-spec");
         controller.apply_added(first.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-
         controller.apply_added(conflicting.clone());
-        finish_build(&mut controller).await;
-        assert!(host.members(&group_key()).is_empty());
-
-        controller.apply_removed(&conflicting.key);
         controller.start_queued_builds();
         starts.recv().await.unwrap();
+
+        controller.apply_added(instance(3, "second-spec"));
+        controller.apply_added(instance(4, "third-spec"));
         host.release.add_permits(1);
         finish_build(&mut controller).await;
         assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
@@ -1441,69 +2080,201 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 2);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn failed_build_remains_unpublished_until_its_retry_succeeds() {
+    #[tokio::test]
+    async fn snapshots_preserve_priority_and_recreated_cohorts_join_the_end() {
         let (host, mut starts) = FakeHost::new();
-        host.failures.store(1, Ordering::SeqCst);
         let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+        let first = instance(1, "first");
+        let second = instance(2, "second");
+        let third = instance(3, "third");
+        for member in [&first, &second, &third] {
+            controller.apply_added(member.clone());
+        }
+        controller.apply_removed(&second.key);
+        controller.apply_added(second.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: controller.revision,
+                instances: Ok([&second, &third, &first].map(discovery_instance).to_vec()),
+            },
+            &NamespaceFilter::Global,
+        );
+
+        // Snapshot order cannot promote a newcomer; disappearance resets priority.
+        for incumbent in [&first, &third, &second] {
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(
+                host.members(&group_key()),
+                BTreeSet::from([incumbent.key.clone()])
+            );
+            controller.apply_removed(&incumbent.key);
+        }
         assert!(host.members(&group_key()).is_empty());
-
-        tokio::time::advance(Duration::from_millis(999)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
-
-        tokio::time::advance(Duration::from_millis(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn blocked_group_retries_on_its_deadline_not_unrelated_churn() {
-        let (host, mut starts) = FakeHost::new();
-        host.commit_failures.store(1, Ordering::SeqCst);
-        let mut controller = ModelDiscoveryController::new(host.clone());
-        let desired = instance(1, "spec");
-        controller.apply_added(desired.clone());
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
+    async fn rejected_workers_and_adapters_cannot_reset_retry_or_change_publication() {
+        for fail_at_commit in [false, true] {
+            let (host, mut starts) = FakeHost::new();
+            if fail_at_commit {
+                host.commit_failures.store(1, Ordering::SeqCst);
+            } else {
+                host.failures.store(1, Ordering::SeqCst);
+            }
+            let mut controller = ModelDiscoveryController::new(host.clone());
+            let incumbent = instance(1, "incumbent");
+            let rejected = instance(2, "rejected");
+            let mut adapter = instance(2, "adapter");
+            adapter.mcid.model_suffix = Some("adapter".to_string());
+            adapter.key = adapter.mcid.to_path();
+            controller.apply_added(incumbent.clone());
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert!(host.members(&group_key()).is_empty());
 
-        let mut unrelated_adapter = instance(99, "spec");
-        unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
-        unrelated_adapter.key = unrelated_adapter.mcid.to_path();
-        controller.apply_added(unrelated_adapter);
-        controller.start_queued_builds();
-        assert!(starts.try_recv().is_err());
+            tokio::time::advance(Duration::from_millis(500)).await;
+            controller.apply_added(rejected.clone());
+            controller.apply_added(adapter.clone());
+            controller.apply_removed(&rejected.key);
+            controller.apply_added(rejected);
+            adapter.projection_fingerprint = "updated".to_string();
+            controller.apply_added(adapter.clone());
+            let mut unrelated_adapter = instance(99, "adapter");
+            unrelated_adapter.mcid.model_suffix = Some("unrelated-adapter".to_string());
+            unrelated_adapter.key = unrelated_adapter.mcid.to_path();
+            controller.apply_added(unrelated_adapter);
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
 
-        tokio::time::advance(Duration::from_secs(1)).await;
-        controller.release_due_retries();
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([desired.key]));
+            tokio::time::advance(Duration::from_millis(499)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            assert!(starts.try_recv().is_err());
+            assert!(host.members(&group_key()).is_empty());
+
+            tokio::time::advance(Duration::from_millis(1)).await;
+            controller.release_due_retries();
+            controller.start_queued_builds();
+            starts.recv().await.unwrap();
+            host.release.add_permits(1);
+            finish_build(&mut controller).await;
+            assert_eq!(
+                host.members(&group_key()),
+                BTreeSet::from([incumbent.key.clone()])
+            );
+            assert!(host.adapters(&group_key()).is_empty());
+
+            let mut admissions = host.admissions.lock().unwrap().last().unwrap().clone();
+            admissions.borrow_and_update();
+            // A publication attempt here would fail and withdraw the safe membership.
+            host.replace_failures.store(1, Ordering::SeqCst);
+            controller.apply_removed(&adapter.key);
+            controller.apply_added(adapter);
+            controller.apply_added(instance(3, "another-rejected"));
+            controller.apply_removed(&instance(3, "another-rejected").key);
+            assert_eq!(host.members(&group_key()), BTreeSet::from([incumbent.key]));
+            assert!(!admissions.has_changed().unwrap());
+            assert!(host.adapters(&group_key()).is_empty());
+        }
     }
 
     #[tokio::test]
-    async fn reconciliation_repairs_missed_state_without_undoing_newer_events() {
-        let (host, _starts) = FakeHost::new();
-        let mut controller = ModelDiscoveryController::new(host);
+    async fn a_resync_replaces_the_desired_instances() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
         let first = instance(1, "spec");
         let second = instance(2, "spec");
 
         controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
+        controller.apply_event(
+            DiscoveryEvent::Resync(vec![discovery_instance(&second)]),
+            &NamespaceFilter::Global,
+        );
+        assert_eq!(host.members(&group_key()), BTreeSet::from([second.key]));
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_cannot_revive_a_removed_instance() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        controller.apply_added(first.clone());
+        // The periodic list starts here and captures `first` before its removal.
+        let list_revision = controller.revision;
+        controller.apply_removed(&first.key);
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_is_discarded_when_no_event_advanced_the_revision() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        // The periodic list starts here and captures `first`. Its registration and its
+        // removal are then both lost to a backend buffer overflow, so no event reaches
+        // the controller to advance the revision before the resync that follows.
+        let list_revision = controller.revision;
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_repairs_missed_state_without_undoing_newer_events() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance(1, "spec");
+        let second = instance(2, "spec");
+
+        controller.apply_added(first.clone());
+        let duplicate_revision = controller.revision;
+        controller.apply_added(first.clone());
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: duplicate_revision,
+                instances: Ok(Vec::new()),
+            },
+            &NamespaceFilter::Global,
+        );
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
         let snapshot_revision = controller.revision;
         controller.apply_removed(&first.key);
         controller.apply_added(second.clone());
@@ -1515,8 +2286,14 @@ mod tests {
             &NamespaceFilter::Global,
         );
 
-        assert!(!controller.desired.contains_key(&first.key));
-        assert!(controller.desired.contains_key(&second.key));
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([second.key.clone()])
+        );
 
         let repair_revision = controller.revision;
         controller.apply_reconciliation(
@@ -1526,13 +2303,6 @@ mod tests {
             },
             &NamespaceFilter::Global,
         );
-        assert!(controller.desired.contains_key(&first.key));
-        assert!(!controller.desired.contains_key(&second.key));
-    }
-
-    #[test]
-    fn retry_delay_follows_the_capped_schedule() {
-        let delays = (1..=7).map(retry_delay).collect::<Vec<_>>();
-        assert_eq!(delays, [1, 2, 4, 8, 16, 30, 30].map(Duration::from_secs));
+        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
     }
 }

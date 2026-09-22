@@ -16,7 +16,7 @@ Offloading is configured **on the worker**, not the Frontend. For vLLM workers, 
 ```yaml
 spec:
   components:
-  - name: VllmDecodeWorker
+  - name: worker
     type: worker
     podTemplate:
       spec:
@@ -55,7 +55,7 @@ This aggregated vLLM worker uses LMCache to offload KV blocks to 20 GB of host m
 ```yaml
 spec:
   components:
-  - name: VllmDecodeWorker
+  - name: worker
     type: worker
     replicas: 1
     podTemplate:

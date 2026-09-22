@@ -24,6 +24,9 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
+    crate::kv_router::plugins::RouterPluginBuilder::default()
+        .validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .metrics_prefix(engine_config.local_model().metrics_prefix())
@@ -110,12 +113,16 @@ pub async fn run(
 
     // Wait for both servers to complete, propagating the first error if any occurs
     // Both tasks should run indefinitely until cancelled by the shutdown token
-    tokio::try_join!(
+    let join_result = tokio::try_join!(
         grpc_service.run(shutdown_token.clone()),
         http_service.run(shutdown_token)
-    )?;
+    );
 
-    distributed_runtime.shutdown(); // Cancel primary token
+    // Initiate runtime shutdown if either server exits, including bind
+    // failures, for both discovery-backed and in-process engines.
+    distributed_runtime.shutdown();
+
+    join_result?;
     Ok(())
 }
 
@@ -177,4 +184,59 @@ async fn run_watcher(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{engines::make_echo_engine, local_model::LocalModelBuilder};
+    use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn metrics_bind_failure_shuts_down_dynamic_and_in_process_runtimes() {
+        for dynamic in [true, false] {
+            let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let model = Box::new(
+                LocalModelBuilder::default()
+                    .model_name(Some("bind-failure".to_string()))
+                    .http_port(0)
+                    .http_metrics_port(Some(occupied.local_addr().unwrap().port()))
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+            let engine_config = if dynamic {
+                EngineConfig::Dynamic {
+                    model,
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                }
+            } else {
+                EngineConfig::InProcessText {
+                    engine: make_echo_engine(),
+                    model,
+                }
+            };
+            let drt = DistributedRuntime::new(
+                Runtime::from_current().unwrap(),
+                DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            let shutdown = drt.primary_token();
+
+            let error = tokio::time::timeout(Duration::from_secs(5), run(drt, engine_config))
+                .await
+                .expect("gRPC run must return after a metrics-port bind failure")
+                .expect_err("the occupied metrics port must prevent server startup");
+            assert!(
+                error.to_string().contains("already in use"),
+                "expected a metrics bind error (dynamic={dynamic}), got {error:#}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), shutdown.cancelled())
+                .await
+                .expect("metrics bind failure must initiate runtime shutdown");
+        }
+    }
 }

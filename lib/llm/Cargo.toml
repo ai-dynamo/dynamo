@@ -72,7 +72,7 @@ required-features = ["media-ffmpeg"]
 
 [dependencies]
 # repo
-dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols"] }
+dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-memory = { workspace = true }
 dynamo-mocker = { workspace = true, features = ["zmq-events"] }
 dynamo-rl = { workspace = true }
@@ -97,6 +97,7 @@ derive_builder = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+half = { version = "2", features = ["serde", "num-traits"] }
 hf-hub = { workspace = true, features = ["tokio", "rustls-tls", "ureq"] }
 http-body-util = "0.1"
 ipnet = { workspace = true }
@@ -166,7 +167,6 @@ indicatif = { version = "0.18.0", optional = true }
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
-rustls = { version = "0.23" }
 utoipa = { version = "5.3", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
@@ -229,6 +229,7 @@ llm-multimodal = { version = "=1.9.0", optional = true }
 llm-tokenizer = { version = "=1.6.0", optional = true }
 
 [dev-dependencies]
+dynamo-kv-router = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 approx = "0.5"
@@ -237,7 +238,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
+rcgen = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
