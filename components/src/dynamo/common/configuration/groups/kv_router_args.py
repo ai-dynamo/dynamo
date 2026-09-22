@@ -203,7 +203,7 @@ class KvRouterConfigBase(ConfigBase):
     use_remote_indexer: bool = False
     serve_indexer: bool = False
     enable_session_prefix_index: bool = False
-    shared_cache_multiplier: float = 0.0
+    shared_cache_multiplier: Optional[float] = None
     shared_cache_type: str = "none"
     conditional_disagg_enabled: bool = False
     conditional_disagg_config: Optional[dict[str, Any]] = None
@@ -716,12 +716,12 @@ class KvRouterArgGroup(ArgGroup):
             flag_name="--shared-cache-multiplier",
             deprecated=_policy_parameter("shared_cache_multiplier"),
             env_var="DYN_SHARED_CACHE_MULTIPLIER",
-            default=0.5,
+            default=None,
             help=(
                 "[EXPERIMENTAL] KV Router: Multiplier for shared cache hits (0.0-1.0). "
                 "Blocks in the shared cache are less valuable than device-local blocks. "
                 "E.g. 0.5 means each shared hit counts as half a device-local hit. "
-                "Default 0.5."
+                "The default policy uses 0.5 when shared cache is enabled."
             ),
             arg_type=float,
         )

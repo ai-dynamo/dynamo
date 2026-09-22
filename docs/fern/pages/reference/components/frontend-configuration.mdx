@@ -183,8 +183,8 @@ Configure scoring through [default policy parameters](../../developer-guide/know
   Environment variable: `DYN_ROUTER_DISK_CACHE_HIT_WEIGHT`
 </ParamField>
 
-<ParamField path="--shared-cache-multiplier" type="float" default="0.5">
-  **Deprecated.** Set `shared_cache_multiplier` in the default policy parameters.
+<ParamField path="--shared-cache-multiplier" type="float">
+  **Deprecated.** Set `shared_cache_multiplier` in the default policy parameters. The policy defaults to `0.5` when shared cache is enabled.
 
   **Experimental.** Credit multiplier from `0.0` through `1.0` for external shared-cache hits.
 

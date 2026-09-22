@@ -1821,7 +1821,7 @@ class KvRouterConfig:
         use_remote_indexer: bool = False,
         serve_indexer: bool = False,
         enable_session_prefix_index: bool = False,
-        shared_cache_multiplier: float = 0.0,
+        shared_cache_multiplier: Optional[float] = None,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
         conditional_disagg_enabled: bool = False,
@@ -1899,7 +1899,7 @@ class KvRouterConfig:
                 Lineage is fed from two sources: routing-lookup matches, and stored-block KV events that carry a session ID. Stored blocks without a session ID do not update lineage.
                 The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
                 The index retains at most 16,384 least-recently-used sessions and opportunistically reclaims unreferenced logical leaves.
-            shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
+            shared_cache_multiplier: Deprecated; set this in the default policy parameters. Omitted values use the policy default (0.5 when shared cache is enabled).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).
             conditional_disagg_policy: Conditional-disagg policy, one of "isl_bounding", "prefill_load", or "isl_or_load" (default: "isl_bounding").
@@ -3114,8 +3114,7 @@ class KvRouter:
 
         Args:
             token_ids: List of token IDs to evaluate.
-            router_config_override: Optional router configuration override for
-                                   score-credit fields.
+            router_config_override: Deprecated and ignored; this query returns raw cache hits.
             block_mm_infos: Optional block-level multimodal metadata aligned to
                            request blocks.
             lora_name: Optional LoRA adapter name for adapter-aware matching.

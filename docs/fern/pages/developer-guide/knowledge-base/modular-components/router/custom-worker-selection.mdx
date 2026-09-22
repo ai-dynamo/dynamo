@@ -573,4 +573,4 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy. The builtin skips cache inputs at zero overlap credit and for plain disaggregated decode.
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. If no shared-cache multiplier is set, the default policy uses `0.5` when shared cache is enabled. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy. The builtin skips cache inputs at zero overlap credit and for plain disaggregated decode.

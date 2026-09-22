@@ -23,7 +23,6 @@ use crate::protocols::{
     WorkerWithDpRank, compute_block_hash_for_seq, compute_seq_hash_for_block,
 };
 use crate::scheduling::WorkerSelectionPolicyError;
-use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
     WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
@@ -752,7 +751,7 @@ fn randomized_reservation_uses_canonical_complete_block_count() {
 }
 
 #[test]
-fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
+fn overlap_scores_response_includes_raw_tier_fields() {
     let worker = WorkerWithDpRank::new(1, 0);
     let idle_worker = WorkerWithDpRank::new(2, 0);
     let mut device_scores = OverlapScores::new();
@@ -770,23 +769,8 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
     };
     tiered.lower_tier.insert(StorageTier::HostPinned, host);
 
-    let mut config = test_config();
-    config.host_cache_hit_weight = 0.75;
-    let override_config = RouterConfigOverride {
-        overlap_score_credit: Some(0.5),
-        ..Default::default()
-    };
-    let response = build_overlap_scores_response(
-        &config,
-        Some(&override_config),
-        &tiered,
-        4,
-        2,
-        [worker, idle_worker],
-        false,
-        None,
-        None,
-    );
+    let response =
+        build_overlap_scores_response(&tiered, 4, 2, [worker, idle_worker], false, None, None);
 
     assert_eq!(response.workers.len(), 2);
     let selected = response
@@ -799,7 +783,6 @@ fn overlap_scores_response_honors_override_and_includes_python_shape_fields() {
     assert_eq!(selected.disk_blocks, 3);
     assert_eq!(selected.host_pinned_extension_blocks, 1);
     assert_eq!(selected.shared_beyond_device_blocks, None);
-    assert_eq!(selected.router_credit_blocks, 1.75);
     assert!(!response.shared_cache.enabled);
 }
 

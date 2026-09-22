@@ -1797,7 +1797,6 @@ impl KvRouter {
     pub async fn get_overlap_scores(
         &self,
         tokens: &[u32],
-        router_config_override: Option<&RouterConfigOverride>,
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         lora_name: Option<&str>,
         cache_namespace: Option<&str>,
@@ -1848,7 +1847,6 @@ impl KvRouter {
         Ok(
             OverlapAnalysis::new(&self.kv_router_config, self.block_size, &tiered_matches)
                 .scores_response(
-                    router_config_override,
                     num_blocks,
                     expected_workers,
                     shared_enabled,
@@ -3106,7 +3104,7 @@ mod tests {
             router_temperature: 0.0,
             use_kv_events: false,
             router_track_active_blocks: false,
-            shared_cache_multiplier: 0.5,
+            shared_cache_multiplier: Some(0.5),
             skip_initial_worker_wait: true,
             ..Default::default()
         };
@@ -3558,7 +3556,7 @@ mod tests {
         .await;
 
         let scores = router
-            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, None, true)
+            .get_overlap_scores(&[11, 12, 21, 22], None, None, None, true)
             .await
             .unwrap();
 
@@ -3577,7 +3575,6 @@ mod tests {
             assert_eq!(worker.host_pinned_extension_blocks, 0);
             assert_eq!(worker.disk_extension_blocks, 0);
             assert_eq!(worker.shared_beyond_device_blocks, Some(2));
-            assert!((worker.router_credit_blocks - 1.0).abs() < f64::EPSILON);
         }
     }
 
