@@ -10,7 +10,7 @@ and its contents as this worker's value for that domain. The Rust runtime
 derives canonical topology taints from the published topology domains.
 
 Environment variables:
-    DYN_TOPOLOGY_ENABLED: Set to a truthy value (true/1/on/yes) to enable topology reading.
+    DYN_TOPOLOGY_ENABLED: Set to a truthy value (true/1/on/yes) to enable; any other non-empty value is logged and ignored.
     DYN_TOPOLOGY_MOUNT_PATH: Directory containing topology domain files
         (default: /etc/dynamo/topology).
     DYN_KV_TRANSFER_DOMAIN: Which topology domain the router should enforce
@@ -122,7 +122,7 @@ def read_topology_config(
 
     The deployment environment injects env vars for topology location and
     transfer policy:
-      - DYN_TOPOLOGY_ENABLED=true  # only the literal "true" enables
+      - DYN_TOPOLOGY_ENABLED=true  # any truthy value (true/1/on/yes) enables
       - DYN_TOPOLOGY_MOUNT_PATH=/etc/dynamo/topology
       - DYN_KV_TRANSFER_DOMAIN=zone
       - DYN_KV_TRANSFER_ENFORCEMENT=required
@@ -151,7 +151,7 @@ def read_topology_config(
     except argparse.ArgumentTypeError:
         if raw:
             logger.warning(
-                "Unrecognized DYN_TOPOLOGY_ENABLED=%r, treating as disabled; use 'true' or 'false'",
+                "Unrecognized DYN_TOPOLOGY_ENABLED=%r, treating as disabled; use 'true'/'false' (or 1/0, on/off, yes/no)",
                 raw,
             )
         return TopologyConfig()

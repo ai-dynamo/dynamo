@@ -49,7 +49,7 @@ async fn apply_from_env(
             if !trimmed.is_empty() {
                 tracing::warn!(
                     value = %trimmed,
-                    "Unrecognized DYN_TOPOLOGY_ENABLED value, treating as disabled; use \"true\" or \"false\""
+                    "Unrecognized DYN_TOPOLOGY_ENABLED value, treating as disabled; use \"true\"/\"false\" (or 1/0, on/off, yes/no)"
                 );
             }
             return Ok(());

@@ -98,7 +98,7 @@ The Python backend utility reads topology from files and transfer policy from en
 
 | Environment variable | Description |
 |----------------------|-------------|
-| `DYN_TOPOLOGY_ENABLED` | Set to `true` to enable topology reading. |
+| `DYN_TOPOLOGY_ENABLED` | Set to a truthy value (`true`, `1`, `on`, `yes`) to enable topology reading. |
 | `DYN_TOPOLOGY_MOUNT_PATH` | Directory containing topology files. Defaults to `/etc/dynamo/topology`. |
 | `DYN_KV_TRANSFER_DOMAIN` | Required when topology is enabled. Names the topology file and runtime domain to use for KV transfer constraints. |
 | `DYN_KV_TRANSFER_ENFORCEMENT` | `required` or `preferred`. Defaults to `required` when a domain is set. |
