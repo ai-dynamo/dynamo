@@ -52,6 +52,209 @@ def setup(monkeypatch, update):
     return scheduler, pool, events
 
 
+def test_completed_inflight_full_blocks_publish_after_gpu_completion(monkeypatch):
+    first = SimpleNamespace(
+        block_id=1,
+        block_hash=b"first",
+        block_hash_num_tokens=16,
+        ref_cnt=1,
+        is_null=False,
+    )
+    completed = SimpleNamespace(
+        block_id=2,
+        block_hash=b"completed",
+        block_hash_num_tokens=32,
+        ref_cnt=1,
+        is_null=False,
+    )
+    optimistic = SimpleNamespace(
+        block_id=3,
+        block_hash=b"optimistic",
+        block_hash_num_tokens=48,
+        ref_cnt=1,
+        is_null=False,
+    )
+    partial = SimpleNamespace(
+        block_id=4,
+        block_hash=b"partial",
+        block_hash_num_tokens=24,
+        ref_cnt=1,
+        is_null=False,
+    )
+    leases = {slot: KVLease(slot, 7) for slot in range(1, 5)}
+    first_key = hooks._directory_key(first.block_hash)
+    pool = SimpleNamespace(
+        _gms_kv_directory=SimpleNamespace(enabled=True, authoritative=True),
+        _gms_kv_leases_by_block=leases,
+        _gms_kv_directory_slot_by_hash={first_key: leases[1]},
+    )
+    cache_manager = SimpleNamespace(
+        block_size=16,
+        req_to_blocks={"request": [first, completed, optimistic, partial]},
+    )
+    scheduler = SimpleNamespace(
+        kv_cache_manager=SimpleNamespace(
+            block_pool=pool,
+            coordinator=SimpleNamespace(single_type_managers=[cache_manager]),
+        ),
+        requests={
+            "request": SimpleNamespace(
+                num_computed_tokens=48,
+                num_in_flight_tokens=16,
+                is_finished=lambda: False,
+            )
+        },
+    )
+    published = []
+
+    def publish(_pool, blocks, **kwargs):
+        published.append(([value.block_id for value in blocks], kwargs))
+        return True
+
+    monkeypatch.setattr(hooks, "_publish_hbm_blocks", publish)
+    count = hooks._publish_completed_inflight_blocks(
+        scheduler, SimpleNamespace(num_scheduled_tokens={"request": 16})
+    )
+
+    assert count == 1
+    assert published == [([2], {"active": False, "release_duplicates": False})]
+
+
+def test_incremental_publication_does_not_release_live_duplicate():
+    content = b"same-native-block-hash"
+    existing_lease = KVLease(2, 7)
+    live_lease = KVLease(3, 11)
+    released = []
+    evicted = []
+    pool = SimpleNamespace(
+        enable_caching=True,
+        _gms_kv_directory=SimpleNamespace(enabled=True),
+        _gms_kv_lease_client=SimpleNamespace(
+            seal=lambda _leases: None,
+            release=lambda leases: released.extend(leases),
+        ),
+        _gms_kv_leases_by_block={2: existing_lease, 3: live_lease},
+        _gms_kv_directory_slot_by_hash={hooks._directory_key(content): existing_lease},
+        _maybe_evict_cached_block=lambda value: evicted.append(value.block_id),
+    )
+    duplicate = SimpleNamespace(block_id=3, block_hash=content)
+
+    assert hooks._publish_hbm_blocks(
+        pool, [duplicate], active=False, release_duplicates=False
+    )
+    assert released == []
+    assert evicted == []
+    assert pool._gms_kv_leases_by_block[3] == live_lease
+
+
+def test_connector_eviction_demotes_sealed_block_before_native_mutation(monkeypatch):
+    content = b"published-native-hash"
+    old = KVLease(3, 7)
+    successor = KVLease(3, 8)
+    events = []
+    value = SimpleNamespace(block_id=3, block_hash=content)
+
+    class NativePool:
+        def evict_blocks(self, block_ids):
+            events.append(("native_evict", set(block_ids)))
+            value.block_hash = None
+
+    monkeypatch.setattr(hooks, "_initialize_gms_block_pool", lambda self: None)
+    pool = hooks._build_gms_block_pool_class(NativePool)()
+    pool.blocks = [
+        SimpleNamespace(block_id=index, block_hash=None) for index in range(4)
+    ]
+    pool.blocks[3] = value
+    pool._gms_kv_leases_by_block = {3: old}
+    key = hooks._directory_key(content)
+    pool._gms_kv_directory_slot_by_hash = {key: old}
+
+    class Directory:
+        authoritative = True
+
+        def flush_deferred(self):
+            events.append("flush")
+            return True
+
+        def ensure_hbm_capacity(self, required, *, eligible_slot_ids):
+            events.append(("retire", required, eligible_slot_ids))
+            return [
+                {
+                    "content_hash": key,
+                    "engine_id": "0",
+                    "slot_ids": [3],
+                    "generations": [7],
+                    "tier": "hbm",
+                }
+            ]
+
+    class Client:
+        def adopt(self, leases):
+            events.append(("adopt", list(leases)))
+            return [successor]
+
+    pool._gms_kv_directory = Directory()
+    pool._gms_kv_lease_client = Client()
+    pool.evict_blocks({3})
+
+    assert events == [
+        "flush",
+        ("retire", 1, [3]),
+        ("adopt", [old]),
+        ("native_evict", {3}),
+    ]
+    assert pool._gms_kv_leases_by_block[3] == successor
+    assert pool._gms_kv_directory_slot_by_hash == {}
+    assert value.block_hash is None
+
+
+def test_prefix_reset_retires_and_releases_all_sealed_blocks(monkeypatch):
+    first = SimpleNamespace(block_id=1, block_hash=b"first")
+    second = SimpleNamespace(block_id=2, block_hash=b"second")
+    leases = {1: KVLease(1, 3), 2: KVLease(2, 5)}
+    events = []
+
+    class NativePool:
+        num_gpu_blocks = 3
+
+        def get_num_free_blocks(self):
+            return 2
+
+        def reset_prefix_cache(self):
+            events.append("native_reset")
+            for value in self.blocks:
+                value.block_hash = None
+            return True
+
+    monkeypatch.setattr(hooks, "_initialize_gms_block_pool", lambda self: None)
+    pool = hooks._build_gms_block_pool_class(NativePool)()
+    pool.blocks = [SimpleNamespace(block_id=0, block_hash=None), first, second]
+    pool._gms_kv_leases_by_block = dict(leases)
+    pool._gms_kv_directory_slot_by_hash = {
+        hooks._directory_key(first.block_hash): leases[1],
+        hooks._directory_key(second.block_hash): leases[2],
+    }
+    monkeypatch.setattr(
+        hooks,
+        "_demote_sealed_blocks_for_mutation",
+        lambda owner, block_ids: (
+            events.append(("demote", set(block_ids))),
+            owner._gms_kv_directory_slot_by_hash.clear(),
+        ),
+    )
+    pool._gms_kv_lease_client = SimpleNamespace(
+        release=lambda values: events.append(("release", list(values)))
+    )
+
+    assert pool.reset_prefix_cache()
+    assert events == [
+        ("demote", {1, 2}),
+        ("release", [leases[1], leases[2]]),
+        "native_reset",
+    ]
+    assert pool._gms_kv_leases_by_block == {}
+
+
 def test_completed_requests_commit_once_before_native_events_and_output(monkeypatch):
     shared = block(1, b"shared", refs=2)
     other = block(2, b"other")
