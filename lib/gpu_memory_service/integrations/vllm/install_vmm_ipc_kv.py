@@ -362,8 +362,7 @@ def _release_new_persistent_kv_allocations(
         try:
             if manager.release_persistent(engine_id, tag):
                 logger.info(
-                    "[GMS-VMM-IPC] released partial KV allocation: "
-                    "engine_id=%s tag=%s",
+                    "[GMS-VMM-IPC] released partial KV allocation: engine_id=%s tag=%s",
                     engine_id,
                     tag,
                 )
@@ -518,14 +517,23 @@ def _wrap_get_kv_cache_configs(original):
         return original
 
     def _patched_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory):
-        existing_blocks = _existing_shared_kv_blocks(
-            wait_ms=_geometry_wait_ms(available_memory)
-        )
-        if existing_blocks is None:
-            return original(vllm_config, kv_cache_specs, available_memory)
-
         cache_config = getattr(vllm_config, "cache_config", None)
-        if cache_config is None:
+        explicit_blocks = (
+            getattr(cache_config, "num_gpu_blocks_override", None)
+            if cache_config is not None
+            else None
+        )
+        existing_blocks = _existing_shared_kv_blocks(
+            # An explicit block count is sufficient for a first writer to create
+            # the shared geometry. Still perform one immediate lookup so an
+            # attaching process can prefer the authoritative existing geometry.
+            wait_ms=(
+                0
+                if explicit_blocks is not None
+                else _geometry_wait_ms(available_memory)
+            )
+        )
+        if existing_blocks is None or cache_config is None:
             return original(vllm_config, kv_cache_specs, available_memory)
 
         previous_override = getattr(cache_config, "num_gpu_blocks_override", None)

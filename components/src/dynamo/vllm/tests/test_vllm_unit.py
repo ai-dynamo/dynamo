@@ -2513,6 +2513,155 @@ async def test_gms_primary_acquires_active_lock_before_registration(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_gms_preinit_lock_starts_liveness_before_engine_setup(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    events = []
+
+    class Lock:
+        async def release(self):
+            events.append("release")
+
+    lock = Lock()
+
+    async def acquire():
+        events.append("acquire")
+        return lock
+
+    async def fence(**kwargs):
+        events.append(("fence", kwargs["role"]))
+
+    def start_monitor(handler, config, *, failover_lock=None):
+        events.append(("monitor", handler, failover_lock))
+
+    runtime = SimpleNamespace(
+        set_health_status=lambda ready: events.append(("health", ready))
+    )
+    config = SimpleNamespace(gms_shadow_mode=True)
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1")
+    monkeypatch.setenv("ENGINE_ID", "0")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire)
+    monkeypatch.setattr(factory, "_maybe_start_rank_liveness_monitor", start_monitor)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence", fence
+    )
+
+    acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
+        runtime, config
+    )
+
+    assert acquired is lock
+    assert fenced is True
+    assert events == [
+        ("health", True),
+        "acquire",
+        ("fence", "engine-0-pre-init"),
+        ("monitor", None, lock),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gms_preinitialized_standby_starts_liveness_before_engine_setup(
+    monkeypatch,
+):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    monitored = []
+    monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "0")
+    monkeypatch.setattr(
+        factory,
+        "_maybe_start_rank_liveness_monitor",
+        lambda handler, config: monitored.append((handler, config)),
+    )
+    config = SimpleNamespace(gms_shadow_mode=True)
+
+    acquired, fenced = await factory._maybe_acquire_failover_lock_before_init(
+        SimpleNamespace(), config
+    )
+
+    assert acquired is None
+    assert fenced is False
+    assert monitored == [(None, config)]
+
+
+@pytest.mark.asyncio
+async def test_gms_preinit_liveness_keeps_lock_until_exit_and_is_reused(monkeypatch):
+    import asyncio
+    import signal
+
+    from dynamo.common import rank_liveness
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    callbacks = []
+    timeout_updates = []
+
+    class Monitor:
+        def __init__(self, callback, expected_ranks, timeout_ms_override):
+            callbacks.append(callback)
+            assert list(expected_ranks) == [1]
+            assert timeout_ms_override == rank_liveness.DEFAULT_TIMEOUT_MS
+
+        def start(self):
+            pass
+
+        def set_timeout_ms(self, value):
+            timeout_updates.append(value)
+
+    released = asyncio.Event()
+
+    class Lock:
+        async def release(self):
+            released.set()
+
+    config = SimpleNamespace(
+        gms_shadow_mode=True, engine_args=SimpleNamespace(nnodes=2)
+    )
+    factory = WorkerFactory(
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+        lambda *args, **kwargs: None,
+    )
+    killed = []
+    monkeypatch.setattr(rank_liveness, "liveness_enabled", lambda: True)
+    monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.os.kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    monitor = factory._maybe_start_rank_liveness_monitor(
+        None, config, failover_lock=Lock()
+    )
+    shutdown_event = asyncio.Event()
+    handler = SimpleNamespace(shutdown_event=shutdown_event)
+    assert factory._maybe_start_rank_liveness_monitor(handler, config) is monitor
+    assert handler._gms_rank_liveness_monitor is monitor
+    assert timeout_updates == [rank_liveness.timeout_ms()]
+
+    callbacks[0](1, "startup loss")
+    await asyncio.sleep(0)
+    assert not released.is_set()
+    assert shutdown_event.is_set()
+    assert killed == [(os.getpid(), signal.SIGTERM)]
+
+
+@pytest.mark.asyncio
 async def test_gms_preinit_lock_owner_starts_rank_liveness_monitor(monkeypatch):
     from dynamo.vllm.worker_factory import WorkerFactory
 
@@ -2564,12 +2713,6 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
         def start(self):
             pass
 
-    released = asyncio.Event()
-
-    async def fake_release(handler, *, backend_name):
-        assert backend_name == "vllm"
-        released.set()
-
     killed = []
     shutdown_event = asyncio.Event()
     handler = SimpleNamespace(shutdown_event=shutdown_event)
@@ -2586,10 +2729,6 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
     monkeypatch.setattr(rank_liveness, "liveness_enabled", lambda: True)
     monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
     monkeypatch.setattr(
-        "dynamo.vllm.worker_factory.release_attached_gms_failover_lock",
-        fake_release,
-    )
-    monkeypatch.setattr(
         "dynamo.vllm.worker_factory.os.kill",
         lambda pid, sig: killed.append((pid, sig)),
     )
@@ -2597,7 +2736,6 @@ async def test_gms_rank_loss_aborts_active_stream_before_sigterm(monkeypatch):
     factory._maybe_start_rank_liveness_monitor(handler, config)
     callbacks[0](1, "heartbeat timeout")
 
-    await asyncio.wait_for(released.wait(), timeout=1)
     await asyncio.sleep(0)
     assert shutdown_event.is_set()
     assert killed == [(os.getpid(), signal.SIGTERM)]
