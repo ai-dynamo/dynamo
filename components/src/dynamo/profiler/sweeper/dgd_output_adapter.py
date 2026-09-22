@@ -19,7 +19,9 @@ from dynamo.profiler.sweeper.renderers import (
     render_dgd,
 )
 
-OUTPUT_ADAPTER_API_VERSION = 1  # must equal aisimulate.output_adapter.OUTPUT_ADAPTER_API_VERSION
+OUTPUT_ADAPTER_API_VERSION = (
+    1  # must equal aisimulate.output_adapter.OUTPUT_ADAPTER_API_VERSION
+)
 
 
 class DgdOutputConfigError(ValueError):
@@ -30,8 +32,14 @@ def _validate_name_component(value: Any, field: str) -> str:
     """Reject a dgd.name/name_prefix that could escape output_dir."""
     if not value or not isinstance(value, str):
         raise DgdOutputConfigError(f"dgd.{field} must be a non-empty string")
-    if Path(value).is_absolute() or any(sep in value for sep in ("/", "\\")) or value in (".", ".."):
-        raise DgdOutputConfigError(f"dgd.{field} must be a single path component, not {value!r}")
+    if (
+        Path(value).is_absolute()
+        or any(sep in value for sep in ("/", "\\"))
+        or value in (".", "..")
+    ):
+        raise DgdOutputConfigError(
+            f"dgd.{field} must be a single path component, not {value!r}"
+        )
     return value
 
 
@@ -77,7 +85,9 @@ def _best_candidate(candidates: Sequence[Any]) -> Any:
     _best_candidate -- the adapter that replaced it rendered every
     candidate it was given instead of picking a winner for scalar mode.
     """
-    return max(candidates, key=lambda candidate: (candidate.score, -candidate.used_gpus))
+    return max(
+        candidates, key=lambda candidate: (candidate.score, -candidate.used_gpus)
+    )
 
 
 def render_and_write_dgds(
@@ -130,7 +140,9 @@ def render_and_write_dgds(
     for candidate, cand_name in zip(candidates, names, strict=True):
         try:
             rendered_dgds.append(
-                render_dgd(candidate, workload, options, dgd_name=cand_name, renderer=renderer)
+                render_dgd(
+                    candidate, workload, options, dgd_name=cand_name, renderer=renderer
+                )
             )
         except CandidateMaterializationError as exc:
             # Not "Pareto candidate": this loop runs in scalar mode too

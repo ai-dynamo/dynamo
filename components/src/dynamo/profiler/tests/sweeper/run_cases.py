@@ -43,6 +43,7 @@ def run_sweep(config):
     candidates = list(Sweeper(runner_factory=create_stack()).run(config))
     return SimpleNamespace(candidates=candidates)
 
+
 _ROOT = Path(__file__).parent
 _REPOSITORY_ROOT = _ROOT.parents[5]
 _CASES_ROOT = _ROOT / "cases"

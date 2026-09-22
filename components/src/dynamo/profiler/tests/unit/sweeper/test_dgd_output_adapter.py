@@ -29,7 +29,9 @@ class _FakeCandidate:
         # single-candidate tests below unaffected; P1's test sets these
         # explicitly to prove the ranking rule itself.
         self.score = score
-        self.used_gpus = used_gpus if used_gpus is not None else config.get("used_gpus", 0)
+        self.used_gpus = (
+            used_gpus if used_gpus is not None else config.get("used_gpus", 0)
+        )
 
 
 class _FakeSweepResult:
@@ -79,7 +81,9 @@ def test_adapter_declares_the_confirmed_name_and_api_version() -> None:
 
 def test_write_returns_relative_paths_that_exist(tmp_path: Path) -> None:
     adapter = DgdOutputAdapter()
-    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
+    result = _FakeSweepResult(
+        [_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload"
+    )
 
     paths = adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
 
@@ -116,7 +120,9 @@ def test_write_passes_the_result_workload_through_to_the_renderer(
     monkeypatch.setattr(mod, "render_dgd", spy)
 
     adapter = DgdOutputAdapter()
-    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
+    result = _FakeSweepResult(
+        [_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload"
+    )
 
     adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
 
@@ -126,7 +132,10 @@ def test_write_passes_the_result_workload_through_to_the_renderer(
 def test_pareto_naming_matches_the_real_name_prefix_convention(tmp_path: Path) -> None:
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult(
-        [_FakeCandidate(_CANDIDATE_CONFIG), _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2))],
+        [
+            _FakeCandidate(_CANDIDATE_CONFIG),
+            _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2)),
+        ],
         workload="qwen-workload",
     )
     config = dict(_DGD_CONFIG, name=None, name_prefix="pareto")
@@ -145,7 +154,9 @@ def test_missing_dgd_config_field_raises_config_error(tmp_path: Path) -> None:
         adapter.write(incomplete_config, result=result, output_dir=tmp_path)
 
 
-def test_scalar_config_picks_the_best_candidate_when_multiple_are_given(tmp_path: Path) -> None:
+def test_scalar_config_picks_the_best_candidate_when_multiple_are_given(
+    tmp_path: Path,
+) -> None:
     """dgd.name (scalar mode) with >1 candidate must select the single
     highest-scoring one (ties broken by fewer GPUs), not raise and not
     render all of them -- restores the deleted CLI's _best_candidate rule."""
@@ -178,12 +189,16 @@ def test_scalar_selection_breaks_score_ties_on_fewer_gpus(tmp_path: Path) -> Non
     assert "nvidia.com/gpu: '2'" in (tmp_path / paths[0]).read_text()
 
 
-def test_pareto_render_skips_unrenderable_candidate_and_continues(tmp_path: Path) -> None:
+def test_pareto_render_skips_unrenderable_candidate_and_continues(
+    tmp_path: Path,
+) -> None:
     """One CandidateMaterializationError must not lose the rest of the
     front -- restores the deleted _render_pareto's per-candidate skip."""
     adapter = DgdOutputAdapter()
     good_a = _FakeCandidate(_CANDIDATE_CONFIG, score=10.0, used_gpus=8)
-    bad = _FakeCandidate(dict(_CANDIDATE_CONFIG, backend="unsupported"), score=9.0, used_gpus=8)
+    bad = _FakeCandidate(
+        dict(_CANDIDATE_CONFIG, backend="unsupported"), score=9.0, used_gpus=8
+    )
     good_b = _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2), score=8.0, used_gpus=2)
     result = _FakeSweepResult([good_a, bad, good_b], workload="qwen-workload")
     config = dict(_DGD_CONFIG, name=None, name_prefix="pareto")
@@ -196,7 +211,9 @@ def test_pareto_render_skips_unrenderable_candidate_and_continues(tmp_path: Path
 def test_name_rejects_path_escaping_values(tmp_path: Path) -> None:
     """dgd.name must not be able to write outside output_dir."""
     adapter = DgdOutputAdapter()
-    result = _FakeSweepResult([_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload")
+    result = _FakeSweepResult(
+        [_FakeCandidate(_CANDIDATE_CONFIG)], workload="qwen-workload"
+    )
 
     for escaping_name in ("../escape", "/etc/passwd", "a/b", ".."):
         config = dict(_DGD_CONFIG, name=escaping_name)
@@ -208,7 +225,10 @@ def test_name_prefix_rejects_path_escaping_values(tmp_path: Path) -> None:
     """Same validation must apply to dgd.name_prefix, not just dgd.name."""
     adapter = DgdOutputAdapter()
     result = _FakeSweepResult(
-        [_FakeCandidate(_CANDIDATE_CONFIG), _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2))],
+        [
+            _FakeCandidate(_CANDIDATE_CONFIG),
+            _FakeCandidate(dict(_CANDIDATE_CONFIG, tp=2)),
+        ],
         workload="qwen-workload",
     )
 
