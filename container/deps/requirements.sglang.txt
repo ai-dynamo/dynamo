@@ -15,6 +15,26 @@
 --no-binary imageio-ffmpeg
 
 blake3>=1.0.0,<2.0.0  # Dynamo SGLang multimodal request handlers import blake3 at startup
+# sglang[diffusion] pins diffusers==0.37.0, so the resolver cannot lift it and
+# the upstream image bundles that exact release. This file installs
+# --force-reinstall --no-deps, which is the only place the pin can be overlaid.
+# 0.38.0 raises its own floor to safetensors>=0.8.0; --no-deps will not pull
+# that in, so the floor below declares it explicitly.
+#
+# Capped at <0.40 rather than <1 as a precaution, not because of a dependency
+# floor. diffusers 0.40.0 floors huggingface-hub>=1.23.0, and the SGLang
+# runtime image carries hub 1.30.0, so that floor is already satisfied. The
+# same <0.40 cap on the TensorRT-LLM side is driven by its own base image
+# sitting below the floors 0.40.0 adds; that reason does not transfer here.
+# Every diffusers import sglang 0.5.19 makes resolves on 0.37.0, 0.39.0 and
+# 0.40.0. No diffusion request has been exercised on 0.40.0, and that is the
+# only reason the ceiling stays.
+#
+# Under --force-reinstall a ceiling is a downgrade instruction, not a no-op.
+# If a later SGLang release bundles diffusers 0.40.0 or newer, this line rolls
+# it back to 0.39.0, and the build stays green while it does. The
+# pillow>=12.3.0,<13 entry below has the same shape.
+diffusers>=0.38.0,<0.40  # bounded: this file installs with --force-reinstall
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
 # Refresh the upstream image's bundled mooncake wheel: older builds vendor a
 # stale Go dependency set inside libetcd_wrapper.so, and current wheels carry
@@ -35,4 +55,6 @@ pillow>=12.3.0,<13  # bounded: this file installs with --force-reinstall
 # libavcodec that the codec gate rejects. Links libnvcuvid at runtime; requires
 # NVIDIA_DRIVER_CAPABILITIES to include "video" (set in sglang_runtime.Dockerfile).
 PyNvVideoCodec>=2.2.0
+# Required by the diffusers floor above; see the note there.
+safetensors>=0.8.0,<1  # bounded: this file installs with --force-reinstall
 zstandard==0.23.0
