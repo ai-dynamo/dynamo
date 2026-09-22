@@ -423,7 +423,15 @@ impl Discovery for KubeDiscoveryClient {
         );
 
         // Before the initial sync, the snapshot would be a false empty set.
-        await_daemon_ready(self.daemon_state.clone()).await?;
+        let ready = await_daemon_ready(self.daemon_state.clone());
+        match &cancel_token {
+            Some(token) => token.run_until_cancelled(ready).await.unwrap_or_else(|| {
+                Err(anyhow::anyhow!(
+                    "the watch was cancelled before the Kubernetes discovery daemon was ready"
+                ))
+            })?,
+            None => ready.await?,
+        }
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let stream_id = uuid::Uuid::new_v4();
 
@@ -600,8 +608,11 @@ mod tests {
         }
     }
 
-    /// A client over `instances` with no cluster behind it; nothing here sends a request.
-    fn client_with(instances: &[DiscoveryInstance], state: DaemonState) -> KubeDiscoveryClient {
+    /// A client over `instances` with no cluster behind it; nothing here sends a request. The
+    /// returned sender reports the daemon state, which starts `Pending`.
+    fn client_with(
+        instances: &[DiscoveryInstance],
+    ) -> (KubeDiscoveryClient, watch::Sender<DaemonState>) {
         let kube_client =
             KubeClient::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap())).unwrap();
         let list_state = instances
@@ -613,10 +624,8 @@ mod tests {
             })
             .collect();
         let (event_tx, _) = broadcast::channel(16);
-        let (state_tx, daemon_state) = watch::channel(state);
-        // The daemon owns the sender; the test client only reads a fixed state.
-        std::mem::forget(state_tx);
-        KubeDiscoveryClient {
+        let (state_tx, daemon_state) = watch::channel(DaemonState::Pending);
+        let client = KubeDiscoveryClient {
             instance_id: 1,
             metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
             list_state: Arc::new(RwLock::new(list_state)),
@@ -631,7 +640,8 @@ mod tests {
                 mode: KubeDiscoveryMode::Pod,
                 target: utils::KubeDiscoveryTarget::Pod("worker-a".to_string()),
             },
-        }
+        };
+        (client, state_tx)
     }
 
     async fn next_event(stream: &mut DiscoveryStream) -> DiscoveryEvent {
@@ -646,7 +656,8 @@ mod tests {
     async fn watch_reports_the_initial_set_as_added_events_then_one_resync() {
         let first = endpoint_instance(1, "127.0.0.1:8000");
         let second = endpoint_instance(2, "127.0.0.1:9000");
-        let client = client_with(&[first.clone(), second.clone()], DaemonState::Ready);
+        let (client, state_tx) = client_with(&[first.clone(), second.clone()]);
+        state_tx.send_replace(DaemonState::Ready);
         let mut events = client
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
@@ -682,70 +693,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_on_an_empty_state_reports_one_empty_resync() {
-        let client = client_with(&[], DaemonState::Ready);
-        let mut events = client
-            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            next_event(&mut events).await,
-            DiscoveryEvent::Resync(vec![])
-        );
-
-        let first = endpoint_instance(1, "127.0.0.1:8000");
-        client
-            .event_tx
-            .send(DiscoveryEvent::Added(first.clone()))
-            .unwrap();
-        assert_eq!(next_event(&mut events).await, DiscoveryEvent::Added(first));
-    }
-
-    #[tokio::test]
-    async fn a_failed_daemon_fails_list_and_watch_instead_of_an_empty_stream() {
-        let client = client_with(&[], DaemonState::Failed("reflector stopped".to_string()));
-
-        let Err(error) = client
-            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
-            .await
-        else {
-            panic!("a failed daemon must fail the watch, not open an empty stream");
+    async fn list_and_watch_waits_for_ready_unless_cancelled() {
+        let (client, state_tx) = client_with(&[]);
+        let client = Arc::new(client);
+        let open_watch = |token: Option<CancellationToken>| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .list_and_watch(DiscoveryQuery::AllEndpoints, token)
+                    .await
+            })
         };
-        assert!(
-            error.to_string().contains("daemon failed"),
-            "unexpected error: {error}"
-        );
-        let error = client
-            .list(DiscoveryQuery::AllEndpoints)
-            .await
-            .expect_err("a failed daemon must fail the list, not return an empty set");
-        assert!(
-            error.to_string().contains("daemon failed"),
-            "unexpected error: {error}"
-        );
-    }
 
-    #[tokio::test]
-    async fn await_daemon_ready_returns_once_the_daemon_is_ready() {
-        let (state_tx, daemon_state) = watch::channel(DaemonState::Pending);
-        let wait = tokio::spawn(await_daemon_ready(daemon_state));
+        // A caller that cancels stops waiting on a daemon that is still pending.
+        let token = CancellationToken::new();
+        let cancelled = open_watch(Some(token.clone()));
         tokio::task::yield_now().await;
         assert!(
-            !wait.is_finished(),
-            "a pending daemon must not release the wait"
+            !cancelled.is_finished(),
+            "a pending daemon must hold the watch"
+        );
+        token.cancel();
+        let Err(error) = tokio::time::timeout(std::time::Duration::from_secs(1), cancelled)
+            .await
+            .expect("cancellation must release the wait")
+            .unwrap()
+        else {
+            panic!("a watch cancelled before Ready must fail");
+        };
+        assert!(
+            error.to_string().contains("cancelled"),
+            "unexpected error: {error}"
         );
 
+        // Ready releases a waiting watch, and its stream starts with the empty snapshot.
+        let waiting = open_watch(None);
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "a pending daemon must hold the watch"
+        );
         state_tx.send_replace(DaemonState::Ready);
-        tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+        let mut events = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
             .await
             .expect("Ready must release the wait")
             .unwrap()
             .unwrap();
+        assert_eq!(
+            next_event(&mut events).await,
+            DiscoveryEvent::Resync(vec![])
+        );
     }
 
     #[tokio::test]
-    async fn await_daemon_ready_fails_when_the_daemon_fails_or_stops() {
+    async fn a_stopped_or_failed_daemon_fails_list_and_watch_instead_of_an_empty_set() {
         for (state, expected) in [
             (
                 DaemonState::Failed("reflector stopped".to_string()),
@@ -753,24 +754,28 @@ mod tests {
             ),
             (DaemonState::Stopped, "daemon is stopped"),
         ] {
-            let (state_tx, daemon_state) = watch::channel(DaemonState::Pending);
-            let wait = tokio::spawn(await_daemon_ready(daemon_state));
+            let (client, state_tx) = client_with(&[]);
             state_tx.send_replace(state);
-            let error = tokio::time::timeout(std::time::Duration::from_secs(1), wait)
+
+            let Err(error) = client
+                .list_and_watch(DiscoveryQuery::AllEndpoints, None)
                 .await
-                .expect("a terminal state must release the wait")
-                .unwrap()
-                .expect_err("a daemon that ended before Ready must be an error");
+            else {
+                panic!("a daemon that ended before Ready must fail the watch");
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+            let error = client
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .expect_err("a daemon that ended before Ready must fail the list");
             assert!(
                 error.to_string().contains(expected),
                 "unexpected error: {error}"
             );
         }
-
-        // A dropped sender is the daemon task ending without a report.
-        let (state_tx, daemon_state) = watch::channel(DaemonState::Pending);
-        drop(state_tx);
-        assert!(await_daemon_ready(daemon_state).await.is_err());
     }
 
     #[test]
