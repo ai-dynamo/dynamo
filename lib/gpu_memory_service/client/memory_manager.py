@@ -32,13 +32,16 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from gpu_memory_service.client.rpc import GMS_ERR_CLAIM_CONFLICT, GmsRemoteError
+from gpu_memory_service.client.persistent_pool import V0PersistentPoolBackend
 from gpu_memory_service.client.session import _GMSClientSession
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.persistent_pool import (
+    PersistentPoolBackend,
+    PersistentPoolKey,
+)
 from gpu_memory_service.common.protocol.messages import GetAllocationResponse
 from gpu_memory_service.common.utils import align_to_granularity
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, get_vmm_device_type
@@ -163,6 +166,7 @@ class GMSClientMemoryManager:
         self._vmm = get_vmm()
 
         self._client: Optional[_GMSClientSession] = None
+        self._persistent_pool: Optional[PersistentPoolBackend] = None
 
         # Server-backed allocations keyed by base VA (VA <-> LocalMapping).
         self._mappings: Dict[int, LocalMapping] = {}
@@ -254,6 +258,7 @@ class GMSClientMemoryManager:
             lock_type=lock_type,
             timeout_ms=timeout_ms,
         )
+        self._persistent_pool = V0PersistentPoolBackend(self._client)
         self._granted_lock_type = self._client.lock_type
         if self._granted_lock_type == GrantedLockType.RW:
             self._last_memory_layout_hash = ""
@@ -280,6 +285,7 @@ class GMSClientMemoryManager:
                 self._client.close()
             finally:
                 self._client = None
+                self._persistent_pool = None
                 self._granted_lock_type = None
             return
         self._granted_lock_type = None
@@ -321,42 +327,6 @@ class GMSClientMemoryManager:
 
     # ==================== Persistent allocations (KV-pool namespace) ===
 
-    def _claim_persistent_with_conflict_retry(
-        self, *, engine_id: str, tag: str, aligned_size: int, shared: bool
-    ):
-        """Issue the claim RPC, retrying only a transient claim conflict.
-
-        A replacement engine reconnecting with the same engine_id can race the
-        daemon's cleanup of the previous connection's claim (its disconnect EOF
-        is processed asynchronously), surfacing as GMS_ERR_CLAIM_CONFLICT. A fast
-        supervisor restart or in-process abort->connect would otherwise fail
-        bootstrap hard from inside torch's malloc callback. Retry briefly with
-        backoff; every other error is fatal and re-raised immediately.
-        """
-        retry_secs = float(os.environ.get("GMS_PERSISTENT_CLAIM_RETRY_SECS", "2.0"))
-        deadline = time.monotonic() + max(0.0, retry_secs)
-        delay = 0.05
-        while True:
-            try:
-                return self._client_rpc.claim_persistent(
-                    engine_id=engine_id,
-                    tag=tag,
-                    size=aligned_size,
-                    shared=shared,
-                )
-            except GmsRemoteError as exc:
-                if exc.code != GMS_ERR_CLAIM_CONFLICT or time.monotonic() >= deadline:
-                    raise
-                logger.warning(
-                    "GMS persistent claim conflict for %s/%s; retrying in %.2fs "
-                    "(likely a prior connection's claim not yet cleaned up)",
-                    engine_id,
-                    tag,
-                    delay,
-                )
-                time.sleep(delay)
-                delay = min(delay * 2, 0.5)
-
     def claim_persistent(
         self,
         engine_id: str,
@@ -380,14 +350,11 @@ class GMSClientMemoryManager:
                 "Memory manager must be connected before claim_persistent",
             )
         aligned_size = align_to_granularity(size, self.granularity)
-        response = self._claim_persistent_with_conflict_retry(
-            engine_id=engine_id,
-            tag=tag,
-            aligned_size=aligned_size,
-            shared=shared,
+        allocation = self._persistent_pool_backend.claim(
+            PersistentPoolKey(engine_id, tag), aligned_size, shared=shared
         )
-        returned_size = int(response.aligned_size)
-        reattached = bool(response.reattached)
+        returned_size = allocation.aligned_size
+        reattached = allocation.reattached
         if returned_size != aligned_size:
             # Shared persistent KV attachers may calculate a smaller local
             # cache geometry after the first claimant has already reserved HBM.
@@ -397,7 +364,7 @@ class GMSClientMemoryManager:
             if not shared or not reattached or returned_size < aligned_size:
                 raise RuntimeError(
                     "GMS persistent allocation alignment mismatch: "
-                    f"requested={aligned_size} returned={response.aligned_size}"
+                    f"requested={aligned_size} returned={allocation.aligned_size}"
                 )
             logger.info(
                 "GMS persistent allocation %s/%s reattached with larger "
@@ -408,7 +375,7 @@ class GMSClientMemoryManager:
                 returned_size,
             )
         return (
-            response.allocation_id,
+            allocation.allocation_id,
             returned_size,
             reattached,
         )
@@ -419,7 +386,7 @@ class GMSClientMemoryManager:
             raise RuntimeError(
                 "Memory manager must be connected before unclaim_persistent",
             )
-        return self._client_rpc.unclaim_persistent(engine_id=engine_id, tag=tag)
+        return self._persistent_pool_backend.unclaim(PersistentPoolKey(engine_id, tag))
 
     def release_persistent(self, engine_id: str, tag: str) -> bool:
         """Explicitly destroy a persistent allocation. Returns True iff
@@ -428,10 +395,7 @@ class GMSClientMemoryManager:
             raise RuntimeError(
                 "Memory manager must be connected before release_persistent",
             )
-        return self._client_rpc.release_persistent(
-            engine_id=engine_id,
-            tag=tag,
-        )
+        return self._persistent_pool_backend.destroy(PersistentPoolKey(engine_id, tag))
 
     def export_persistent_handle(self, engine_id: str, tag: str) -> int:
         """Export the persistent allocation's POSIX FD. The caller owns
@@ -441,11 +405,7 @@ class GMSClientMemoryManager:
             raise RuntimeError(
                 "Memory manager must be connected before export_persistent",
             )
-        _, fd = self._client_rpc.export_persistent(
-            engine_id=engine_id,
-            tag=tag,
-        )
-        return fd
+        return self._persistent_pool_backend.export(PersistentPoolKey(engine_id, tag))
 
     def list_persistent(
         self,
@@ -458,7 +418,7 @@ class GMSClientMemoryManager:
             raise RuntimeError(
                 "Memory manager must be connected before list_persistent",
             )
-        return self._client_rpc.list_persistent(
+        return self._persistent_pool_backend.inventory(
             engine_id=engine_id,
             include_unclaimed=include_unclaimed,
         )
@@ -557,6 +517,7 @@ class GMSClientMemoryManager:
 
         self._client_rpc.commit()
         self._client = None
+        self._persistent_pool = None
         self._granted_lock_type = None
         return True
 
@@ -1061,6 +1022,18 @@ class GMSClientMemoryManager:
                 raise RuntimeError("Memory manager is unmapped")
             raise RuntimeError("Memory manager is not connected")
         return self._client
+
+    @property
+    def _persistent_pool_backend(self) -> PersistentPoolBackend:
+        """Return the allocation-lifetime backend for the active session."""
+        session = self._client_rpc
+        backend = getattr(self, "_persistent_pool", None)
+        if backend is None:
+            # Keep compatibility with lightweight test doubles and callers that
+            # construct the manager via ``__new__``.
+            backend = V0PersistentPoolBackend(session)
+            self._persistent_pool = backend
+        return backend
 
     def _require_rw(self) -> None:
         if self._granted_lock_type != GrantedLockType.RW:
