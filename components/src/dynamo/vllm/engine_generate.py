@@ -15,7 +15,6 @@ import torch
 if TYPE_CHECKING:
     from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 
-from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import TokensPrompt, mm_input
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
@@ -224,6 +223,8 @@ def adapt_engine_generate_request(
             f"({max_num_seqs}), got {sampling_params.n}."
         )
     if not native_request.is_sampling_param_provided("max_tokens"):
+        from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+
         model_config = vllm_config.model_config
         generation_config = getattr(model_config, "generation_config", "vllm")
         override_generation_config = (
