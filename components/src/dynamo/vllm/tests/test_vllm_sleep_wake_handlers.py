@@ -99,6 +99,27 @@ async def test_pause_without_level_uses_vllm_default_sleep():
 
 
 @pytest.mark.asyncio
+async def test_generation_only_pause_keeps_memory_mapped():
+    engine_client = SimpleNamespace(
+        pause_generation=AsyncMock(),
+        sleep=AsyncMock(),
+        wake_up=AsyncMock(),
+        resume_generation=AsyncMock(),
+    )
+    controller = VllmEnginePauseController(engine_client)
+
+    assert await controller.pause_generation_only(clear_cache=False) is True
+    assert controller.is_paused is False
+    assert controller.needs_resume_recovery is True
+    assert await controller.resume([]) is True
+
+    engine_client.pause_generation.assert_awaited_once_with(clear_cache=False)
+    engine_client.sleep.assert_not_awaited()
+    engine_client.wake_up.assert_not_awaited()
+    engine_client.resume_generation.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_wraps_sleep_wake_with_communicator_checkpoint_calls():
     engine_client = AsyncMock()
     controller = VllmEnginePauseController(
