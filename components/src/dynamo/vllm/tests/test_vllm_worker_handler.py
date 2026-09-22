@@ -92,10 +92,13 @@ def _make_config(
     # so set to LOCAL mode.
     config.embedding_transfer_mode = EmbeddingTransferMode.LOCAL
     config.enable_multimodal = enable_multimodal
+    config.enable_rl = False
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
-    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = {}
+    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = (
+        {}
+    )
     return config
 
 
@@ -206,9 +209,13 @@ def test_lora_discovery_publishes_engine_generate_capability():
         asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
 
     publish_generate.assert_called_once()
-    runtime_arg, input_arg, model_type_arg, worker_arg, tower_lora_arg = (
-        publish_generate.call_args.args
-    )
+    (
+        runtime_arg,
+        input_arg,
+        model_type_arg,
+        worker_arg,
+        tower_lora_arg,
+    ) = publish_generate.call_args.args
     assert runtime_arg is runtime_config
     assert input_arg == mod.ModelInput.Tokens
     assert model_type_arg.supports_chat()

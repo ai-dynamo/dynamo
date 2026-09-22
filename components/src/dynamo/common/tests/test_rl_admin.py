@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+
 from dynamo.common.rl import (
     RLAdminValidationError,
     RLRouteRegistry,

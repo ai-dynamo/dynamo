@@ -48,8 +48,9 @@ def _vllm_config(*, max_num_seqs=8, max_model_len=128):
 
 
 def test_tito_adapter_uses_outer_tokens_and_rl_sampling_defaults():
-    from dynamo.vllm.engine_generate import adapt_engine_generate_request
     from vllm.sampling_params import RequestOutputKind
+
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
     request = _request(
         token_ids=[41, 42],
@@ -169,6 +170,40 @@ def test_tito_adapter_rejects_routing_hash_count_mismatch():
     request["extra_args"]["dynamo_mm_routing_hashes"] = ["one", "two"]
 
     with pytest.raises(ValueError, match="routing hash"):
+        adapt_engine_generate_request(
+            request,
+            enable_multimodal=True,
+            aggregated=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
+
+
+@pytest.mark.parametrize(
+    ("is_embed", "error", "match"),
+    [
+        ({"unexpected": True}, TypeError, "sequence"),
+        ([False, True], ValueError, "placeholder length"),
+        ([1], ValueError, "booleans"),
+    ],
+)
+def test_tito_adapter_rejects_invalid_placeholder_mask_before_tensor_conversion(
+    is_embed, error, match
+):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    request = _request(
+        token_ids=[11],
+        features={
+            "mm_hashes": {"image": ["one"]},
+            "mm_placeholders": {
+                "image": [{"offset": 0, "length": 1, "is_embed": is_embed}]
+            },
+            "kwargs_data": None,
+        },
+    )
+
+    with pytest.raises(error, match=match):
         adapt_engine_generate_request(
             request,
             enable_multimodal=True,

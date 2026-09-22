@@ -586,7 +586,7 @@ class OmniHandler(BaseOmniHandler):
                     yield result
         finally:
             if request_started:
-                self._lora_state.end_request(admitted_lora_request.lora_name)
+                self._lora_state.end_request(lora_request.lora_name)
 
     async def build_engine_inputs(
         self,

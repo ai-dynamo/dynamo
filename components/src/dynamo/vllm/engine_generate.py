@@ -15,8 +15,8 @@ import torch
 if TYPE_CHECKING:
     from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 
-from vllm.inputs import TokensPrompt, mm_input
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.inputs import TokensPrompt, mm_input
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     MultiModalKwargsItems,
@@ -39,11 +39,15 @@ def publish_engine_generate_capability(
     """Publish native Generate support and its MM-routing-relevant config."""
     from dynamo.llm import ModelInput, ModelType, WorkerType
 
-    if (
-        model_input != ModelInput.Tokens
-        or worker_type != WorkerType.Aggregated
-        or not (model_type.supports_chat() or model_type == ModelType.Completions)
-    ):
+    if model_input != ModelInput.Tokens:
+        return False
+    if worker_type == WorkerType.Prefill:
+        supported = model_type == ModelType.Prefill
+    else:
+        supported = worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
+            model_type.supports_chat() or model_type == ModelType.Completions
+        )
+    if not supported:
         return False
 
     runtime_config.set_engine_specific(
@@ -140,15 +144,22 @@ def _image_features(
         ):
             raise ValueError("TITO image placeholder range is invalid")
         is_embed_raw = item.get("is_embed")
+        if is_embed_raw is not None:
+            if not isinstance(is_embed_raw, (list, tuple)):
+                raise TypeError("TITO image placeholder is_embed must be a sequence")
+            if len(is_embed_raw) != length:
+                raise ValueError(
+                    "TITO image placeholder is_embed must match placeholder length"
+                )
+            if not all(isinstance(value, bool) for value in is_embed_raw):
+                raise ValueError(
+                    "TITO image placeholder is_embed values must be booleans"
+                )
         is_embed = (
             None
             if is_embed_raw is None
             else torch.as_tensor(is_embed_raw, dtype=torch.bool)
         )
-        if is_embed is not None and (is_embed.ndim != 1 or is_embed.numel() != length):
-            raise ValueError(
-                "TITO image placeholder is_embed must be one-dimensional and match length"
-            )
         restored_ranges.append(
             PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
         )

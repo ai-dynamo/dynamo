@@ -3391,9 +3391,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[output_idx] = (
-                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
-                    )
+                    total_output_tokens_by_index[
+                        output_idx
+                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -3436,11 +3436,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out["completion_usage"] = (
-                            BaseWorkerHandler._build_completion_usage(
-                                request_output=res,
-                                completion_token_counts=total_output_tokens_by_index,
-                            )
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            completion_token_counts=total_output_tokens_by_index,
                         )
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
@@ -3756,13 +3756,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
         has_mm_data = request.get("multi_modal_data") is not None
         assembled_prompt: EmbedsPrompt | TokensPrompt | None = None
-        engine_generate_input = adapt_engine_generate_request(
-            request,
-            enable_multimodal=self._multimodal_request_processor.enable_multimodal,
-            aggregated=mode == DisaggregationMode.AGGREGATED,
-            vllm_config=self.engine_client.vllm_config,
-            default_sampling_params=self.default_sampling_params,
-        )
+        engine_generate_input = None
+        extra_args = request.get("extra_args")
+        if isinstance(extra_args, dict) and "vllm_tito" in extra_args:
+            engine_generate_input = adapt_engine_generate_request(
+                request,
+                enable_multimodal=self._multimodal_request_processor.enable_multimodal,
+                aggregated=mode == DisaggregationMode.AGGREGATED,
+                vllm_config=self.engine_client.vllm_config,
+                default_sampling_params=self.default_sampling_params,
+            )
 
         if has_external_encoder_result:
             assembled_prompt = await self._assemble_external_encoder_prompt(
@@ -3938,9 +3941,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"]["prompt_tokens_details"] = (
-                                prefill_prompt_tokens_details
-                            )
+                            tok["completion_usage"][
+                                "prompt_tokens_details"
+                            ] = prefill_prompt_tokens_details
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -4279,9 +4282,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params["expanded_prompt_token_ids"] = (
-                expanded_prompt_token_ids
-            )
+            disaggregated_params[
+                "expanded_prompt_token_ids"
+            ] = expanded_prompt_token_ids
 
         return disaggregated_params if disaggregated_params else None
 
