@@ -20,14 +20,31 @@ from uuid import uuid4
 
 from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.vmm import VMMDevice
+from gpu_memory_service.server.persistent_allocations import (
+    PersistentAllocationManager,
+    PersistentClaimConflictError,
+    PersistentNotFoundError,
+    PersistentPoolIncompatibleError,
+)
 from gpu_memory_service.v1.protocol import (
     CHECKPOINT_CONTROL_TYPES,
+    ERROR_CLAIM_CONFLICT,
+    ERROR_INVALID_REQUEST,
+    ERROR_NOT_CLAIMED,
+    ERROR_NOT_FOUND,
+    ERROR_OUT_OF_MEMORY,
     REQUEST_TYPES,
     AbortRequest,
     AllocateRequest,
     AllocationRecord,
+    ClaimPersistentPoolRequest,
+    ClaimPersistentPoolResponse,
     CommitRequest,
+    DestroyPersistentPoolRequest,
+    DestroyPersistentPoolResponse,
     ErrorResponse,
+    ExportPersistentPoolRequest,
+    ExportPersistentPoolResponse,
     ExportRequest,
     ExportResponse,
     FreeRequest,
@@ -35,10 +52,16 @@ from gpu_memory_service.v1.protocol import (
     HandshakeResponse,
     ListAllocationsRequest,
     ListAllocationsResponse,
+    ListPersistentPoolsRequest,
+    ListPersistentPoolsResponse,
     Message,
+    PersistentPoolErrorResponse,
+    PersistentPoolRecord,
     Request,
     Response,
     SuccessResponse,
+    UnclaimPersistentPoolRequest,
+    UnclaimPersistentPoolResponse,
     receive_message,
     send_message,
 )
@@ -83,6 +106,7 @@ class SessionSnapshot:
     ro_sessions: int
     waiting_writers: int
     writer_reserved: bool
+    persistent_sessions: int = 0
 
 
 class GMSSessionManager:
@@ -106,6 +130,7 @@ class GMSSessionManager:
         )
         self._rw_session: ServerSession | None = None
         self._ro_sessions: set[ServerSession] = set()
+        self._persistent_sessions: set[ServerSession] = set()
         self._writer_reserved = False
         self._waiting_writers = 0
         self._committed = False
@@ -117,6 +142,14 @@ class GMSSessionManager:
         is_cancelled: Callable[[], bool] | None = None,
     ) -> ServerSession | None:
         deadline = monotonic() + timeout if timeout is not None else None
+        if requested is RequestedLockType.RW_PERSISTENT:
+            with self._condition:
+                self._require_admission()
+                if is_cancelled is not None and is_cancelled():
+                    return None
+                session = ServerSession(GrantedLockType.RW_PERSISTENT)
+                self._persistent_sessions.add(session)
+                return session
         if requested is RequestedLockType.RW:
             with self._condition:
                 self._require_admission()
@@ -184,6 +217,10 @@ class GMSSessionManager:
                 self._ro_sessions.remove(session)
                 self._condition.notify_all()
                 return
+            elif session in self._persistent_sessions:
+                self._persistent_sessions.remove(session)
+                self._condition.notify_all()
+                return
             else:
                 return
 
@@ -200,7 +237,11 @@ class GMSSessionManager:
 
     def is_active(self, session: ServerSession) -> bool:
         with self._condition:
-            return session is self._rw_session or session in self._ro_sessions
+            return (
+                session is self._rw_session
+                or session in self._ro_sessions
+                or session in self._persistent_sessions
+            )
 
     def snapshot(self) -> SessionSnapshot:
         with self._condition:
@@ -208,6 +249,7 @@ class GMSSessionManager:
                 committed=self._committed,
                 rw_sessions=int(self._rw_session is not None),
                 ro_sessions=len(self._ro_sessions),
+                persistent_sessions=len(self._persistent_sessions),
                 waiting_writers=self._waiting_writers,
                 writer_reserved=self._writer_reserved,
             )
@@ -304,7 +346,10 @@ class GMSServerMemoryManager:
             raise ValueError("GPU UUID must not be empty")
         self._identity = (str(uuid4()), gpu_uuid)
         self._allocations = GMSAllocationManager(vmm, device)
+        self._persistent = PersistentAllocationManager(device, vmm=vmm)
         self._allocation_sizes: dict[str, int] = {}
+        self._persistent_claims: dict[ServerSession, dict[tuple[str, str], bool]] = {}
+        self._persistent_lock = threading.RLock()
         self._checkpoint_lifecycle = checkpoint_lifecycle
         self._sessions = GMSSessionManager(
             self._clear_allocations,
@@ -328,6 +373,10 @@ class GMSServerMemoryManager:
     def checkpoint_lifecycle(self) -> GMSCheckpointLifecycle | None:
         return self._checkpoint_lifecycle
 
+    @property
+    def persistent(self) -> PersistentAllocationManager:
+        return self._persistent
+
     def acquire(
         self,
         requested: RequestedLockType,
@@ -341,6 +390,20 @@ class GMSServerMemoryManager:
         request: Request,
         is_connected: Callable[[], bool] | None = None,
     ) -> tuple[Response, int]:
+        if isinstance(
+            request,
+            (
+                ClaimPersistentPoolRequest,
+                UnclaimPersistentPoolRequest,
+                DestroyPersistentPoolRequest,
+                ExportPersistentPoolRequest,
+                ListPersistentPoolsRequest,
+            ),
+        ):
+            return self._handle_persistent_request(session, request)
+        self._require_active(session)
+        if session.mode not in (GrantedLockType.RW, GrantedLockType.RO):
+            raise RuntimeError("transactional operation requires an RW or RO session")
         if isinstance(request, AllocateRequest):
             self._require_rw(session)
             self._allocations.allocate(
@@ -351,7 +414,6 @@ class GMSServerMemoryManager:
             self._allocation_sizes[request.allocation_id] = request.aligned_size
             return SuccessResponse(), -1
         if isinstance(request, ExportRequest):
-            self._require_active(session)
             return ExportResponse(), self._allocations.export(request.allocation_id)
         if isinstance(request, FreeRequest):
             self._require_rw(session)
@@ -359,7 +421,6 @@ class GMSServerMemoryManager:
             del self._allocation_sizes[request.allocation_id]
             return SuccessResponse(), -1
         if isinstance(request, ListAllocationsRequest):
-            self._require_active(session)
             allocations = tuple(
                 AllocationRecord(allocation_id, aligned_size)
                 for allocation_id, aligned_size in self._allocation_sizes.items()
@@ -371,18 +432,171 @@ class GMSServerMemoryManager:
             return SuccessResponse(), -1
         if isinstance(request, AbortRequest):
             self._require_rw(session)
-            self._sessions.close(session)
+            self.close(session)
             return SuccessResponse(), -1
         raise RuntimeError(f"unsupported GMS request {type(request).__name__}")
 
     def close(self, session: ServerSession) -> None:
-        self._sessions.close(session)
+        try:
+            with self._persistent_lock:
+                claims = self._persistent_claims.pop(session, {})
+                for engine_id, tag in claims:
+                    self._persistent.unclaim(engine_id, tag)
+        finally:
+            self._sessions.close(session)
+
+    def _handle_persistent_request(
+        self,
+        session: ServerSession,
+        request: Request,
+    ) -> tuple[Response, int]:
+        self._require_persistent(session)
+        with self._persistent_lock:
+            claims = self._persistent_claims.setdefault(session, {})
+            if isinstance(request, ClaimPersistentPoolRequest):
+                key = (request.engine_id, request.tag)
+                try:
+                    if key in claims and claims[key] != request.shared:
+                        return (
+                            PersistentPoolErrorResponse(
+                                "persistent claim mode differs from this session's claim",
+                                code=ERROR_INVALID_REQUEST,
+                            ),
+                            -1,
+                        )
+                    if key in claims:
+                        allocation = self._persistent.get_compatible(
+                            request.engine_id,
+                            request.tag,
+                            request.aligned_size,
+                            shared=request.shared,
+                        )
+                        reattached = True
+                    else:
+                        allocation, reattached = self._persistent.claim(
+                            request.engine_id,
+                            request.tag,
+                            request.aligned_size,
+                            shared=request.shared,
+                        )
+                except PersistentPoolIncompatibleError as exc:
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_INVALID_REQUEST),
+                        -1,
+                    )
+                except PersistentClaimConflictError as exc:
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_CLAIM_CONFLICT),
+                        -1,
+                    )
+                except ValueError as exc:
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_INVALID_REQUEST),
+                        -1,
+                    )
+                except MemoryError as exc:
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_OUT_OF_MEMORY),
+                        -1,
+                    )
+                claims[key] = request.shared
+                return (
+                    ClaimPersistentPoolResponse(
+                        self._persistent_record(allocation),
+                        reattached,
+                    ),
+                    -1,
+                )
+
+            if isinstance(request, UnclaimPersistentPoolRequest):
+                key = (request.engine_id, request.tag)
+                if key not in claims:
+                    return UnclaimPersistentPoolResponse(False), -1
+                unclaimed = self._persistent.unclaim(*key)
+                del claims[key]
+                if not claims:
+                    self._persistent_claims.pop(session, None)
+                return UnclaimPersistentPoolResponse(unclaimed), -1
+
+            if isinstance(request, DestroyPersistentPoolRequest):
+                key = (request.engine_id, request.tag)
+                if key not in claims and self._persistent.is_claimed(*key):
+                    return (
+                        PersistentPoolErrorResponse(
+                            "persistent allocation claimed by another session",
+                            code=ERROR_NOT_CLAIMED,
+                        ),
+                        -1,
+                    )
+                try:
+                    destroyed = self._persistent.release(*key)
+                except PersistentClaimConflictError as exc:
+                    return (
+                        PersistentPoolErrorResponse(str(exc), ERROR_CLAIM_CONFLICT),
+                        -1,
+                    )
+                claims.pop(key, None)
+                if not claims:
+                    self._persistent_claims.pop(session, None)
+                return DestroyPersistentPoolResponse(destroyed), -1
+
+            if isinstance(request, ExportPersistentPoolRequest):
+                key = (request.engine_id, request.tag)
+                if key not in claims:
+                    return (
+                        PersistentPoolErrorResponse(
+                            "persistent allocation not claimed by session",
+                            code=ERROR_NOT_CLAIMED,
+                        ),
+                        -1,
+                    )
+                try:
+                    _allocation, fd = self._persistent.export(*key)
+                except PersistentNotFoundError as exc:
+                    return PersistentPoolErrorResponse(str(exc), ERROR_NOT_FOUND), -1
+                return ExportPersistentPoolResponse(), fd
+
+            if isinstance(request, ListPersistentPoolsRequest):
+                allocations = self._persistent.list(engine_id=request.engine_id)
+                if not request.include_unclaimed:
+                    allocations = [
+                        allocation
+                        for allocation in allocations
+                        if (allocation.engine_id, allocation.tag) in claims
+                    ]
+                return (
+                    ListPersistentPoolsResponse(
+                        tuple(self._persistent_record(item) for item in allocations)
+                    ),
+                    -1,
+                )
+
+        raise AssertionError(f"unhandled persistent request {type(request).__name__}")
+
+    def _persistent_record(self, allocation) -> PersistentPoolRecord:
+        return PersistentPoolRecord(
+            allocation_id=allocation.allocation_id,
+            engine_id=allocation.engine_id,
+            tag=allocation.tag,
+            size=allocation.size,
+            aligned_size=allocation.aligned_size,
+            claimed=self._persistent.is_claimed(
+                allocation.engine_id,
+                allocation.tag,
+            ),
+        )
 
     def session_snapshot(self) -> SessionSnapshot:
         return self._sessions.snapshot()
 
     def allocation_snapshot(self) -> tuple[tuple[str, int], ...]:
         return tuple(sorted(self._allocation_sizes.items()))
+
+    @property
+    def persistent_allocation_count(self) -> int:
+        """Include orphaned backing when checking checkpoint safety."""
+        with self._persistent_lock:
+            return self._persistent.allocation_count
 
     def _clear_allocations(self) -> int:
         cleared = self._allocations.clear()
@@ -396,6 +610,13 @@ class GMSServerMemoryManager:
     def _require_active(self, session: ServerSession) -> None:
         if not self._sessions.is_active(session):
             raise RuntimeError("operation requires an active GMS session")
+
+    def _require_persistent(self, session: ServerSession) -> None:
+        self._require_active(session)
+        if session.mode is not GrantedLockType.RW_PERSISTENT:
+            raise RuntimeError(
+                "persistent-pool operation requires an RW_PERSISTENT session"
+            )
 
 
 class _GMSRequestHandler(socketserver.BaseRequestHandler):
