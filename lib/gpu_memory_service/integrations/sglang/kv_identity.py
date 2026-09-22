@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import os
+
 from gpu_memory_service.integrations.common.utils import (
     env_enabled_by_default,
     get_gms_persistent_kv_engine_id,
@@ -15,6 +17,19 @@ def shared_kv_enabled() -> bool:
     return env_enabled_by_default(
         "GMS_SGLANG_SHARED_KV",
         default=env_enabled_by_default("DYN_GMS_FAILOVER_SHADOW_MODE", default=False),
+    )
+
+
+def failover_hooks_required() -> bool:
+    """Whether startup must reject an incomplete shared-KV integration.
+
+    An authoritative content directory is part of the same recovery contract
+    as a shared pool: either mode must never silently start with only some of
+    the native SGLang hooks installed.
+    """
+    return shared_kv_enabled() or (
+        os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()
+        == "authoritative"
     )
 
 

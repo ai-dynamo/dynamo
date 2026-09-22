@@ -335,3 +335,8 @@ def install() -> bool:
 def install_lazy() -> None:
     """Compatibility alias; setup occurs before SGLang builds memory pools."""
     install()
+
+
+def persistent_kv_hooks_installed() -> bool:
+    """Return whether persistent MHA/MLA pool subclasses are installed."""
+    return _INSTALLED
