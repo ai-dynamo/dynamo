@@ -158,6 +158,9 @@ impl RequestEndTraceState {
 impl Drop for RequestEndTraceState {
     fn drop(&mut self) {
         if self.request_context.is_killed() {
+            if let Some(request) = &self.request {
+                request.request_tracker.record_finish_if_missing();
+            }
             self.emit();
         }
     }
@@ -396,6 +399,52 @@ mod tests {
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.input_tokens, Some(2));
         assert_eq!(request.output_tokens, Some(0));
+    }
+
+    #[test]
+    fn agent_cancellation_finalizes_missing_timing_and_preserves_existing_finish() {
+        BUS.init(64);
+        let mut receiver = BUS.subscribe();
+        for already_finished in [false, true] {
+            let request_id = format!("req-agent-cancel-{already_finished}");
+            let tracker = Arc::new(RequestTracker::new());
+            let (mut state, context) = request_end_state(&request_id, tracker.clone());
+            state.agent = Some(AgentContextTraceState {
+                agent_context: AgentContext {
+                    session_id: "cancel-timing".to_string(),
+                    parent_session_id: None,
+                    session_final: None,
+                    compaction: None,
+                    input_trigger: None,
+                },
+                request_model: "test-model".to_string(),
+                request_tracker: Some(tracker.clone()),
+                x_request_id: None,
+                finish_reason_metadata: Default::default(),
+            });
+            if already_finished {
+                tracker.record_finish();
+            }
+            let original_total = tracker.total_time_ms();
+            std::thread::sleep(Duration::from_millis(20));
+            context.kill();
+            drop(state);
+
+            let records = drain_request_records(&mut receiver, &request_id);
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
+            let request = record.request.as_ref().unwrap();
+            let total = request.total_time_ms.expect("cancellation finish timing");
+            if let Some(original_total) = original_total {
+                assert_eq!(total, original_total);
+            } else {
+                assert!(total >= 20.0);
+            }
+            assert_eq!(
+                record.event_time_unix_ms,
+                request.request_received_ms.unwrap() + total.round() as u64
+            );
+        }
     }
 
     #[test]
