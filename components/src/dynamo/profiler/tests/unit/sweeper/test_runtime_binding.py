@@ -10,11 +10,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from dynamo.profiler.sweeper.runtime_binding import (
     RuntimeBindingError,
     resolve_runtime_binding,
 )
+
+pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
 _TRTLLM_AGG_CANDIDATE = {
     "backend": "trtllm",
@@ -41,12 +42,12 @@ def _fake_gpus_per_node(value=4):
 
 
 def _resolve(candidate, **overrides):
-    kwargs = dict(
-        model="deepseek-ai/DeepSeek-V3",
-        dynamo_version=_DYNAMO_VERSION,
-        check_support=_fake_support(),
-        lookup_num_gpus_per_node=_fake_gpus_per_node(),
-    )
+    kwargs = {
+        "model": "deepseek-ai/DeepSeek-V3",
+        "dynamo_version": _DYNAMO_VERSION,
+        "check_support": _fake_support(),
+        "lookup_num_gpus_per_node": _fake_gpus_per_node(),
+    }
     kwargs.update(overrides)
     return resolve_runtime_binding(candidate, **kwargs)
 
