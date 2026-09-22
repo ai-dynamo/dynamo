@@ -123,9 +123,9 @@ class TestReadTopologyConfig:
             _enable_topology(monkeypatch, topology_dir)
             monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", value)
             config = read_topology_config()
-            assert config.enabled, (
-                f"expected enabled for DYN_TOPOLOGY_ENABLED={value!r}"
-            )
+            assert (
+                config.enabled
+            ), f"expected enabled for DYN_TOPOLOGY_ENABLED={value!r}"
 
     def test_invalid_values_disable_with_warning(self, monkeypatch, caplog):
         """Unrecognized values disable topology and log a warning instead of raising."""
@@ -135,12 +135,12 @@ class TestReadTopologyConfig:
             monkeypatch.setenv("DYN_TOPOLOGY_ENABLED", value)
             with caplog.at_level(logging.WARNING):
                 config = read_topology_config()
-            assert not config.enabled, (
-                f"expected disabled for DYN_TOPOLOGY_ENABLED={value!r}"
-            )
-            assert any("DYN_TOPOLOGY_ENABLED" in r.message for r in caplog.records), (
-                f"expected warning for DYN_TOPOLOGY_ENABLED={value!r}"
-            )
+            assert (
+                not config.enabled
+            ), f"expected disabled for DYN_TOPOLOGY_ENABLED={value!r}"
+            assert any(
+                "DYN_TOPOLOGY_ENABLED" in r.message for r in caplog.records
+            ), f"expected warning for DYN_TOPOLOGY_ENABLED={value!r}"
             caplog.clear()
 
     def test_reads_all_non_hidden_topology_files(self, monkeypatch, tmp_path):
