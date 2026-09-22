@@ -22,4 +22,3 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio-util = { workspace = true }

@@ -71,7 +71,7 @@ The default deferral timeout permits waits of roughly 30 minutes under pressure.
 
 Program state is local to each frontend's router instance. This is not a cluster-wide admission budget; keep a session's turns on the same frontend when using multiple replicas. The native plugin has been exercised with aggregated vLLM workers. Standalone EPP and disaggregated deployment guidance are outside this example.
 
-The native plugin uses the existing [router plugin API](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#register-a-request-classifier). Its classifier and worker selector register together in Dynamo's builtin catalog. It does not expose the Python prototype's soft-demotion controls, priority boosts, host-cache budget, or separate status endpoints described below.
+The native plugin's classifier and worker selector register together in Dynamo's builtin catalog. It does not expose the Python prototype's soft-demotion controls, priority boosts, host-cache budget, or separate status endpoints described below.
 
 ### Native Plugin Logs
 
