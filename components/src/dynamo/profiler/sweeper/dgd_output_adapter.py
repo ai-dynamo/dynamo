@@ -8,8 +8,9 @@ selects, reusing Dynamo's existing renderer/output pipeline."""
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from dynamo.profiler.sweeper.output import OutputFormat, write_outputs
 from dynamo.profiler.sweeper.renderers import (

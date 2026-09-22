@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from dynamo.profiler.sweeper.output.atomic import replace_text
 from dynamo.profiler.sweeper.renderers import DGDGenerationOptions, render_dgd
 from dynamo.profiler.sweeper.stack_provider import create_stack
@@ -742,8 +741,6 @@ def _run_sweeper_renderers(
         reason = f": {exception.describe()}" if exception is not None else ""
         print(f"[{case.hardware.name}/{case.name}] sweeper skipped{reason}", flush=True)
         return []
-
-    from aisimulate.sweeper import SmartSearchConfig, Sweeper
 
     config = load_sweep_config(case.composed_sweeper_path)
     if config.goal.is_pareto:
