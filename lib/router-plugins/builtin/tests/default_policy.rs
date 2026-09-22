@@ -333,3 +333,57 @@ fn pin_does_not_advance_seeded_random_stream() {
         );
     }
 }
+
+#[test]
+fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
+    let (workers, mut request) = fixture(2, 160);
+    for (worker, load) in &mut request.worker_loads {
+        load.active_prefill_tokens = 0;
+        load.active_requests = 0;
+        load.active_decode_blocks = if worker.worker_id == 0 { 8 } else { 0 };
+        load.additional_active_blocks = 0;
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if worker.worker_id == 0 { 10 } else { 0 });
+    }
+    let mut registry = default_registry();
+    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    for (parameters, expected_worker, expects_cache) in [
+        ("{}", 0, true),
+        (
+            "{overlap_score_credit: 0, shared_cache_multiplier: 0}",
+            1,
+            false,
+        ),
+    ] {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!(
+            "worker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+        )).unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            overlap_score_credit: 2.0,
+            host_cache_hit_weight: 0.0,
+            disk_cache_hit_weight: 0.0,
+            router_temperature: 0.0,
+            ..Default::default()
+        };
+        let factory = registry.resolve(&config).unwrap().unwrap();
+        let policy = factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+        assert_eq!(
+            <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(&policy)
+                .contains(WorkerInputs::CACHE),
+            expects_cache,
+        );
+        let selected = policy
+            .select_worker(support::selection_input(&workers, &request, 16))
+            .unwrap();
+        assert_eq!(selected.worker.worker_id, expected_worker);
+    }
+}
