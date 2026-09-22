@@ -239,6 +239,13 @@ spec:
   env:
   - name: UCX_TLS
     value: rc_x,rc,cuda_copy,cuda_ipc
+  # UCX transport-layer tuning; only meaningful once a fabric is attached.
+  - name: UCX_MEMTYPE_CACHE
+    value: "n"
+  - name: UCX_RCACHE_MAX_UNRELEASED
+    value: "1024"
+  - name: UCX_NET_DEVICES
+    value: all
   # TP is intra-pod and belongs on NVLink; keep NCCL off IB so the two
   # fabrics stay separated by role.
   - name: NCCL_IB_DISABLE
@@ -253,9 +260,3 @@ spec:
     value: LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4
   - name: VLLM_WORKER_MULTIPROC_METHOD
     value: spawn
-  - name: UCX_MEMTYPE_CACHE
-    value: "n"
-  - name: UCX_RCACHE_MAX_UNRELEASED
-    value: "1024"
-  - name: UCX_NET_DEVICES
-    value: all

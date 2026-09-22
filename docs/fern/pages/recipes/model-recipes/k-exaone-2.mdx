@@ -134,9 +134,11 @@ Trace replay with AIPerf against the Mooncake 8K/1K/70%-reuse chat trace. See [`
 
 Mooncake chat trace replay, 1,805 requests, at the highest concurrency meeting a joint gate of E2E ≥ 50 tok/s/user **and** TTFT p50 < 5 s, where `E2E = OSL / (TTFT_p50 + OSL × ITL)`.
 
-| Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
-| ----------- | --------- | -------------- | -------- | --- |
-| 7           | 87        | 51.4           | 291 ms   | 19.15 ms |
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Chat 8K/1K trace | `agg-b200-chat` | vLLM | B200 | 7 | 87 | 51.4 | 291 |
+
+ITL p50 is 19.15 ms.
 
 Measured KV reuse on this workload is 8.8%. That is not a misconfiguration — the trace's working set is roughly 42x oversubscribed against TP4's KV capacity, so blocks are evicted before they can be reused.
 
@@ -146,9 +148,11 @@ Measured KV reuse on this workload is 8.8%. That is not a misconfiguration — t
 
 Mooncake chat trace replay, 1,805 requests. Concurrency 14 is this target's operating point — the highest concurrency meeting both legs of the gate.
 
-| Concurrency | tok/s/GPU | E2E tok/s/user | TTFT p50 | ITL |
-| ----------- | --------- | -------------- | -------- | --- |
-| 14          | **85**    | 54.9           | 2,230 ms | 15.98 ms |
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Chat 8K/1K trace | `disagg-b200-chat` | vLLM | B200 | 14 | 85 | 54.9 | 2,230 |
+
+ITL p50 is 15.98 ms.
 
 This is level with the aggregated target's 87 tok/s/GPU under the same gate, so disaggregation is an SLA and scaling choice for this model rather than a throughput win or loss. It buys per-token latency (ITL 15.98 ms against the aggregated recipe's 19.15 ms) and lets prefill and decode scale independently, for twice the GPUs. Lowering concurrency trades throughput for interactivity — at C=7 the same deployment gives 55 tok/s/GPU but E2E 70.6 tok/s/user and TTFT p50 1,018 ms.
 
