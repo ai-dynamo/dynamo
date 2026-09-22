@@ -344,12 +344,13 @@ def _normalize_lease_engine_name(backend_name: str) -> str:
 def lease_transition_serving_enabled(
     backend_name: str, *, mapped_standby: bool
 ) -> bool:
-    """Validate the opt-in mode that serves before predecessor retirement.
+    """Validate the legacy transition-serving configuration.
 
-    In this mode the new owner may allocate only atomically FREE lease slots and
-    may reuse predecessor KV only through exact-generation SEALED adoption or
-    read pins. CPU writers are fenced and leases classified before admission;
-    optional GPU-quiescence reclamation remains asynchronous.
+    This flag no longer selects an earlier admission path: every takeover
+    fences CPU writers and classifies predecessor leases before admission.
+    Retain the configuration checks for existing deployments that set it.
+    Optional GPU-quiescence reclamation remains asynchronous; setting this
+    flag never authorizes reuse of quarantined pages.
     """
 
     if not _truthy_env(LEASE_TRANSITION_SERVING_ENV):
