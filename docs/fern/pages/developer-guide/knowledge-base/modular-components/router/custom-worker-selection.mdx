@@ -412,7 +412,7 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
-| `affinity_target()` | Optional worker and data-parallel rank from soft session affinity |
+| `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
@@ -433,7 +433,7 @@ The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examp
 
 ### Soft Session Affinity
 
-Set `--router-session-affinity-mode soft` with a session-affinity TTL to let a custom policy influence an existing session binding. The current binding enters the normal selection pipeline as `affinity_target()`. By default, the policy receives the full host-eligible candidate set, subject to its own filters, and may select another worker. Dynamo rebinds the session after dispatch returns a response stream.
+Set `--router-session-affinity-mode soft` with a session-affinity TTL to let a custom policy influence an existing session binding. The current binding enters the normal selection pipeline as `affinity_target()`. The policy still receives the full host-eligible candidate set, subject to its own filters, and may select another worker. Dynamo rebinds the session after dispatch returns a response stream.
 
 ```mermaid
 flowchart LR
@@ -444,24 +444,6 @@ flowchart LR
 ```
 
 Match both fields when a policy wants to recognize the target. A target with `dp_rank: None` matches every rank on its worker; a populated rank matches only that worker-rank pair. The target can be absent from the candidate table when the worker is unavailable or a custom filter rejects it.
-
-To retain an eligible target without duplicating affinity logic in the picker, opt into scheduler
-candidate narrowing when you build the policy:
-
-```rust
-WorkerSelectionPolicy::new(
-    config.clone(),
-    worker_type.as_str(),
-    scorers,
-    Box::new(LowestCostPicker),
-)
-.with_exclusive_affinity_target(true)
-```
-
-The default is `false`. When enabled, Dynamo checks discovery, availability, overload, request
-allowlists, routing constraints, and the target's data-parallel rank before narrowing. An ineligible
-target leaves the normal candidate set intact. Policy filters still run after narrowing, so rejecting
-the sole narrowed candidate returns the policy's usual all-filtered error.
 
 Hard affinity remains the default. A hard binding and every explicit request target take the exact-target path instead of advisory custom selection. A selection, setup, or dispatch failure before a response stream leaves the previous soft binding intact. An error or cancellation after the stream is returned does not roll back a completed rebind.
 

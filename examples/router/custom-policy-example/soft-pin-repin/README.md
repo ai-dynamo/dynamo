@@ -7,10 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The `soft-pin-repin` policy keeps a session on its current worker until that worker exceeds an active-request threshold. It then selects the least-loaded alternative and lets Dynamo store the selected worker as the new soft binding.
 
-The policy implements only `WorkerPicker`. It requests `WorkerInputs::LOAD` and explicitly keeps
-`with_exclusive_affinity_target(false)` so the picker can compare the current soft target with every
-eligible alternative. Dynamo continues to own worker discovery, eligibility, reservations,
-accounting, dispatch, and session binding state.
+The policy implements only `WorkerPicker`. It requests `WorkerInputs::LOAD`; Dynamo continues to own worker discovery, eligibility, reservations, accounting, dispatch, and session binding state.
 
 ## Policy Behavior
 

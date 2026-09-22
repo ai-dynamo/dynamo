@@ -30,8 +30,6 @@ use super::types::{
     NonMaxOverlapSelection, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider,
     SchedulingContext, SchedulingRequest, SchedulingResponse, WorkerAvailabilityProvider,
 };
-#[cfg(test)]
-use crate::protocols::WorkerAffinityTarget;
 use crate::protocols::{
     LocalBlockHash, PrefillLoadHint, WorkerConfigLike, WorkerId, WorkerSelectionResult,
     WorkerWithDpRank,
@@ -2121,14 +2119,9 @@ mod tests {
     #[derive(Clone)]
     struct MinDecodeSelector {
         rendezvous: Option<Arc<SelectorRendezvous>>,
-        exclusive_affinity_target: bool,
     }
 
     impl WorkerSelector<SimpleWorkerConfig> for MinDecodeSelector {
-        fn uses_exclusive_affinity_target(&self) -> bool {
-            self.exclusive_affinity_target
-        }
-
         fn required_worker_inputs(&self) -> WorkerInputs {
             WorkerInputs::CACHE | WorkerInputs::LOAD
         }
@@ -2206,41 +2199,8 @@ mod tests {
         Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
     ) {
-        let configs = (0..num_workers as u64)
-            .map(|id| {
-                (
-                    id,
-                    SimpleWorkerConfig {
-                        max_num_batched_tokens: Some(isl as u64),
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-        make_queue_with_custom_configs_and_selector(configs, block_size, threshold_frac, selector)
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn make_queue_with_custom_configs_and_selector<
-        Sel: WorkerSelector<SimpleWorkerConfig> + Send + 'static,
-    >(
-        configs: HashMap<u64, SimpleWorkerConfig>,
-        block_size: u32,
-        threshold_frac: Option<f64>,
-        selector: Sel,
-    ) -> (
-        Arc<SchedulerQueue<NoopSequencePublisher, SimpleWorkerConfig, Sel>>,
-        Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
-    ) {
-        let dp_range: HashMap<u64, (u32, u32)> = configs
-            .iter()
-            .map(|(&id, config)| {
-                (
-                    id,
-                    (config.data_parallel_start_rank, config.data_parallel_size),
-                )
-            })
-            .collect();
+        let dp_range: HashMap<u64, (u32, u32)> =
+            (0..num_workers as u64).map(|id| (id, (0, 1))).collect();
         let slots = Arc::new(ActiveSequencesMultiWorker::new(
             NoopSequencePublisher,
             block_size as usize,
@@ -2249,6 +2209,17 @@ mod tests {
             0,
             "test",
         ));
+
+        let mut configs: HashMap<u64, SimpleWorkerConfig> = HashMap::new();
+        for id in 0..num_workers as u64 {
+            configs.insert(
+                id,
+                SimpleWorkerConfig {
+                    max_num_batched_tokens: Some(isl as u64),
+                    ..Default::default()
+                },
+            );
+        }
         let (_cfg_tx, cfg_rx) = watch::channel(configs);
 
         let queue = Arc::new(SchedulerQueue::new(
@@ -2650,101 +2621,6 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
-    }
-
-    #[tokio::test]
-    async fn affinity_target_narrows_candidates_only_when_selector_opts_in() {
-        let target = WorkerWithDpRank::new(1, 0);
-        for (exclusive_affinity_target, expected) in
-            [(false, WorkerWithDpRank::new(0, 0)), (true, target)]
-        {
-            let (queue, _slots) = make_queue_with_custom_selector(
-                2,
-                16,
-                64,
-                None,
-                MinDecodeSelector {
-                    rendezvous: None,
-                    exclusive_affinity_target,
-                },
-            );
-            let (mut request, _response_rx) = make_request("soft-affinity", 64);
-            request.affinity_target = Some(target.into());
-
-            let selected = queue.select_without_admission(request).await.unwrap();
-
-            assert_eq!(selected.response.best_worker, expected);
-        }
-    }
-
-    #[tokio::test]
-    async fn exclusive_affinity_falls_back_when_target_is_disallowed() {
-        let (queue, _slots) = make_queue_with_custom_selector(
-            2,
-            16,
-            64,
-            None,
-            MinDecodeSelector {
-                rendezvous: None,
-                exclusive_affinity_target: true,
-            },
-        );
-        let (mut request, _response_rx) = make_request("disallowed-affinity", 64);
-        request.affinity_target = Some(WorkerWithDpRank::new(1, 0).into());
-        request.allowed_worker_ids = Some(HashSet::from([0]));
-
-        let selected = queue.select_without_admission(request).await.unwrap();
-
-        assert_eq!(selected.response.best_worker, WorkerWithDpRank::new(0, 0));
-    }
-
-    #[tokio::test]
-    async fn exclusive_affinity_respects_dp_rank_scope() {
-        let configs = HashMap::from([
-            (
-                7,
-                SimpleWorkerConfig {
-                    data_parallel_start_rank: 2,
-                    data_parallel_size: 2,
-                    max_num_batched_tokens: Some(64),
-                    ..Default::default()
-                },
-            ),
-            (
-                8,
-                SimpleWorkerConfig {
-                    max_num_batched_tokens: Some(64),
-                    ..Default::default()
-                },
-            ),
-        ]);
-        let (queue, _slots) = make_queue_with_custom_configs_and_selector(
-            configs,
-            16,
-            None,
-            MinDecodeSelector {
-                rendezvous: None,
-                exclusive_affinity_target: true,
-            },
-        );
-
-        for (name, target, expected) in [
-            (
-                "exact-rank-affinity",
-                WorkerAffinityTarget::new(7, Some(3)),
-                WorkerWithDpRank::new(7, 3),
-            ),
-            (
-                "worker-only-affinity",
-                WorkerAffinityTarget::new(7, None),
-                WorkerWithDpRank::new(7, 2),
-            ),
-        ] {
-            let (mut request, _response_rx) = make_request(name, 64);
-            request.affinity_target = Some(target);
-            let selected = queue.select_without_admission(request).await.unwrap();
-            assert_eq!(selected.response.best_worker, expected);
-        }
     }
 
     #[tokio::test]
@@ -3234,10 +3110,7 @@ policy_classes:
             16,
             64,
             None,
-            MinDecodeSelector {
-                rendezvous: None,
-                exclusive_affinity_target: false,
-            },
+            MinDecodeSelector { rendezvous: None },
         );
         let worker0 = WorkerWithDpRank::new(0, 0);
         let worker1 = WorkerWithDpRank::new(1, 0);
@@ -3285,10 +3158,7 @@ policy_classes:
             16,
             64,
             None,
-            MinDecodeSelector {
-                rendezvous: None,
-                exclusive_affinity_target: false,
-            },
+            MinDecodeSelector { rendezvous: None },
         );
         let observer_gate = Arc::new((StdMutex::new(false), Condvar::new()));
         let callback_gate = Arc::clone(&observer_gate);
@@ -3348,10 +3218,7 @@ policy_classes:
             16,
             64,
             None,
-            MinDecodeSelector {
-                rendezvous: None,
-                exclusive_affinity_target: false,
-            },
+            MinDecodeSelector { rendezvous: None },
         );
         let worker0 = WorkerWithDpRank::new(0, 0);
         let worker1 = WorkerWithDpRank::new(1, 0);
@@ -3598,7 +3465,6 @@ policy_classes:
     async fn test_concurrent_immediate_admissions_see_prior_booking() {
         let selector = MinDecodeSelector {
             rendezvous: Some(Arc::new(SelectorRendezvous::default())),
-            exclusive_affinity_target: false,
         };
         let (queue, slots) = make_queue_with_custom_selector(2, 16, 512, None, selector);
         let barrier = Arc::new(Barrier::new(3));

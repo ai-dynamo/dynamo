@@ -154,7 +154,7 @@ experimental router exactly. Add any subset to tune it:
 | `cache_threshold` | `0.5` | Fraction of the request's blocks that must be device-resident on the best worker before the cache tier applies. Compared strictly. Must be in `[0.0, 1.0]`. |
 | `balance_abs_threshold` | `32` | Minimum active-request spread before the load tier applies. |
 | `balance_rel_threshold` | `1.1` | Minimum ratio of largest to smallest active-request count before the load tier applies. Must be at least `1.0`. |
-| `respect_soft_affinity` | `false` | When `true`, an eligible soft session-affinity target is the only candidate passed to the two-tier picker. When `false`, the target remains advisory and the picker can select another eligible worker. |
+| `respect_soft_affinity` | `false` | When `true`, the two-tier picker retains a soft session-affinity target found in its eligible candidates. When `false`, cache and load choose among the full eligible set. |
 
 Both load gates must hold before the load tier displaces the cache tier. Parameters are validated at
 startup, so an out-of-range value or an unknown key fails the process immediately, naming the key,
@@ -162,11 +162,11 @@ rather than being silently ignored. It selects the least-loaded worker once the 
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
 
-`respect_soft_affinity` affects soft affinity only. A target is eligible when it remains discovered,
-available, below the overload threshold, allowed by the request's worker allowlist, and compatible
-with its routing constraints. If the target is ineligible, the policy falls back to normal two-tier
-selection. Hard session affinity and explicit request targets remain exact constraints for either
-value.
+`respect_soft_affinity` affects soft affinity only. Custom policies always receive the full eligible
+candidate set plus the affinity target as context; this parameter tells the two-tier picker whether
+to retain a matching target before considering other workers. If the target is absent from that
+set, the policy falls back to normal two-tier selection. Hard session affinity and explicit request
+targets remain exact constraints for either value.
 
 #### Override the Selection
 

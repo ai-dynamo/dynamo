@@ -111,9 +111,10 @@ python3 -m dynamo.frontend \
 To compare against the built-in selector, restart with
 `DYN_ROUTER_WORKER_SELECTION_POLICY=default` — no config change needed.
 
-`respect_soft_affinity: true` keeps an eligible soft session-affinity target as the exclusive
-candidate. The default is `false`, which leaves the target advisory. Ineligible soft targets fall
-back to normal two-tier selection; hard affinity and explicit worker targets remain exact.
+`respect_soft_affinity: true` makes the two-tier picker retain a soft session-affinity target when
+that target is among its eligible candidates. The default is `false`, which lets cache and load
+choose among the full eligible set. An absent target falls back to normal two-tier selection; hard
+affinity and explicit worker targets remain exact.
 
 For the available policy types and per-stage prefill/decode selection, see
 [Worker-Selection Policies](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies).

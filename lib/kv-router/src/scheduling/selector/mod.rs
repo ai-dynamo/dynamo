@@ -36,8 +36,8 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
 
     /// Whether an eligible affinity target exclusively constrains worker selection.
     ///
-    /// The default selector uses exclusive affinity. Custom policies receive affinity as advisory
-    /// context unless they opt into exclusive candidate narrowing.
+    /// The default selector uses exclusive affinity. Custom policies receive affinity as
+    /// advisory context and may choose another eligible worker.
     fn uses_exclusive_affinity_target(&self) -> bool {
         false
     }

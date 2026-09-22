@@ -64,7 +64,7 @@ struct Parameters {
     balance_abs_threshold: usize,
     /// Minimum ratio of largest to smallest active-request count before the load tier applies.
     balance_rel_threshold: f64,
-    /// Whether an eligible soft-affinity target exclusively constrains candidate selection.
+    /// Whether to retain an eligible soft-affinity target before considering other workers.
     respect_soft_affinity: bool,
 }
 
@@ -99,27 +99,28 @@ fn least_loaded(load: &[WorkerLoadInput], rows: impl Iterator<Item = usize>) -> 
     rows.min_by_key(|&row| load[row].active_requests())
 }
 
-fn select_row(
+fn select_row_where(
     parameters: &Parameters,
     cache: &[WorkerCacheInput],
     load: &[WorkerLoadInput],
     request_blocks: u64,
+    include: impl Fn(usize) -> bool + Copy,
 ) -> Option<usize> {
     if cache.is_empty() || cache.len() != load.len() {
         return None;
     }
 
-    let min_load = load.iter().map(|item| item.active_requests()).min()?;
-    let max_load = load.iter().map(|item| item.active_requests()).max()?;
+    let rows = || (0..load.len()).filter(|&row| include(row));
+    let min_load = rows().map(|row| load[row].active_requests()).min()?;
+    let max_load = rows().map(|row| load[row].active_requests()).max()?;
     if max_load.saturating_sub(min_load) > parameters.balance_abs_threshold
         && (max_load as f64) > parameters.balance_rel_threshold * (min_load as f64)
     {
-        return least_loaded(load, 0..load.len());
+        return least_loaded(load, rows());
     }
 
-    let max_overlap = cache
-        .iter()
-        .map(|item| item.device_overlap_blocks())
+    let max_overlap = rows()
+        .map(|row| cache[row].device_overlap_blocks())
         .max_by(f64::total_cmp)?;
     let cache_ratio = if request_blocks == 0 {
         0.0
@@ -129,13 +130,20 @@ fn select_row(
     if cache_ratio > parameters.cache_threshold {
         return least_loaded(
             load,
-            cache.iter().enumerate().filter_map(|(row, item)| {
-                (item.device_overlap_blocks() == max_overlap).then_some(row)
-            }),
+            rows().filter(|&row| cache[row].device_overlap_blocks() == max_overlap),
         );
     }
 
-    least_loaded(load, 0..load.len())
+    least_loaded(load, rows())
+}
+
+fn select_row(
+    parameters: &Parameters,
+    cache: &[WorkerCacheInput],
+    load: &[WorkerLoadInput],
+    request_blocks: u64,
+) -> Option<usize> {
+    select_row_where(parameters, cache, load, request_blocks, |_| true)
 }
 
 struct TwoTierCostFnPicker {
@@ -158,6 +166,24 @@ impl WorkerPicker for TwoTierCostFnPicker {
         let load = input
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+
+        if self.parameters.respect_soft_affinity
+            && let Some(target) = context.affinity_target()
+            && let Some(row) = select_row_where(
+                &self.parameters,
+                cache,
+                load,
+                context.request_blocks(),
+                |row| {
+                    let worker = input.candidates()[row].worker();
+                    worker.worker_id == target.worker_id
+                        && target.dp_rank.is_none_or(|rank| worker.dp_rank == rank)
+                },
+            )
+        {
+            return Ok(row);
+        }
+
         select_row(&self.parameters, cache, load, context.request_blocks())
             .ok_or_else(|| WorkerSelectionPolicyError::failed("no eligible worker"))
     }
@@ -177,7 +203,6 @@ fn provider(
                 Vec::new(),
                 Box::new(TwoTierCostFnPicker { parameters }),
             )
-            .with_exclusive_affinity_target(parameters.respect_soft_affinity)
         },
     ))
 }
@@ -192,7 +217,9 @@ pub fn register(
 mod tests {
     use std::collections::HashMap;
 
-    use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
+    use dynamo_kv_router::protocols::{
+        RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerWithDpRank,
+    };
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
     use dynamo_kv_router::{
         SchedulingRequest, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
@@ -233,13 +260,21 @@ mod tests {
     }
 
     fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
+        select_with_affinity(parameters, workers, None)
+    }
+
+    fn select_with_affinity(
+        parameters: Parameters,
+        workers: [(u64, usize, usize); 2],
+        affinity_target: Option<WorkerAffinityTarget>,
+    ) -> WorkerWithDpRank {
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
             isl_tokens: TEN_BLOCKS,
             lora_name: None,
             expected_output_tokens: None,
-            affinity_target: None,
+            affinity_target,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -310,6 +345,37 @@ mod tests {
             ..Parameters::default()
         };
         assert_eq!(select_with(tuned, workers), worker(B));
+    }
+
+    #[test]
+    fn soft_affinity_is_policy_owned() {
+        let workers = [(A, 0, 0), (B, 6, 4)];
+        let target = Some(WorkerAffinityTarget::new(A, None));
+
+        assert_eq!(
+            select_with_affinity(Parameters::default(), workers, target),
+            worker(B),
+            "the default ignores advisory soft affinity"
+        );
+
+        let respecting = Parameters {
+            respect_soft_affinity: true,
+            ..Parameters::default()
+        };
+        assert_eq!(
+            select_with_affinity(respecting, workers, target),
+            worker(A),
+            "an eligible target is retained by the picker"
+        );
+        assert_eq!(
+            select_with_affinity(
+                respecting,
+                workers,
+                Some(WorkerAffinityTarget::new(999, None)),
+            ),
+            worker(B),
+            "an absent target falls back to normal two-tier selection"
+        );
     }
 
     #[test]

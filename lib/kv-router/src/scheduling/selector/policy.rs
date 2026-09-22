@@ -49,7 +49,6 @@ pub(super) struct CustomWorkerSelectionState {
 pub struct WorkerSelectionPolicy {
     kv_router_config: KvRouterConfig,
     worker_label: &'static str,
-    exclusive_affinity_target: bool,
     state: WorkerSelectionPolicyState,
 }
 
@@ -88,7 +87,6 @@ impl WorkerSelectionPolicy {
         Self {
             kv_router_config,
             worker_label,
-            exclusive_affinity_target: false,
             state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
                 filters,
                 scorers,
@@ -112,19 +110,8 @@ impl WorkerSelectionPolicy {
         Self {
             kv_router_config,
             worker_label,
-            exclusive_affinity_target: true,
             state: WorkerSelectionPolicyState::Default(picker),
         }
-    }
-
-    /// Configure whether an eligible affinity target exclusively constrains candidate selection.
-    ///
-    /// Custom policies are advisory by default. When enabled, the scheduler narrows the eligible
-    /// candidate set to the affinity target before filters, scorers, and the picker run. If the
-    /// target is ineligible, normal selection continues over the remaining eligible candidates.
-    pub fn with_exclusive_affinity_target(mut self, enabled: bool) -> Self {
-        self.exclusive_affinity_target = enabled;
-        self
     }
 }
 
@@ -282,7 +269,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
-        self.exclusive_affinity_target
+        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -840,21 +827,12 @@ mod tests {
             vec![Box::new(LoadScorer)],
             Box::new(FirstPicker),
         );
-        let advisory_inputs =
-            <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
-                &policy,
-            );
-        assert!(!uses_exclusive_affinity(&policy));
-
-        let policy = policy.with_exclusive_affinity_target(true);
-        let exclusive_inputs =
+        let inputs =
             <WorkerSelectionPolicy as WorkerSelector<TaintedWorkerConfig>>::required_worker_inputs(
                 &policy,
             );
 
-        assert!(uses_exclusive_affinity(&policy));
-        assert_eq!(exclusive_inputs, advisory_inputs);
-        assert!(exclusive_inputs.contains(WorkerInputs::CACHE));
-        assert!(exclusive_inputs.contains(WorkerInputs::LOAD));
+        assert!(inputs.contains(WorkerInputs::CACHE));
+        assert!(inputs.contains(WorkerInputs::LOAD));
     }
 }

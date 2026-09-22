@@ -36,8 +36,7 @@ pub fn register(
 #[cfg(test)]
 mod tests {
     use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::protocols::WorkerConfigLike;
-    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerSelector, WorkerType};
+    use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
     use super::*;
 
@@ -60,41 +59,6 @@ mod tests {
         register(&mut registry).unwrap();
         let resolved = registry.resolve(&config);
         (config, resolved)
-    }
-
-    struct PolicyTestWorker;
-
-    impl WorkerConfigLike for PolicyTestWorker {
-        fn data_parallel_start_rank(&self) -> u32 {
-            0
-        }
-
-        fn data_parallel_size(&self) -> u32 {
-            1
-        }
-
-        fn max_num_batched_tokens(&self) -> Option<u64> {
-            None
-        }
-
-        fn total_kv_blocks(&self) -> Option<u64> {
-            None
-        }
-    }
-
-    fn resolves_exclusive_affinity(yaml: &str) -> bool {
-        let (config, resolved) = resolve(yaml);
-        let factory = resolved
-            .unwrap()
-            .expect("a configured instance resolves to a factory");
-        let policy = factory(
-            &config,
-            WorkerType::Aggregated,
-            RoutingPartitionRef::new("model", "default"),
-        );
-        <dynamo_kv_router::WorkerSelectionPolicy as WorkerSelector<PolicyTestWorker>>::uses_exclusive_affinity_target(
-            &policy,
-        )
     }
 
     /// Catches a policy type name that drifts from its documentation, and proves the documented
@@ -141,13 +105,17 @@ worker_selection:
             )
         };
 
-        assert!(!resolves_exclusive_affinity(&yaml("")));
-        assert!(!resolves_exclusive_affinity(&yaml(
-            "      parameters:\n        respect_soft_affinity: false"
-        )));
-        assert!(resolves_exclusive_affinity(&yaml(
-            "      parameters:\n        respect_soft_affinity: true"
-        )));
+        for parameter in [
+            "",
+            "      parameters:\n        respect_soft_affinity: false",
+            "      parameters:\n        respect_soft_affinity: true",
+        ] {
+            let (_config, resolved) = resolve(&yaml(parameter));
+            assert!(
+                resolved.unwrap().is_some(),
+                "parameter variant should resolve: {parameter}"
+            );
+        }
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must
