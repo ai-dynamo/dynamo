@@ -617,7 +617,7 @@ fn server_info() -> pb::ServerInfo {
         max_running_requests: 128,
         max_batched_tokens: 2048,
         max_loras: 4,
-        effective_attention_block_size: Some(16),
+        effective_attention_block_size: None,
         rl_capabilities: Some(pb::RlCapabilities {
             weight_transfer_enabled: true,
             weight_transfer_backend: "nccl".to_string(),
@@ -632,13 +632,15 @@ fn engine_config_advertises_supported_capabilities() {
     let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
     assert!(
         !model
-            .engine_config()
+            .engine_config(true)
+            .expect("valid KV metadata")
             .runtime_data
             .contains_key("vllm_inference_v1_generate")
     );
     assert_eq!(
         model
-            .engine_config()
+            .engine_config(true)
+            .expect("valid KV metadata")
             .runtime_data
             .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
         Some(&json!(true))
@@ -1402,15 +1404,18 @@ fn discovery_rejects_nonzero_dp_start_without_local_size() {
 
 #[test]
 fn engine_config_uses_effective_attention_block_size() {
-    for (case, dcp, reported, expected) in [
-        ("DCP=1", 1, Some(16), Ok(16)),
-        ("DCP=2", 2, Some(32), Ok(32)),
-        ("engine is authoritative", 2, Some(64), Ok(64)),
-        ("missing", 1, None, Err("effective_attention_block_size")),
-        ("zero", 1, Some(0), Err("nonzero size")),
+    for (case, dcp, physical, reported, expected) in [
+        ("DCP=1", 1, 16, Some(16), Ok(Some(16))),
+        ("DCP=2", 2, 16, Some(32), Ok(Some(32))),
+        ("engine is authoritative", 2, 16, Some(64), Ok(Some(64))),
+        ("legacy DCP=1", 1, 16, None, Ok(Some(16))),
+        ("legacy DCP=2", 2, 16, None, Ok(Some(16))),
+        ("legacy unknown size", 1, 0, None, Ok(None)),
+        ("zero", 1, 16, Some(0), Err("nonzero size")),
         (
             "overflow",
             1,
+            16,
             Some(u64::from(u32::MAX) + 1),
             Err("fits u32"),
         ),
@@ -1421,13 +1426,14 @@ fn engine_config_uses_effective_attention_block_size() {
             .as_mut()
             .unwrap()
             .decode_context_parallel_size = dcp;
+        server.kv_block_size = physical;
         server.effective_attention_block_size = reported;
         let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
         let result = model.engine_config(true);
         match expected {
             Ok(size) => {
                 let registration = result.unwrap().llm.unwrap();
-                assert_eq!(registration.kv_cache_block_size, Some(size), "{case}");
+                assert_eq!(registration.kv_cache_block_size, size, "{case}");
                 assert_eq!(registration.total_kv_blocks, Some(2048), "{case}");
             }
             Err(message) => assert!(result.unwrap_err().to_string().contains(message), "{case}"),

@@ -174,9 +174,11 @@ impl DiscoveredModel {
         enable_kv_routing: bool,
     ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        let kv_cache_block_size = enable_kv_routing
-            .then(|| self.kv_cache_block_size())
-            .transpose()?;
+        let kv_cache_block_size = if enable_kv_routing {
+            self.kv_cache_block_size()?
+        } else {
+            None
+        };
         Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
@@ -201,20 +203,19 @@ impl DiscoveredModel {
         })
     }
 
-    fn kv_cache_block_size(&self) -> Result<u32, DynamoError> {
-        let block_size = self.server.effective_attention_block_size.ok_or_else(|| {
-            client::protocol_error(
-                "KV routing requires Control.ServerInfo.effective_attention_block_size; use compatible Python vLLM and vllm-rs builds that report the effective attention block size",
-            )
-        })?;
-        u32::try_from(block_size)
+    fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+        let Some(block_size) = self.server.effective_attention_block_size else {
+            return Ok(nonzero(self.server.kv_block_size));
+        };
+        let block_size = u32::try_from(block_size)
             .ok()
             .and_then(nonzero)
             .ok_or_else(|| {
                 client::protocol_error(format!(
                     "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
                 ))
-            })
+            })?;
+        Ok(Some(block_size))
     }
 
     pub(crate) fn data_parallel_range(&self) -> &Range<u32> {

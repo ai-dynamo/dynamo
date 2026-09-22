@@ -145,19 +145,16 @@ The wrapper enables only ModelExpress when installed; otherwise it disables
 all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
 `local-dev` images do not install Omni and retain normal plugin discovery.
 
-KV routing requires `Control.GetServerInfo.effective_attention_block_size`.
-The development contract is provided by
-[vLLM fork PR #3](https://github.com/JulienDarve/vllm/pull/3) at
-`0a7bb87ee19b0cdcb8b12f1400521cd9598fcd04`; build both Python vLLM and the Rust
-frontend from that revision. This consumer must wait for compatible upstream
-Python and Rust frontend artifacts before merging.
-
-The sidecar registers the reported effective attention block size. For physical
-size 16 with DCP=2, that size is 32 tokens. The same value configures KV-event
-publishing; block capacity remains the reported aggregate divided by the number
-of data-parallel ranks. An absent, zero, or overflowing (`u32`) effective size
-fails startup. Encoder-only workers do not enable KV routing and do not require
-this field. Partial-block and general hybrid/Mamba routing remain unsupported.
+The sidecar uses `Control.GetServerInfo.effective_attention_block_size` when
+reported by a vLLM build containing
+[vLLM #56538](https://github.com/vllm-project/vllm/pull/56538). For physical size
+16 with DCP=2, the effective size is 32 tokens. The same value configures worker
+registration and KV-event publishing. If the field is absent, the sidecar uses
+the physical `kv_block_size`, preserving legacy behavior and its DCP routing
+limitations. An explicitly reported zero or overflowing (`u32`) effective size
+fails startup when KV routing is enabled. Encoder-only workers do not enable
+KV routing and ignore this field. Block-capacity accounting is unchanged.
+Partial-block and general hybrid/Mamba routing remain unsupported.
 
 Start vLLM with its gRPC listener:
 
