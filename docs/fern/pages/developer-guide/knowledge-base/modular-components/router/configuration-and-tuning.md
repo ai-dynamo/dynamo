@@ -112,6 +112,7 @@ link no catalog and reject a configured policy type at startup.
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `dynamo-soft-affinity-load-guard` | Retains an eligible soft-affinity target until its active-request count exceeds a threshold and another worker has a sufficient load advantage. Without a target, selects the least-loaded eligible worker. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -159,6 +160,36 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+#### Guard Soft Affinity Under Load
+
+Use `dynamo-soft-affinity-load-guard` with soft session affinity to retain a session's worker while
+its active-request count is at or below `max_active_requests`. Above that threshold, the policy
+moves only when the least-loaded alternative has at least `move_margin` fewer active requests.
+The same rule applies when requests carrying a parent session ID share the parent-group binding.
+
+```yaml
+worker_selection:
+  aggregated: soft-guard
+  instances:
+    - name: soft-guard
+      type: dynamo-soft-affinity-load-guard
+      parameters:
+        max_active_requests: 32
+        move_margin: 2
+```
+
+Run the frontend with `--router-mode kv`, `--router-session-affinity-ttl-secs 60`,
+`--router-session-affinity-mode soft`, and `--router-policy-config` pointing to that YAML file.
+Both parameters are optional; the values above are the defaults. `move_margin` must be at least
+one. When the affinity target is missing from the eligible candidate set, the policy falls back
+to the least-loaded worker. If no better alternative exists, it retains the target. Equal-load
+workers never trigger a move. Hard affinity and explicit worker targets remain exact and bypass
+this advisory choice.
+
+The active-request count is a routing load signal, not a prediction of queue wait or remaining
+work. This policy does not inspect cache residency. Moving to a cold worker may recompute a prefix;
+choose thresholds with a workload comparison of request latency and cached-token usage.
 
 #### Override the Selection
 

@@ -18,6 +18,7 @@
 //! beyond `dynamo-kv-router`, put it behind its own default-on Cargo feature so a build can drop
 //! it; every policy registered here is compiled into every artifact that links this crate.
 
+mod soft_affinity_load_guard;
 mod two_tier_cost_fn;
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
@@ -30,7 +31,8 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegis
 pub fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
-    two_tier_cost_fn::register(registry)
+    two_tier_cost_fn::register(registry)?;
+    soft_affinity_load_guard::register(registry)
 }
 
 #[cfg(test)]
@@ -88,6 +90,28 @@ worker_selection:
         ] {
             factory(&config, worker_type, partition);
         }
+    }
+
+    #[test]
+    fn resolves_soft_affinity_load_guard_yaml() {
+        let (config, resolved) = resolve(
+            r#"
+worker_selection:
+  aggregated: soft-guard
+  instances:
+    - name: soft-guard
+      type: dynamo-soft-affinity-load-guard
+      parameters:
+        max_active_requests: 7
+        move_margin: 2
+"#,
+        );
+        let factory = resolved.unwrap().expect("the shipped policy resolves");
+        factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
     }
 
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must
