@@ -27,6 +27,19 @@ T = TypeVar("T")
 
 logger = logging.getLogger(__name__)
 
+# Server error codes (see gpu_memory_service.server.gms). Preserved on the
+# client so callers can distinguish transient from fatal failures instead of
+# treating every ErrorResponse identically.
+GMS_ERR_CLAIM_CONFLICT = 1
+
+
+class GmsRemoteError(RuntimeError):
+    """A typed server-side error response, carrying the server's error code."""
+
+    def __init__(self, message: str, code: int) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class _GMSRPCTransport:
     """Raw GMS Unix socket transport."""
@@ -133,7 +146,11 @@ class _GMSRPCTransport:
         if isinstance(response, ErrorResponse):
             if fd >= 0:
                 os.close(fd)
-            raise RuntimeError(f"{prefix} error: {response.error}")
+            # Preserve the server error code so callers can distinguish a
+            # transient claim conflict (retryable) from a fatal error.
+            raise GmsRemoteError(
+                f"{prefix} error: {response.error}", int(response.code)
+            )
         return response, fd
 
     def close(self) -> None:
