@@ -24,7 +24,6 @@ use tokio::net::TcpListener;
 use tokio_stream::wrappers::ReceiverStream;
 
 use dynamo_ext_proc::ExtProcServer;
-use dynamo_ext_proc::metrics::Metrics;
 use dynamo_ext_proc::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo};
 use dynamo_ext_proc::proto::envoy::config::core::v3::{HeaderMap, HeaderValue};
 use dynamo_ext_proc::proto::envoy::service::ext_proc::v3::{
@@ -90,10 +89,7 @@ async fn test_pick_result_translates_to_ext_proc_mutations() {
         result: pick_result,
         observed_headers: observed_headers.clone(),
     });
-    // Isolated recorder: the wire-level assertions below do not depend on
-    // metrics, and an isolated registry keeps this test off the process-wide one.
-    let metrics = Arc::new(Metrics::with_registry(prometheus::Registry::new()));
-    let server = ExtProcServer::new(picker, metrics);
+    let server = ExtProcServer::new(picker);
 
     // Bind to a random port
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
