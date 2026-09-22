@@ -49,14 +49,6 @@ pub(super) struct DaemonOutputs {
     pub(super) state_tx: watch::Sender<DaemonState>,
 }
 
-/// The reflector-fed inputs of the daemon's event loop.
-struct DaemonSources {
-    source: DiscoverySource,
-    cr_reader: reflector::Store<DynamoWorkerMetadata>,
-    readiness_rx: mpsc::Receiver<ReadinessEvent>,
-    cr_rx: mpsc::Receiver<CrEvent>,
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum ReadinessEvent {
     Apply {
@@ -288,13 +280,16 @@ impl DiscoveryDaemon {
             }
         });
 
-        let sources = DaemonSources {
+        let state = match event_loop(
             source,
             cr_reader,
             readiness_rx,
             cr_rx,
-        };
-        let state = match event_loop(sources, &outputs, &self.cancel_token).await {
+            &outputs,
+            &self.cancel_token,
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("Discovery daemon stopped");
                 DaemonState::Stopped
@@ -312,7 +307,10 @@ impl DiscoveryDaemon {
 /// only then does the join table hold every instance the cluster had at start. Returns `Ok` on
 /// cancellation and an error when a reflector stream ends.
 async fn event_loop(
-    mut sources: DaemonSources,
+    source: DiscoverySource,
+    cr_reader: reflector::Store<DynamoWorkerMetadata>,
+    mut readiness_rx: mpsc::Receiver<ReadinessEvent>,
+    mut cr_rx: mpsc::Receiver<CrEvent>,
     outputs: &DaemonOutputs,
     cancel_token: &CancellationToken,
 ) -> Result<()> {
@@ -330,7 +328,7 @@ async fn event_loop(
                 tracing::info!("Discovery daemon received cancellation");
                 return Ok(());
             }
-            event = sources.readiness_rx.recv() => {
+            event = readiness_rx.recv() => {
                 let Some(event) = event else {
                     anyhow::bail!("Readiness reflector stream stopped");
                 };
@@ -339,13 +337,13 @@ async fn event_loop(
                 }
                 apply_readiness_event(
                     event,
-                    &sources.source,
+                    &source,
                     &mut readiness_index,
                     &mut join_table,
                     &mut changes,
                 );
             }
-            event = sources.cr_rx.recv() => {
+            event = cr_rx.recv() => {
                 let Some(event) = event else {
                     anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
                 };
@@ -354,7 +352,7 @@ async fn event_loop(
                 }
                 apply_cr_event(
                     event,
-                    &sources.cr_reader,
+                    &cr_reader,
                     &mut valid_cr_cache,
                     &mut join_table,
                     &mut changes,
@@ -658,16 +656,20 @@ mod tests {
             event_tx: broadcast::channel(16).0,
             state_tx,
         };
-        let sources = DaemonSources {
-            source: DiscoverySource::Pod(pod_reader),
-            cr_reader,
-            readiness_rx,
-            cr_rx,
-        };
         let cancel_token = CancellationToken::new();
         let task = tokio::spawn({
             let cancel_token = cancel_token.clone();
-            async move { event_loop(sources, &outputs, &cancel_token).await }
+            async move {
+                event_loop(
+                    DiscoverySource::Pod(pod_reader),
+                    cr_reader,
+                    readiness_rx,
+                    cr_rx,
+                    &outputs,
+                    &cancel_token,
+                )
+                .await
+            }
         });
 
         // One reflector done is not enough: the join table cannot hold every instance yet.

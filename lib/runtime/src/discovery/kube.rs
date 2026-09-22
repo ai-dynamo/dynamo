@@ -81,26 +81,34 @@ pub struct KubeDiscoveryClient {
     pod_info: PodInfo,
 }
 
-/// Wait until the daemon holds its first complete view of the cluster.
-///
-/// Fails when the daemon stopped or failed, or when its state channel closed.
-async fn await_daemon_ready(mut daemon_state: watch::Receiver<DaemonState>) -> Result<()> {
-    loop {
-        match &*daemon_state.borrow_and_update() {
-            DaemonState::Ready => return Ok(()),
-            DaemonState::Pending => {}
+impl KubeDiscoveryClient {
+    /// Waits until the daemon holds its first complete view of the cluster.
+    ///
+    /// Fails when the daemon stopped or failed first, or when `cancel_token` fires.
+    async fn await_daemon_ready(&self, cancel_token: Option<&CancellationToken>) -> Result<()> {
+        let mut daemon_state = self.daemon_state.clone();
+        let settled = daemon_state.wait_for(|state| *state != DaemonState::Pending);
+        let state = match cancel_token {
+            Some(token) => token.run_until_cancelled(settled).await.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the watch was cancelled before the Kubernetes discovery daemon was ready"
+                )
+            })?,
+            None => settled.await,
+        }
+        .map_err(|_| {
+            anyhow::anyhow!("the Kubernetes discovery daemon ended without reporting its state")
+        })?;
+        match &*state {
+            DaemonState::Ready => Ok(()),
             DaemonState::Stopped => anyhow::bail!("the Kubernetes discovery daemon is stopped"),
             DaemonState::Failed(reason) => {
                 anyhow::bail!("the Kubernetes discovery daemon failed: {reason}")
             }
+            DaemonState::Pending => unreachable!("wait_for returns once the daemon left Pending"),
         }
-        daemon_state.changed().await.map_err(|_| {
-            anyhow::anyhow!("the Kubernetes discovery daemon ended without reporting its state")
-        })?;
     }
-}
 
-impl KubeDiscoveryClient {
     /// Create a new Kubernetes discovery client
     ///
     /// # Arguments
@@ -392,7 +400,7 @@ impl Discovery for KubeDiscoveryClient {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 
         // Before the initial sync, list_state is empty whatever the cluster holds.
-        await_daemon_ready(self.daemon_state.clone()).await?;
+        self.await_daemon_ready(None).await?;
         let state = self.list_state.read().await;
         let instances: Vec<DiscoveryInstance> =
             state.values().flat_map(|m| m.filter(&query)).collect();
@@ -420,15 +428,7 @@ impl Discovery for KubeDiscoveryClient {
         );
 
         // Before the initial sync, the snapshot would be a false empty set.
-        let ready = await_daemon_ready(self.daemon_state.clone());
-        match &cancel_token {
-            Some(token) => token.run_until_cancelled(ready).await.unwrap_or_else(|| {
-                Err(anyhow::anyhow!(
-                    "the watch was cancelled before the Kubernetes discovery daemon was ready"
-                ))
-            })?,
-            None => ready.await?,
-        }
+        self.await_daemon_ready(cancel_token.as_ref()).await?;
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let stream_id = uuid::Uuid::new_v4();
 
