@@ -21,9 +21,15 @@ patches:
       - op: replace
         path: /spec/services/Frontend/volumeMounts/0/name
         value: shared-model-cache
+      - op: add
+        path: /spec/services/Frontend/extraPodSpec/priorityClassName
+        value: ci-nightly-high-priority
       - op: replace
         path: /spec/services/prefill/volumeMounts/0/name
         value: shared-model-cache
+      - op: add
+        path: /spec/services/prefill/extraPodSpec/priorityClassName
+        value: ci-nightly-high-priority
       - op: add
         path: /spec/services/prefill/extraPodSpec/affinity
         value:
@@ -45,6 +51,9 @@ patches:
       - op: replace
         path: /spec/services/decode/volumeMounts/0/name
         value: shared-model-cache
+      - op: add
+        path: /spec/services/decode/extraPodSpec/priorityClassName
+        value: ci-nightly-high-priority
       - op: add
         path: /spec/services/decode/extraPodSpec/affinity
         value:
