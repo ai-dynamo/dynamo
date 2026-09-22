@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 def prepare(model_dir: Path) -> None:
+    """Add the missing model type while preserving the original checkpoint config."""
     path = model_dir / "config.json"
     original = path.read_text()
     config = json.loads(original)

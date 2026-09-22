@@ -43,6 +43,7 @@ async def wait_for_frontend(http, url, model, timeout=120):
 
 
 async def run(args):
+    """Check live generation and prefix routing, persisting the validation report."""
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, trust_remote_code=True)
     runtime = DistributedRuntime(
         asyncio.get_running_loop(), "etcd", "tcp", event_plane="nats"
@@ -79,9 +80,11 @@ async def run(args):
             )
 
         async def scores(tokens):
+            """Read each prefill worker's cached-prefix overlap."""
             return await router.get_overlap_scores(tokens)
 
         async def wait_for_cache(tokens, owner):
+            """Wait until the router observes the owner's complete cached prefix."""
             deadline = time.monotonic() + 30
             expected = len(tokens) // 64
             while True:
@@ -101,6 +104,7 @@ async def run(args):
             await wait_for_frontend(http, args.url, args.model)
 
             async def request(label, tokens, expected_word, forced_prefill=None):
+                """Generate one response and validate its completion and worker metadata."""
                 headers = {"x-request-id": f"longcat-{label}-{uuid.uuid4().hex}"}
                 if forced_prefill is not None:
                     headers["x-dynamo-prefill-instance-id"] = str(forced_prefill)
@@ -121,9 +125,13 @@ async def run(args):
                     headers=headers,
                 ) as response:
                     if response.status_code != 200:
-                        body = (await response.aread()).decode()
+                        body = b""
+                        async for chunk in response.aiter_bytes(chunk_size=1000):
+                            body = chunk
+                            break
                         raise RuntimeError(
-                            f"{label}: HTTP {response.status_code}: {body}"
+                            f"{label}: HTTP {response.status_code}: "
+                            f"{body.decode(errors='replace')}"
                         )
                     async for line in response.aiter_lines():
                         if not line.startswith("data:"):

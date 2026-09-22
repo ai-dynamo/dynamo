@@ -15,17 +15,22 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
-    pytest.mark.timeout(10),
+    pytest.mark.timeout(60),  # Allow cold imports of transformers and Dynamo bindings.
 ]
 
 
-@pytest.fixture(params=[0, 2], ids=["normal", "optimized"])
-def validator(request, monkeypatch):
-    """Execute the actual script with normal and python -OO compilation semantics."""
+@pytest.fixture
+def optimization_level():
+    return 0
+
+
+@pytest.fixture
+def validator(optimization_level, monkeypatch):
+    """Load the script, optionally using python -OO compilation semantics."""
     path = Path(__file__).parents[1] / "validate_disagg.py"
     module = ModuleType("tokenspeed_disagg_validator")
     exec(
-        compile(path.read_text(), str(path), "exec", optimize=request.param),
+        compile(path.read_text(), str(path), "exec", optimize=optimization_level),
         module.__dict__,
     )
     clock = 0.0
@@ -77,6 +82,7 @@ async def test_readiness_timeout_retains_transport_error(validator):
             )
 
 
+@pytest.mark.parametrize("optimization_level", [0, 2], ids=["normal", "optimized"])
 @pytest.mark.parametrize(
     "fault,message",
     [
@@ -88,6 +94,9 @@ async def test_readiness_timeout_retains_transport_error(validator):
         ("forced-prefill", "Forced prefill"),
         ("cold-overlap", "Cold prefix"),
         ("wrong-reuse", "Cached-prefix owner"),
+        ("http-error", "HTTP 503"),
+        ("empty-http-error", "HTTP 503"),
+        ("invalid-utf8-error", "HTTP 503"),
     ],
 )
 async def test_full_validation_cannot_pass_bad_deployment(
@@ -96,6 +105,23 @@ async def test_full_validation_cannot_pass_bad_deployment(
     """Every safety check remains active under optimization, with a passing control."""
     topics = ["ORANGE", "PURPLE", "SILVER"]
     shutdown = Mock()
+
+    class ErrorBody(httpx.AsyncByteStream):
+        def __init__(self):
+            self.chunks_read = 0
+            self.closed = False
+
+        async def __aiter__(self):
+            if fault == "empty-http-error":
+                return
+            for _ in range(8192):
+                self.chunks_read += 1
+                yield b"x" * 999 + (b"\xe2" if fault == "invalid-utf8-error" else b"x")
+
+        async def aclose(self):
+            self.closed = True
+
+    error_body = ErrorBody()
 
     class Tokenizer:
         def apply_chat_template(self, messages, **kwargs):
@@ -124,54 +150,37 @@ async def test_full_validation_cannot_pass_bad_deployment(
                 ]
             }
 
-    class Stream:
-        status_code = 200
-
-        def __init__(self, payload, headers):
-            index = payload["prompt"][0]
-            forced = headers.get("x-dynamo-prefill-instance-id")
-            owner = int(forced) if forced else min(index + 1, 2)
-            if fault == "unknown-prefill":
-                owner = 99
-            elif fault == "forced-prefill" and forced:
-                owner = 3 - int(forced)
-            elif fault == "wrong-reuse" and not forced:
-                owner = 3 - owner
-            self.chunk = {
-                "choices": [
-                    {"text": "WRONG" if fault == "wrong-text" else topics[index]}
-                ],
-                "nvext": {
-                    "worker_id": {
-                        "prefill_worker_id": owner,
-                        "decode_worker_id": None if fault == "missing-decode" else 3,
-                    }
-                },
-            }
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def aiter_lines(self):
-            yield "data: " + json.dumps(self.chunk)
-            if fault != "missing-done":
-                yield "data: [DONE]"
-
-    class Http:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def get(self, *args, **kwargs):
+    async def respond(request):
+        if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "longcat-flash"}]})
-
-        def stream(self, method, url, *, json, headers):
-            return Stream(json, headers)
+        if fault in ("http-error", "empty-http-error", "invalid-utf8-error"):
+            return httpx.Response(503, stream=error_body)
+        payload = json.loads(request.content)
+        headers = request.headers
+        index = payload["prompt"][0]
+        forced = headers.get("x-dynamo-prefill-instance-id")
+        owner = int(forced) if forced else min(index + 1, 2)
+        if fault == "unknown-prefill":
+            owner = 99
+        elif fault == "forced-prefill" and forced:
+            owner = 3 - int(forced)
+        elif fault == "wrong-reuse" and not forced:
+            owner = 3 - owner
+        chunk = {
+            "choices": [
+                {"text": "WRONG" if fault == "wrong-text" else topics[index]}
+            ],
+            "nvext": {
+                "worker_id": {
+                    "prefill_worker_id": owner,
+                    "decode_worker_id": None if fault == "missing-decode" else 3,
+                }
+            },
+        }
+        body = "data: " + json.dumps(chunk) + "\n\n"
+        if fault != "missing-done":
+            body += "data: [DONE]\n\n"
+        return httpx.Response(200, text=body)
 
     monkeypatch.setattr(
         validator,
@@ -185,7 +194,10 @@ async def test_full_validation_cannot_pass_bad_deployment(
         validator,
         "httpx",
         SimpleNamespace(
-            AsyncClient=lambda **k: Http(), TransportError=httpx.TransportError
+            AsyncClient=lambda **k: httpx.AsyncClient(
+                transport=httpx.MockTransport(respond), **k
+            ),
+            TransportError=httpx.TransportError,
         ),
     )
     args = SimpleNamespace(
@@ -206,4 +218,13 @@ async def test_full_validation_cannot_pass_bad_deployment(
         assert len(report["requests"]) == 7
     else:
         assert message in report["error"]
+    if fault in ("http-error", "empty-http-error", "invalid-utf8-error"):
+        assert error_body.closed
+        assert error_body.chunks_read == (0 if fault == "empty-http-error" else 1)
+        expected_body = ""
+        if fault != "empty-http-error":
+            expected_body = "x" * 999 + (
+                "\ufffd" if fault == "invalid-utf8-error" else "x"
+            )
+        assert report["error"] == "warm-0: HTTP 503: " + expected_body
     shutdown.assert_called_once_with()
