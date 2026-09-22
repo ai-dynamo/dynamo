@@ -2884,6 +2884,7 @@ async def test_gms_mapped_shadow_classifies_leases_before_resume(monkeypatch):
     monkeypatch.setenv("ENGINE_ID", "1")
     monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
     monkeypatch.setenv("DYN_VLLM_GMS_MAPPED_STANDBY", "1")
+    monkeypatch.setenv("GMS_VLLM_KV_LEASES", "1")
     monkeypatch.setattr(factory, "_acquire_failover_lock", acquire_lock)
     monkeypatch.setattr(
         factory,
@@ -2921,6 +2922,36 @@ async def test_gms_mapped_shadow_classifies_leases_before_resume(monkeypatch):
         "mark_resumed",
         "monitor",
     ]
+
+
+@pytest.mark.asyncio
+async def test_gms_mapped_shadow_prewarm_requires_leases(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    factory = WorkerFactory(*(lambda *args, **kwargs: None for _ in range(5)))
+    handler = SimpleNamespace(_pause_controller=SimpleNamespace())
+    config = SimpleNamespace(gms_shadow_mode=True)
+
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_VLLM_GMS_MAPPED_STANDBY", "1")
+    monkeypatch.delenv("GMS_VLLM_KV_LEASES", raising=False)
+    monkeypatch.delenv("GMS_KV_LEASES", raising=False)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.lease_transition_serving_enabled",
+        lambda *_args, **_kwargs: False,
+    )
+
+    async def warmup():
+        raise AssertionError("unsafe warmup must not run")
+
+    with pytest.raises(RuntimeError, match="prewarm requires vLLM KV leases"):
+        await factory._maybe_wait_for_failover_lock(
+            handler,
+            SimpleNamespace(),
+            config,
+            promotion_warmup=warmup,
+        )
 
 
 @pytest.mark.asyncio

@@ -1508,10 +1508,20 @@ class WorkerFactory:
             "vllm", mapped_standby=mapped_standby
         )
         prewarmed = False
-        if mapped_standby and lease_transition_serving and promotion_warmup is not None:
+        if mapped_standby and promotion_warmup is not None:
+            from gpu_memory_service.integrations.common.kv_lease_client import (
+                kv_leases_enabled,
+            )
+
+            if not kv_leases_enabled("vllm"):
+                raise RuntimeError(
+                    "mapped standby prewarm requires vLLM KV leases so its "
+                    "canary can allocate only FREE blocks"
+                )
             # The lease arbiter restricts this canary to FREE blocks, so it can
             # compile and launch the shadow's real execution path while the
-            # primary remains active. Keep that work outside failover downtime.
+            # primary remains active. This is allocation isolation, not granular
+            # takeover: the global lock still gates discovery and all recovery.
             await promotion_warmup()
             prewarmed = True
             logger.info("[Shadow] Prewarmed mapped standby before lock wait")
