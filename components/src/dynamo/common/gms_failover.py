@@ -54,11 +54,11 @@ def _backend_env_name(backend_name: str, suffix: str) -> str:
 
 
 def _post_lock_fence_ms(backend_name: str) -> int:
-    # vLLM and SGLang use kernel-held cohort guards. Acquiring the predecessor's
-    # exclusive guard proves every process capable of submitting CUDA work has
-    # exited and its CUDA context has been torn down. Keep an explicit delay knob
-    # for diagnostics and platform workarounds, but correctness never depends on
-    # elapsed wall time.
+    # Cohort guards exclude CPU submitters and permanently close old admission.
+    # Their release is NOT proof that previously submitted CUDA work has drained:
+    # driver cleanup can outlive the file lock. Nor can a fixed sleep establish
+    # that proof. Keep the delay for diagnostics only; crash-time writable reuse
+    # still requires a validated GPU-quiescence contract for the deployed driver.
     default_ms = 0
     backend_env = _backend_env_name(backend_name, "GMS_FAILOVER_POST_LOCK_FENCE_MS")
     if backend_env in os.environ:

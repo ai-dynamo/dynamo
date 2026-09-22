@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 from gpu_memory_service.integrations.common.process_lifecycle import (
+    WriterCohortRetired,
     arm_parent_death_signal,
+    retire_writer_cohort,
 )
 from gpu_memory_service.integrations.sglang import writer_lifecycle as lifecycle
 
@@ -133,6 +135,15 @@ def _fake_scheduler():
     return "scheduler"
 
 
+def test_retired_scheduler_group_rejects_late_entry(tmp_path, monkeypatch):
+    monkeypatch.setattr(lifecycle, "arm_parent_death_signal", lambda **kwargs: None)
+    guard = tmp_path / "retired"
+    guard.touch()
+    asyncio.run(retire_writer_cohort(guard))
+    with pytest.raises(WriterCohortRetired):
+        lifecycle.run_guarded_scheduler(os.getppid(), str(guard), _fake_scheduler)
+
+
 def test_engine_uses_picklable_guarded_scheduler_entry():
     class Engine:
         run_scheduler_process_func = staticmethod(_fake_scheduler)
@@ -170,3 +181,4 @@ def test_cancelled_fence_does_not_publish_successor():
 
         asyncio.run(verify())
         assert (directory / "active").read_text() == previous
+        assert predecessor.read_bytes() == b"", "cancellation must not retire admission"

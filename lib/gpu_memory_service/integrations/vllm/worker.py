@@ -186,8 +186,8 @@ class GMSWorker(_BaseWorker):
 
         if shared_kv_enabled():
             # Join the kernel-visible writer cohort before opening shared KV.
-            # PDEATHSIG accelerates cleanup; the cohort flock is the proof that
-            # all CUDA-capable descendants have actually exited.
+            # PDEATHSIG accelerates cleanup; the cohort guard excludes CPU
+            # submitters. Neither is by itself proof of GPU completion.
             if os.environ.get("GMS_VLLM_WRITER_COHORT_PATH"):
                 join_writer_cohort_process()
             elif writer_cohort_required():
