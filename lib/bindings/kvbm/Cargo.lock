@@ -2204,6 +2204,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
+ "percent-encoding",
  "prometheus",
  "prost 0.13.5",
  "rand 0.9.4",
