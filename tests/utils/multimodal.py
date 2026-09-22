@@ -57,6 +57,27 @@ _COLOR_PROMPT_FILLER = (
 )
 
 
+def _color_prompt_prefix(repeats: int) -> str:
+    if repeats < 1:
+        raise ValueError("repeats must be at least 1")
+    return (_COLOR_PROMPT_FILLER * repeats).strip()
+
+
+def make_image_text_prefix_warmup_payload(*, prompt_filler_repeats: int) -> ChatPayload:
+    """Populate router KV state for the text prefix of the image payload.
+
+    The matching image request appends its question and image after this text.
+    With enough filler to cross a routing-block boundary, this warmup creates a
+    positive control for text-prefix matching without populating image blocks.
+    """
+    return chat_payload(
+        _color_prompt_prefix(prompt_filler_repeats),
+        expected_response=[],
+        temperature=0.0,
+        max_tokens=8,
+    )
+
+
 def make_image_payload(
     expected_response: list[str],
     *,
@@ -102,6 +123,7 @@ def make_image_payload_cached_tokens(
     require_vllm_mm_processor_init: bool = False,
     min_routing_total_blocks: int = 0,
     min_avg_kv_hit_rate: float = 0.0,
+    require_positive_avg_kv_hit_rate: bool = False,
     prompt_filler_repeats: int = 0,
 ) -> CachedTokensChatPayload:
     """Image payload that asserts MM-aware KV cache reuse on repeats.
@@ -112,13 +134,16 @@ def make_image_payload_cached_tokens(
     [ROUTING] block count is well above text-prefix fallback (~1-3 blocks).
     ``min_avg_kv_hit_rate`` asserts the post-R1 mean of router_kv_hit_rate
     >= threshold (fails closed when router-side hashes diverge from the worker).
+    ``require_positive_avg_kv_hit_rate`` additionally requires at least one
+    matching routing block, which distinguishes a working text-prefix control
+    from total routing failure.
     ``prompt_filler_repeats`` prepends N copies of a topic-aligned filler so
     the routing-token sequence spans multiple blocks on specs that use a
     coarse routing-block size (e.g. qwen3_5 family at block_size=544).
     """
     prompt = _MULTIMODAL_COLOR_PROMPT
     if prompt_filler_repeats > 0:
-        prompt = (_COLOR_PROMPT_FILLER * prompt_filler_repeats).strip() + " " + prompt
+        prompt = _color_prompt_prefix(prompt_filler_repeats) + " " + prompt
     return CachedTokensChatPayload(
         body={
             "messages": [
@@ -145,6 +170,7 @@ def make_image_payload_cached_tokens(
         require_vllm_mm_processor_init=require_vllm_mm_processor_init,
         min_routing_total_blocks=min_routing_total_blocks,
         min_avg_kv_hit_rate=min_avg_kv_hit_rate,
+        require_positive_avg_kv_hit_rate=require_positive_avg_kv_hit_rate,
     )
 
 

@@ -3,6 +3,7 @@
 
 import dataclasses
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 
@@ -23,7 +24,10 @@ from tests.serve.conftest import (
 )
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
-from tests.utils.multimodal import make_image_payload_cached_tokens
+from tests.utils.multimodal import (
+    make_image_payload_cached_tokens,
+    make_image_text_prefix_warmup_payload,
+)
 from tests.utils.payload_builder import (
     TEXT_PROMPT,
     chat_payload,
@@ -35,9 +39,16 @@ from tests.utils.payload_builder import (
     multimodal_payload_default,
     router_selection_chat_payload_default,
 )
-from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
+from tests.utils.payloads import (
+    ImageGenerationPayload,
+    RouterKvHitRateBelowThreshold,
+    VideoGenerationPayload,
+)
 
 logger = logging.getLogger(__name__)
+
+_MM_ROUTING_FULL_HIT_THRESHOLD = math.nextafter(0.5, 1.0)
+_MM_ROUTING_TEXT_PREFIX_REPEATS = 2
 
 
 @dataclass
@@ -132,7 +143,7 @@ trtllm_configs = {
         env={
             "AGG_ENGINE_ARGS": os.path.join(
                 trtllm_test_engine_config_dir, "agg_ngram.yaml"
-            )
+            ),
         },
         request_payloads=[
             completion_payload(
@@ -347,12 +358,16 @@ trtllm_configs = {
         delayed_start=60,
         env={"DYN_MM_ALLOW_INTERNAL": "1"},
         request_payloads=[
+            make_image_text_prefix_warmup_payload(
+                prompt_filler_repeats=_MM_ROUTING_TEXT_PREFIX_REPEATS
+            ),
             make_image_payload_cached_tokens(
                 ["green"],
                 repeat_count=2,
                 require_rust_processor_init=True,
-                min_avg_kv_hit_rate=0.5,
-            )
+                min_avg_kv_hit_rate=_MM_ROUTING_FULL_HIT_THRESHOLD,
+                prompt_filler_repeats=_MM_ROUTING_TEXT_PREFIX_REPEATS,
+            ),
         ],
     ),
     "aggregated_multimodal_router_v2": TRTLLMConfig(
@@ -369,7 +384,7 @@ trtllm_configs = {
             pytest.mark.timeout(960),
             pytest.mark.xfail(
                 strict=True,
-                raises=AssertionError,
+                raises=RouterKvHitRateBelowThreshold,
                 reason=(
                     "TensorRT-LLM V2 events do not yet preserve the frontend "
                     "multimodal routing identity"
@@ -385,6 +400,9 @@ trtllm_configs = {
             "TRTLLM_USE_KV_CACHE_MANAGER_V2": "1",
         },
         request_payloads=[
+            make_image_text_prefix_warmup_payload(
+                prompt_filler_repeats=_MM_ROUTING_TEXT_PREFIX_REPEATS
+            ),
             make_image_payload_cached_tokens(
                 ["green"],
                 repeat_count=2,
@@ -392,8 +410,10 @@ trtllm_configs = {
                     r"TensorRT-LLM KV cache manager V2 forced for multimodal routing test"
                 ],
                 require_rust_processor_init=True,
-                min_avg_kv_hit_rate=0.5,
-            )
+                min_avg_kv_hit_rate=_MM_ROUTING_FULL_HIT_THRESHOLD,
+                require_positive_avg_kv_hit_rate=True,
+                prompt_filler_repeats=_MM_ROUTING_TEXT_PREFIX_REPEATS,
+            ),
         ],
     ),
     "aggregated_multimodal_video_nvdec": TRTLLMConfig(

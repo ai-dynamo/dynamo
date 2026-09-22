@@ -402,6 +402,10 @@ class GuidedDecodingChatPayload(ChatPayload):
         logger.info(f"Guided decoding validation passed: {parsed}")
 
 
+class RouterKvHitRateBelowThreshold(AssertionError):
+    """The router found some prefix overlap, but not enough for the test gate."""
+
+
 @dataclass
 class CachedTokensChatPayload(ChatPayload):
     """
@@ -427,6 +431,7 @@ class CachedTokensChatPayload(ChatPayload):
         require_rust_processor_init: bool = False,
         require_vllm_mm_processor_init: bool = False,
         min_avg_kv_hit_rate: float = 0.0,
+        require_positive_avg_kv_hit_rate: bool = False,
     ):
         # MM-aware routing checks: piggyback on engine_process.validate_expected_logs.
         log_patterns: List[str] = list(expected_log or [])
@@ -472,6 +477,7 @@ class CachedTokensChatPayload(ChatPayload):
         # block-count, etc.), move into a RouterMetricsAssertion
         # mixin/subclass.
         self.min_avg_kv_hit_rate = min_avg_kv_hit_rate
+        self.require_positive_avg_kv_hit_rate = require_positive_avg_kv_hit_rate
         self._metrics_baseline: Optional[tuple[float, float]] = None
 
     def validate(self, response: Any, content: str) -> None:
@@ -602,8 +608,14 @@ class CachedTokensChatPayload(ChatPayload):
                 f"MM-routing likely not engaging on repeat requests."
             )
         avg = d_sum / d_count
-        if avg < self.min_avg_kv_hit_rate:
+        if self.require_positive_avg_kv_hit_rate and avg <= 0:
             raise AssertionError(
+                "router_kv_hit_rate: expected a positive text-prefix overlap, "
+                f"but mean over R2+ was {avg:.3f}. delta_n={d_count}, "
+                f"delta_sum={d_sum:.3f}. The control prefix did not match."
+            )
+        if avg < self.min_avg_kv_hit_rate:
+            raise RouterKvHitRateBelowThreshold(
                 f"router_kv_hit_rate: mean over R2+ ({avg:.3f}) below required "
                 f"min ({self.min_avg_kv_hit_rate}). delta_n={d_count}, "
                 f"delta_sum={d_sum:.3f}. Router-side block hashes did not "
