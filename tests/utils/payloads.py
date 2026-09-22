@@ -226,32 +226,33 @@ class DisaggregatedChatPayload(ChatPayload):
         super().validate(response, content)
         result = response.json()
         choices = result["choices"]
-        assert len(choices) == 1, f"Expected one completion, got {choices!r}"
-        assert isinstance(content, str) and content.strip(), "Completion is empty"
-        assert choices[0].get("finish_reason") in {
-            "stop",
-            "length",
-        }, f"Unexpected finish reason: {choices[0]!r}"
+        if len(choices) != 1:
+            raise AssertionError(f"Expected one completion, got {choices!r}")
+        if not isinstance(content, str) or not content.strip():
+            raise AssertionError("Completion is empty")
+        if choices[0].get("finish_reason") not in {"stop", "length"}:
+            raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
 
         usage = result.get("usage")
-        assert isinstance(usage, dict), f"Missing usage: {result!r}"
+        if not isinstance(usage, dict):
+            raise AssertionError(f"Missing usage: {result!r}")
         prompt_tokens = usage.get("prompt_tokens")
         completion_tokens = usage.get("completion_tokens")
-        assert (
-            type(prompt_tokens) is int and prompt_tokens > 0
-        ), f"Expected positive prompt usage: {usage!r}"
-        assert (
-            type(completion_tokens) is int and completion_tokens > 1
-        ), f"Expected decode to generate more than the prefill token: {usage!r}"
+        if type(prompt_tokens) is not int or prompt_tokens <= 0:
+            raise AssertionError(f"Expected positive prompt usage: {usage!r}")
+        if type(completion_tokens) is not int or completion_tokens <= 1:
+            raise AssertionError(
+                f"Expected decode to generate more than the prefill token: {usage!r}"
+            )
 
         workers = require_router_worker_id(result, context=type(self).__name__)
         for role in ("prefill_worker_id", "decode_worker_id"):
-            assert (
-                type(workers.get(role)) is int and workers[role] >= 0
-            ), f"Expected a valid {role}: {dict(workers)!r}"
-        assert (
-            workers["prefill_worker_id"] != workers["decode_worker_id"]
-        ), f"Expected distinct prefill and decode workers: {dict(workers)!r}"
+            if type(workers.get(role)) is not int or workers[role] < 0:
+                raise AssertionError(f"Expected a valid {role}: {dict(workers)!r}")
+        if workers["prefill_worker_id"] == workers["decode_worker_id"]:
+            raise AssertionError(
+                f"Expected distinct prefill and decode workers: {dict(workers)!r}"
+            )
 
 
 class RouterNvextChatPayload(ChatPayload):

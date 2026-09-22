@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Two aggregated SGLang native-gRPC sidecars behind Dynamo's KV-aware router.
-# Requires two GPUs and an SGLang build that exposes KV-event discovery over GetServerInfo.
+# Requires an SGLang build that exposes KV-event discovery over GetServerInfo.
 
 set -e
 
@@ -83,7 +83,7 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 KV_EVENTS_CONFIG_1="{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG_WORKER1_KV_EVENT_PORT}\",\"topic\":\"\"}"
 KV_EVENTS_CONFIG_2="{\"publisher\":\"zmq\",\"endpoint\":\"tcp://*:${SGLANG_WORKER2_KV_EVENT_PORT}\",\"topic\":\"\"}"
 
-print_launch_banner "Launching SGLang Native-gRPC Sidecars with KV Routing (2 GPUs)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching SGLang Native-gRPC Sidecars with KV Routing (2 workers)" "$MODEL" "$HTTP_PORT" \
     "Worker 1: GPU ${SGLANG_WORKER1_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_WORKER1_GRPC_PORT}, KV events tcp://*:${SGLANG_WORKER1_KV_EVENT_PORT}" \
     "Worker 2: GPU ${SGLANG_WORKER2_GPU}, gRPC ${SGLANG_HOST}:${SGLANG_WORKER2_GRPC_PORT}, KV events tcp://*:${SGLANG_WORKER2_KV_EVENT_PORT}"
 
