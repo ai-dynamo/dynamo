@@ -145,11 +145,11 @@ worker_selection:
         overlap_score_credit_decay: 0.0
         prefill_load_scale: 1.0
         decode_active_request_weight: 0.0
-        shared_cache_multiplier: 0.0
+        shared_cache_multiplier: 0.5
         router_temperature: 0.0
 ```
 
-Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
+Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. The default policy uses `shared_cache_multiplier: 0.5` when shared cache is enabled; an explicit `0` disables shared-cache credit. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
 > The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.

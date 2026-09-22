@@ -2638,13 +2638,8 @@ impl KvRouter {
         include_shared: bool,
         cache_namespace: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let router_config_override = if let Some(obj) = router_config_override {
-            let override_config: RouterConfigOverride =
-                depythonize(obj.bind(py)).map_err(to_pyerr)?;
-            Some(override_config)
-        } else {
-            None
-        };
+        // Retain the Python argument for existing callers; raw overlaps have no score weights.
+        let _ = router_config_override;
         let block_mm_infos = block_mm_infos
             .map(|obj| depythonize_block_mm_infos(obj.bind(py)))
             .transpose()?;
@@ -2654,7 +2649,6 @@ impl KvRouter {
             let scores = chooser
                 .get_overlap_scores(
                     &token_ids,
-                    router_config_override.as_ref(),
                     block_mm_infos.as_deref(),
                     lora_name.as_deref(),
                     cache_namespace.as_deref(),

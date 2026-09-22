@@ -22,7 +22,7 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
                     host_cache_hit_weight: 0.25,
                     disk_cache_hit_weight: 0.1,
                     decode_active_request_weight: if mode & 8 == 0 { 0.0 } else { 0.7 },
-                    shared_cache_multiplier: if mode & 16 == 0 { 0.0 } else { 0.6 },
+                    shared_cache_multiplier: Some(if mode & 16 == 0 { 0.0 } else { 0.6 }),
                     ..Default::default()
                 };
                 if mode % 8 >= 4 {
@@ -385,5 +385,68 @@ fn yaml_parameters_override_legacy_config_and_omissions_inherit_it() {
             .select_worker(support::selection_input(&workers, &request, 16))
             .unwrap();
         assert_eq!(selected.worker.worker_id, expected_worker);
+    }
+}
+
+#[test]
+fn shared_cache_credit_defaults_and_legacy_precedence_apply_to_selection() {
+    let (workers, mut request) = fixture(2, 64);
+    request.overlap = Default::default();
+    for (worker, load) in &mut request.worker_loads {
+        // With no shared credit, the warm worker costs 3 blocks versus 4.
+        // At the default 0.5 credit, it costs 2.5 versus the cold worker's 2.
+        *load = Default::default();
+        load.active_decode_blocks = if worker.worker_id == 0 { 2 } else { 0 };
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(*worker, if worker.worker_id == 0 { 3 } else { 0 });
+    }
+    #[allow(clippy::single_range_in_vec_init)]
+    let hits = dynamo_kv_router::SharedCacheHits::from_ranges(vec![0..4]);
+    request.shared_cache_hits = Some(hits);
+
+    let mut registry = default_registry();
+    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+    for (cache_type, legacy, parameters, expected_worker) in [
+        ("none", None, "{}", 0),
+        ("hicache", None, "{}", 1),
+        ("hicache", Some(0.0), "{}", 0),
+        ("hicache", Some(0.3), "{}", 0),
+        ("hicache", Some(0.0), "{shared_cache_multiplier: 0.5}", 1),
+        ("hicache", Some(0.5), "{shared_cache_multiplier: 0}", 0),
+    ] {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!(
+            "router:\n  shared_cache_type: {cache_type}\nworker_selection:\n  aggregated: tuned\n  instances:\n    - name: tuned\n      type: dynamo-default-cost-fn\n      parameters: {parameters}\n"
+        )).unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            shared_cache_multiplier: legacy,
+            ..Default::default()
+        };
+        config.apply_policy_config().unwrap();
+        let factory = registry.resolve(&config).unwrap().unwrap();
+        let policy = factory(
+            &config,
+            WorkerType::Aggregated,
+            RoutingPartitionRef::new("model", "default"),
+        );
+        let select = |policy: WorkerSelectionPolicy| {
+            policy
+                .select_worker(support::selection_input(&workers, &request, 16))
+                .unwrap()
+                .worker
+                .worker_id
+        };
+        assert_eq!(
+            select(policy),
+            expected_worker,
+            "cache={cache_type} legacy={legacy:?} parameters={parameters}"
+        );
+        if parameters == "{}" {
+            assert_eq!(select(default_policy(config, "prefill")), expected_worker);
+        }
     }
 }

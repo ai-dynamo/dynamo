@@ -194,7 +194,7 @@ fn log_env_config(config: &KvRouterConfig) {
         router_event_threads = config.router_event_threads,
         router_queue_policy = %config.router_queue_policy,
         use_remote_indexer = config.use_remote_indexer,
-        shared_cache_multiplier = config.shared_cache_multiplier,
+        shared_cache_multiplier = ?config.shared_cache_multiplier,
         shared_cache_type = %config.shared_cache_type,
         host_cache_hit_weight = config.host_cache_hit_weight,
         disk_cache_hit_weight = config.disk_cache_hit_weight,
@@ -378,16 +378,9 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_bool(&get_env, "DYN_USE_REMOTE_INDEXER") {
         config.use_remote_indexer = value;
     }
-    let mut shared_cache_multiplier_set = false;
-    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
-        config.shared_cache_multiplier = value;
-        shared_cache_multiplier_set = true;
-    }
+    config.shared_cache_multiplier = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER");
     if let Some(value) = get_env("DYN_SHARED_CACHE_TYPE") {
         config.shared_cache_type = value.parse()?;
-    }
-    if config.shared_cache_type != SharedCacheType::None && !shared_cache_multiplier_set {
-        config.shared_cache_multiplier = 0.5;
     }
     if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_HOST_CACHE_HIT_WEIGHT") {
         config.host_cache_hit_weight = value;
@@ -720,7 +713,7 @@ struct KvRouterConfigSerde {
     serve_indexer: bool,
     #[serde(default)]
     enable_session_prefix_index: bool,
-    shared_cache_multiplier: f64,
+    shared_cache_multiplier: Option<f64>,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
     conditional_disagg_enabled: bool,
@@ -917,12 +910,11 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub enable_session_prefix_index: bool,
 
-    /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
-    /// Blocks available in the shared cache are less valuable than device-local blocks
-    /// because they need to be fetched. A value of 0.5 means each shared cache hit
-    /// counts as half a device-local hit. Default: 0.0 (shared cache scoring disabled);
-    /// the CLI sets this to 0.5 when shared cache is enabled.
-    pub shared_cache_multiplier: f64,
+    /// Deprecated default-policy parameter. `None` lets the policy choose its default.
+    // TODO(v1.7): Remove with the deprecated flag after the v1.6 migration window.
+    // Omit absent values so older readers continue to receive numbers, never null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_cache_multiplier: Option<f64>,
 
     /// Type of external shared KV cache to query during routing.
     /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
@@ -1020,7 +1012,7 @@ impl Default for KvRouterConfig {
             use_remote_indexer: false,
             serve_indexer: false,
             enable_session_prefix_index: false,
-            shared_cache_multiplier: 0.0,
+            shared_cache_multiplier: None,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
             conditional_disagg_enabled: false,
@@ -1462,12 +1454,9 @@ impl KvRouterConfig {
         if self.router_event_threads == 0 {
             return Err("router_event_threads must be at least 1".to_string());
         }
-        validate_range(
-            "shared_cache_multiplier",
-            self.shared_cache_multiplier,
-            0.0,
-            1.0,
-        )?;
+        if let Some(value) = self.shared_cache_multiplier {
+            validate_range("shared_cache_multiplier", value, 0.0, 1.0)?;
+        }
         if let Some(value) = self.router_predicted_ttl_secs {
             validate_min("router_predicted_ttl_secs", value, 0.0)?;
         }
@@ -1802,7 +1791,7 @@ mod tests {
         assert_eq!(config.router_event_threads, 8);
         assert_eq!(config.router_queue_policy, RouterQueuePolicy::Wspt);
         assert!(config.use_remote_indexer);
-        assert_eq!(config.shared_cache_multiplier, 0.5);
+        assert_eq!(config.shared_cache_multiplier, Some(0.5));
         assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
         assert_eq!(config.host_cache_hit_weight, 0.6);
         assert_eq!(config.disk_cache_hit_weight, 0.3);
@@ -2009,11 +1998,11 @@ mod tests {
     #[test]
     fn test_kv_router_config_rejects_out_of_range_shared_cache_multiplier() {
         let too_small = KvRouterConfig {
-            shared_cache_multiplier: -0.1,
+            shared_cache_multiplier: Some(-0.1),
             ..Default::default()
         };
         let too_large = KvRouterConfig {
-            shared_cache_multiplier: 1.1,
+            shared_cache_multiplier: Some(1.1),
             ..Default::default()
         };
 
@@ -2022,29 +2011,55 @@ mod tests {
     }
 
     #[test]
-    fn dynamo_env_config_applies_python_default_shared_cache_multiplier() {
-        let default = KvRouterConfig::default();
+    fn dynamo_env_config_preserves_only_explicit_shared_cache_multipliers() {
+        for cache_type in ["none", "hicache"] {
+            let config = config_from_values(&[("DYN_SHARED_CACHE_TYPE", cache_type)]);
+            assert_eq!(config.shared_cache_multiplier, None);
+            for (value, expected) in [("0", 0.0), ("0.3", 0.3)] {
+                let config = config_from_values(&[
+                    ("DYN_SHARED_CACHE_TYPE", cache_type),
+                    ("DYN_SHARED_CACHE_MULTIPLIER", value),
+                ]);
+                assert_eq!(config.shared_cache_multiplier, Some(expected));
+            }
+        }
+    }
 
-        // Without shared cache, the multiplier stays at its Rust default (0.0).
-        let none_type = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "none")]);
-        assert_eq!(none_type.shared_cache_type, SharedCacheType::None);
-        assert_eq!(
-            none_type.shared_cache_multiplier,
-            default.shared_cache_multiplier
-        );
+    #[test]
+    fn yaml_shared_cache_keeps_the_default_in_the_policy() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "router:\n  shared_cache_type: hicache\n").unwrap();
+        let path = file.path().to_str().unwrap();
+        for (value, expected) in [
+            (None, None),
+            (Some("0"), Some(0.0)),
+            (Some("0.3"), Some(0.3)),
+        ] {
+            let mut values = vec![("DYN_ROUTER_POLICY_CONFIG", path)];
+            if let Some(value) = value {
+                values.push(("DYN_SHARED_CACHE_MULTIPLIER", value));
+            }
+            let config = config_from_values(&values);
+            assert_eq!(config.shared_cache_type, SharedCacheType::Hicache);
+            assert_eq!(config.shared_cache_multiplier, expected);
+        }
+    }
 
-        // Enabling shared cache without an explicit multiplier matches the
-        // Python CLI default of 0.5.
-        let hicache_only = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "hicache")]);
-        assert_eq!(hicache_only.shared_cache_type, SharedCacheType::Hicache);
-        assert_eq!(hicache_only.shared_cache_multiplier, 0.5);
-
-        // An explicit multiplier still wins.
-        let explicit = config_from_values(&[
-            ("DYN_SHARED_CACHE_TYPE", "hicache"),
-            ("DYN_SHARED_CACHE_MULTIPLIER", "0.3"),
-        ]);
-        assert_eq!(explicit.shared_cache_multiplier, 0.3);
+    #[test]
+    fn shared_cache_multiplier_round_trips_absence_and_legacy_numbers() {
+        for multiplier in [None, Some(0.0), Some(0.3)] {
+            let config = KvRouterConfig {
+                shared_cache_multiplier: multiplier,
+                ..Default::default()
+            };
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(
+                json.get("shared_cache_multiplier"),
+                multiplier.map(serde_json::Value::from).as_ref()
+            );
+            let decoded: KvRouterConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(decoded.shared_cache_multiplier, multiplier);
+        }
     }
 
     #[test]

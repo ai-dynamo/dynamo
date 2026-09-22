@@ -1031,6 +1031,30 @@ def test_deprecated_policy_flags_preserve_values_and_cli_precedence(
     assert KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()[parameter] == 0.0
 
 
+@pytest.mark.parametrize("source", ["default", "cli", "env", "yaml"])
+def test_shared_cache_weight_default_is_left_to_the_policy(
+    monkeypatch, tmp_path, source
+):
+    monkeypatch.delenv("DYN_SHARED_CACHE_MULTIPLIER", raising=False)
+    monkeypatch.delenv("DYN_SHARED_CACHE_TYPE", raising=False)
+    args = []
+    if source == "cli":
+        args = ["--shared-cache-type", "hicache"]
+    elif source == "env":
+        monkeypatch.setenv("DYN_SHARED_CACHE_TYPE", "hicache")
+    elif source == "yaml":
+        path = tmp_path / "policy.yaml"
+        path.write_text("router:\n  shared_cache_type: hicache\n")
+        args = ["--router-policy-config", str(path)]
+    parser = argparse.ArgumentParser()
+    KvRouterArgGroup().add_arguments(parser)
+    kwargs = KvRouterConfigBase.from_cli_args(
+        parser.parse_args(args)
+    ).kv_router_kwargs()
+    assert kwargs["shared_cache_type"] == ("none" if source == "default" else "hicache")
+    assert kwargs["shared_cache_multiplier"] is None
+
+
 def test_no_load_aware_overrides_deprecated_environment(monkeypatch):
     monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
     parser = argparse.ArgumentParser()
