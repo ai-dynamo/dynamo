@@ -181,6 +181,16 @@ async def test_loader_rejects_empty_image_row_split() -> None:
         )
 
 
+async def test_loader_rejects_placeholder_count_mismatch() -> None:
+    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+
+    with pytest.raises(InvalidArgument, match="placeholder tokens.*image tensors"):
+        await loader.load(
+            _encoder_result(),
+            [_IMAGE_TOKEN_ID],
+        )
+
+
 async def test_handler_assembles_external_prompt_through_shared_loader() -> None:
     handler = _handler()
     expected = EmbedsPrompt(

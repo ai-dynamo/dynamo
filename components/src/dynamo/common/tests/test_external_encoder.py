@@ -102,6 +102,24 @@ def test_external_encoder_result_covers_packed_rows() -> None:
         )
 
 
+def test_external_encoder_result_rejects_malformed_features() -> None:
+    class RowSplitsThatMustNotBeRead(list[int]):
+        def __iter__(self):
+            raise AssertionError("row_splits read before features were validated")
+
+    with pytest.raises(ValueError, match="features missing fields"):
+        ExternalEncoderResult.from_dict(
+            {
+                "schema": "dynamo.external_encoder_result",
+                "version": 0,
+                "format": "linear_embeddings",
+                "features": {"unexpected": "field"},
+                "row_splits": RowSplitsThatMustNotBeRead([0, 1]),
+                "image_token_id": 99,
+            }
+        )
+
+
 def test_external_encoder_result_rejects_empty_image() -> None:
     features = encode_request_plane_tensor(torch.ones((3, 4)))
 

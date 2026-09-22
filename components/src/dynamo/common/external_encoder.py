@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from math import prod
 from types import MappingProxyType
@@ -66,8 +66,10 @@ def encode_request_plane_tensor(tensor: torch.Tensor) -> dict[str, Any]:
     }
 
 
-def decode_request_plane_tensor(payload: Mapping[str, Any]) -> torch.Tensor:
-    """Reconstruct an owned CPU tensor from a MsgPack request payload."""
+def _validate_request_plane_tensor_payload(
+    payload: Mapping[str, Any],
+) -> tuple[tuple[int, int], torch.dtype, bytes]:
+    """Validate request-plane tensor metadata without allocating a tensor."""
 
     if not isinstance(payload, Mapping):
         raise ValueError("external encoder features must be an object")
@@ -110,6 +112,14 @@ def decode_request_plane_tensor(payload: Mapping[str, Any]) -> torch.Tensor:
             f"expected {expected_bytes}, got {len(data)}"
         )
 
+    return (shape[0], shape[1]), dtype, data
+
+
+def decode_request_plane_tensor(payload: Mapping[str, Any]) -> torch.Tensor:
+    """Reconstruct an owned CPU tensor from a MsgPack request payload."""
+
+    shape, dtype, data = _validate_request_plane_tensor_payload(payload)
+
     storage = torch.frombuffer(bytearray(data), dtype=torch.uint8)
     return storage.view(dtype).reshape(shape)
 
@@ -119,7 +129,7 @@ class ExternalEncoderResult:
     """Packed linear embeddings plus metadata needed to splice image rows."""
 
     features: Mapping[str, Any]
-    row_splits: tuple[int, ...]
+    row_splits: Sequence[int]
     image_token_id: int
     embedding_format: str = LINEAR_EMBEDDINGS_FORMAT
 
@@ -130,6 +140,7 @@ class ExternalEncoderResult:
             raise ValueError(
                 f"unsupported external encoder format {self.embedding_format!r}"
             )
+        shape, _, _ = _validate_request_plane_tensor_payload(self.features)
         row_splits = tuple(self.row_splits)
         if len(row_splits) < 2 or row_splits[0] != 0:
             raise ValueError("external encoder row_splits must start at zero")
@@ -149,14 +160,7 @@ class ExternalEncoderResult:
         if self.image_token_id < 0:
             raise ValueError("external encoder image_token_id must be non-negative")
 
-        shape = self.features.get("shape")
-        if (
-            isinstance(shape, list)
-            and shape
-            and isinstance(shape[0], int)
-            and not isinstance(shape[0], bool)
-            and row_splits[-1] != shape[0]
-        ):
+        if row_splits[-1] != shape[0]:
             raise ValueError(
                 "external encoder row_splits do not cover the packed feature rows"
             )
@@ -207,7 +211,7 @@ class ExternalEncoderResult:
             raise ValueError("external encoder row_splits must be an array")
         return cls(
             features=data["features"],
-            row_splits=tuple(row_splits),
+            row_splits=row_splits,
             image_token_id=data["image_token_id"],
             embedding_format=data["format"],
         )
@@ -230,6 +234,6 @@ class ExternalEncoderResult:
             raise ValueError("external encoder row_splits must be an array")
         return cls(
             features=features,
-            row_splits=tuple(row_splits),
+            row_splits=row_splits,
             image_token_id=metadata["image_token_id"],
         )
