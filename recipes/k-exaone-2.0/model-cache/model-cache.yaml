@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      # K-EXAONE-2.0-750B-A37B-NVFP4 is ~530 GB on disk (764.5 B params at 0.688 B/param).
+      # 700Gi leaves headroom for the HF blob/snapshot layout, which stores each shard once
+      # under blobs/ with a symlink from snapshots/.
+      storage: 700Gi
+  storageClassName: "your-storage-class-name"

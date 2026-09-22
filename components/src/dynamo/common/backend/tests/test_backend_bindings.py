@@ -88,6 +88,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
             max_num_seqs=64,
             max_num_batched_tokens=2048,
             enable_eagle=True,
+            max_gpu_lora_count=4,
         ),
     )
     assert cfg.model == "m2"
@@ -101,6 +102,7 @@ def test_engine_config_full_kwargs_round_trip_through_getters():
     assert llm.max_num_seqs == 64
     assert llm.max_num_batched_tokens == 2048
     assert llm.enable_eagle is True
+    assert llm.max_gpu_lora_count == 4
 
 
 @pytest.mark.unified
@@ -109,6 +111,12 @@ def test_llm_registration_preserves_legacy_positional_arguments():
     assert llm.bootstrap_host == "host"
     assert llm.bootstrap_port == 9000
     assert llm.enable_eagle is False
+    assert llm.max_gpu_lora_count is None
+    extended = backend.LlmRegistration(
+        2048, 16, 1000, 64, 2048, 2, 1, "host", 9000, True, 8
+    )
+    assert extended.enable_eagle is True
+    assert extended.max_gpu_lora_count == 8
 
 
 @pytest.mark.parametrize("kwargs", [{}, {"enable_eagle": True}])

@@ -20,9 +20,7 @@
 
 mod two_tier_cost_fn;
 
-use dynamo_kv_router::services::selection::{
-    WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
-};
+use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
 
 /// Register every policy Dynamo ships.
 ///
@@ -30,14 +28,14 @@ use dynamo_kv_router::services::selection::{
 /// can shadow it. A later catalog that reuses one of these type names fails registration rather
 /// than overriding it.
 pub fn register(
-    registry: &mut WorkerSelectionPolicyRegistry,
+    registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
     two_tier_cost_fn::register(registry)
 }
 
 #[cfg(test)]
 mod tests {
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyFactory;
+    use dynamo_kv_router::plugins::worker_selection::WorkerSelectionPolicyFactory;
     use dynamo_kv_router::{KvRouterConfig, RoutingPartitionRef, WorkerType};
 
     use super::*;
@@ -57,7 +55,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut registry = WorkerSelectionPolicyRegistry::default();
+        let mut registry = RouterPluginRegistry::default();
         register(&mut registry).unwrap();
         let resolved = registry.resolve(&config);
         (config, resolved)
