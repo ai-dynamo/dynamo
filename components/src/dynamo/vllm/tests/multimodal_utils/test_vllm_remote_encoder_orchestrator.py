@@ -108,7 +108,7 @@ async def test_orchestrator_packages_inline_encoder_result() -> None:
     orchestrator = ExternalEncoderOrchestrator(
         encoder,
         LLMUnaryClient(raw_client),
-        "decoder-model",
+        "generator-model",
     )
 
     completion = await orchestrator(request, context=context)
@@ -121,7 +121,7 @@ async def test_orchestrator_packages_inline_encoder_result() -> None:
     ]
     assert raw_client.context is context
     assert raw_client.request is not None
-    assert raw_client.request["model"] == "decoder-model"
+    assert raw_client.request["model"] == "generator-model"
     for field_name in (
         "multi_modal_data",
         "multi_modal_uuids",

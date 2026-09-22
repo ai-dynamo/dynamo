@@ -20,7 +20,7 @@ DEFAULT_ENCODER_CLASS = (
     "examples.custom_encoder.hitchhikers_vision_encoder.HitchhikersVisionEncoder"
 )
 DEFAULT_PUBLIC_MODEL_NAME = "remote-custom-encoder"
-DEFAULT_DECODER_MODEL_NAME = "remote-custom-encoder-decoder"
+DEFAULT_GENERATOR_MODEL_NAME = "remote-custom-encoder-generator"
 DEFAULT_NAMESPACE = "remote-custom-encoder"
 
 
@@ -31,7 +31,7 @@ class RemoteEncoderConfig:
     model: str
     encoder_class_path: str
     public_model_name: str
-    decoder_model_name: str
+    generator_model_name: str
     namespace: str
     generator_endpoint: str
     orchestrator_endpoint: str
@@ -50,8 +50,8 @@ class RemoteEncoderConfig:
             public_model_name=os.environ.get(
                 "DYN_SERVED_MODEL_NAME", DEFAULT_PUBLIC_MODEL_NAME
             ),
-            decoder_model_name=os.environ.get(
-                "DYN_DECODER_MODEL_NAME", DEFAULT_DECODER_MODEL_NAME
+            generator_model_name=os.environ.get(
+                "DYN_GENERATOR_MODEL_NAME", DEFAULT_GENERATOR_MODEL_NAME
             ),
             namespace=namespace,
             generator_endpoint=f"{namespace}.generator.generate",
@@ -67,9 +67,7 @@ class RemoteEncoderConfig:
 
         module_path, separator, class_name = self.encoder_class_path.rpartition(".")
         if not separator:
-            raise ValueError(
-                "DYN_ENCODER_CLASS must be a dotted module.ClassName path"
-            )
+            raise ValueError("DYN_ENCODER_CLASS must be a dotted module.ClassName path")
         backend_class = getattr(importlib.import_module(module_path), class_name)
         if not (
             isinstance(backend_class, type)

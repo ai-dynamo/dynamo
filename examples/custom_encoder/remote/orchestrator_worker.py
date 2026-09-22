@@ -24,8 +24,8 @@ async def worker(runtime: DistributedRuntime) -> None:
 
     config = RemoteEncoderConfig.from_env()
 
-    decoder_client = await runtime.endpoint(config.generator_endpoint).client()
-    await decoder_client.wait_for_instances()
+    generator_client = await runtime.endpoint(config.generator_endpoint).client()
+    await generator_client.wait_for_instances()
 
     backend_class = config.resolve_backend_class()
     encoder = InlineEncoder.from_backend(backend_class(), model=config.model)
@@ -43,8 +43,8 @@ async def worker(runtime: DistributedRuntime) -> None:
         )
         orchestrator = ExternalEncoderOrchestrator(
             encoder,
-            LLMUnaryClient(decoder_client),
-            config.decoder_model_name,
+            LLMUnaryClient(generator_client),
+            config.generator_model_name,
             EncoderResultRequestBuilder(),
         )
         await serve_unary_endpoint(endpoint, orchestrator)
