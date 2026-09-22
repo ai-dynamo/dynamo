@@ -101,7 +101,9 @@ async def test_snapshot_crash_failover_rejected_before_engine_creation(monkeypat
 
     monkeypatch.setattr(snapshot.sgl, "Engine", unexpected_engine)
     with pytest.raises(RuntimeError, match="writer-cohort fence"):
-        await snapshot.prepare_snapshot_engine(SimpleNamespace())
+        await snapshot.prepare_snapshot_engine(
+            SimpleNamespace(server_args=SimpleNamespace())
+        )
 
 
 class _FakeEndpoint:
