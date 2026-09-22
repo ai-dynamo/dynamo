@@ -1741,20 +1741,23 @@ class ManagedDeployment:
         port_forward: Any,
         request_sender: Any = send_request,
     ) -> requests.Response:
-        """Retry one request after rebuilding a dropped pod port-forward."""
+        """Retry one complete response after rebuilding a dropped port-forward."""
         active_port_forward = port_forward
 
         # Inference POSTs may have reached the backend before their connection
         # failed, so rebuild the port-forward and replay each request only once.
         for attempt in range(PORT_FORWARD_REQUEST_RETRY_LIMIT + 1):
             url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
+            response = None
             try:
-                return request_sender(url, payload, timeout=timeout, method="POST")
-            except (
-                requests.ConnectionError,
-                requests.Timeout,
-                httpx.TransportError,
-            ) as error:
+                response = request_sender(url, payload, timeout=timeout, method="POST")
+                # Keep streamed body reads inside the retry boundary. Accessing
+                # content is a no-op for responses that are already buffered.
+                _ = response.content
+                return response
+            except (requests.RequestException, httpx.TransportError) as error:
+                if response is not None:
+                    response.close()
                 if attempt == PORT_FORWARD_REQUEST_RETRY_LIMIT:
                     raise
 
