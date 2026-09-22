@@ -13,7 +13,6 @@ import pytest
 
 from tests.rl.utils import (
     check_model_registered,
-    check_ready,
     prepare_log_dir,
     process_env,
     vllm_gpu_mem_args,
@@ -21,7 +20,11 @@ from tests.rl.utils import (
 from tests.utils.client import send_request
 from tests.utils.constants import QWEN
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
+from tests.utils.managed_process import (
+    DynamoFrontendProcess,
+    ManagedProcess,
+    check_health_ready,
+)
 from tests.utils.port_utils import ServicePorts
 from tests.utils.sglang_generate import assert_native_stream, stream_generate
 
@@ -78,7 +81,7 @@ class VllmTitoWorkerProcess(ManagedProcess):
             ],
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", check_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
                 (
                     f"http://localhost:{frontend_port}/v1/models",
                     partial(check_model_registered, model=TEST_MODEL),
@@ -125,7 +128,7 @@ class SglangTitoWorkerProcess(ManagedProcess):
             ],
             env=env,
             health_check_urls=[
-                (f"http://localhost:{system_port}/health", check_ready),
+                (f"http://localhost:{system_port}/health", check_health_ready),
                 (
                     f"http://localhost:{frontend_port}/v1/models",
                     partial(check_model_registered, model=TEST_MODEL),

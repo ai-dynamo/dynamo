@@ -14,6 +14,8 @@ import copy
 import json
 import sys
 import types
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
@@ -35,7 +37,7 @@ from dynamo.frontend.sglang_prepost import (
     SglangPreprocessResult,
     SglangStreamingPostProcessor,
     _flatten_message_content,
-    _guided_tool_choice_requires_reasoning,
+    _guided_output_requires_reasoning,
     _normalize_assistant_tool_call_arguments,
     _normalize_prompt_token_ids,
     _normalize_sglang_parser_name,
@@ -152,7 +154,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
                     "video_url": {"url": "https://example.com/video.mp4"},
                     "uuid": "cached-video",
                 },
-                "supported only for image_url",
+                "supported only by the vLLM backend",
             ),
             (
                 {
@@ -242,6 +244,56 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert result["sampling_options"]["guided_decoding"] == {
             "json": {"type": "object"}
         }
+
+    @pytest.mark.router
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "backend_instance_id",
+            "decode_worker_id",
+            "prefill_worker_id",
+            "dp_rank",
+            "prefill_dp_rank",
+        ],
+    )
+    def test_worker_routing_hints_are_projected(self, field):
+        result = _build_dynamo_preproc({"nvext": {field: 7}}, [1], "test", None)
+        assert result["routing"] == {field: 7}
+
+    @pytest.mark.router
+    def test_worker_routing_preserves_rank_zero(self):
+        """Rank zero is an explicit value, not an omitted rank."""
+        result = _build_dynamo_preproc({"nvext": {"dp_rank": 0}}, [1], "test", None)
+        assert result["routing"] == {"dp_rank": 0}
+
+    @pytest.mark.router
+    def test_worker_routing_omits_null(self):
+        result = _build_dynamo_preproc(
+            {"nvext": {"backend_instance_id": None}}, [1], "test", None
+        )
+        assert result["routing"] is None
+
+    @pytest.mark.router
+    def test_worker_routing_preserves_priority_and_explicit_overrides(self):
+        request = {
+            "nvext": {
+                "backend_instance_id": 2**64 - 1,
+                "decode_worker_id": 7,
+                "dp_rank": 0,
+                "agent_hints": {"priority": 10},
+            },
+            "routing": {"decode_worker_id": 9, "priority": 3},
+        }
+        original = copy.deepcopy(request)
+        result = _build_dynamo_preproc(request, [1], "test", None)
+        assert result["routing"] == {
+            "backend_instance_id": 2**64 - 1,
+            "decode_worker_id": 9,
+            "dp_rank": 0,
+            "priority": 3,
+            "priority_jump": 10.0,
+        }
+        assert request == original
 
     def test_agent_hints_are_projected_to_routing(self):
         result = _build_dynamo_preproc(
@@ -1009,7 +1061,7 @@ def test_qwen_separate_reasoning_false_keeps_generation_gate(tokenizer, tool_cho
 
     assert result.force_reasoning is True
     assert result.reasoning_parser is None
-    assert _guided_tool_choice_requires_reasoning(request, result.force_reasoning)
+    assert _guided_output_requires_reasoning(request, result.force_reasoning)
 
 
 @pytest.mark.parametrize(
@@ -1086,7 +1138,120 @@ def test_guided_tool_choice_requires_effective_reasoning(
 ):
     """Only reasoning-enabled required or named tools activate the gate."""
     request = {"tool_choice": tool_choice}
-    assert _guided_tool_choice_requires_reasoning(request, force_reasoning) is expected
+    assert _guided_output_requires_reasoning(request, force_reasoning) is expected
+
+
+@pytest.mark.core
+def test_structured_response_requires_effective_reasoning():
+    request = {"response_format": {"type": "json_schema"}}
+
+    assert _guided_output_requires_reasoning(request, True, "deepseek-v4") is True
+    assert _guided_output_requires_reasoning(request, False, "deepseek-v4") is False
+    assert _guided_output_requires_reasoning(request, True, "gpt-oss") is False
+    assert not _guided_output_requires_reasoning(
+        {"response_format": {"type": "text"}}, True, "deepseek-v4"
+    )
+
+
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("legacy_constraint", "expected"),
+    [
+        ({"guided_regex": "trueish"}, False),
+        ({"guided_choice": []}, True),
+    ],
+)
+def test_structured_response_respects_legacy_constraint_precedence(
+    legacy_constraint, expected
+):
+    request = {"response_format": {"type": "json_schema"}, **legacy_constraint}
+
+    assert _guided_output_requires_reasoning(request, True, "qwen3") is expected
+
+
+@pytest.mark.core
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize(
+    ("use_pool", "thinking", "separate_reasoning", "legacy_regex"),
+    [
+        pytest.param(False, True, True, False, id="inline-structured"),
+        pytest.param(False, False, True, False, id="inline-thinking-disabled"),
+        pytest.param(False, True, False, False, id="inline-separation-disabled"),
+        pytest.param(False, True, True, True, id="inline-legacy-regex"),
+        pytest.param(True, True, True, False, id="pool-structured"),
+    ],
+)
+def test_structured_response_generator_forwards_reasoning_gate(
+    tokenizer, monkeypatch, use_pool, thinking, separate_reasoning, legacy_regex
+):
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}},
+                "required": ["answer"],
+            },
+        },
+    }
+    request = {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": "Return answer 42 as JSON."}],
+        "response_format": response_format,
+        "chat_template_kwargs": {"enable_thinking": thinking},
+        "separate_reasoning": separate_reasoning,
+        "stream": True,
+    }
+    if legacy_regex:
+        request["guided_regex"] = "trueish"
+    routed_engine = FakeRoutedEngine(items=[{"token_ids": [], "finish_reason": "stop"}])
+
+    class InlinePreprocessPool:
+        # Keep the real worker and pool generator path without spawning processes.
+        def submit(self, fn, *args):
+            future = Future()
+            future.set_result(fn(*args))
+            return future
+
+    if use_pool:
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_reasoning_parser_name", "qwen3"
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+    processor = SglangProcessor(
+        tokenizer=tokenizer,
+        routed_engine=routed_engine,
+        tool_call_parser_name=None,
+        reasoning_parser_name="qwen3",
+        eos_token_ids=None,
+        preprocess_pool=InlinePreprocessPool() if use_pool else None,
+    )
+
+    async def collect():
+        return [item async for item in processor.generator(request)]
+
+    asyncio.run(collect())
+    assert len(routed_engine.requests) == 1
+    assert routed_engine.requests[0]["require_reasoning"] is (
+        thinking and not legacy_regex
+    )
+    if legacy_regex:
+        assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
+            "regex": "trueish"
+        }
+    else:
+        assert routed_engine.requests[0]["sampling_options"]["guided_decoding"] == {
+            "json": response_format["json_schema"]["schema"]
+        }
 
 
 class _CapturingReasoningParser:
@@ -2059,7 +2224,56 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
 
-    def test_response_format_takes_precedence_over_tool_guidance(
+    @pytest.mark.parametrize("tools", [None, []], ids=["missing", "empty"])
+    def test_required_tool_choice_rejects_missing_tools(self, tools):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {"type": "json_object"},
+            "tool_choice": "required",
+        }
+        if tools is not None:
+            request["tools"] = tools
+
+        with pytest.raises(
+            PreprocessError, match='tool_choice is "required" but tools is empty'
+        ):
+            preprocess_chat_request(
+                request,
+                tokenizer=None,
+                tool_call_parser_name="hermes",
+                reasoning_parser_name=None,
+            )
+
+    @pytest.mark.parametrize(
+        "tool_choice",
+        ["required", tool_choice_value("named")],
+        ids=["required", "named"],
+    )
+    def test_forced_tool_choice_rejects_structural_tag_response_format(
+        self, tool_choice
+    ):
+        with pytest.raises(
+            PreprocessError,
+            match="cannot be combined with a structural_tag response format",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": [parity_tool()],
+                    "tool_choice": tool_choice,
+                    "response_format": {
+                        "type": "structural_tag",
+                        "format": {"type": "any_text"},
+                    },
+                },
+                tokenizer=None,
+                tool_call_parser_name="hermes",
+                reasoning_parser_name=None,
+            )
+
+    def test_forced_tool_guidance_takes_precedence_over_response_format(
         self, tokenizer, caplog
     ):
         result = preprocess_chat_request(
@@ -2086,13 +2300,14 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             reasoning_parser_name=None,
         )
 
-        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.guided_decoding is not None
+        assert result.guided_decoding["json"]["type"] == "array"
         assert (
-            "Tool-call guided decoding will be ignored because of response_format already exists."
+            "response_format guided decoding will be ignored because tool_choice is forced."
             in caplog.text
         )
 
-    def test_response_format_disables_named_zero_arg_tool_reconstruction(
+    def test_named_zero_arg_tool_guidance_takes_precedence_over_response_format(
         self, tokenizer
     ):
         result = preprocess_chat_request(
@@ -2123,8 +2338,8 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             reasoning_parser_name=None,
         )
 
-        assert result.guided_decoding == {"json": {"type": "object"}}
-        assert result.named_zero_arg_tool is None
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.named_zero_arg_tool == "get_server_time"
 
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.
@@ -3193,6 +3408,91 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.core
+@pytest.mark.parametrize(
+    ("requested", "pin_workers"),
+    [
+        pytest.param(None, False, id="omitted"),
+        pytest.param(True, False, id="true"),
+        pytest.param(False, False, id="false"),
+        pytest.param(None, True, id="pinned"),
+    ],
+)
+@pytest.mark.parametrize("use_pool", [False, True], ids=["inline", "pool"])
+def test_generator_preserves_decode_and_routing_options(
+    requested, use_pool, pin_workers, monkeypatch
+):
+    class SpecialTokenTokenizer:
+        chat_template = ""
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1]
+
+        def decode(self, token_ids, *, skip_special_tokens):
+            return "".join(
+                "<special>" if token == 2 else "A"
+                for token in token_ids
+                if token != 2 or not skip_special_tokens
+            )
+
+    tokenizer = SpecialTokenTokenizer()
+    engine = FakeRoutedEngine(items=[{"token_ids": [2, 3], "finish_reason": "length"}])
+    request = {"model": "test", "messages": [{"role": "user", "content": "Hi"}]}
+    if requested is not None:
+        request["skip_special_tokens"] = requested
+
+    worker_routing = {
+        "backend_instance_id": 7,
+        "decode_worker_id": 8,
+        "prefill_worker_id": 9,
+        "dp_rank": 0,
+        "prefill_dp_rank": 1,
+    }
+    if pin_workers:
+        request["nvext"] = worker_routing.copy()
+
+    if use_pool:
+        # Run the real worker through the pool branch without loading a model
+        # or spawning a process; monkeypatch restores its globals afterwards.
+        monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", tokenizer)
+        monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", None)
+        monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", None)
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+        )
+        monkeypatch.setattr(
+            sglang_processor_module, "_w_template_force_reasoning", False
+        )
+        monkeypatch.setattr(sglang_processor_module, "_w_default_thinking_mode", None)
+
+    with ThreadPoolExecutor(max_workers=1) if use_pool else nullcontext() as pool:
+        processor = SglangProcessor(
+            tokenizer,
+            engine,
+            None,
+            None,
+            None,
+            preprocess_pool=pool,
+            preprocess_workers=1 if use_pool else 0,
+        )
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        output = asyncio.run(collect())
+
+    content = "".join(
+        choice["delta"].get("content", "")
+        for item in output
+        for choice in item.get("data", {}).get("choices", [])
+    )
+    assert content == ("<special>A" if requested is False else "A")
+    assert engine.requests[0]["output_options"]["skip_special_tokens"] is (
+        requested is not False
+    )
+    assert engine.requests[0]["routing"] == (worker_routing if pin_workers else None)
+
+
 class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
     """Test safe-boundary incremental detokenization."""
 
@@ -3908,16 +4208,163 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert post._decode_context_ids == [ord("a")]
         assert post._pending_decode_ids == []
 
-    def test_strips_all_configured_trailing_eos_token_ids(self, tokenizer):
-        """Any configured EOS id is stripped from the final chunk before decode."""
+    def test_strips_only_the_exact_matched_stop_suffix(self, tokenizer):
+        """Matched metadata, not configured membership alone, selects the suffix."""
         post = SglangStreamingPostProcessor(
             tokenizer=tokenizer,
             tool_call_parser=None,
             reasoning_parser=None,
             eos_token_ids=[2, 3],
+            stop_token_ids={4, 5},
         )
 
-        assert post._strip_trailing_eos_token_ids([10, 3, 2]) == [10]
+        assert post._strip_matched_stop_token_ids([10, 3, 2], None) == [10, 3]
+        assert post._strip_matched_stop_token_ids([10, 4, 5], 5) == [10, 4]
+        assert post._strip_matched_stop_token_ids([10, 4, 5], [4, 5]) == [10]
+
+    @pytest.mark.parametrize(
+        "stop_config",
+        [
+            {"stop_token_ids": {ord("A")}},
+            {"eos_token_ids": [ord("A")]},
+        ],
+        ids=["request-stop-id", "model-eos-id"],
+    )
+    def test_length_finish_keeps_configured_token_and_logprob(self, stop_config):
+        """A length finish does not turn a configured final ID into a match."""
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": [ord("A")],
+                    "finish_reason": "length",
+                    "log_probs": [-0.25],
+                }
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            **stop_config,
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-length", {"model": "test-model"}, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert len(chunks) == 1
+        choice = chunks[0]["choices"][0]
+        assert choice["delta"]["content"] == "A"
+        assert choice["finish_reason"] == "length"
+        assert choice["logprobs"]["content"] == [
+            {
+                "token": "A",
+                "logprob": -0.25,
+                "bytes": [65],
+                "top_logprobs": [],
+            }
+        ]
+
+    def test_string_match_inside_configured_stop_token_keeps_visible_prefix(
+        self, tokenizer
+    ):
+        """An engine-reported string match wins over configured token membership."""
+        token_ids = tokenizer.encode("alphabet")
+        assert len(token_ids) == 1
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"pha"},
+            stop_token_ids=set(token_ids),
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": token_ids,
+                "finish_reason": "stop",
+                "stop_reason": "pha",
+                "stop_terminated": True,
+            }
+        )
+
+        assert choice is not None
+        assert choice["delta"]["content"] == "al"
+        assert choice["finish_reason"] == "stop"
+
+    def test_request_stop_token_id_is_hidden_by_python_frontend(self):
+        """Match the Rust frontend when SGLang returns a request stop token."""
+
+        class RequestTokenizer(self.ByteTokenizer):
+            chat_template = "{{ messages }}"
+            eos_token_id = 0
+
+            def encode(self, text, *, add_special_tokens=False):
+                del add_special_tokens
+                return list(text.encode())
+
+            def apply_chat_template(self, messages, **kwargs):
+                del messages, kwargs
+                return [1, 2, 3]
+
+        tokenizer = RequestTokenizer()
+        generated_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+        assert len(generated_ids) >= 2
+        stop_token_id = generated_ids[-1]
+        visible_ids = generated_ids[:-1]
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {
+                    # Native SGLang includes the matched stop position.
+                    "token_ids": generated_ids,
+                    "finish_reason": "stop",
+                    "stop_reason": stop_token_id,
+                }
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=[tokenizer.eos_token_id],
+        )
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Say hello"}],
+            "stop_token_ids": [stop_token_id],
+            # Displaying special tokens must not expose a matched stop suffix.
+            "skip_special_tokens": False,
+        }
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        items = asyncio.run(collect())
+        content = "".join(
+            item["data"]["choices"][0]["delta"].get("content", "")
+            for item in items
+            if "data" in item
+        )
+
+        assert routed_engine.requests[0]["stop_conditions"]["stop_token_ids"] == [
+            stop_token_id
+        ]
+        assert content == tokenizer.decode(visible_ids, skip_special_tokens=False)
 
 
 # ---------------------------------------------------------------------------
@@ -4116,6 +4563,84 @@ class TestReasoningParsing:  # FRONTEND.9 — reasoning ↔ tool-call orchestrat
         assert json.loads(tool_calls[0]["function"]["arguments"]) == {
             "city": "New York"
         }
+
+    @pytest.mark.core
+    @pytest.mark.timeout(60)
+    @pytest.mark.parametrize(
+        ("chunk_size", "finish_with_tokens"), [(1, False), (10000, True)]
+    )
+    @pytest.mark.parametrize(
+        ("text", "expected_reasoning", "expected_content", "finish_reason"),
+        [
+            ('{"answer":42}', '{"answer":42}', "", "stop"),
+            ('{"answer":42}', '{"answer":42}', "", "length"),
+            (
+                '{"answer":41}</think>{"answer":42}',
+                '{"answer":41}',
+                '{"answer":42}',
+                "stop",
+            ),
+        ],
+    )
+    def test_structured_response_preserves_reasoning_boundaries(
+        self,
+        tokenizer,
+        chunk_size,
+        finish_with_tokens,
+        text,
+        expected_reasoning,
+        expected_content,
+        finish_reason,
+    ):
+        _, reasoning_parser = create_parsers(
+            {},
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+            force_reasoning=True,
+        )
+        assert reasoning_parser is not None
+        case_tokenizer = copy.deepcopy(tokenizer)
+        detector = reasoning_parser.detector
+        case_tokenizer.add_special_tokens(
+            {
+                "additional_special_tokens": [
+                    detector.think_start_token,
+                    detector.think_end_token,
+                ]
+            }
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=case_tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=reasoning_parser,
+        )
+        token_ids = case_tokenizer.encode(text, add_special_tokens=False)
+        responses = []
+        for offset in range(0, len(token_ids), chunk_size):
+            is_last = offset + chunk_size >= len(token_ids)
+            choice = post.process_output(
+                {
+                    "token_ids": token_ids[offset : offset + chunk_size],
+                    "finish_reason": (
+                        finish_reason if finish_with_tokens and is_last else None
+                    ),
+                }
+            )
+            if choice:
+                responses.append(choice)
+        if not finish_with_tokens:
+            terminal = post.process_output(
+                {"token_ids": [], "finish_reason": finish_reason}
+            )
+            assert terminal is not None
+            responses.append(terminal)
+        content = "".join(item["delta"].get("content", "") for item in responses)
+        reasoning = "".join(
+            item["delta"].get("reasoning_content", "") for item in responses
+        )
+        assert content == expected_content
+        assert reasoning == expected_reasoning
+        assert responses[-1]["finish_reason"] == finish_reason
 
 
 # ---------------------------------------------------------------------------

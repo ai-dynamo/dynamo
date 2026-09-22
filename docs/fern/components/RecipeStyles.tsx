@@ -193,8 +193,10 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-moonshot:checked ~ .dynamo-recipe-browser label[for="provider-moonshot"],
 #provider-meta:checked ~ .dynamo-recipe-browser label[for="provider-meta"],
 #provider-openai:checked ~ .dynamo-recipe-browser label[for="provider-openai"],
+#provider-skt:checked ~ .dynamo-recipe-browser label[for="provider-skt"],
 #provider-zai:checked ~ .dynamo-recipe-browser label[for="provider-zai"],
 #provider-thinkingmachines:checked ~ .dynamo-recipe-browser label[for="provider-thinkingmachines"],
+#provider-lg:checked ~ .dynamo-recipe-browser label[for="provider-lg"],
 #runtime-all:checked ~ .dynamo-recipe-browser label[for="runtime-all"],
 #runtime-vllm:checked ~ .dynamo-recipe-browser label[for="runtime-vllm"],
 #runtime-trtllm:checked ~ .dynamo-recipe-browser label[for="runtime-trtllm"],
@@ -667,8 +669,10 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 #provider-moonshot:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="moonshot"]),
 #provider-meta:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="meta"]),
 #provider-openai:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="openai"]),
+#provider-skt:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="skt"]),
 #provider-zai:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="zai"]),
 #provider-thinkingmachines:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="thinkingmachines"]),
+#provider-lg:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="lg"]),
 #runtime-vllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="vllm"]),
 #runtime-trtllm:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="trtllm"]),
 #runtime-sglang:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-runtime~="sglang"]),
@@ -2033,11 +2037,12 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 /* ---------------------------------------------------------------------------
    Recipe target picker (variant selector on multi-target recipe pages).
-   Pages opt in by rendering hidden radio inputs named "recipe-sku" /
-   "recipe-usecase" with an adjacent label, and tagging variant-scoped blocks
-   with data-sku / data-usecase (space-separated values allowed). Content is
-   hidden via body:has(), so browsers without :has() degrade to showing all
-   variants. Pages without a picker are unaffected.
+   Pages opt in by rendering hidden radio inputs named "recipe-framework" /
+   "recipe-sku" / "recipe-usecase" with an adjacent label, and tagging
+   variant-scoped blocks with data-recipe-framework / data-sku / data-usecase
+   (space-separated values allowed). Content is hidden via body:has(), so
+   browsers without :has() degrade to showing all variants. Pages without a
+   picker are unaffected.
 --------------------------------------------------------------------------- */
 
 .dynamo-target-picker {
@@ -2160,7 +2165,9 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
     color: var(--grayscale-a9, #777);
 }
 
-/* Variant visibility: hide blocks that do not match the checked sku/usecase */
+/* Variant visibility: hide blocks that do not match the checked framework/sku/usecase */
+body:has(input[name="recipe-framework"][value="vllm"]:checked) [data-recipe-framework]:not([data-recipe-framework~="vllm"]),
+body:has(input[name="recipe-framework"][value="sglang"]:checked) [data-recipe-framework]:not([data-recipe-framework~="sglang"]),
 body:has(input[name="recipe-sku"][value="b200"]:checked) [data-sku]:not([data-sku~="b200"]),
 body:has(input[name="recipe-sku"][value="h200"]:checked) [data-sku]:not([data-sku~="h200"]),
 body:has(input[name="recipe-sku"][value="h100"]:checked) [data-sku]:not([data-sku~="h100"]),

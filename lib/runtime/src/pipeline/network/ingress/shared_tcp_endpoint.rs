@@ -8,12 +8,12 @@
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
-    ENGINE_REQUEST_GAUGE, REJECTION_REQUEST_TOTAL, REQUEST_QUEUE_GAUGE,
     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL, WORK_HANDLER_PERMIT_WAIT_SECONDS,
     WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
     WORK_HANDLER_QUEUE_DEPTH,
 };
 use crate::pipeline::network::PushWorkHandler;
+use crate::{protocols::EndpointId, transports::tcp::instance_path};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -56,51 +56,6 @@ fn get_work_queue_size() -> usize {
         .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
 }
 
-/// Default small overflow queue when the engine-request limit is set but the
-/// queue limit is left unset. Keeps the hard cap close to N.
-const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
-
-/// Resolved worker-pool / overflow-queue sizing for the TCP ingress.
-///
-/// `read_loop` front-acquires a worker-pool permit and dispatches directly when
-/// a worker is free, falls back to the bounded overflow queue, and returns 503
-/// ("Server overloaded") when both are full. The knobs set the *sizes*:
-///
-/// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
-///   (default 16). Hard cap N+Q.
-/// * unset → large defaults (10000 / 40000), so rejection only triggers under
-///   extreme saturation.
-struct SizingConfig {
-    pool_size: usize,
-    queue_size: usize,
-}
-
-fn resolve_sizing() -> SizingConfig {
-    match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        Some(engine_limit) => {
-            let queue_limit = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT);
-            // The single dispatcher holds one request between `recv()` and
-            // acquiring an engine permit, so size the channel to limit-1:
-            // channel + the dispatcher-held request cap "queued, not in engine"
-            // at exactly `limit`.
-            SizingConfig {
-                pool_size: engine_limit.max(1),
-                queue_size: queue_limit.saturating_sub(1).max(1),
-            }
-        }
-        None => SizingConfig {
-            pool_size: get_worker_pool_size(),
-            queue_size: get_work_queue_size(),
-        },
-    }
-}
-
 /// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
 /// `Drop` decrements, so a single owner expresses the "task is active" interval.
 /// Constructed in the dispatcher *before* `tokio::spawn` and moved into the
@@ -112,8 +67,6 @@ struct ActiveTaskGuard;
 impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
-        // `dynamo_engine_request`: requests currently in the engine.
-        ENGINE_REQUEST_GAUGE.inc();
         Self
     }
 }
@@ -121,7 +74,6 @@ impl ActiveTaskGuard {
 impl Drop for ActiveTaskGuard {
     fn drop(&mut self) {
         WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
-        ENGINE_REQUEST_GAUGE.dec();
     }
 }
 
@@ -148,8 +100,9 @@ pub struct SharedTcpServer {
     cancellation_token: CancellationToken,
     /// Channel for sending work to the worker pool
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
-    /// Worker-pool semaphore bounding concurrent in-engine requests. Shared with
+    /// Worker-pool semaphore bounding concurrent TCP worker tasks. Shared with
     /// `read_loop` so it can front-acquire a permit and dispatch directly.
+    /// Unrelated to the backend admission gate's concurrency limit.
     engine_sem: Arc<Semaphore>,
     /// Overflow-queue capacity; `read_loop` compares against it to tell whether
     /// the queue is empty for the FIFO direct-dispatch rule.
@@ -174,10 +127,11 @@ impl SharedTcpServer {
         bind_addr: SocketAddr,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<Self>> {
-        let SizingConfig {
-            pool_size: worker_pool_size,
-            queue_size: work_queue_size,
-        } = resolve_sizing();
+        // TCP request-plane sizing only. Backend admission (the engine
+        // concurrency limit and its overflow queue) is owned by
+        // `crate::admission_gate`, which every transport shares.
+        let worker_pool_size = get_worker_pool_size();
+        let work_queue_size = get_work_queue_size();
 
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
@@ -284,7 +238,6 @@ impl SharedTcpServer {
                         // gauge strictly reflects channel occupancy. Permit-acquire wait is
                         // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
                         WORK_HANDLER_QUEUE_DEPTH.dec();
-                        REQUEST_QUEUE_GAUGE.dec();
 
                         // Acquire permit before spawning (bounds concurrency). Time the wait so
                         // pool starvation (permit exhaustion) shows up as rising p99 in
@@ -525,7 +478,7 @@ impl SharedTcpServer {
         Ok(())
     }
 
-    pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
+    pub async fn remove_handler(&self, endpoint_path: &str, endpoint_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
             handler
                 .system_health
@@ -671,10 +624,11 @@ impl SharedTcpServer {
                 Some(h) => h,
                 None => {
                     tracing::warn!("No handler found for endpoint: {endpoint_path}");
-                    // Send error response
+                    // The client only treats this prefix as a rejection; any other reply is
+                    // read as a success ACK and it waits for a response stream that never opens.
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
-                        "Unknown endpoint: {}",
-                        endpoint_path
+                        "{} unknown endpoint {endpoint_path}",
+                        crate::pipeline::network::ACK_UNAVAILABLE_PREFIX
                     )));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
@@ -718,11 +672,10 @@ impl SharedTcpServer {
                 continue;
             }
 
-            // All engine slots busy (or items already queued): try the overflow queue.
+            // All pool permits busy (or items already queued): try the work queue.
             match work_tx.try_reserve() {
                 Ok(slot) => {
                     WORK_HANDLER_QUEUE_DEPTH.inc();
-                    REQUEST_QUEUE_GAUGE.inc();
                     slot.send(work_item);
                     // Queued: the dispatcher owns inflight, so don't touch it here.
                     if !send_response(TcpResponseMessage::empty()) {
@@ -730,12 +683,13 @@ impl SharedTcpServer {
                     }
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Engine and queue both full → shed; keep the connection open.
-                    REJECTION_REQUEST_TOTAL.inc();
+                    // TCP worker pool and work queue both full → shed; keep the
+                    // connection open.
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        "Worker at capacity (engine + queue full), rejecting request"
+                        "TCP worker pool and work queue full, rejecting request"
                     );
                     send_response(TcpResponseMessage::new(Bytes::from_static(
                         b"Server overloaded: worker at capacity",
@@ -745,9 +699,10 @@ impl SharedTcpServer {
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
-                    send_response(TcpResponseMessage::new(Bytes::from_static(
-                        b"Server unavailable: worker pool channel closed",
-                    )));
+                    send_response(TcpResponseMessage::new(Bytes::from(format!(
+                        "{} worker pool channel closed",
+                        crate::pipeline::network::ACK_UNAVAILABLE_PREFIX
+                    ))));
                     handler.inflight.fetch_sub(1, Ordering::SeqCst);
                     handler.notify.notify_one();
                     tracing::error!("Worker pool channel closed, shutting down read loop");
@@ -783,11 +738,13 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // Include instance_id in the routing key to avoid collisions when multiple workers
-        // share the same TCP server (e.g., --num-workers > 1 in tests)
-        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
+        let endpoint_id = EndpointId {
+            namespace: namespace.clone(),
+            component: component_name.clone(),
+            name: endpoint_name.clone(),
+        };
         self.register_endpoint(
-            endpoint_path,
+            instance_path(&endpoint_id, instance_id),
             service_handler,
             instance_id,
             namespace,
@@ -798,20 +755,32 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        // With multiple workers per process, each registers with a unique key
-        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
-        let suffix = format!("/{endpoint_name}");
-        let keys_to_remove: Vec<String> = self
-            .handlers
-            .iter()
-            .filter(|entry| entry.key().ends_with(&suffix))
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.unregister_endpoint(&key, endpoint_name).await;
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let path = {
+            let mut matches = self.handlers.iter().filter(|entry| {
+                entry.value().endpoint_name == endpoint_name
+                    && entry.value().instance_id == instance_id
+            });
+            let path = matches.next().map(|entry| entry.key().clone());
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "Ambiguous endpoint {endpoint_name}/{instance_id:x}; use unregister_endpoint_instance"
+            );
+            path
+        };
+        if let Some(path) = path {
+            self.remove_handler(&path, endpoint_name).await;
         }
+        Ok(())
+    }
+
+    async fn unregister_endpoint_instance(
+        &self,
+        endpoint_id: &EndpointId,
+        instance_id: u64,
+    ) -> Result<()> {
+        self.remove_handler(&instance_path(endpoint_id, instance_id), &endpoint_id.name)
+            .await;
         Ok(())
     }
 
@@ -837,6 +806,10 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
 mod tests {
     use super::*;
     use crate::pipeline::error::PipelineError;
+    use crate::pipeline::network::egress::tcp_client::TcpRequestClient;
+    use crate::pipeline::network::egress::unified_client::{Headers, RequestPlaneClient};
+    use crate::pipeline::network::ingress::unified_server::RequestPlaneServer;
+    use crate::tls_utils::test_certs::self_signed_pair;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -899,6 +872,16 @@ mod tests {
         }
     }
 
+    fn ready_system_health() -> Arc<Mutex<SystemHealth>> {
+        Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false, // health_check_enabled
+            "/health".to_string(),
+            "/live".to_string(),
+        )))
+    }
+
     #[tokio::test]
     async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
         // Initialize tracing for test debugging
@@ -918,13 +901,7 @@ mod tests {
 
         // Register endpoint
         let endpoint_path = "test_endpoint".to_string();
-        let system_health = Arc::new(Mutex::new(SystemHealth::new(
-            crate::HealthStatus::Ready,
-            vec![],
-            false, // health_check_enabled
-            "/health".to_string(),
-            "/live".to_string(),
-        )));
+        let system_health = ready_system_health();
 
         server
             .register_endpoint(
@@ -985,9 +962,7 @@ mod tests {
             let server = server.clone();
             let endpoint_path = endpoint_path.clone();
             async move {
-                server
-                    .unregister_endpoint(&endpoint_path, "test_endpoint")
-                    .await;
+                server.remove_handler(&endpoint_path, "test_endpoint").await;
                 Instant::now()
             }
         });
@@ -1047,6 +1022,148 @@ mod tests {
             .expect("Request should succeed");
 
         tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
+    }
+
+    async fn send_ack(client: &TcpRequestClient, address: &str) -> Bytes {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.send_request(
+                address.to_string(),
+                Bytes::from_static(b"payload"),
+                Headers::new(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("no ACK within 5s for {address}"))
+        .expect("request-plane send should succeed")
+    }
+
+    #[tokio::test]
+    async fn unregister_endpoint_removes_only_the_matching_endpoint_instance() {
+        let endpoint = EndpointId {
+            namespace: "test_namespace".into(),
+            component: "test_component".into(),
+            name: "generate".into(),
+        };
+        let survivors = [
+            (endpoint.clone(), 0xb),
+            (
+                EndpointId {
+                    namespace: "other_namespace".into(),
+                    ..endpoint.clone()
+                },
+                0xa,
+            ),
+            (
+                EndpointId {
+                    component: "other_component".into(),
+                    ..endpoint.clone()
+                },
+                0xa,
+            ),
+        ];
+
+        let id = |namespace: &str, component: &str, name: &str| EndpointId {
+            namespace: namespace.into(),
+            component: component.into(),
+            name: name.into(),
+        };
+        let cases = survivors
+            .into_iter()
+            .map(|(survivor, instance_id)| (endpoint.clone(), survivor, instance_id))
+            .chain([
+                (id("a/b", "c", "d"), id("a", "b/c", "d"), 0xa),
+                (id("a", "b/c", "d"), id("a", "b", "c/d"), 0xa),
+                (id("a/b", "c", "d"), id("a%2Fb", "c", "d"), 0xa),
+            ]);
+
+        for (endpoint, survivor_endpoint, survivor_id) in cases {
+            let cancel = CancellationToken::new();
+            let server =
+                SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), cancel.clone()).unwrap();
+            let addr = server.clone().bind_and_start().await.unwrap();
+            let plane: &dyn RequestPlaneServer = server.as_ref();
+            let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
+            let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
+            for (id, instance_id, handler) in [
+                (&endpoint, 0xa, removed.clone()),
+                (&survivor_endpoint, survivor_id, survivor.clone()),
+            ] {
+                plane
+                    .register_endpoint(
+                        id.name.clone(),
+                        handler,
+                        instance_id,
+                        id.namespace.clone(),
+                        id.component.clone(),
+                        ready_system_health(),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            if survivor_id == 0xa && survivor_endpoint.name == endpoint.name {
+                assert!(
+                    plane
+                        .unregister_endpoint(&endpoint.name, 0xa)
+                        .await
+                        .is_err()
+                );
+            }
+
+            // The second registration must not redirect requests for the first.
+            let client = TcpRequestClient::new().unwrap();
+            let removed_address = format!("{addr}/{}", instance_path(&endpoint, 0xa));
+            assert!(send_ack(&client, &removed_address).await.is_empty());
+            let delivered_to_removed = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    _ = removed.request_started.notified() => true,
+                    _ = survivor.request_started.notified() => false,
+                }
+            })
+            .await
+            .expect("a registered handler should receive the request");
+            assert!(
+                delivered_to_removed,
+                "request redirected to {survivor_endpoint:?}/{survivor_id:x}"
+            );
+
+            // Removing one registration must preserve every distinct endpoint instance.
+            plane
+                .unregister_endpoint_instance(&endpoint, 0xa)
+                .await
+                .unwrap();
+            let address = format!("{addr}/{}", instance_path(&survivor_endpoint, survivor_id));
+            let ack = send_ack(&client, &address).await;
+            assert!(
+                ack.is_empty(),
+                "survivor {survivor_endpoint:?}/{survivor_id:x} rejected: {ack:?}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), survivor.request_started.notified())
+                .await
+                .expect("surviving handler should receive the request");
+
+            let ack = send_ack(&client, &removed_address).await;
+            assert!(
+                ack.starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes()),
+                "removed endpoint must reject new requests: {ack:?}"
+            );
+            // With one match left, the original API must still remove that registration.
+            plane
+                .unregister_endpoint(&survivor_endpoint.name, survivor_id)
+                .await
+                .unwrap();
+            assert!(
+                send_ack(&client, &address)
+                    .await
+                    .starts_with(crate::pipeline::network::ACK_UNAVAILABLE_PREFIX.as_bytes())
+            );
+            plane
+                .unregister_endpoint(&survivor_endpoint.name, survivor_id)
+                .await
+                .unwrap();
+            cancel.cancel();
+        }
     }
 
     ///////////////////// TESTS FOR CONCURRENCY BOUNDING /////////////////////
@@ -1272,22 +1389,6 @@ mod tests {
         cancellation_token.cancel();
     }
 
-    fn make_cert_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-        use std::io::Write;
-        let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-            .unwrap()
-            .self_signed(&key_pair)
-            .unwrap();
-        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
-        cert_file.write_all(cert.pem().as_bytes()).unwrap();
-        let mut key_file = tempfile::NamedTempFile::new().unwrap();
-        key_file
-            .write_all(key_pair.serialize_pem().as_bytes())
-            .unwrap();
-        (cert_file, key_file)
-    }
-
     #[tokio::test]
     async fn new_no_tls_env_is_plaintext() {
         let token = CancellationToken::new();
@@ -1301,7 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_partial_tls_config_errors() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let cert_str = cert.path().to_str().unwrap();
         let key_str = key.path().to_str().unwrap();
         let token = CancellationToken::new();
@@ -1334,7 +1435,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_both_paths_enables_tls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let token = CancellationToken::new();
         temp_env::with_vars(
             [
@@ -1352,7 +1453,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_acceptor_enables_mtls() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         // cert + key + client CA -> mTLS acceptor built.
         assert!(
             SharedTcpServer::request_plane_tls_acceptor(
@@ -1367,7 +1468,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_rejects_client_ca_without_server_identity() {
-        let (client_ca, _) = make_cert_files();
+        let (client_ca, _) = self_signed_pair();
         let error = SharedTcpServer::request_plane_tls_acceptor(None, None, Some(client_ca.path()))
             .err()
             .expect("a client CA without a server certificate/key must fail");
@@ -1380,7 +1481,7 @@ mod tests {
 
     #[test]
     fn request_plane_tls_reads_client_ca_path() {
-        let (cert, key) = make_cert_files();
+        let (cert, key) = self_signed_pair();
         let error = SharedTcpServer::request_plane_tls_acceptor(
             Some(cert.path()),
             Some(key.path()),

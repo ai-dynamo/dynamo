@@ -4,10 +4,8 @@
 use super::*;
 use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
+    #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -16,8 +14,10 @@ where
         affinity_target: Option<AffinityTarget>,
         planned_worker: Option<WorkerWithDpRank>,
         admission: FindBestMatchAdmission,
+        budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
+        let staged_kv = StagedKv::for_request(request.content());
         let policy_class = request.metadata().get("policy-class").cloned();
         let session_context = request
             .agent_context
@@ -49,7 +49,15 @@ where
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
 
-        cancel_on_stop(request_context.as_ref(), selection_future).await?
+        await_with_cleanup_policy(
+            request_context.as_ref(),
+            phase,
+            staged_kv,
+            "kv.select_worker",
+            budget,
+            selection_future,
+        )
+        .await?
     }
 
     async fn select_request(
@@ -58,6 +66,7 @@ where
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
+        budget: &CleanupBudget,
     ) -> Result<WorkerSelection, Error> {
         self.select_request_outcome(
             request,
@@ -65,9 +74,8 @@ where
             is_query_only,
             affinity_target,
             None,
-            FindBestMatchAdmission::WithAdmission {
-                track_lifecycle: true,
-            },
+            FindBestMatchAdmission::WithAdmission,
+            budget,
         )
         .await?
         .into_result()
@@ -78,11 +86,90 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
-    ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        self.select_with_session_affinity(request, phase, is_query_only, |target| {
-            self.select_request(request, phase, is_query_only, target)
-        })
-        .await
+        budget: &CleanupBudget,
+    ) -> Result<(WorkerSelection, Option<Hold>), Error> {
+        self.validate_explicit_worker(request.content(), phase)?;
+        let select = || {
+            self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
+                self.select_request(request, phase, is_query_only, target, budget)
+            })
+        };
+        if is_query_only {
+            return select().await;
+        }
+        self.select_with_request_lifecycle(request, phase, select)
+            .await
+    }
+
+    /// Claim or begin the classifier lifecycle for `request`, run the selection
+    /// future built by `select` under it, and attach it to the selection.
+    /// Selection failures either park the lifecycle for a migration retry or
+    /// abort it with the cause.
+    ///
+    /// `select` is a constructor rather than a future so the selection future
+    /// lives in exactly one slot: taking it by value gave the caller's future a
+    /// second copy, and in debug builds that doubled footprint overflowed the
+    /// test-thread stack under `block_on`.
+    async fn select_with_request_lifecycle<Fut>(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        phase: RequestPhase,
+        select: impl FnOnce() -> Fut,
+    ) -> Result<(WorkerSelection, Option<Hold>), Error>
+    where
+        Fut: Future<Output = Result<(WorkerSelection, Option<Hold>), Error>>,
+    {
+        // Decode/aggregated routing owns the logical request's classifier.
+        // A retry can run prefill again with the same MigrationState; that hop
+        // must leave the parked decode lifecycle for the decode host to resume.
+        match phase {
+            RequestPhase::Prefill => return select().await,
+            RequestPhase::Decode | RequestPhase::Aggregated => {}
+        }
+        let mut lifecycle = request
+            .migration_state
+            .as_ref()
+            .and_then(|state| state.take_request_lifecycle());
+        if lifecycle.is_none() {
+            lifecycle = self
+                .kv_router()
+                .begin_request_lifecycle(request.context().id())
+                .map_err(|error| classifier_failure_response(request.context().id(), &error))?
+                .map(Box::new);
+        }
+
+        let (mut selection, affinity) = match select().await {
+            Ok(selection) => selection,
+            Err(error) => {
+                if let Some(mut lifecycle) = lifecycle.take() {
+                    if let Some(classifier_error) = classification_failure(&error) {
+                        lifecycle.abort(Some(classifier_abort_error(classifier_error)));
+                        return Err(classifier_failure_response(
+                            request.context().id(),
+                            classifier_error,
+                        ));
+                    }
+                    if crate::migration::is_migratable(error.as_ref())
+                        && let Some(state) = request.migration_state.as_ref()
+                    {
+                        lifecycle.prepare_retry();
+                        state.store_request_lifecycle(lifecycle);
+                    } else {
+                        lifecycle.abort(Some(
+                            crate::protocols::common::preprocessor::owned_abort_error(
+                                error.as_ref(),
+                            ),
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if let Some(lifecycle) = lifecycle.as_mut() {
+            lifecycle.selected(selection.worker);
+        }
+        selection.request_lifecycle = lifecycle;
+        Ok((selection, affinity))
     }
 
     fn route_signals(&self, selection: &WorkerSelection) -> RoutePlanSignals {
@@ -111,14 +198,19 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
+        // The conditional route's first stage. The budget travels with the
+        // preview into the plan and on into dispatch, so the whole route shares
+        // one deadline.
+        let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route previews require KV routing"));
         }
+        self.validate_explicit_worker(request.content(), phase)?;
 
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (outcome, _) = self
-            .select_with_session_affinity(request, phase, true, |target| {
+            .select_with_session_affinity(request, phase, true, &budget, |target| {
                 self.select_request_outcome(
                     request,
                     phase,
@@ -126,6 +218,7 @@ where
                     target,
                     None,
                     FindBestMatchAdmission::WithoutAdmission,
+                    &budget,
                 )
             })
             .await?;
@@ -136,6 +229,7 @@ where
             request_id: request.context().id().to_string(),
             phase,
             signals,
+            budget,
         })
     }
 
@@ -143,7 +237,10 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         preview: RoutePreview,
-    ) -> Result<RoutePlan<Sel>, Error> {
+    ) -> Result<RoutePlan, Error> {
+        // Inherited, not restarted: this stage continues the route the preview
+        // opened.
+        let budget = preview.budget;
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route plans require KV routing"));
         }
@@ -159,21 +256,26 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
-        let (selection, affinity) = self
-            .select_with_session_affinity(request, phase, false, |target| async move {
-                self.select_request_outcome(
-                    request,
-                    phase,
-                    false,
-                    target,
-                    Some(planned_worker),
-                    FindBestMatchAdmission::WithAdmission {
-                        track_lifecycle: true,
-                    },
-                )
-                .await?
-                .into_result()
+        let select = || {
+            self.select_with_session_affinity(request, phase, false, &budget, |target| {
+                let budget = &budget;
+                async move {
+                    self.select_request_outcome(
+                        request,
+                        phase,
+                        false,
+                        target,
+                        Some(planned_worker),
+                        FindBestMatchAdmission::WithAdmission,
+                        budget,
+                    )
+                    .await?
+                    .into_result()
+                }
             })
+        };
+        let (mut selection, affinity) = self
+            .select_with_request_lifecycle(request, phase, select)
             .await?;
         let signals = self.route_signals(&selection);
         drop(route_guard);
@@ -183,33 +285,38 @@ where
                 Arc::clone(self.kv_router()),
                 request.context().id().to_string(),
                 selection.worker,
-                selection.attempt,
+                selection.booking.take(),
             ),
             selection,
             affinity,
+            budget,
         })
     }
 
     pub(crate) async fn dispatch_kv_plan(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        plan: RoutePlan<Sel>,
+        plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let RoutePlan {
             mut selection,
             cleanup,
             mut affinity,
+            budget,
             ..
         } = plan;
         let selected_target = route_target(selection.worker);
         let guard = match self
-            .track_planned_selection(&request, &mut selection, cleanup)
+            .track_planned_selection(&request, &mut selection, cleanup, &budget)
             .await
         {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
@@ -221,12 +328,7 @@ where
                 return Err(error);
             }
         };
-        match affinity {
-            Some(affinity) => {
-                affinity.into_stream(selected_target, stream, self.session_affinity_mode)
-            }
-            None => Ok(stream),
-        }
+        self.bind_affinity(affinity, selected_target, stream)
     }
 
     pub(crate) async fn prefill_worker_busy(
@@ -234,12 +336,16 @@ where
         request: &SingleIn<PreprocessedRequest>,
         threshold: f64,
     ) -> Result<bool, Error> {
+        // A local budget is sound here and only here: the probe is pinned to
+        // `RequestPhase::Prefill`, which never selects `DispatchWhenStopped`, so
+        // nothing it runs can arm or spend a budget.
+        let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("prefill load probe requires KV routing"));
         }
 
         let (outcome, _) = self
-            .select_with_session_affinity(request, RequestPhase::Prefill, true, |target| {
+            .select_with_session_affinity(request, RequestPhase::Prefill, true, &budget, |target| {
                 self.select_request_outcome(
                     request,
                     RequestPhase::Prefill,
@@ -247,6 +353,7 @@ where
                     target,
                     None,
                     FindBestMatchAdmission::WithoutAdmission,
+                    &budget,
                 )
             })
             .await?;
@@ -263,9 +370,11 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
+        phase: RequestPhase,
         is_query_only: bool,
-    ) -> Result<RequestGuard<Sel>, Error> {
-        self.track_selection_with_cleanup(request, selection, is_query_only, None)
+        budget: &CleanupBudget,
+    ) -> Result<RequestGuard, Error> {
+        self.track_selection_with_cleanup(request, selection, phase, is_query_only, None, budget)
             .await
     }
 
@@ -273,9 +382,15 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
-        cleanup: KvRequestCleanup<Sel>,
-    ) -> Result<RequestGuard<Sel>, Error> {
-        self.track_selection_with_cleanup(request, selection, false, Some(cleanup))
+        cleanup: KvRequestCleanup,
+        budget: &CleanupBudget,
+    ) -> Result<RequestGuard, Error> {
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or(RequestPhase::Aggregated);
+        self.track_selection_with_cleanup(request, selection, phase, false, Some(cleanup), budget)
             .await
     }
 
@@ -283,26 +398,33 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
+        phase: RequestPhase,
         is_query_only: bool,
-        cleanup: Option<KvRequestCleanup<Sel>>,
-    ) -> Result<RequestGuard<Sel>, Error> {
+        cleanup: Option<KvRequestCleanup>,
+        budget: &CleanupBudget,
+    ) -> Result<RequestGuard, Error> {
         let context_id = request.context().id().to_string();
+        let staged_kv = StagedKv::for_request(request.content());
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let chooser = self.kv_router();
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
         let mut guard = match cleanup {
-            Some(cleanup) => {
-                RequestGuard::new_kv_with_cleanup(self.request_metrics.clone(), cleanup, request)
-            }
+            Some(cleanup) => RequestGuard::new_kv_with_cleanup(
+                self.request_metrics.clone(),
+                cleanup,
+                request,
+                selection.request_lifecycle.take(),
+            ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
                 self.request_metrics.clone(),
                 context_id.clone(),
                 selected_worker,
-                selection.attempt,
+                selection.booking.take(),
                 request,
+                selection.request_lifecycle.take(),
             ),
         };
 
@@ -336,14 +458,22 @@ where
                     }
                 };
                 let record_result = if guard.has_approximate_lru() {
-                    cancel_on_stop(
+                    await_with_cleanup_policy(
                         request_context.as_ref(),
+                        phase,
+                        staged_kv,
+                        "kv.record_routing_decision",
+                        budget,
                         guard.acquire_approximate_lru(hashes),
                     )
                     .await?
                 } else {
-                    cancel_on_stop(
+                    await_with_cleanup_policy(
                         request_context.as_ref(),
+                        phase,
+                        staged_kv,
+                        "kv.record_routing_decision",
+                        budget,
                         chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
@@ -382,7 +512,7 @@ where
         .await;
 
         if let Err(error) = record_result {
-            guard.abort().await;
+            guard.abort_with_error(Some(error.as_ref())).await;
             return Err(error);
         }
         Ok(guard)
@@ -392,7 +522,8 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
-        mut guard: RequestGuard<Sel>,
+        mut guard: RequestGuard,
+        budget: &CleanupBudget,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -402,6 +533,7 @@ where
             .as_ref()
             .map(|tracker| tracker.phase())
             .unwrap_or(RequestPhase::Aggregated);
+        let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
@@ -440,8 +572,12 @@ where
             route_trace_context.as_deref(),
             selection.worker.worker_id,
         );
-        let dispatch_result = cancel_on_stop(
+        let dispatch_result = await_with_cleanup_policy(
             request_context.as_ref(),
+            phase,
+            staged_kv,
+            "kv.dispatch",
+            budget,
             dispatch.instrument(route_span.clone()),
         )
         .await
@@ -454,7 +590,11 @@ where
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                if !crate::migration::is_migratable(error.as_ref())
+                    || !guard.release_for_retry().await
+                {
+                    guard.abort_with_error(Some(error.as_ref())).await;
+                }
                 return Err(error);
             }
         };
@@ -506,15 +646,16 @@ where
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
+        let budget = CleanupBudget::default();
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only)
+            .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
         let mut guard = match self
-            .track_selection(&request, &mut selection, is_query_only)
+            .track_selection(&request, &mut selection, phase, is_query_only, &budget)
             .await
         {
             Ok(guard) => guard,
@@ -524,12 +665,15 @@ where
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
-                guard.abort().await;
+                guard.abort_with_error(Some(error.as_ref())).await;
                 return Err(error);
             }
         };
         drop(route_guard);
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
@@ -541,12 +685,9 @@ where
                 return Err(error);
             }
         };
-        let Some(operation) = operation else {
-            return Ok((metadata, stream));
-        };
         Ok((
             metadata,
-            operation.into_stream(selected_target, stream, self.session_affinity_mode)?,
+            self.bind_affinity(operation, selected_target, stream)?,
         ))
     }
 }

@@ -172,6 +172,11 @@ spec:
 
 You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
+<!--
+Maintenance: The DynamoGraphDeployment examples below use the legacy v1alpha1 API and are stale.
+Track their update or removal in GitHub issue #13852.
+-->
+
 ## Usage with Dynamo
 
 Mount the Fluid-generated PVC in your DynamoGraphDeployment:
@@ -190,7 +195,7 @@ spec:
     - name: DYN_DEPLOYMENT_CONFIG
       value: '{"Common": {"model": "/model", ...}}'
   services:
-    VllmWorker:
+    worker:
       volumeMounts:
         - name: s3-model
           mountPoint: /model
@@ -288,7 +293,7 @@ spec:
       "Frontend": {"served_model_name": "meta-llama/Llama-3.3-70B-Instruct", "endpoint":
       "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router":
       "round-robin", "router-num-threads": 4, "common-configs": ["model", "block-size",
-      "max-model-len"]}, "VllmWorker": {"tensor-parallel-size": 4, "enforce-eager": true, "max-num-batched-tokens":
+      "max-model-len"]}, "worker": {"tensor-parallel-size": 4, "enforce-eager": true, "max-num-batched-tokens":
       16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources":
       {"gpu": "4", "memory": "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]},
       "Planner": {"environment": "kubernetes", "no-operation": true}}'
@@ -299,7 +304,7 @@ spec:
       volumeMounts:
         - name: llama-3-3-70b-instruct-model
           mountPoint: /model
-    VllmWorker:
+    worker:
       volumeMounts:
         - name: llama-3-3-70b-instruct-model
           mountPoint: /model

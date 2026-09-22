@@ -28,11 +28,9 @@ follow-up.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is provided through the environment.
 
-Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP
-endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`.
-The sidecar advertises this capability only after the HTTP health probe passes
-and discovery confirms `--incremental-streaming-output`; otherwise it continues
-serving the native gRPC path without advertising `/generate`.
+Start SGLang with `--incremental-streaming-output`. The sidecar's gRPC streaming path expects each response to contain only new tokens; cumulative output would duplicate tokens and inflate completion-token counts. The sidecar checks `GetServerInfo` during discovery and rejects startup unless `incremental_streaming_output` is explicitly `true`. Unlike the in-process Python worker, the sidecar cannot set launch options on an already-running engine.
+
+Native Dynamo `/generate` requests are forwarded opaquely to SGLang's HTTP endpoint using the gRPC host and the HTTP port returned by `GetServerInfo`. The sidecar advertises this capability only after HTTP discovery and its health probe succeed; otherwise it continues serving the native gRPC path without advertising `/generate`.
 
 The sidecar discovers the model and tokenizer paths, served model name, parser defaults, worker role, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through SGLang's native discovery RPCs. Explicit Dynamo parser options override parser names discovered from SGLang.
 
@@ -40,7 +38,7 @@ SGLang remains the source of truth for the worker's aggregated, prefill, or deco
 
 The sidecar opens eight gRPC connections by default. Override the pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
 
-Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a five-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
+Connection startup uses a 30-second timeout per attempt, a one-second retry and readiness interval, and a 30-minute deadline for establishing the full connection pool. Override them with `--grpc-connect-attempt-timeout-secs`, `--grpc-retry-interval-secs`, and `--grpc-startup-deadline-secs`, or with the corresponding `DYN_SIDECAR_GRPC_*` environment variables.
 
 ## SGLang-managed module contract
 
@@ -77,7 +75,7 @@ command.
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
 > server (`--grpc-port`) landed there. The KV-routing examples require
 > **v0.5.18+** because the sidecar discovers their structured KV-event
-> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.18`.
+> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.19`.
 
 ### Prerequisites
 

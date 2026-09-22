@@ -120,16 +120,32 @@ type ComponentRoleSpec struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	Name string `json:"name"`
 
+	// replicas is the logical cardinality of this role in one complete component
+	// instance. The enclosing component type defines the cardinality. For
+	// multinode components, admission defaults and persists omitted values from
+	// multinode.nodeCount; leader must be 1 and worker must be
+	// multinode.nodeCount minus 1.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	Replicas *int32 `json:"replicas,omitempty"`
+
 	// providerOverride configures the provider workload unit generated for this
 	// role. It is supported only for components embedded in a DGD.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
+
+	// podTemplate defines the Pod configuration for this role. Admission permits
+	// it only when the enclosing component type explicitly supports role-specific
+	// Pod templates. No component type supports it in this release.
+	// +optional
+	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // MultinodeSpec configures a multinode component.
 type MultinodeSpec struct {
 	// nodeCount is the number of nodes to deploy for the multinode component.
-	// Total GPUs used is `nodeCount * container GPU request`.
+	// Total GPUs used is `nodeCount * container GPU request`. The value is
+	// immutable after creation.
 	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=2
@@ -238,9 +254,11 @@ type GroveSpec struct {
 	// deployment. `false` or omitted means automatic selection (multi-node
 	// and inter-pod GMS components use a scaling group, other single-node
 	// components a standalone PodClique), not "force PodClique".
+	// The pointer preserves field presence on the wire: `nil` and `false` are
+	// semantically identical, and consumers must dereference with `false`.
 	// Immutable after creation.
 	// +optional
-	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+	ForceScalingGroup *bool `json:"forceScalingGroup,omitempty"`
 }
 
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
