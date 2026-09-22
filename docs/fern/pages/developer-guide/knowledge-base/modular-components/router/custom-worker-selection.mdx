@@ -17,7 +17,7 @@ This feature replaces the worker-ranking part of Dynamo's routing pipeline. A `W
 flowchart LR
     Request["Incoming request"] --> Eligibility["Dynamo eligibility filters"]
     Eligibility --> Filters["WorkerFilter(s)<br/>keep or reject each worker"]
-    Filters --> Scorers["WorkerScorer.score<br/>all surviving workers, one cost per worker"]
+    Filters --> Scorers["WorkerScorer(s)<br/>one cost per worker"]
     Scorers --> Sum["Dynamo sums scorer costs"]
     Sum --> Picker["WorkerPicker<br/>one candidate row"]
     Picker --> Validate["Dynamo validates the row"]
@@ -41,8 +41,7 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
 | Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
-An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker implement the same public traits as external policies.
-
+An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker are internal and can change with the built-in routing algorithm.
 
 ## Public Plugin API and Compatibility
 
@@ -54,9 +53,9 @@ Use `dynamo_kv_router::plugins` for plugin registration and these modules for pl
 | `plugins::request_classifier` | `RequestClassifier`, `ClassifyRequest`, `ClassifyEvent`, configuration, and factories |
 | `plugins` | `RouterPluginRegistry` and the resolved `RouterPlugins` bundle |
 
-The module organization changes no signal accessor, callback signature, signal meaning, or configuration format. Cache overlap, worker load, session metadata, and classification inputs retain their existing APIs. Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
+Dynamo owns scheduler queues, eligibility checks, reservations, lifecycle synchronization, and the default selector implementation. Low-level host interfaces such as `WorkerSelector` are used to connect Dynamo components; external plugins use `WorkerSelectionPolicy`.
 
-Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection` or `plugins::request_classifier`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7. The signal methods themselves are unchanged.
+Existing plugin imports and the `WorkerSelectionPolicyRegistry` name remain available through compatibility re-exports until version 1.7. They refer to the same types and traits, so existing policies can register into `RouterPluginRegistry` without adapters. Migrate imports to `plugins::worker_selection` or `plugins::request_classifier`, rename the registry to `RouterPluginRegistry`, and use `register_worker_selection` for worker policies. The compatibility exports, registry alias, worker-only `register` method, and frontend `worker_selection_policy_factory` setter are scheduled for removal in 1.7.
 
 ## Build the Policy
 
@@ -144,23 +143,20 @@ Pass filters to `WorkerSelectionPolicy::new_with_filters`. If the policy has no 
 
 A scorer expresses a preference without excluding a worker. It writes one finite cost for each worker into a host-owned output slice. Lower total cost is better by convention.
 
-This scorer first finds the lowest active-request count among surviving workers, then scores each worker by the number of requests above that minimum. Subtracting the same minimum from each cost preserves the ranking:
+This scorer ranks workers by active requests above the batch minimum:
 
 ```rust
 use dynamo_kv_router::plugins::worker_selection::{
     WorkerCandidates, WorkerInputs, WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicyError,
 };
 
-/// Scores active requests above the least-loaded surviving candidate.
 struct ActiveRequestsScorer;
 
 impl WorkerScorer for ActiveRequestsScorer {
-    /// Requests load inputs for the active-request count.
     fn required_worker_inputs(&self) -> WorkerInputs {
         WorkerInputs::LOAD
     }
 
-    /// Find the batch minimum and write one relative load cost per worker.
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
@@ -185,7 +181,7 @@ impl WorkerScorer for ActiveRequestsScorer {
 }
 ```
 
-Dynamo calls `score` once per scorer after filtering. The `WorkerCandidates` view borrows a fixed request snapshot; its order is unspecified and it cannot be retained. Use `iter()` to visit workers, `get(row)` to read one worker, and `len()` or `is_empty()` to inspect the batch. Each returned `WorkerCandidate` borrows the stored row and exposes only that scorer's declared inputs. Creating the view does not copy the worker table. The output slice has the same length and starts with NaN in every slot. Write every cost; an unwritten slot or a non-finite contribution or total stops selection before picking or booking. Empty sets skip scoring. Compute request-wide values, such as the minimum load, inside `score` before filling the output slice.
+Dynamo calls `score` once per scorer after filtering. The output slice matches the candidate order and length. Write every entry with a finite cost; an unwritten or invalid cost stops selection before picking.
 
 A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
 
@@ -382,7 +378,7 @@ The discovery-backed HTTP frontend and Python `KvRouter.generate` path install c
 
 The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
 
-Rust embedders using `dynamo-llm` start with the host's `router_plugin_registry()`, which includes Dynamo's default policy. Register the custom catalog before resolving the configuration. Plugin authors and frontend embedders do not need a direct dependency on the default policy's implementation crate:
+Rust embedders start with the host registry, which includes the default policy, then register their catalog:
 
 ```rust
 use dynamo_llm::entrypoint::input::http::HttpFrontend;
@@ -420,15 +416,15 @@ The disaggregated prefill hop and query-only probes do not run classifiers. Stat
 
 Worker identity and ordinary request metadata are always available. Request-level cache context requires `WorkerInputs::CACHE`. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
-The combined `WorkerInputs` declarations also control cache setup. Without `CACHE`, the router creates no routing indexer, KV event subscription, or shared-cache client. With `CACHE`, cache settings choose event-backed, approximate, or remote indexing. Worker role, conditional disaggregation, and scoring weights do not enable or disable this setup. `serve_indexer` and `enable_session_prefix_index` require a policy that declares `CACHE`; incompatible configurations fail before cache resources start.
+Routing cache resources start only if a component requests `CACHE`. `serve_indexer` and `enable_session_prefix_index` also require `CACHE`. Scoring weights do not control cache setup.
 
 ### Request Context
 
 | Accessor | Meaning |
 |---|---|
-| `prompt_tokens()` | Exact incoming prompt token count, borrowed from the request without allocation |
+| `prompt_tokens()` | Exact incoming prompt token count |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
-| `cache()` | With `CACHE`, returns a borrowed `RequestCacheInput`; otherwise returns `None` |
+| `cache()` | Request cache data when the component declares `CACHE`; otherwise `None` |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
@@ -438,16 +434,12 @@ The combined `WorkerInputs` declarations also control cache setup. Without `CACH
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
 
-Each filter, scorer, and picker must declare `WorkerInputs::CACHE` in its own `required_worker_inputs()` to access `context.cache()`. Another component requesting cache does not enable it. The returned view exposes:
+`context.cache()` exposes:
 
 | Accessor | Meaning |
 |---|---|
 | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
-| `shared_hits()` | Optional unweighted shared-cache ranges from the current lookup, with `total_hits` and `hits_beyond(prefix)` |
-
-A declared cache view exists even when no shared-cache result was supplied; in that case, `shared_hits()` returns `None`. The host borrows the existing lookup snapshot. Reading the view adds no cache lookup, range copy, or allocation.
-
-Calculate shared-cache credit inside the policy from `shared_hits()` and the worker's cache data. For example, call `hits_beyond(device_prefix)` to count shared blocks beyond the GPU prefix. The default policy uses its accounting estimate as the prefix when tier matches are absent. It performs this calculation only when shared-cache credit is enabled.
+| `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
 
 ### Session Context
 
@@ -497,7 +489,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `device_overlap_blocks()` | Device-resident prefix overlap in blocks |
 | `CACHE` | `host_overlap_blocks()` | Host-pinned prefix overlap in blocks |
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
-| `CACHE` | `accounting_cache_estimate()` | Host accounting estimate as weighted KV blocks and rounded tokens; not clamped to prompt length |
+| `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
@@ -506,7 +498,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-A filter or scorer reads requested groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every optional group that it reads. Candidate and context views enforce that declaration independently for every filter, scorer, and picker, including preferred-taint access. The host materializes the combined requirements once and shares borrowed views; it does not copy or rewrite every row for each scorer.
+A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 
@@ -631,13 +623,7 @@ The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/rout
 
 ## Default Policy Plugin
 
-Routing hosts install Dynamo's default policy automatically, even without a custom catalog. An omitted policy or the reserved `default` selection uses that policy. Optional catalogs register named providers without replacing the default or existing classifiers.
-
-Applications that construct the low-level `SelectionServiceBuilder` directly must supply a registry with a default factory or an explicit policy factory. A missing factory fails construction before workers or synchronization resources start. Each routing partition receives its own policy instance.
-
-Resolving `RouterPlugins` from the host registry includes the default factory even when no named policy is selected. `RouterPlugins::default()` remains an empty builder input. Use `has_custom_worker_selection()` to detect an explicit named or programmatic policy, and `has_custom_plugins()` to detect that policy or a classifier. Factory presence alone does not imply a custom selection. These checks preserve stock frontend modes and avoid waiting for a typed model card solely because the builtin factory is present. A classifier-only configuration still uses the builtin default for worker selection.
-
-To configure a separate default-policy instance, use the named provider:
+To give a worker role its own default-policy settings, select `dynamo-default-cost-fn`:
 
 ```yaml
 worker_selection:
@@ -651,10 +637,4 @@ worker_selection:
         router_temperature: 0.0
 ```
 
-The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. The default scorer declares `CACHE`, including when its device credit is zero; select a policy without `CACHE` to omit routing cache setup. The default plugin uses configured parameters and does not apply per-request score or temperature overrides. Plain disaggregated decode remains load-only when prefill tracking is off and conditional disaggregation is disabled.
-
-`WorkerCacheInput::accounting_cache_estimate()` returns the host's weighted block estimate and rounded token estimate. Missing estimates are zero. These estimates are not clamped to prompt length and do not measure physical GPU residency. The plugin can use them without changing the load that the host records. `WorkerLoadInput::is_available()` distinguishes a missing load observation from an observed idle worker. Both values describe the current selection snapshot.
-
-The default scorer owns the cache and load formula, including preferred-taint costs. Inside `score`, it finds the minimum prefill load used to reduce cache credit on busier workers. The picker reads only the final costs and owns temperature sampling and tie-breaking. The host checks scorer costs and the selected row before booking; diagnostics use the selected row's summed scorer cost. `with_exclusive_affinity(true)` asks the host to constrain candidates to an eligible session-affinity target; explicit request pins remain mandatory for every policy.
-
-Scoring reads the existing snapshot; it adds no tracker synchronization. The routing core still projects load, selects and books serially, and processes request lifecycle updates.
+The provider also accepts `overlap_score_credit_decay`, `decode_active_request_weight`, `host_cache_hit_weight`, `disk_cache_hit_weight`, and `shared_cache_multiplier`. Omitted parameters inherit router configuration. Values must be finite and non-negative. Per-request score and temperature overrides do not apply to this policy.
