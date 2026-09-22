@@ -255,6 +255,7 @@ fn validate_schema(root: &Value) -> Result<()> {
         targets[index] = Some(*target);
     }
     validate_reference_cycles(&nodes, &targets)?;
+    validate_reference_closure(&nodes, &targets)?;
     validate_root(&nodes, &targets)
 }
 
@@ -339,13 +340,17 @@ fn is_object_schema(schema: &Map<String, Value>) -> bool {
     object_type || declares_properties(schema)
 }
 
-fn validate_object(schema: &Map<String, Value>, path: &str) -> Result<()> {
-    let local_constraints = declares_properties(schema)
+fn has_local_constraints(schema: &Map<String, Value>) -> bool {
+    declares_properties(schema)
         || schema.contains_key("required")
-        || schema.contains_key("additionalProperties");
-    // A type-only $ref sibling constrains the target, not a second local property set.
+        || schema.contains_key("additionalProperties")
+}
+
+fn validate_object(schema: &Map<String, Value>, path: &str) -> Result<()> {
+    // A type-only $ref sibling constrains the target, not a second local property set;
+    // validate_reference_closure checks that the target closes the object.
     let needs_object_checks = if schema.contains_key("$ref") {
-        local_constraints
+        has_local_constraints(schema)
     } else {
         is_object_schema(schema)
     };
@@ -438,6 +443,8 @@ fn reference_pointer(reference: &str, path: &str) -> Result<String> {
     Ok(pointer.into_owned())
 }
 
+// Only direct `$ref` edges are followed. Recursion through a child schema is not a cycle
+// here because the child is a separate node with no edge back to its parent.
 fn validate_reference_cycles(
     nodes: &[(String, &Value, usize)],
     targets: &[Option<usize>],
@@ -447,17 +454,10 @@ fn validate_reference_cycles(
         let mut chain = HashSet::new();
         let mut current = start;
         while !finished.contains(&current) {
-            let schema = nodes[current].1;
-            if ["type", "properties", "patternProperties", "anyOf"]
-                .iter()
-                .any(|key| schema.get(key).is_some())
-            {
-                break;
-            }
             if !chain.insert(current) {
                 return Err(invalid(
                     &nodes[current].0,
-                    "Dynamo does not support reference-only cycles",
+                    "Dynamo does not support direct reference cycles",
                 ));
             }
             let Some(target) = targets[current] else {
@@ -467,6 +467,41 @@ fn validate_reference_cycles(
         }
         finished.extend(chain);
         finished.insert(current);
+    }
+    Ok(())
+}
+
+// A `$ref` sibling that asserts an object type without closing it locally must reach a
+// target that does, stopping at the first target with its own object constraints because
+// validate_object already checked those.
+fn validate_reference_closure(
+    nodes: &[(String, &Value, usize)],
+    targets: &[Option<usize>],
+) -> Result<()> {
+    for (index, (path, value, _)) in nodes.iter().enumerate() {
+        let Some(schema) = value.as_object() else {
+            continue;
+        };
+        if targets[index].is_none() || !is_object_schema(schema) || has_local_constraints(schema) {
+            continue;
+        }
+        let mut current = index;
+        while let Some(target) = targets[current] {
+            current = target;
+            if nodes[current]
+                .1
+                .as_object()
+                .is_some_and(has_local_constraints)
+            {
+                break;
+            }
+        }
+        if nodes[current].1.get("additionalProperties") != Some(&Value::Bool(false)) {
+            return Err(invalid(
+                path,
+                "reference target must close the object with additionalProperties: false",
+            ));
+        }
     }
     Ok(())
 }
@@ -771,6 +806,12 @@ mod tests {
             check(schema).unwrap();
         }
         check(json!({"$id": "https://example.com/root", "$anchor": "root", "type": "object", "additionalProperties": false, "$defs": {"unused": {"$id": "child", "$anchor": "child"}}})).unwrap();
+        check(json!({
+            "type": "object", "additionalProperties": false, "required": ["value"],
+            "properties": {"value": {"type": ["object", "null"], "$ref": "#/$defs/base"}},
+            "$defs": {"base": object()}
+        }))
+        .unwrap();
     }
 
     #[test]
@@ -807,14 +848,35 @@ mod tests {
             schema[keyword] = json!("#");
             rejects(schema, "reference mechanism");
         }
-        rejects(json!({"$ref": "#"}), "reference-only cycles");
+        rejects(json!({"$ref": "#"}), "reference cycles");
         rejects(
             json!({"$ref": "#/$defs/a", "$defs": {"a": {"$ref": "#/$defs/b"}, "b": {"$ref": "#/$defs/a"}}}),
-            "reference-only cycles",
+            "reference cycles",
         );
         let mut schema = object();
         schema["$defs"] = json!({"unused": {"$ref": "#/$defs/unused"}});
-        rejects(schema, "reference-only cycles");
+        rejects(schema, "reference cycles");
+        let mut schema = object();
+        schema["$ref"] = json!("#");
+        rejects(schema.clone(), "reference cycles");
+        rejects(
+            json!({"type": "object", "additionalProperties": false, "$ref": "#/$defs/base", "$defs": {"base": schema}}),
+            "reference cycles",
+        );
+        for target in [json!(true), json!({}), json!({"description": "open"})] {
+            rejects(
+                json!({"type": "object", "$ref": "#/$defs/base", "$defs": {"base": target}}),
+                "must close the object",
+            );
+        }
+        rejects(
+            json!({
+                "type": "object", "additionalProperties": false, "required": ["value"],
+                "properties": {"value": {"type": ["object", "null"], "$ref": "#/$defs/base"}},
+                "$defs": {"base": true}
+            }),
+            "must close the object",
+        );
         rejects(
             json!({"$ref": "#/$defs/target", "$defs": {"target": {"type": "object"}}}),
             "additionalProperties",
