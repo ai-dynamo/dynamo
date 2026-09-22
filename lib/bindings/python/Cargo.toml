@@ -41,6 +41,8 @@ slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalo
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 # Stable request identities and deterministic replay tie-breaking for parity builds.
 replay-bench = ["dynamo-mocker/replay-bench"]
+# Offline builtin comparisons independent of deterministic replay plumbing.
+replay-builtin = ["dynamo-mocker/replay-builtin"]
 aic-forward-pass = ["dep:aisimulate-core"]
 nvtx = ["dynamo-runtime/nvtx"]
 # Enable in-process MM-aware KV routing

@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use dynamo_kv_router::LocalBlockHash;
 pub(in crate::replay) use dynamo_kv_router::config::KvRouterConfig as ReplayKvRouterConfig;
-use dynamo_kv_router::config::KvRouterConfig;
+use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::{
     BlockHashOptions, OverlapScores, PrefillLoadHint, RouterEvent, RoutingConstraints,
     WorkerConfigLike, WorkerId, WorkerWithDpRank, compute_block_hash_for_seq,
@@ -22,10 +22,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
 use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, RadixTree, RoutingPartitionRef,
-    SchedulingRequest, SequenceRequest, SessionContext, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerLoadProjection, WorkerSelectionInput, WorkerSelector,
-    scheduling::TierOverlapBlocks,
+    ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
+    SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
+    WorkerLoadProjection, WorkerSelectionInput, scheduling::TierOverlapBlocks,
 };
 use dynamo_tokens::SequenceHash;
 use rustc_hash::FxHashMap;
@@ -34,11 +33,12 @@ use uuid::Uuid;
 
 use crate::common::protocols::DirectRequest;
 use crate::common::protocols::MockEngineArgs;
+use crate::common::protocols::WorkerType;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventBatch;
 use crate::replay::router_shared::{
-    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_selector_with_seed,
-    replay_slots, replay_worker_config, replay_workers_with_configs,
+    ReplayNoopPublisher, ReplayWorkerConfig, replay_router_config, replay_slots,
+    replay_worker_config, replay_workers_with_configs,
 };
 use aisimulate_core::replay::loadgen::{ReplayRequestHashes, ReplayRequestPayload};
 use aisimulate_core::replay::{
@@ -47,7 +47,12 @@ use aisimulate_core::replay::{
 };
 
 mod composition;
+mod recent_cache;
+mod resident_cache;
+mod selector;
 pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
+use recent_cache::RecentCache;
+use selector::OfflineWorkerSelector;
 
 #[derive(Clone, Copy)]
 enum KvEventSummary {
@@ -256,6 +261,7 @@ impl SyncReplayIndexer {
 struct PendingRequest {
     uuid: Uuid,
     token_seq: Option<Vec<SequenceHash>>,
+    recent_seq: Option<Vec<SequenceHash>>,
     isl_tokens: usize,
     overlaps: OverlapScores,
     track_prefill_tokens: bool,
@@ -331,12 +337,13 @@ pub(crate) struct OfflineReplayRouter {
     worker_config_template: ReplayWorkerConfig,
     workers_with_configs: HashMap<WorkerId, ReplayWorkerConfig>,
     slots: Arc<ActiveSequencesMultiWorker<ReplayNoopPublisher>>,
-    selector: DefaultWorkerSelector,
+    selector: OfflineWorkerSelector,
     pending: PolicyQueue<PendingRequest>,
     indexer: SyncReplayIndexer,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
+    recent_cache: Option<RecentCache>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -480,8 +487,8 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(PlacementEffects { decision, released })
     }
 
-    fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
-        let effects = self.router.on_kv_events(observation.0)?;
+    fn observe(&mut self, observation: RouterEventBatch, now_ms: f64) -> Result<Vec<Placement>> {
+        let effects = self.router.on_kv_events_at(observation.0, now_ms)?;
         Ok(self.placements(effects.admissions))
     }
 
@@ -503,8 +510,9 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         self.router.pending_count()
     }
 
-    fn worker_ready(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
+    fn worker_ready(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
         self.router.add_worker(worker.worker_id)?;
+        self.router.sample_resident(now_ms);
         Ok(Vec::new())
     }
 
@@ -513,8 +521,9 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(Vec::new())
     }
 
-    fn worker_removed(&mut self, worker: WorkerTopology, _now_ms: f64) -> Result<Vec<Placement>> {
+    fn worker_removed(&mut self, worker: WorkerTopology, now_ms: f64) -> Result<Vec<Placement>> {
         self.router.finalize_worker_removal(worker.worker_id)?;
+        self.router.sample_resident(now_ms);
         Ok(Vec::new())
     }
 
@@ -552,10 +561,37 @@ impl OfflineReplayRouter {
         let worker_config_template = replay_worker_config(args);
         let workers_with_configs = replay_workers_with_configs(args, num_workers);
         let slots = replay_slots(args, &workers_with_configs);
-        let selector = replay_selector_with_seed(&config, selector_seed)?;
+        let selector = OfflineWorkerSelector::new(&config, args.worker_type, selector_seed)?;
         let profile = config
             .configured_policy_profile()
             .map_err(anyhow::Error::from)?;
+        let decay_time_epoch = Instant::now();
+        let recent_cache = recent_cache::Config::from_env()?
+            .map(|config| -> Result<RecentCache> {
+                selector.validate_recent_cache(&config)?;
+                anyhow::ensure!(
+                    args.worker_type == WorkerType::Aggregated,
+                    "{} requires aggregated replay",
+                    recent_cache::ENV
+                );
+                anyhow::ensure!(
+                    args.num_gpu_blocks > 0,
+                    "recent-cache experiment requires nonzero KV capacity"
+                );
+                let mut cache = RecentCache::new(config, decay_time_epoch)?;
+                for (&worker_id, config) in &workers_with_configs {
+                    for dp_rank in config.data_parallel_start_rank
+                        ..config.data_parallel_start_rank + config.data_parallel_size
+                    {
+                        cache.add_worker(
+                            WorkerWithDpRank::new(worker_id, dp_rank),
+                            config.total_kv_blocks,
+                        );
+                    }
+                }
+                Ok(cache)
+            })
+            .transpose()?;
 
         Ok(Self {
             config,
@@ -572,8 +608,9 @@ impl OfflineReplayRouter {
             // This is only a base Instant for converting replay `now_ms` values into
             // synthetic `Instant`s. All subsequent decay/accounting uses virtual replay
             // time derived from this epoch, not wall-clock progression.
-            decay_time_epoch: Instant::now(),
+            decay_time_epoch,
             tracking_hash,
+            recent_cache,
         })
     }
 
@@ -672,8 +709,16 @@ impl OfflineReplayRouter {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
+        self.on_kv_events_at(events, 0.0)
+    }
+
+    fn on_kv_events_at(&mut self, events: Vec<RouterEvent>, now_ms: f64) -> Result<RouterEffects> {
         for event in events {
+            if let Some(cache) = &mut self.recent_cache {
+                cache.observe_resident_event(&event);
+            }
             let worker_id = event.worker_id;
             let event_id = event.event.event_id;
             let dp_rank = event.event.dp_rank;
@@ -684,7 +729,15 @@ impl OfflineReplayRouter {
                 )
             })?;
         }
+        self.sample_resident(now_ms);
         Ok(RouterEffects::default())
+    }
+
+    fn sample_resident(&mut self, now_ms: f64) {
+        let now = self.decay_now(now_ms);
+        if let Some(cache) = &mut self.recent_cache {
+            cache.sample_resident(now);
+        }
     }
 
     pub(crate) fn on_prefill_completed(
@@ -693,6 +746,10 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
+        if let Some(cache) = &mut self.recent_cache {
+            cache.expire(decay_now);
+            cache.sample_resident(decay_now);
+        }
         self.slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
@@ -707,6 +764,10 @@ impl OfflineReplayRouter {
         now_ms: f64,
     ) -> Result<RouterEffects> {
         let decay_now = self.decay_now(now_ms);
+        if let Some(cache) = &mut self.recent_cache {
+            cache.expire(decay_now);
+            cache.sample_resident(decay_now);
+        }
         self.slots
             .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
@@ -743,6 +804,14 @@ impl OfflineReplayRouter {
             self.workers_with_configs.remove(&wid);
             return Err(error.into());
         }
+        if let Some(cache) = &mut self.recent_cache {
+            for dp_rank in 0..self.dp_size {
+                cache.add_worker(
+                    WorkerWithDpRank::new(wid, dp_rank),
+                    self.worker_config_template.total_kv_blocks,
+                );
+            }
+        }
 
         Ok(())
     }
@@ -759,6 +828,9 @@ impl OfflineReplayRouter {
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
+        if let Some(cache) = &mut self.recent_cache {
+            cache.remove_worker(wid);
+        }
         Ok(())
     }
 
@@ -770,6 +842,9 @@ impl OfflineReplayRouter {
             .unregister_worker(wid)
             .map_err(anyhow::Error::from)?;
         self.indexer.tree.remove_worker(wid);
+        if let Some(cache) = &mut self.recent_cache {
+            cache.finalize_worker_removal(wid);
+        }
         Ok(())
     }
 
@@ -854,8 +929,12 @@ impl OfflineReplayRouter {
             .uuid
             .ok_or_else(|| anyhow!("offline replay requires requests to have stable UUIDs"))?;
         let (priority_jump, strict_priority) = request.router_priorities();
-        let (overlaps, token_seq) = match replay_hashes {
+        let (overlaps, token_seq, recent_seq) = match replay_hashes {
             Some(replay_hashes) => {
+                let recent_seq = self
+                    .recent_cache
+                    .as_ref()
+                    .map(|_| replay_hashes.sequence_hashes.clone());
                 let overlaps =
                     self.indexer
                         .find_matches_for_hashes(crate::loadgen::local_block_hashes(
@@ -881,10 +960,13 @@ impl OfflineReplayRouter {
                         None,
                     )
                 };
-                (overlaps, token_seq)
+                (overlaps, token_seq, recent_seq)
             }
             None => {
                 let tokens = request_view.prompt_tokens_for_placement()?;
+                let recent_seq = self.recent_cache.as_ref().map(|_| {
+                    ReplayRequestHashes::from_tokens(&tokens, self.block_size).sequence_hashes
+                });
                 let overlaps = self.indexer.find_matches_for_request(&tokens, None);
                 let token_seq = self.config.compute_seq_hashes_for_tracking_with_context(
                     &self.tracking_hash,
@@ -894,13 +976,14 @@ impl OfflineReplayRouter {
                     BlockHashOptions::default(),
                     None,
                 );
-                (overlaps, token_seq)
+                (overlaps, token_seq, recent_seq)
             }
         };
 
         Ok(PendingRequest {
             uuid,
             token_seq,
+            recent_seq,
             isl_tokens: input_length,
             overlaps,
             track_prefill_tokens: self.config.router_track_prefill_tokens,
@@ -924,13 +1007,38 @@ impl OfflineReplayRouter {
 
     fn admit_request(
         &mut self,
-        request: PendingRequest,
+        mut request: PendingRequest,
         decay_now: Instant,
     ) -> Result<AdmitOutcome> {
+        let recent_decision = self.recent_cache.as_mut().map(|cache| {
+            cache.prepare(
+                decay_now,
+                request.recent_seq.as_deref().unwrap_or_default(),
+                &mut request.overlaps,
+            )
+        });
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let mut scheduling_request =
+            request.scheduling_request(self.block_size as usize, worker_loads);
+        if self.selector.uses_device_tier() {
+            scheduling_request.overlap.tier_overlap_blocks.device = request
+                .overlaps
+                .scores
+                .iter()
+                .map(|(worker, blocks)| (*worker, *blocks as usize))
+                .collect();
+        }
+        if let Some(credit) = recent_decision
+            .as_ref()
+            .and_then(|decision| decision.credit)
+        {
+            scheduling_request.router_config_override = Some(RouterConfigOverride {
+                overlap_score_credit: Some(credit),
+                ..Default::default()
+            });
+        }
         let eligibility = scheduling_request.eligibility();
         let best_available_overlap_blocks = request
             .overlaps
@@ -986,6 +1094,15 @@ impl OfflineReplayRouter {
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+        if let (Some(cache), Some(decision)) = (&mut self.recent_cache, recent_decision) {
+            cache.admitted(
+                selection.worker,
+                request.recent_seq.as_deref().unwrap_or_default(),
+                decay_now,
+                overlap_blocks,
+                decision,
+            );
+        }
 
         Ok(AdmitOutcome {
             worker_idx,
@@ -1196,6 +1313,254 @@ mod tests {
             strict_priority,
             policy_class: None,
             replay_context: None,
+        }
+    }
+
+    fn enable_recent_cache(router: &mut OfflineReplayRouter, config: super::recent_cache::Config) {
+        let mut cache = super::RecentCache::new(config, router.decay_time_epoch).unwrap();
+        for (&worker_id, config) in &router.workers_with_configs {
+            for dp_rank in 0..config.data_parallel_size {
+                cache.add_worker(
+                    dynamo_kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank),
+                    config.total_kv_blocks,
+                );
+            }
+        }
+        router.recent_cache = Some(cache);
+    }
+
+    #[cfg(feature = "replay-builtin")]
+    mod builtin_policy {
+        use super::*;
+        use dynamo_kv_router::SequenceRequest;
+        use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+        fn policy_config(policy_type: &str) -> (NamedTempFile, KvRouterConfig) {
+            let mut policy_file = NamedTempFile::new().unwrap();
+            write!(policy_file, "worker_selection:\n  aggregated: comparison\n  instances:\n    - name: comparison\n      type: {policy_type}\n").unwrap();
+            let config = KvRouterConfig {
+                router_policy_config: Some(policy_file.path().display().to_string()),
+                ..Default::default()
+            };
+            (policy_file, config)
+        }
+
+        #[test]
+        fn two_tier_replay_uses_device_events_and_active_request_load() {
+            for (overlap_blocks, active_requests, expected_worker) in
+                [(6, 4, 1), (5, 4, 0), (10, 40, 0)]
+            {
+                let (_policy_file, config) = policy_config("dynamo-two-tier-cost-fn");
+                let mut router =
+                    OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+                let target = request_with_priorities(1, 7, 640, 0, 0);
+                let hashes = ReplayRequestHashes::from_tokens(&target.tokens, 64);
+                router
+                    .on_kv_events(vec![RouterEvent::with_storage_tier(
+                        1,
+                        KvCacheEvent {
+                            event_id: 1,
+                            data: KvCacheEventData::Stored(KvCacheStoreData {
+                                parent_hash: None,
+                                start_position: None,
+                                blocks: hashes
+                                    .local_block_hashes
+                                    .iter()
+                                    .take(overlap_blocks)
+                                    .enumerate()
+                                    .map(|(index, hash)| KvCacheStoredBlockData {
+                                        block_hash: ExternalSequenceBlockHash(index as u64 + 1),
+                                        tokens_hash: LocalBlockHash(*hash),
+                                        mm_extra_info: None,
+                                    })
+                                    .collect(),
+                            }),
+                            dp_rank: 0,
+                        },
+                        StorageTier::Device,
+                    )])
+                    .unwrap();
+                for index in 0..active_requests {
+                    router
+                        .slots
+                        .add_request(
+                            SequenceRequest {
+                                request_id: format!("two-tier-load-{index}"),
+                                token_sequence: None,
+                                track_prefill_tokens: false,
+                                expected_output_tokens: Some(1),
+                                prefill_load_hint: None,
+                                worker: WorkerWithDpRank::new(1, 0),
+                                lora_name: None,
+                            },
+                            router.decay_now(0.0),
+                        )
+                        .unwrap();
+                }
+                let result = router
+                    .on_request_arrival(&target, Some(hashes), 0.0)
+                    .unwrap();
+                assert_eq!(
+                    result.admissions[0].worker_idx, expected_worker,
+                    "overlap={overlap_blocks}, active_requests={active_requests}"
+                );
+                assert_eq!(
+                    result.admissions[0].best_available_overlap_blocks,
+                    overlap_blocks as u32
+                );
+            }
+        }
+
+        #[test]
+        fn two_tier_replay_rejects_unknown_policy_at_startup() {
+            let (_policy_file, config) = policy_config("unlinked-policy");
+            let error = match OfflineReplayRouter::new(&replay_args(), Some(config), None, 2) {
+                Ok(_) => panic!("unknown policy unexpectedly accepted"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("unknown worker-selection policy type"),
+                "{error}"
+            );
+        }
+
+        #[test]
+        fn two_tier_replay_only_accepts_observational_recent_cache() {
+            let (_policy_file, config) = policy_config("dynamo-two-tier-cost-fn");
+            let router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+            assert!(
+                router
+                    .selector
+                    .validate_recent_cache(&Default::default())
+                    .is_err()
+            );
+            assert!(
+                router
+                    .selector
+                    .validate_recent_cache(&super::super::recent_cache::Config {
+                        mode: super::super::recent_cache::Mode::Observe,
+                        predict: false,
+                        ..Default::default()
+                    })
+                    .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn recent_cache_eagerly_books_without_active_block_tracking() {
+        let config = KvRouterConfig {
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: false,
+            router_temperature: 0.0,
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 2).unwrap();
+        enable_recent_cache(
+            &mut router,
+            super::recent_cache::Config {
+                ttl_secs: 1.0,
+                mode: super::recent_cache::Mode::Observe,
+                ..Default::default()
+            },
+        );
+        let first_request = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&first_request.tokens, 64);
+        let pending = router
+            .build_pending_request(&first_request, 2, Some(hashes.clone()), None)
+            .unwrap();
+        assert!(pending.token_seq.is_none());
+        assert_eq!(pending.recent_seq, Some(hashes.sequence_hashes.clone()));
+        let first = router
+            .on_request_arrival(&first_request, Some(hashes.clone()), 0.0)
+            .unwrap();
+        router
+            .on_kv_events_at(
+                vec![RouterEvent::with_storage_tier(
+                    first.admissions[0].worker_idx as WorkerId,
+                    KvCacheEvent {
+                        event_id: 1,
+                        data: KvCacheEventData::Cleared,
+                        dp_rank: 0,
+                    },
+                    StorageTier::Device,
+                )],
+                0.5,
+            )
+            .unwrap();
+        let mut predicted = dynamo_kv_router::protocols::OverlapScores::new();
+        let now = router.decay_now(1.0);
+        router
+            .recent_cache
+            .as_mut()
+            .unwrap()
+            .prepare(now, &hashes.sequence_hashes, &mut predicted);
+        let first_worker = dynamo_kv_router::protocols::WorkerWithDpRank::new(
+            first.admissions[0].worker_idx as WorkerId,
+            0,
+        );
+        assert_eq!(predicted.scores[&first_worker], 1);
+        let second = router
+            .on_request_arrival(&request(2, 7), Some(hashes.clone()), 1.0)
+            .unwrap();
+        assert_eq!(second.admissions[0].best_available_overlap_blocks, 1);
+        assert_eq!(router.indexer.debug_snapshot().total_cached_blocks, 0);
+        let expired = router
+            .on_request_arrival(&request(3, 7), Some(hashes), 1_001.0)
+            .unwrap();
+        assert_eq!(expired.admissions[0].overlap_blocks, 0);
+        assert_eq!(expired.admissions[0].best_available_overlap_blocks, 0);
+    }
+
+    #[test]
+    fn recent_cache_uses_public_identity_when_slot_tracking_is_randomized() {
+        let config = KvRouterConfig {
+            router_assume_kv_reuse: false,
+            ..KvRouterConfig::default()
+        };
+        let mut router = OfflineReplayRouter::new(&replay_args(), Some(config), None, 1).unwrap();
+        enable_recent_cache(&mut router, Default::default());
+        let request = request(1, 7);
+        let hashes = ReplayRequestHashes::from_tokens(&request.tokens, 64);
+        let supplied = router
+            .build_pending_request(&request, 2, Some(hashes.clone()), None)
+            .unwrap();
+        let authored = router
+            .build_pending_request(&request, 2, None, None)
+            .unwrap();
+        assert_eq!(supplied.recent_seq, Some(hashes.sequence_hashes));
+        assert_eq!(authored.recent_seq, supplied.recent_seq);
+        assert_ne!(supplied.token_seq, supplied.recent_seq);
+    }
+
+    #[test]
+    fn recent_cache_observe_without_prediction_preserves_admission_overlap() {
+        let mut baseline = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        let mut observed = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
+        assert!(baseline.recent_cache.is_none());
+        enable_recent_cache(
+            &mut observed,
+            super::recent_cache::Config {
+                mode: super::recent_cache::Mode::Observe,
+                predict: false,
+                ..Default::default()
+            },
+        );
+        for id in 1..4 {
+            let request = request(id, 7);
+            let baseline_effects = baseline
+                .on_request_arrival(&request, None, id as f64)
+                .unwrap();
+            let observed_effects = observed
+                .on_request_arrival(&request, None, id as f64)
+                .unwrap();
+            assert_eq!(baseline_effects.admissions, observed_effects.admissions);
+            assert_eq!(
+                baseline.debug_snapshot(id as f64),
+                observed.debug_snapshot(id as f64)
+            );
         }
     }
 

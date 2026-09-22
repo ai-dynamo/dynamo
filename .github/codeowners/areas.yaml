@@ -476,6 +476,8 @@ areas:
   - benchmarks/nat_trace/
   - benchmarks/prefix_data_generator/
   - benchmarks/pyproject.toml
+  - benchmarks/recent_cache/
+  - benchmarks/replay_recent_cache.py
   - benchmarks/request_trace/README.md
   - benchmarks/request_trace/__init__.py
   - benchmarks/request_trace/convert_to_perfetto.py
