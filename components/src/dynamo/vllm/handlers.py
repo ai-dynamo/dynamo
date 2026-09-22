@@ -2619,14 +2619,13 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         lora_request: LoRARequest | None,
         create_generator: Callable[[LoRARequest | None], AsyncIterator[Any]],
     ) -> AsyncIterator[Any]:
-        """Yield results after atomically admitting a lazy LoRA request.
+        """Yield results after atomically admitting a LoRA request.
 
         vLLM admits an ``AsyncLLM.generate`` request on its first iteration.
         Holding the adapter lifecycle lock through that iteration prevents an
-        unload from deleting bookkeeping before lazy activation completes.
+        unload from removing lazy or preloaded adapter state before admission.
         """
-        if lora_request is None or self._preload_lora_into_engine():
-            self._track_lora_request_activation(lora_request)
+        if lora_request is None:
             async for result in create_generator(lora_request):
                 yield result
             return
@@ -2645,16 +2644,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 raise ValueError(
                     f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
                 )
-            generator = create_generator(admitted_lora_request)
             self._track_lora_request_activation(admitted_lora_request)
-            try:
-                first_result = await anext(generator)
-            except StopAsyncIteration:
-                return
+            self._lora_state.begin_request(admitted_lora_request.lora_name)
 
-        yield first_result
-        async for result in generator:
-            yield result
+        try:
+            async for result in create_generator(admitted_lora_request):
+                yield result
+        finally:
+            self._lora_state.end_request(admitted_lora_request.lora_name)
 
     def _preload_lora_into_engine(self) -> bool:
         """Whether lifecycle registration should eagerly activate the adapter.
@@ -2763,6 +2760,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
+                            await self._lora_state.wait_until_idle(lora_name)
                             await self.engine_client.remove_lora(old_info.id)
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
@@ -2992,6 +2990,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     logger.debug(f"Unloading LoRA adapter: {lora_name}")
                     lora_id = lora.id
+
+                    if lora_name in self._engine_loaded_loras:
+                        await self._lora_state.wait_until_idle(lora_name)
 
                     # Stop advertising the adapter before mutating engine or
                     # tracking state. Otherwise requests can still route here
