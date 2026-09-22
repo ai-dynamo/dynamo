@@ -177,18 +177,24 @@ async fn start_taps(drt: &DistributedRuntime, config: ShadowConfig) -> Result<Sh
     }
 
     let metrics = namespace.metrics();
-    let counter = |name: &str, help: &str| metrics.create_intcountervec(name, help, &["tap"], &[]);
-    let queued = counter(
+    let queued = metrics.create_intcountervec(
         "shadow_tap_queued_total",
         "Records a shadow tap queued for publishing",
+        &["tap"],
+        &[],
     )?;
-    let dropped = counter(
+    // `reason` tells a slow consumer (`full`) from a dead publisher (`closed`).
+    let dropped = metrics.create_intcountervec(
         "shadow_tap_dropped_total",
-        "Records a shadow tap dropped because its queue was full",
+        "Records a shadow tap dropped: the queue was full, or the publisher task was gone",
+        &["tap", "reason"],
+        &[],
     )?;
-    let publish_errors = counter(
+    let publish_errors = metrics.create_intcountervec(
         "shadow_tap_publish_errors_total",
         "Records a shadow tap failed to publish",
+        &["tap"],
+        &[],
     )?;
 
     let mut taps = Vec::with_capacity(publishers.len());
@@ -205,7 +211,8 @@ async fn start_taps(drt: &DistributedRuntime, config: ShadowConfig) -> Result<Sh
         );
         let counters = TapCounters {
             queued: queued.with_label_values(&[&name]),
-            dropped: dropped.with_label_values(&[&name]),
+            dropped_full: dropped.with_label_values(&[&name, "full"]),
+            dropped_closed: dropped.with_label_values(&[&name, "closed"]),
         };
         let (queue, receiver) = TapQueue::new(spec, counters);
         drt.runtime().secondary().spawn(publisher::run(

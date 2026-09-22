@@ -23,6 +23,7 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use futures::{StreamExt, stream};
 use prometheus::IntCounter;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 
 use super::config::{Capture, ResponseOptions, TapSpec};
 use super::envelope::{
@@ -67,7 +68,10 @@ impl ShadowChunk for LLMEngineOutput {
 #[derive(Clone)]
 pub struct TapCounters {
     pub queued: IntCounter,
-    pub dropped: IntCounter,
+    /// The queue was full: the consumer is slow.
+    pub dropped_full: IntCounter,
+    /// The publisher task is gone: the runtime stopped, or the task panicked.
+    pub dropped_closed: IntCounter,
 }
 
 /// The request-path half of one tap. The publisher task owns the receiver.
@@ -109,7 +113,8 @@ impl TapQueue {
         };
         match self.tx.try_send(envelope) {
             Ok(()) => self.counters.queued.inc(),
-            Err(_) => self.counters.dropped.inc(),
+            Err(TrySendError::Full(_)) => self.counters.dropped_full.inc(),
+            Err(TrySendError::Closed(_)) => self.counters.dropped_closed.inc(),
         }
     }
 }
@@ -331,6 +336,7 @@ impl Recorder {
                         finish_reason: None,
                         output_tokens: 0,
                         token_ids: Vec::new(),
+                        truncated: false,
                     },
                 );
                 position
@@ -353,7 +359,15 @@ impl Recorder {
         }
         choice.output_tokens += tokens.len() as u64;
         if self.options.tokens {
-            choice.token_ids.extend_from_slice(tokens);
+            let room = self.options.max_tokens.map_or(tokens.len(), |cap| {
+                cap.saturating_sub(choice.token_ids.len())
+            });
+            choice
+                .token_ids
+                .extend_from_slice(&tokens[..room.min(tokens.len())]);
+            if room < tokens.len() {
+                choice.truncated = true;
+            }
         }
         let offset = self.started.elapsed();
         self.first_token.get_or_insert(offset);
@@ -420,7 +434,8 @@ pub(super) mod tests {
         let counter = |name: &str| IntCounter::new(name, name).unwrap();
         TapCounters {
             queued: counter("queued"),
-            dropped: counter("dropped"),
+            dropped_full: counter("dropped_full"),
+            dropped_closed: counter("dropped_closed"),
         }
     }
 
@@ -563,13 +578,49 @@ pub(super) mod tests {
             .expect("a full tap queue must not block serving");
 
         assert_eq!(queue.counters.queued.get(), 2);
-        assert_eq!(queue.counters.dropped.get(), 3);
+        assert_eq!(queue.counters.dropped_full.get(), 3);
+        assert_eq!(queue.counters.dropped_closed.get(), 0);
         assert_eq!(receiver.try_recv().unwrap().seq, 0);
         assert_eq!(receiver.try_recv().unwrap().seq, 1);
 
         let engine = Engine::new(vec![]);
         let _ = run(&tap, engine, "r5").await.unwrap();
         assert_eq!(receiver.try_recv().unwrap().seq, 5);
+    }
+
+    #[tokio::test]
+    async fn a_gone_publisher_is_counted_apart_from_a_full_queue() {
+        let mut queues = taps(REQUEST_TAP);
+        let (queue, receiver) = queues.remove(0);
+        drop(receiver);
+        let tap = ShadowTap::new(vec![queue.clone()], ShadowOrigin::Chat);
+
+        let _ = run(&tap, Engine::new(vec![]), "r-closed").await.unwrap();
+        assert_eq!(queue.counters.dropped_closed.get(), 1);
+        assert_eq!(queue.counters.dropped_full.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn max_tokens_caps_the_recorded_tokens_of_each_choice() {
+        let yaml = "schema_version: 1\ntaps:\n  - {name: j, capture: request_response, response: {max_tokens: 3}}\n";
+        let mut queues = taps(yaml);
+        let (queue, mut receiver) = queues.remove(0);
+        let tap = ShadowTap::new(vec![queue], ShadowOrigin::Chat);
+        let engine = Engine::new(vec![
+            choice_chunk(0, vec![10, 11], None),
+            choice_chunk(1, vec![20], None),
+            choice_chunk(0, vec![12, 13], Some(FinishReason::Stop)),
+            choice_chunk(1, vec![21], Some(FinishReason::Stop)),
+        ]);
+
+        let _: Vec<_> = run(&tap, engine, "req-cap").await.unwrap().collect().await;
+        let recorded = receiver.try_recv().unwrap().response.unwrap();
+        assert_eq!(recorded.outcome, ShadowOutcome::Complete);
+        assert_eq!(recorded.output_tokens, 6, "the count is not capped");
+        assert_eq!(recorded.choices[0].token_ids, vec![10, 11, 12]);
+        assert!(recorded.choices[0].truncated);
+        assert_eq!(recorded.choices[1].token_ids, vec![20, 21]);
+        assert!(!recorded.choices[1].truncated);
     }
 
     #[tokio::test]
@@ -669,7 +720,7 @@ pub(super) mod tests {
             "model filter rejected the request"
         );
         assert_eq!(
-            c.counters.dropped.get(),
+            c.counters.dropped_full.get(),
             0,
             "a filtered request is not a drop"
         );
@@ -889,6 +940,7 @@ pub(super) mod tests {
                     finish_reason: Some("stop".to_string()),
                     output_tokens: 1,
                     token_ids: vec![5],
+                    truncated: false,
                 }],
                 output_tokens: 1,
                 first_token_offset_ns: Some(1),

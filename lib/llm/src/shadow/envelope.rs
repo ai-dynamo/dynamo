@@ -98,7 +98,12 @@ pub struct ShadowChoice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     pub output_tokens: u64,
-    /// Empty when the tap sets `response.tokens: false`.
+    /// Empty when the tap sets `response.tokens: false`. At most
+    /// `response.max_tokens` entries when that is set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub token_ids: Vec<TokenIdType>,
+    /// `token_ids` stopped at `response.max_tokens`; `output_tokens` still
+    /// counts every token.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }

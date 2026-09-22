@@ -67,8 +67,17 @@ pub enum Emit {
 #[serde(deny_unknown_fields)]
 pub struct ResponseOptions {
     /// Record output token ids.
+    ///
+    /// The tap holds the recorded tokens of every in-flight request until its
+    /// stream ends. `capacity` does not bound this; the bound is the number of
+    /// in-flight requests times `max_tokens` (or the response length when
+    /// `max_tokens` is unset) times 4 bytes per token, for each tap.
     #[serde(default = "default_true")]
     pub tokens: bool,
+    /// Record at most this many token ids for each choice. The record marks
+    /// the choice `truncated`, and `output_tokens` still counts every token.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
     /// Record the arrival offset of every response chunk that carried tokens,
     /// not only the first and the last. `end_offset_ns` gives the end of the
     /// stream, which covers a final chunk that carries only a finish reason.
@@ -80,6 +89,7 @@ impl Default for ResponseOptions {
     fn default() -> Self {
         Self {
             tokens: true,
+            max_tokens: None,
             chunk_timing: false,
         }
     }
@@ -163,6 +173,15 @@ impl TapSpec {
 
         let capacity = tap.capacity.unwrap_or(DEFAULT_CAPACITY);
         ensure!(capacity > 0, "tap `{name}`: capacity must be at least 1");
+        if let Some(ResponseOptions {
+            max_tokens: Some(0),
+            ..
+        }) = tap.response
+        {
+            bail!(
+                "tap `{name}`: response.max_tokens must be at least 1; use `tokens: false` to record none"
+            );
+        }
 
         if tap.capture == Capture::Request {
             if tap.emit.is_some() {
@@ -254,6 +273,12 @@ taps:
         assert!(one_tap("    filters: [nope]\n").is_err());
         assert!(one_tap("    emit: joined\n").is_err());
         assert!(one_tap("    response: {tokens: true}\n").is_err());
+        assert!(
+            ShadowConfig::from_yaml(
+                "schema_version: 1\ntaps:\n  - {name: t, capture: request_response, response: {max_tokens: 0}}\n"
+            )
+            .is_err()
+        );
         assert!(one_tap("    unknown_key: 1\n").is_err());
         assert!(one_tap("    topic: 'a.b'\n").is_err());
         assert!(ShadowConfig::from_yaml("schema_version: 2\ntaps: []\n").is_err());
