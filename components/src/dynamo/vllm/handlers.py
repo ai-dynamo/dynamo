@@ -4085,6 +4085,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         multi_modal_data=multi_modal_data,
                         prompt_token_ids=list(res.prompt_token_ids or []),
                         mm_processor_kwargs=mm_processor_kwargs,
+                        mm_uuids=prompt.get("multi_modal_uuids")
+                        if isinstance(prompt, dict)
+                        else None,
                     )
                 )
 

@@ -53,6 +53,10 @@ IMAGE_URL_KEY = "image_url"
 VIDEO_URL_KEY = "video_url"
 AUDIO_URL_KEY = "audio_url"
 
+# Key under which prefill ships its resolved multimodal identity to decode
+# inside ``embedding_params``.
+MM_UUIDS_KEY = "mm_uuids"
+
 
 def mark_forwarded_mm_hashes_for_routing(
     mm_hashes: Sequence[str | None],
@@ -272,6 +276,47 @@ def compute_mm_uuids(
         )
     uuids: list[str | None] = list(compute_mm_uuids_from_images(images))
     return {modality: uuids}
+
+
+def _build_handoff_mm_uuids(
+    request: dict[str, Any],
+) -> Optional[dict[str, list[str | None]]]:
+    """Reuse the identity prefill resolved so both P/D legs agree.
+
+    Decode cannot derive an image identity of its own: its
+    ``multi_modal_data`` holds the placeholder embedding dict, which
+    :func:`compute_mm_uuids` declines because there is no raw-image
+    preimage. Prefill therefore forwards the identity it already resolved.
+    The value is already in vLLM's modality-keyed form, so it is consumed
+    verbatim rather than re-normalized.
+
+    A malformed payload falls back to the local sources rather than
+    raising: the request is still servable, just without a shared identity.
+    """
+    prefill_result = request.get("prefill_result")
+    if not isinstance(prefill_result, dict):
+        return None
+    disaggregated_params = prefill_result.get("disaggregated_params")
+    if not isinstance(disaggregated_params, dict):
+        return None
+    embedding_params = disaggregated_params.get("embedding_params")
+    if not isinstance(embedding_params, dict):
+        return None
+    raw_uuids = embedding_params.get(MM_UUIDS_KEY)
+    if not isinstance(raw_uuids, dict):
+        return None
+
+    mm_uuids: dict[str, list[str | None]] = {}
+    for modality, values in raw_uuids.items():
+        if not isinstance(values, list):
+            return None
+        if not all(
+            value is None or (isinstance(value, str) and value) for value in values
+        ):
+            return None
+        if any(value is not None for value in values):
+            mm_uuids[str(modality)] = list(values)
+    return mm_uuids or None
 
 
 def get_mm_processor_kwargs(request: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -501,17 +546,25 @@ class VllmMultimodalRequestProcessor:
         multi_modal_data: Optional[dict[str, Any]],
         prompt_token_ids: list[int],
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
+        mm_uuids: Optional[dict[str, list[str | None]]] = None,
     ) -> Optional[dict[str, Any]]:
         """Build the model-specific multimodal portion of a P/D handoff."""
         if not multi_modal_data:
             return None
         if self._model_family is ModelFamily.QWEN_VL:
-            return build_qwen_embedding_params(
+            handoff = build_qwen_embedding_params(
                 multi_modal_data,
                 self._qwen_grid_params,
                 mm_processor_kwargs,
             )
-        return {"expanded_prompt_token_ids": prompt_token_ids}
+        else:
+            handoff = {"expanded_prompt_token_ids": prompt_token_ids}
+        # Carry the identity this worker resolved. Decode cannot recompute one,
+        # so without this both legs key the same image differently and decode
+        # can never reuse an image prefix.
+        if handoff is not None and mm_uuids:
+            handoff[MM_UUIDS_KEY] = mm_uuids
+        return handoff
 
     async def extract_multimodal_data(
         self,
@@ -784,16 +837,20 @@ class VllmMultimodalRequestProcessor:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
         raw_mm_data = request.get("multi_modal_data") or {}
-        mm_uuids = _build_user_mm_uuids(
-            request.get("multi_modal_uuids"),
-            self.use_unified_vision_chunk,
-            use_audio_in_video=bool(
-                mm_processor_kwargs
-                and mm_processor_kwargs.get("use_audio_in_video", False)
-            ),
-            explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
-            video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
-        )
+        # Prefill's resolved identity wins: it is the only source decode can
+        # agree with, since decode holds no raw image to hash.
+        mm_uuids = _build_handoff_mm_uuids(request)
+        if mm_uuids is None:
+            mm_uuids = _build_user_mm_uuids(
+                request.get("multi_modal_uuids"),
+                self.use_unified_vision_chunk,
+                use_audio_in_video=bool(
+                    mm_processor_kwargs
+                    and mm_processor_kwargs.get("use_audio_in_video", False)
+                ),
+                explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
+                video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
+            )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
                 extra_args,
@@ -849,6 +906,13 @@ class VllmMultimodalRequestProcessor:
                         embedding_params.get("image_grid_thw"),
                         embedding_params.get("embeddings_shape"),
                         request_id,
+                        # Derived from the validated uuids, not raw presence:
+                        # a malformed payload resolves to no identity, and a
+                        # constant fill would then let two same-sized images
+                        # collide.
+                        has_stable_identity=(
+                            _build_handoff_mm_uuids(request) is not None
+                        ),
                     )
                 elif has_mm_data and request["multi_modal_data"].get(IMAGE_URL_KEY):
                     prefill_result = request.get("prefill_result")

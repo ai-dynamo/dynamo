@@ -50,6 +50,41 @@ class TestMultiModalUtils:
             # Embedding values are randomly genearted as placehodler, we only check the shape
             assert mm_data["image"]["image_embeds"].shape == (2, 1024)
 
+    def test_stable_identity_placeholder_is_deterministic(self):
+        """A forwarded identity lets the placeholder stop varying per request.
+
+        vLLM then keys the request on the forwarded uuids rather than hashing
+        this tensor, so equal contents are what make decode's block hashes
+        match prefill's for the same image.
+        """
+        first, second = (
+            construct_qwen_decode_mm_data(
+                image_grid_thw=[16, 16],
+                embeddings_shape=[2, 1024],
+                request_id=request_id,
+                has_stable_identity=True,
+            )["image"]["image_embeds"]
+            for request_id in ("req-a", "req-b")
+        )
+
+        assert torch.equal(first, second)
+        assert torch.all(first == 0)
+
+    def test_placeholder_varies_per_request_without_stable_identity(self):
+        """Without a shared identity vLLM hashes this tensor, so two requests
+        must not produce equal contents or different images with the same
+        grid would collide on decode."""
+        first, second = (
+            construct_qwen_decode_mm_data(
+                image_grid_thw=[16, 16],
+                embeddings_shape=[2, 1024],
+                request_id=request_id,
+            )["image"]["image_embeds"]
+            for request_id in ("req-a", "req-b")
+        )
+
+        assert not torch.equal(first, second)
+
 
 class TestLoadVisionModel:
     def test_vllm_encoder_settings_from_environment(self, monkeypatch):

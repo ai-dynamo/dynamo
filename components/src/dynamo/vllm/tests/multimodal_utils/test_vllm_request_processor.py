@@ -1027,7 +1027,7 @@ async def test_qwen_decode_reconstructs_placeholder_embeddings(monkeypatch):
     monkeypatch.setattr(
         mod,
         "construct_qwen_decode_mm_data",
-        lambda grid, shape, request_id: decode_mm_data,
+        lambda grid, shape, request_id, **_kwargs: decode_mm_data,
     )
 
     prepared = await _prepare_prompt(
@@ -1062,7 +1062,7 @@ async def test_qwen_decode_merges_placeholder_image_with_reloaded_video(monkeypa
     monkeypatch.setattr(
         mod,
         "construct_qwen_decode_mm_data",
-        lambda grid, shape, request_id: {"image": image},
+        lambda grid, shape, request_id, **_kwargs: {"image": image},
     )
     video_items = [{"Url": "https://example.com/video.mp4"}]
 
@@ -1333,6 +1333,166 @@ def test_build_prefill_handoff_dispatches_by_model_and_forwards_processor_kwargs
         multi_modal_data=mm_data,
         prompt_token_ids=[1, 99, 2],
     ) == {"expanded_prompt_token_ids": [1, 99, 2]}
+
+
+_HANDOFF_UUID = "a" * 64
+_FORWARDED_HASH = "0123456789abcdef"
+_DECODE_EMBEDDING_PARAMS = {
+    "image_grid_thw": [[1, 2, 2]],
+    "embeddings_shape": [1, 16],
+}
+
+
+def _decode_request(embedding_params, **extra):
+    """A decode-leg request carrying prefill's handoff."""
+    request = {
+        "token_ids": [1, 2],
+        "multi_modal_data": {"image_url": [{"Url": "https://image"}]},
+        "prefill_result": {
+            "disaggregated_params": {"embedding_params": embedding_params}
+        },
+    }
+    request.update(extra)
+    return request
+
+
+def test_prefill_handoff_carries_resolved_mm_uuids(monkeypatch):
+    """Prefill ships the identity it resolved so decode can key on the same one."""
+    mm_data = {"image": object()}
+    mm_uuids = {"image": [_HANDOFF_UUID]}
+    monkeypatch.setattr(
+        mod,
+        "build_qwen_embedding_params",
+        lambda data, params, processor_kwargs: {"image_grid_thw": [[1, 2, 2]]},
+    )
+
+    assert _processor().build_prefill_handoff(
+        multi_modal_data=mm_data,
+        prompt_token_ids=[1, 99, 2],
+        mm_uuids=mm_uuids,
+    ) == {"image_grid_thw": [[1, 2, 2]], "mm_uuids": mm_uuids}
+
+    assert _processor(model="llava-hf/llava-1.5-7b-hf").build_prefill_handoff(
+        multi_modal_data=mm_data,
+        prompt_token_ids=[1, 99, 2],
+        mm_uuids=mm_uuids,
+    ) == {"expanded_prompt_token_ids": [1, 99, 2], "mm_uuids": mm_uuids}
+
+
+@pytest.mark.parametrize("mm_uuids", [None, {}])
+def test_prefill_handoff_omits_mm_uuids_when_unresolved(monkeypatch, mm_uuids):
+    """No resolved identity leaves the handoff shape untouched."""
+    monkeypatch.setattr(
+        mod,
+        "build_qwen_embedding_params",
+        lambda data, params, processor_kwargs: {"image_grid_thw": [[1, 2, 2]]},
+    )
+
+    assert _processor().build_prefill_handoff(
+        multi_modal_data={"image": object()},
+        prompt_token_ids=[1, 99, 2],
+        mm_uuids=mm_uuids,
+    ) == {"image_grid_thw": [[1, 2, 2]]}
+
+
+@pytest.mark.asyncio
+async def test_decode_reuses_prefill_mm_uuids(monkeypatch):
+    """Decode keys the image on prefill's identity, ahead of frontend hashes."""
+    processor = _processor()
+    captured = {}
+
+    def fake_construct(grid, shape, request_id, **kwargs):
+        captured.update(kwargs)
+        return {"image": {"placeholder": object()}}
+
+    monkeypatch.setattr(mod, "construct_qwen_decode_mm_data", fake_construct)
+
+    prepared = await _prepare_prompt(
+        processor,
+        _decode_request(
+            {**_DECODE_EMBEDDING_PARAMS, "mm_uuids": {"image": [_HANDOFF_UUID]}},
+            extra_args={"mm_hashes": [_FORWARDED_HASH]},
+        ),
+        "request-shared-uuid",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["multi_modal_uuids"] == {"image": [_HANDOFF_UUID]}
+    # A shared identity makes the placeholder contents irrelevant to hashing.
+    assert captured["has_stable_identity"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_uuids",
+    [
+        "not-a-dict",
+        {"image": "not-a-list"},
+        {"image": [123]},
+        {"image": [""]},
+        {"image": [None]},
+    ],
+)
+async def test_decode_falls_back_when_handoff_mm_uuids_are_malformed(
+    monkeypatch, bad_uuids
+):
+    """A bad handoff must not break a request that still resolves locally."""
+    processor = _processor()
+    captured = {}
+
+    def fake_construct(grid, shape, request_id, **kwargs):
+        captured.update(kwargs)
+        return {"image": {"placeholder": object()}}
+
+    monkeypatch.setattr(mod, "construct_qwen_decode_mm_data", fake_construct)
+
+    prepared = await _prepare_prompt(
+        processor,
+        _decode_request(
+            {**_DECODE_EMBEDDING_PARAMS, "mm_uuids": bad_uuids},
+            extra_args={"mm_hashes": [_FORWARDED_HASH]},
+        ),
+        "request-bad-uuid",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert prepared.prompt["multi_modal_uuids"] == {
+        "image": mod.mark_forwarded_mm_hashes_for_routing([_FORWARDED_HASH])
+    }
+    # Rejected uuids mean no shared identity, so the placeholder must stay
+    # unique or two same-sized images would collide on decode.
+    assert captured["has_stable_identity"] is False
+
+
+@pytest.mark.asyncio
+async def test_decode_without_handoff_mm_uuids_keeps_unique_placeholder(monkeypatch):
+    """Today's behavior is preserved when prefill forwards no identity."""
+    processor = _processor()
+    captured = {}
+
+    def fake_construct(grid, shape, request_id, **kwargs):
+        captured.update(kwargs)
+        return {"image": {"placeholder": object()}}
+
+    monkeypatch.setattr(mod, "construct_qwen_decode_mm_data", fake_construct)
+
+    prepared = await _prepare_prompt(
+        processor,
+        _decode_request(dict(_DECODE_EMBEDDING_PARAMS)),
+        "request-no-uuid",
+        None,
+        DisaggregationMode.DECODE,
+    )
+
+    assert "multi_modal_uuids" not in prepared.prompt
+    assert captured["has_stable_identity"] is False
+
+
+def test_handoff_mm_uuids_ignored_without_prefill_result():
+    """The prefill leg has no handoff, so this source stays inert there."""
+    assert mod._build_handoff_mm_uuids({"token_ids": [1, 2]}) is None
 
 
 def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):

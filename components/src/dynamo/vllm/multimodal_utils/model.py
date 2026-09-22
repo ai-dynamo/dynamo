@@ -279,6 +279,7 @@ def construct_qwen_decode_mm_data(
     request_id: str,
     *,
     dtype: torch.dtype = torch.float16,
+    has_stable_identity: bool = False,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
     """Construct schema-valid Qwen multimodal data for vLLM v1 disagg decode.
 
@@ -299,32 +300,44 @@ def construct_qwen_decode_mm_data(
       different images.
 
     Caching Caveat:
-    - This WAR disables prefix cache reuse on the DECODE worker (each request
-      has unique placeholder embeddings).
+    - Without a forwarded identity this WAR disables prefix cache reuse on the
+      DECODE worker, because each request gets unique placeholder embeddings.
     - Prefix caching still works correctly on the PREFILL worker, which uses
       actual image embeddings. This is where the caching benefit matters since
       prefill does the heavy computation.
-    - Decode receives KV blocks from prefill via NIXL transfer anyway, so
-      decode-side prefix caching provides minimal benefit in disaggregated setup.
+    - `has_stable_identity` says prefill forwarded the multimodal UUIDs it
+      resolved, so vLLM keys the request on those instead of hashing this
+      tensor. The placeholder no longer has to distinguish images, a constant
+      fill is safe, and decode-side prefix reuse is restored -- a local hit
+      shrinks the KV pulled over NIXL.
     """
     if image_grid_thw is None or len(image_grid_thw) == 0:
         raise ValueError("No image grid provided for Qwen model.")
     if embeddings_shape is None:
         raise ValueError("embeddings_shape is required for Qwen decode mm data.")
 
-    # WAR: Use request_id hash as seed for unique placeholder values.
-    # This prevents prefix cache from incorrectly matching different images
-    # that happen to have the same dimensions (same image_grid_thw).
-    # bit ops to convert request ID to somewhat unique value that fits in the dtype range
-    if not hasattr(construct_qwen_decode_mm_data, "_counter"):
-        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
-    fill_value = construct_qwen_decode_mm_data._counter  # type: ignore[attr-defined]
-    construct_qwen_decode_mm_data._counter += 1  # type: ignore[attr-defined]
-    max_val = (
-        torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
-    )
-    if construct_qwen_decode_mm_data._counter > max_val:  # type: ignore[attr-defined]
-        construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
+    fill_value: int
+    if has_stable_identity:
+        # The forwarded UUIDs already distinguish images, so the placeholder
+        # content does not have to. A constant fill keeps decode's block hashes
+        # equal to prefill's for the same image.
+        fill_value = 0
+    else:
+        # No forwarded identity, so vLLM falls back to hashing this tensor.
+        # Keep each request's placeholder unique, otherwise two different
+        # images with the same image_grid_thw collide and decode reuses the
+        # wrong cached KV.
+        if not hasattr(construct_qwen_decode_mm_data, "_counter"):
+            construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
+        fill_value = construct_qwen_decode_mm_data._counter  # type: ignore[attr-defined]
+        construct_qwen_decode_mm_data._counter += 1  # type: ignore[attr-defined]
+        max_val = (
+            torch.finfo(dtype).max
+            if dtype.is_floating_point
+            else torch.iinfo(dtype).max
+        )
+        if construct_qwen_decode_mm_data._counter > max_val:  # type: ignore[attr-defined]
+            construct_qwen_decode_mm_data._counter = 0  # type: ignore[attr-defined]
     image_embeds = torch.full(
         embeddings_shape, fill_value=fill_value, dtype=dtype, device="cpu"
     )
