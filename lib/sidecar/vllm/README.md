@@ -145,17 +145,6 @@ The wrapper enables only ModelExpress when installed; otherwise it disables
 all plugins. An exported `VLLM_PLUGINS` overrides this default. The `dev` and
 `local-dev` images do not install Omni and retain normal plugin discovery.
 
-The sidecar uses `Control.GetServerInfo.effective_attention_block_size` when
-reported by a vLLM build containing
-[vLLM #56538](https://github.com/vllm-project/vllm/pull/56538). For physical size
-16 with DCP=2, the effective size is 32 tokens. The same value configures worker
-registration and KV-event publishing. If the field is absent, the sidecar uses
-the physical `kv_block_size`, preserving legacy behavior and its DCP routing
-limitations. An explicitly reported zero or overflowing (`u32`) effective size
-fails startup when KV routing is enabled. Encoder-only workers do not enable
-KV routing and ignore this field. Block-capacity accounting is unchanged.
-Partial-block and general hybrid/Mamba routing remain unsupported.
-
 Start vLLM with its gRPC listener:
 
 ```bash

@@ -1438,14 +1438,13 @@ fn engine_config_uses_effective_attention_block_size() {
             }
             Err(message) => assert!(result.unwrap_err().to_string().contains(message), "{case}"),
         }
+        let registration = model.engine_config(false).unwrap().llm.unwrap();
         assert_eq!(
-            model
-                .engine_config(false)
-                .unwrap()
-                .llm
-                .unwrap()
-                .kv_cache_block_size,
-            None,
+            registration.kv_cache_block_size, None,
+            "{case}: KV routing disabled"
+        );
+        assert_eq!(
+            registration.total_kv_blocks, None,
             "{case}: KV routing disabled"
         );
     }

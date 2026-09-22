@@ -192,7 +192,9 @@ impl DiscoveredModel {
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size,
-                total_kv_blocks: self.total_kv_blocks_per_rank(),
+                total_kv_blocks: enable_kv_routing
+                    .then(|| self.total_kv_blocks_per_rank())
+                    .flatten(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
                 max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
