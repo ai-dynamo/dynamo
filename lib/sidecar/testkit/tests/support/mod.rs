@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_backend_common::{BackendError, LLMEngine};
+use dynamo_backend_common::{BackendError, DisaggregationMode, LLMEngine, PreprocessedRequest};
 use dynamo_mocker::common::protocols::{EngineType, MockEngineArgs};
-use dynamo_sidecar_testkit::control::{Controller, Protocol};
+use dynamo_sidecar_testkit::control::{Controller, Protocol, RequestHandle};
+use dynamo_sidecar_testkit::fixtures::Outputs;
 
 pub mod sglang;
 pub mod vllm;
@@ -11,6 +12,8 @@ pub mod vllm;
 pub struct FixtureConfig {
     pub model: String,
     pub connections: usize,
+    pub speedup_ratio: f64,
+    pub disaggregation_mode: DisaggregationMode,
 }
 
 impl Default for FixtureConfig {
@@ -18,6 +21,8 @@ impl Default for FixtureConfig {
         Self {
             model: "mocker-model".into(),
             connections: 1,
+            speedup_ratio: 0.0,
+            disaggregation_mode: DisaggregationMode::Aggregated,
         }
     }
 }
@@ -32,6 +37,16 @@ pub trait SidecarFixture {
     fn native_model(request: &<Self::Protocol as Protocol>::Request) -> Option<&str>;
     fn active_request_count(&self) -> usize;
     async fn shutdown(&mut self);
+}
+
+pub trait WireFixture: SidecarFixture {
+    fn assert_stream(
+        handle: &RequestHandle<Self::Protocol>,
+        request: &PreprocessedRequest,
+        outputs: &Outputs,
+    );
+    async fn scheduler_active(&self);
+    async fn scheduler_idle(&self);
 }
 
 fn fast_engine_args(engine_type: EngineType) -> MockEngineArgs {

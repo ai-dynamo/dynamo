@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Collect and execute isolated CPU unit tests; shared common code runs once."""
+"""Collect and execute sidecar tests; all selects CPU layers, native is explicit."""
 
 import argparse
 import json
@@ -26,20 +26,63 @@ def run(command, **kwargs):
 
 
 def specifications(level, framework="all"):
-    if level not in ("unit", "pre-merge", "all"):
-        raise ValueError(f"Unsupported unit test level: {level}")
     if framework not in ("vllm", "all"):
-        raise ValueError(f"Unsupported unit framework: {framework}")
-    return [
-        (
-            "dynamo-sidecar-common",
-            "lib",
-            ["--features", "tonic-v14"],
-            ["unit_"],
-            "unit",
-        ),
-        ("dynamo-vllm-sidecar", "lib", [], ["unit_"], "unit"),
-    ]
+        raise ValueError(f"Unsupported framework: {framework}")
+    specs = []
+    if level in ("unit", "pre-merge", "all"):
+        for package in ("dynamo-sidecar-common", "dynamo-vllm-sidecar"):
+            extra = (
+                ["--features", "tonic-v14"]
+                if package == "dynamo-sidecar-common"
+                else []
+            )
+            specs.append((package, "lib", extra, ["unit_"], "unit"))
+    if level in ("wire", "pre-merge", "integration", "all"):
+        specs += [
+            (
+                "dynamo-sidecar-testkit",
+                "conformance",
+                [],
+                ["--skip", "sglang::"],
+                "wire",
+            ),
+            ("dynamo-vllm-mocker", "sidecar", [], [], "wire"),
+        ]
+        if framework == "all":
+            specs += [
+                ("dynamo-sidecar-testkit", "conformance", [], ["sglang::"], "wire"),
+                ("dynamo-sglang-mocker", "sidecar", [], [], "wire"),
+            ]
+        for package in ("dynamo-sidecar-common", "dynamo-vllm-sidecar"):
+            extra = (
+                ["--features", "tonic-v14"]
+                if package == "dynamo-sidecar-common"
+                else []
+            )
+            specs.append(
+                (package, "lib", extra, ["--skip", "unit_", "--test-threads=1"], "wire")
+            )
+    if level in ("process", "integration", "all"):
+        specs.append(
+            (
+                "dynamo-sidecar-testkit",
+                "cross_process",
+                ["--features", "process-tests"],
+                ["--test-threads=1"],
+                "process",
+            )
+        )
+    if level == "native":
+        specs.append(
+            (
+                "dynamo-sidecar-testkit",
+                "native_engine",
+                ["--features", "native-tests"],
+                [],
+                "native",
+            )
+        )
+    return specs
 
 
 def build(root, package, target, extra):
@@ -74,6 +117,11 @@ def build(root, package, target, extra):
 
 
 def artifact_name(package, target, filters, level):
+    if level == "native":
+        return "native_engine"
+    if target == "conformance":
+        backend = "sglang" if filters == ["sglang::"] else "vllm"
+        return f"{package}-{target}-{backend}"
     return f"{package}-{target}"
 
 
@@ -106,11 +154,22 @@ def main():
         "--framework",
         choices=["vllm", "all"],
         default="all",
-        help="backend unit modules; all currently selects common and vLLM once",
+        help=(
+            "all also preserves baseline SGLang wire/Mocker coverage; "
+            "process/native remain vLLM-only"
+        ),
     )
     parser.add_argument(
         "--level",
-        choices=["unit", "pre-merge", "all"],
+        choices=[
+            "unit",
+            "wire",
+            "process",
+            "integration",
+            "native",
+            "pre-merge",
+            "all",
+        ],
         default="all",
     )
     parser.add_argument("--list", action="store_true", help="collect without execution")
@@ -118,7 +177,7 @@ def main():
     artifacts.add_argument(
         "--export",
         type=Path,
-        help="export executable tests for a CPU container",
+        help="export executable tests for a CPU container or native engine job",
     )
     artifacts.add_argument(
         "--artifacts", type=Path, help="execute previously exported tests"
@@ -134,7 +193,7 @@ def main():
         entries = select_entries(
             json.loads((args.artifacts / "tests.json").read_text()),
             specs,
-            specifications("all", "all"),
+            specifications("all", "all") + specifications("native", "all"),
         )
     else:
         root = Path(__file__).resolve().parents[3]
@@ -149,12 +208,37 @@ def main():
                     "level": level,
                 }
             )
+        if any(entry["level"] == "process" for entry in entries):
+            run(
+                [
+                    "cargo",
+                    "build",
+                    "--locked",
+                    "-p",
+                    "dynamo-vllm-sidecar",
+                    "--bin",
+                    "dynamo-vllm-sidecar",
+                ],
+                cwd=root,
+            )
+            process = next(entry for entry in entries if entry["level"] == "process")
+            binary = Path(process["path"]).parent.parent / "dynamo-vllm-sidecar"
+            os.environ["DYNAMO_VLLM_SIDECAR"] = str(binary)
         if args.export:
             args.export.mkdir(parents=True, exist_ok=True)
             for entry in entries:
                 destination = args.export / entry["name"]
                 run(["strip", "-o", str(destination), entry["path"]])
                 entry["path"] = entry["name"]
+            if any(entry["level"] == "process" for entry in entries):
+                run(
+                    [
+                        "strip",
+                        "-o",
+                        str(args.export / "dynamo-vllm-sidecar"),
+                        os.environ["DYNAMO_VLLM_SIDECAR"],
+                    ]
+                )
             shutil.copy2(__file__, args.export / "run.py")
             (args.export / "tests.json").write_text(
                 json.dumps(entries, indent=2) + "\n"
@@ -178,11 +262,20 @@ def main():
         if not cases:
             raise RuntimeError(f"No cases collected from {binary}")
         if not args.list:
+            if entry["level"] == "native":
+                raise RuntimeError(
+                    "Run native tests through tests/sidecar/test_native_integration.py "
+                    "with DYNAMO_SIDECAR_NATIVE_TEST set to the exported binary"
+                )
             environment = {
                 **os.environ,
                 "HF_HUB_OFFLINE": "1",
                 "CUDA_VISIBLE_DEVICES": "",
             }
+            if args.artifacts and entry["level"] == "process":
+                environment["DYNAMO_VLLM_SIDECAR"] = str(
+                    args.artifacts / "dynamo-vllm-sidecar"
+                )
             result = run(
                 [str(binary), *entry["filters"], "--nocapture"],
                 capture_output=True,

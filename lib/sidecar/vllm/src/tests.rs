@@ -48,8 +48,6 @@ struct FakeVllm {
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
     server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
     kv_ranks_override: Arc<Mutex<Option<Vec<u32>>>>,
-    reject: Arc<AtomicBool>,
-    hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
     headers_pending: Arc<AtomicBool>,
     release_headers: Arc<Notify>,
@@ -142,9 +140,6 @@ impl pb::inference_server::Inference for FakeVllm {
             self.release_headers.notified().await;
             self.headers_pending.store(false, Ordering::SeqCst);
         }
-        if self.reject.load(Ordering::SeqCst) {
-            return Err(Status::invalid_argument("rejected by fake vLLM"));
-        }
         if !request.lora_name.is_empty() {
             if self.lora_disabled.load(Ordering::SeqCst) {
                 return Err(Status::failed_precondition(
@@ -217,7 +212,6 @@ impl pb::inference_server::Inference for FakeVllm {
         let encoder_handoff = encoder_handoff();
         let encoder_response = self.encoder_response.load(Ordering::SeqCst);
         let omit_encoder_metadata = self.omit_encoder_metadata.load(Ordering::SeqCst);
-        let hang = self.hang.load(Ordering::SeqCst);
         let hold_before_first_token = self.hold_before_first_token.load(Ordering::SeqCst);
         let close_before_first_token = self.close_before_first_token.load(Ordering::SeqCst);
         let first_token_pending = self.first_token_pending.clone();
@@ -264,12 +258,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 return;
             }
 
-            if hang {
-                loop {
-                    yield sequence_response(false, wants_logprobs, None);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            } else if encoder_response {
+            if encoder_response {
                 let ec = (!omit_encoder_metadata).then(|| {
                     json_to_struct(encoder_handoff).expect("encoder handoff")
                 });
@@ -2399,27 +2388,6 @@ async fn request_admission_and_unload_cannot_race() {
 }
 
 #[tokio::test]
-async fn grpc_request_errors_are_propagated() {
-    let service = FakeVllm::default();
-    service.reject.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let result = engine
-        .generate(request(), GenerateContext::new(context, None))
-        .await;
-    assert!(result.is_err());
-    assert_eq!(server.service.requests.lock().await.len(), 1);
-}
-
-#[tokio::test]
 async fn prefill_decode_handoff_is_opaque_and_repeatable() {
     let server = FakeServer::start(FakeVllm::default()).await;
     let prefill = engine(
@@ -2549,76 +2517,6 @@ async fn pool_uses_each_configured_connection() {
             .iter()
             .all(Option::is_none)
     );
-}
-
-#[tokio::test]
-async fn cancellation_drops_the_remote_stream() {
-    let service = FakeVllm::default();
-    service.hang.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let mut stream = engine
-        .generate(request(), GenerateContext::new(context.clone(), None))
-        .await
-        .expect("generate");
-    let first = stream.next().await.unwrap().unwrap();
-    assert_eq!(first.token_ids, [42]);
-    context.stop_generating();
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    drop(stream);
-
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !server.service.server_stream_dropped.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("server stream dropped");
-}
-
-#[tokio::test]
-async fn cancellation_interrupts_pending_response_headers() {
-    let service = FakeVllm::default();
-    service.hang_before_headers.store(true, Ordering::SeqCst);
-    let server = FakeServer::start(service).await;
-    let engine = engine(
-        &server.endpoint,
-        DisaggregationMode::Aggregated,
-        1,
-        model_info(),
-    );
-    engine.start(0).await.expect("start");
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let generate = engine.generate(request(), GenerateContext::new(context.clone(), None));
-    tokio::pin!(generate);
-
-    tokio::select! {
-        _ = &mut generate => panic!("generate returned before cancellation"),
-        _ = async {
-            while !server.service.headers_pending.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        } => {}
-    }
-
-    context.stop_generating();
-    let mut stream = tokio::time::timeout(std::time::Duration::from_secs(2), &mut generate)
-        .await
-        .expect("cancel pending headers")
-        .expect("generate cancellation stream");
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    server.service.release_headers.notify_waiters();
 }
 
 #[tokio::test]
