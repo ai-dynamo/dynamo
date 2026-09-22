@@ -3276,7 +3276,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         reasoning_parser_kwargs=None,
         session_id=None,
     ):
-        """Yield token deltas with cumulative usage and available cache details."""
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
             self._log_with_lora_context(
@@ -3305,6 +3304,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             total_output_tokens = 0
+            usage_metadata_by_index: dict[int, tuple[int | None, int | None]] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
@@ -3352,6 +3352,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         (output, output_idx, token_ids, finish_reason, stop_reason)
                     )
 
+                usage_metadata = (
+                    len(res.prompt_token_ids) if res.prompt_token_ids else None,
+                    getattr(res, "num_cached_tokens", None),
+                )
                 for (
                     output,
                     output_idx,
@@ -3381,14 +3385,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                    # vLLM reports cached prompt tokens before generation finishes.
-                    # Forward usage with each emitted delta so continuous-usage
-                    # clients can account for cache hits even if they stop early.
-                    # The frontend controls whether usage is exposed on the wire.
-                    out["completion_usage"] = BaseWorkerHandler._build_completion_usage(
-                        request_output=res,
-                        completion_tokens=total_output_tokens,
-                    )
+                    # The frontend retains prompt/cache metadata and counts output
+                    # tokens itself. Send changes and final totals, not per-token usage.
+                    if (
+                        finish_reason
+                        or usage_metadata_by_index.get(output_idx) != usage_metadata
+                    ):
+                        out[
+                            "completion_usage"
+                        ] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                            completion_tokens=total_output_tokens,
+                        )
+                        usage_metadata_by_index[output_idx] = usage_metadata
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
