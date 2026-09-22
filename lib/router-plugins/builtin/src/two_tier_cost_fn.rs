@@ -256,14 +256,10 @@ mod tests {
 
     /// Select among workers given as `(worker_id, device_overlap_blocks, active_requests)`.
     fn select(workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
-        select_with(Parameters::default(), workers)
+        select_with(Parameters::default(), workers, None)
     }
 
-    fn select_with(parameters: Parameters, workers: [(u64, usize, usize); 2]) -> WorkerWithDpRank {
-        select_with_affinity(parameters, workers, None)
-    }
-
-    fn select_with_affinity(
+    fn select_with(
         parameters: Parameters,
         workers: [(u64, usize, usize); 2],
         affinity_target: Option<WorkerAffinityTarget>,
@@ -344,7 +340,7 @@ mod tests {
             cache_threshold: 0.2,
             ..Parameters::default()
         };
-        assert_eq!(select_with(tuned, workers), worker(B));
+        assert_eq!(select_with(tuned, workers, None), worker(B));
     }
 
     #[test]
@@ -353,7 +349,7 @@ mod tests {
         let target = Some(WorkerAffinityTarget::new(A, None));
 
         assert_eq!(
-            select_with_affinity(Parameters::default(), workers, target),
+            select_with(Parameters::default(), workers, target),
             worker(B),
             "the default ignores advisory soft affinity"
         );
@@ -363,12 +359,12 @@ mod tests {
             ..Parameters::default()
         };
         assert_eq!(
-            select_with_affinity(respecting, workers, target),
+            select_with(respecting, workers, target),
             worker(A),
             "an eligible target is retained by the picker"
         );
         assert_eq!(
-            select_with_affinity(
+            select_with(
                 respecting,
                 workers,
                 Some(WorkerAffinityTarget::new(999, None)),
