@@ -53,7 +53,7 @@ pub type OverloadedWorkerProvider =
 /// set. `None` means no hard-availability source is attached; `Some` is
 /// authoritative, so an empty set rejects every candidate.
 pub type WorkerAvailabilityProvider =
-    Arc<dyn Fn() -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
+    Arc<dyn Fn(&SchedulingRequest) -> Option<Arc<HashSet<WorkerId>>> + Send + Sync + 'static>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerSelectionPolicyError {
@@ -115,6 +115,24 @@ pub enum KvSchedulerError {
 
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
+
+    #[error("request classifier panicked: {0}")]
+    RequestClassifierPanicked(String),
+
+    #[error("request classifier failed: {0}")]
+    RequestClassifierFailed(Arc<super::ClassifierError>),
+
+    #[error("request classifier is already tracking request ID {0:?}")]
+    DuplicateClassificationRequestId(String),
+
+    #[error("invalid request classification metadata: {0}")]
+    InvalidClassificationMetadata(String),
+
+    #[error("request lifecycle for request ID {0:?} ended before classification completed")]
+    ClassificationLifecycleEnded(String),
+
+    #[error("request deadline exceeded")]
+    DeadlineExceeded,
 
     #[error(transparent)]
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
@@ -434,13 +452,24 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
         self.request
     }
 
+    pub(crate) fn with_available_workers(
+        mut self,
+        available: Option<&'a HashSet<WorkerId>>,
+    ) -> Self {
+        self.eligibility = self.eligibility.with_available_workers(available);
+        self
+    }
+
     pub fn best_effective_prefill_tokens(&self) -> usize {
         effective_prefill_tokens(self.request.isl_tokens, self.best_cached_tokens())
     }
 
     pub fn best_cached_tokens(&self) -> usize {
         match self.eligibility.pinned_worker() {
-            Some(worker) => self.request.effective_cached_tokens_for(worker),
+            Some(worker) => self
+                .eligibility
+                .validate_worker_rank(self.workers, worker)
+                .map_or(0, |_| self.request.effective_cached_tokens_for(worker)),
             None => self
                 .request
                 .overlap

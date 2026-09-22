@@ -32,7 +32,7 @@ from .sglang_prepost import (
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
-    _guided_tool_choice_requires_reasoning,
+    _guided_output_requires_reasoning,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -357,8 +357,8 @@ def _preprocess_worker(
         pre.guided_decoding,
         pre.tool_call_parser,
         pre.reasoning_parser,
-        require_reasoning=_guided_tool_choice_requires_reasoning(
-            request, pre.force_reasoning
+        require_reasoning=_guided_output_requires_reasoning(
+            request, pre.force_reasoning, _w_reasoning_parser_name
         ),
     )
 
@@ -416,6 +416,22 @@ def _build_dynamo_preproc(
     nvext_routing = (
         _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
     )
+    if isinstance(nvext, dict):
+        # Preserve explicit targets for the router to resolve in the current phase.
+        # Rank zero is a valid target; only absent/null values are omitted.
+        worker_routing = {
+            key: nvext[key]
+            for key in (
+                "backend_instance_id",
+                "decode_worker_id",
+                "prefill_worker_id",
+                "dp_rank",
+                "prefill_dp_rank",
+            )
+            if nvext.get(key) is not None
+        }
+        if worker_routing:
+            nvext_routing = {**(nvext_routing or {}), **worker_routing}
     if isinstance(routing, dict):
         if nvext_routing:
             routing = {**nvext_routing, **routing}
@@ -599,8 +615,8 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
                 pre.reasoning_parser,
-                require_reasoning=_guided_tool_choice_requires_reasoning(
-                    request, pre.force_reasoning
+                require_reasoning=_guided_output_requires_reasoning(
+                    request, pre.force_reasoning, self.reasoning_parser_name
                 ),
             )
         except PreprocessError as exc:

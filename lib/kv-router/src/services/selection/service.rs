@@ -2,27 +2,31 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
+use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig};
+use super::affinity::SessionAffinityConfig;
+use super::core::{KvIndexSource, SelectionCore, SelectionHost, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
-use super::policy_registry::WorkerSelectionPolicyRegistry;
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
     SelectResponse, WorkerCatalogRecord, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerType;
+use crate::plugins::RouterPluginRegistry;
 
 pub struct SelectionServiceBuilder {
     kv_router_config: KvRouterConfig,
@@ -32,7 +36,11 @@ pub struct SelectionServiceBuilder {
     replica_sync_peers: Vec<String>,
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
-    worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+    plugin_registry: RouterPluginRegistry,
+    host: SelectionHost,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    session_affinity_ttl: Option<Duration>,
+    host_manages_request_lifecycle: bool,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -59,7 +67,7 @@ impl SelectionServiceBuilder {
     pub fn new(
         kv_router_config: KvRouterConfig,
         worker_type: WorkerType,
-        worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+        plugin_registry: RouterPluginRegistry,
     ) -> Self {
         Self {
             kv_router_config,
@@ -69,8 +77,35 @@ impl SelectionServiceBuilder {
             replica_sync_peers: Vec::new(),
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
-            worker_selection_policy_registry,
+            plugin_registry,
+            host: SelectionHost::default(),
+            worker_selection_policy_factory: None,
+            session_affinity_ttl: None,
+            host_manages_request_lifecycle: false,
         }
+    }
+
+    /// Use `factory` for every partition's worker-selection policy instead of
+    /// resolving one from router configuration through the registry.
+    pub fn worker_selection_policy_factory(
+        mut self,
+        factory: WorkerSelectionPolicyFactory,
+    ) -> Self {
+        self.worker_selection_policy_factory = Some(factory);
+        self
+    }
+
+    /// Where each partition's KV index comes from (see [`KvIndexSource`]).
+    /// Shorthand for setting `host.cache.index`.
+    pub fn kv_index(mut self, source: KvIndexSource) -> Self {
+        self.host.cache.index = source;
+        self
+    }
+
+    /// What the embedding host supplies to every partition this service creates.
+    pub fn host(mut self, host: SelectionHost) -> Self {
+        self.host = host;
+        self
     }
 
     pub fn indexer_threads(mut self, indexer_threads: usize) -> Self {
@@ -80,6 +115,13 @@ impl SelectionServiceBuilder {
 
     pub fn indexer_peers(mut self, indexer_peers: Vec<String>) -> Self {
         self.indexer_peers = indexer_peers;
+        self
+    }
+
+    /// Pin each session id to the worker that served it for `ttl` after its
+    /// last request. Bindings replicate over the replica mesh when enabled.
+    pub fn session_affinity(mut self, ttl: Duration) -> Self {
+        self.session_affinity_ttl = Some(ttl);
         self
     }
 
@@ -94,14 +136,36 @@ impl SelectionServiceBuilder {
         self
     }
 
+    /// The embedding host installs classifiers and drives their request lifecycle.
+    ///
+    /// Only hosts that enroll requests and report dispatch, completion, and abort
+    /// may enable this. Standalone selection cannot provide those callbacks.
+    pub fn host_manages_request_lifecycle(mut self) -> Self {
+        self.host_manages_request_lifecycle = true;
+        self
+    }
+
     pub async fn build(self) -> anyhow::Result<SelectionService> {
+        if let Some(ttl) = self.session_affinity_ttl {
+            super::affinity::SessionAffinity::validate_ttl(ttl)?;
+        }
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
-        let worker_selection_policy_factory = self
-            .worker_selection_policy_registry
-            .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?;
+        if !self.host_manages_request_lifecycle
+            && self.kv_router_config.request_classifier_config()?.is_some()
+        {
+            anyhow::bail!("standalone selection does not support request_classifier plugins");
+        }
+        let worker_selection_policy_factory = match self.worker_selection_policy_factory {
+            Some(factory) => Some(factory),
+            None => self
+                .plugin_registry
+                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
+        };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
+        let indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
+        let recover_from_peers = !self.indexer_peers.is_empty();
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -123,13 +187,16 @@ impl SelectionServiceBuilder {
             cancel_token.clone(),
             replica_config,
             worker_selection_policy_factory,
+            self.host,
             self.worker_type,
             false,
             self.selection_cache,
             tracking_hash,
+            indexer_policy,
+            self.session_affinity_ttl.map(SessionAffinityConfig::new),
         ));
 
-        if !self.indexer_peers.is_empty() {
+        if recover_from_peers {
             match core.recover_indexer_from_peers(&self.indexer_peers).await {
                 Ok(true) => tracing::info!("Selection indexer recovery completed"),
                 Ok(false) => {
@@ -146,7 +213,8 @@ impl SelectionServiceBuilder {
 
         let peer_manager = if replica_runtime.is_some() {
             let weak_core = Arc::downgrade(&core);
-            Some(PeerManager::start(
+            let affinity_core = Arc::downgrade(&core);
+            Some(PeerManager::start_with_affinity(
                 self.replica_sync_peers,
                 cancel_token.child_token(),
                 move |event| {
@@ -154,6 +222,13 @@ impl SelectionServiceBuilder {
                         core.dispatch_replica_event(event);
                     }
                 },
+                self.session_affinity_ttl.map(|_| {
+                    move |event| {
+                        if let Some(core) = affinity_core.upgrade() {
+                            core.dispatch_affinity_event(event);
+                        }
+                    }
+                }),
             )?)
         } else {
             None
@@ -174,18 +249,21 @@ impl SelectionServiceConfig {
     pub fn service_builder(
         &self,
         worker_type: WorkerType,
-        worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+        plugin_registry: RouterPluginRegistry,
     ) -> SelectionServiceBuilder {
         let mut builder = SelectionServiceBuilder::new(
             self.kv_router_config.clone(),
             worker_type,
-            worker_selection_policy_registry,
+            plugin_registry,
         )
         .indexer_threads(self.threads)
         .indexer_peers(self.indexer_peers.clone())
         .selection_cache(self.selection_cache.clone());
         if let Some(port) = self.replica_sync_port {
             builder = builder.replica_sync(port, self.replica_sync_peers.clone());
+        }
+        if let Some(ttl) = self.session_affinity_ttl {
+            builder = builder.session_affinity(ttl);
         }
         builder
     }
@@ -254,6 +332,11 @@ impl SelectionService {
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         self.core.upsert_worker(req).await
+    }
+
+    /// The core this service wraps, for hosts that drive its catalog directly.
+    pub fn core(&self) -> &Arc<SelectionCore> {
+        &self.core
     }
 
     /// The port this service uses for replica synchronization, if enabled.
@@ -396,10 +479,6 @@ impl SelectionService {
         self.core.recover_indexer_from_peers(peers).await
     }
 
-    pub async fn cancelled(&self) {
-        self.cancel_token.cancelled().await;
-    }
-
     pub async fn shutdown(&self) {
         self.cancel_token.cancel();
         self.core.shutdown();
@@ -452,6 +531,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standalone_selection_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..test_config()
+        };
+        let result = SelectionServiceBuilder::new(
+            config,
+            WorkerType::Aggregated,
+            RouterPluginRegistry::default(),
+        )
+        .build()
+        .await;
+        let Err(error) = result else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("standalone selection does not support request_classifier")
+        );
+    }
+
+    #[tokio::test]
     async fn configured_custom_policy_requires_linked_policy_type_at_construction() {
         let policy_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
@@ -474,7 +578,7 @@ worker_selection:
         let error = match SelectionServiceBuilder::new(
             config,
             WorkerType::Prefill,
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .build()
         .await
@@ -496,7 +600,7 @@ worker_selection:
                 match SelectionServiceBuilder::new(
                     test_config(),
                     WorkerType::Aggregated,
-                    WorkerSelectionPolicyRegistry::default(),
+                    RouterPluginRegistry::default(),
                 )
                 .indexer_threads(1)
                 .replica_sync(port, Vec::new())
@@ -518,7 +622,7 @@ worker_selection:
         let failed = SelectionServiceBuilder::new(
             test_config(),
             WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .indexer_threads(1)
         .replica_sync(port, vec!["invalid".to_string()])
@@ -573,7 +677,7 @@ worker_selection:
             SelectionServiceBuilder::new(
                 test_config(),
                 WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                RouterPluginRegistry::default(),
             )
             .indexer_threads(1)
             .indexer_peers(vec![peer_url])

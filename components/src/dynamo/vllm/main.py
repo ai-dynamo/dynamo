@@ -78,6 +78,9 @@ from .kv_connector_protocols import (
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
+from .multimodal_utils.models.nemotron_video_routing import (
+    publish_vllm_nemotron_video_processor_contract,
+)
 from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
 )
@@ -390,7 +393,7 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
 
     Resolved via the SAME Rust logic the frontend uses
     (`dynamo._core.resolve_routing_image_token_id` ->
-    `lightseek_mm::resolve_routing_tokens`), returning `chat_placeholder_token_id`
+    `mm_routing::image::resolve_routing_tokens`), returning `chat_placeholder_token_id`
     so the KV-event normalizer keys on the identical token the frontend
     substitutes `pad_value` over — no per-family drift between the two.
 
@@ -837,6 +840,7 @@ async def register_vllm_model(
     runtime_config = ModelRuntimeConfig()
     publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
     publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
+    publish_vllm_nemotron_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
     state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)

@@ -48,6 +48,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.backend.agent_context import session_id_from_request
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -67,7 +68,10 @@ from dynamo.common.rl import (
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
-from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.input_params import (
+    InputParamManager,
+    resolve_thinking_token_budget,
+)
 from dynamo.common.utils.structural_tag import serialize_structural_tag
 from dynamo.common.utils.time_section import time_and_log_code_section
 from dynamo.llm import (
@@ -153,6 +157,8 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
         "weight_version",
     }
 )
+# An object sentinel cannot collide with a caller-supplied version.
+_WEIGHT_VERSION_UNDECLARED: Final = object()
 
 
 def build_prompt_tokens_details(
@@ -997,11 +1003,11 @@ def build_sampling_params_openai(
     if "min_tokens" in request and request["min_tokens"] is not None:
         sampling_params.min_tokens = request["min_tokens"]
 
-    nvext_max_thinking_tokens = (request.get("nvext") or {}).get("max_thinking_tokens")
-    if nvext_max_thinking_tokens is not None and hasattr(
+    thinking_token_budget = resolve_thinking_token_budget(request)
+    if thinking_token_budget is not None and hasattr(
         sampling_params, "thinking_token_budget"
     ):
-        sampling_params.thinking_token_budget = nvext_max_thinking_tokens
+        sampling_params.thinking_token_budget = thinking_token_budget
 
     return sampling_params
 
@@ -1200,7 +1206,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # to prevent both bypassing the check before either inserts (atomicity).
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
-        self._weight_version: str = "initial"
+        self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
@@ -2016,7 +2022,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return {"status": "error", "message": str(e)}
 
     async def get_weight_version(self, body: dict) -> dict:
-        """Return the current weight version tag."""
+        """Report the worker's current declared weight-version state."""
         if body is None:
             body = {}
         elif not isinstance(body, dict):
@@ -2024,7 +2030,29 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "status": "error",
                 "message": "request body must be a JSON object",
             }
-        return {"status": "ok", "version": getattr(self, "_weight_version", "initial")}
+        version = self._weight_version
+        is_declared = version is not _WEIGHT_VERSION_UNDECLARED
+        return {
+            "status": "ok",
+            "version": version if is_declared else None,
+            "version_declared": is_declared,
+        }
+
+    async def set_weight_version(self, body: dict) -> dict:
+        """Validate and declare a weight version for subsequent requests."""
+        if body is None:
+            body = {}
+        elif not isinstance(body, dict):
+            return {
+                "status": "error",
+                "message": "request body must be a JSON object",
+            }
+        if "weight_version" not in body:
+            return {"status": "error", "message": "Missing 'weight_version' in body"}
+        version = body["weight_version"]
+        self._weight_version = version
+        logger.info("[RL] Weight version declared")
+        return {"status": "ok", "version": version}
 
     async def update_weights_from_disk(self, body: dict) -> dict:
         """Load weights from a shared filesystem checkpoint."""
@@ -2063,11 +2091,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 # weights is now stale and must not be reused. Invalidate it
                 # while still holding _pause_lock (generation is paused).
                 await self.engine_client.reset_prefix_cache()
-                self._weight_version = version
+                if "weight_version" in body:
+                    self._weight_version = version
                 logger.info(
                     f"[RL] Weights loaded from {path} (version={version}, rpc={rpc})"
                 )
-                return {"status": "ok", "version": version}
+                return {
+                    "status": "ok",
+                    "version": version,
+                    "version_declared": "weight_version" in body,
+                }
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
@@ -2126,12 +2159,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # Weights changed: stale prefix/KV cache must be invalidated
                     # before resume so it is not reused under the new weights.
                     await self.engine_client.reset_prefix_cache()
-                self._weight_version = version
+                if "weight_version" in body:
+                    self._weight_version = version
                 logger.info(
                     f"[RL] Weights received via distributed "
                     f"(version={version}, rpc={rpc})"
                 )
-                return {"status": "ok", "version": version}
+                return {
+                    "status": "ok",
+                    "version": version,
+                    "version_declared": "weight_version" in body,
+                }
             except EngineDeadError as e:
                 self._shutdown_on_engine_dead(e)
             except Exception as e:
@@ -3238,6 +3276,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        session_id=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3256,6 +3295,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     data_parallel_rank=data_parallel_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    session_id=session_id,
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
@@ -3686,6 +3726,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        session_id = session_id_from_request(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -3734,6 +3775,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        session_id=session_id,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3784,6 +3826,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         first_token_output_seen = False
 
         trace_headers = context.trace_headers()
+        session_id = session_id_from_request(request)
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
@@ -3817,6 +3860,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    session_id=session_id,
                 )
 
                 async for res in gen:
@@ -4001,6 +4045,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        session_id = session_id_from_request(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -4014,6 +4059,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         lora_request=admitted_lora_request,
                         trace_headers=trace_headers,
                         priority=priority,
+                        session_id=session_id,
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,

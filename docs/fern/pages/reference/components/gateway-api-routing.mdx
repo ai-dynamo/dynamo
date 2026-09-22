@@ -11,21 +11,23 @@ topology, see [Using GAIE with Dynamo](../../kubernetes/kv-aware-routing/gateway
 
 ## EPP Modes
 
-The EPP runs in one of two modes, selected by the `DYN_EPP_MODE` environment variable. This reference
-covers Dynamo mode only.
+The native Rust EPP runs in one of two modes, selected by the `DYN_EPP_MODE` environment variable.
+This reference covers Dynamo mode only. The deprecated Go EPP, kept by `eppConfig` with the image
+pinned to 1.4, does not read `DYN_EPP_MODE` and has no standalone mode.
 
 | Concern | Dynamo mode (`dynamo`, default) | Standalone mode (`standalone`) |
 |---|---|---|
 | Deployed by | Dynamo operator, from a DGD `epp` component | User-applied manifests |
-| Dynamo runtime | Required, with etcd and NATS | Not used |
+| Dynamo runtime | Required. It uses whichever discovery and event planes the platform is configured for; etcd and NATS are needed only when selected | Not used |
 | Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
-| EPP ServiceAccount and RBAC | Created by the operator against the ClusterRole or Role from the `dynamo-platform` chart | Supplied with the deployment manifests |
+| EPP ServiceAccount and RBAC | Cluster-wide mode: the operator creates the ServiceAccount and binds it to the `dynamo-platform` chart's EPP ClusterRole. Namespace-restricted mode: the chart creates the ServiceAccount, Role, and RoleBinding | Supplied with the deployment manifests |
 | EPP replication | Available. Replicas exchange active-sequence state through the Dynamo event plane, which the runtime addresses and discovers. It is ZMQ-backed by default and NATS when the runtime is configured for it | Available. Replicas exchange active-sequence state over ZMQ sockets the EPP binds itself, discovering peers from the Service named by `DYN_EPP_PEER_SERVICE` |
 
-Standalone mode does not install or run the Dynamo operator, so no operator-generated resource
-described on this page applies to it, including the EPP ServiceAccount and the chart's EPP RBAC. A
+A standalone EPP is not managed by the Dynamo operator, so the operator generates no resources for
+it. It uses neither the EPP ServiceAccount nor the `dynamo-platform` chart's EPP RBAC. Standalone
+mode targets clusters without the Dynamo platform chart; do not install it for this path. A
 standalone EPP carries its own ServiceAccount and Role, which grant the permissions that mode needs.
-Do not bind a standalone EPP to the operator's EPP ClusterRole; its rules cover only the resources a
+Do not bind a standalone EPP to the chart's EPP ClusterRole; its rules cover only the resources a
 Dynamo-mode EPP reads. For the standalone path, see
 [Using GAIE with vanilla vLLM](../../kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx).
 
@@ -279,6 +281,22 @@ spec:
 
 Treat the generated `InferencePool`, EPP Service, and Deployment as operator-owned resources. Make
 persistent changes in the DGD.
+
+### Endpoint Picker Failure Mode
+
+`InferencePool.spec.endpointPickerRef.failureMode` decides what the gateway does when the EPP does not
+answer, such as when its pod is restarting or has failed:
+
+- `FailClose` drops the request. The client gets an error, in practice HTTP 500.
+- `FailOpen` forwards the request to an endpoint the gateway picks. The request is served, but without
+  KV-aware routing.
+
+The operator does not set this field, so the Gateway API default of `FailClose` applies. Setting it by
+hand on the generated `InferencePool` does not hold: the operator restores its own rendering on the
+next reconcile, which leaves the field unset and lets the default apply again. No DGD field selects it.
+
+A standalone EPP is unaffected. Its `InferencePool` is user-applied, so the value you write is the
+value you keep. The on-ramp example leaves the field out, so it also gets `FailClose`.
 
 ## HTTPRoute Contract
 

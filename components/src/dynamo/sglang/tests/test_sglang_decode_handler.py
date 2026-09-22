@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sglang.srt.managers.io_struct import GenerateReqInput
 
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
@@ -26,8 +27,11 @@ from dynamo.sglang.protocol import (
 from dynamo.sglang.request_handlers.llm.decode_handler import (
     DecodeWorkerHandler,
     _extract_sglang_stop_reason,
+    _native_payload_is_batched,
     _nvext_extra_field_requested,
     _openai_stop_sampling_params,
+    _ordered_cancellation_request_id,
+    _public_native_response_id,
     _user_stop_token_ids,
 )
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
@@ -37,6 +41,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
 )
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
 from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
+from dynamo.sglang.request_utils import request_cache_salt
 
 pytestmark = [
     pytest.mark.unit,
@@ -46,28 +51,6 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
-
-
-@pytest.mark.asyncio
-async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
-    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
-    handler.shutdown_event = asyncio.Event()
-
-    async def set_shutdown_when_cancelled(*_args):
-        try:
-            await asyncio.Future()
-        except asyncio.CancelledError:
-            handler.shutdown_event.set()
-            raise
-
-    handler._handle_cancellation = set_shutdown_when_cancelled
-    request_id_future = asyncio.get_running_loop().create_future()
-    request_id_future.set_result("sglang-request-id")
-    context = SimpleNamespace(id=lambda: "request-id")
-
-    with pytest.raises(EngineShutdown, match="shut down during token generation"):
-        async with handler._cancellation_monitor(request_id_future, context):
-            await asyncio.sleep(0)
 
 
 def _read_zstd_payload(path):
@@ -242,19 +225,35 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
     }
 
 
-def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
+def _new_decode_handler(
+    *,
+    use_sglang_tokenizer: bool = False,
+    skip_tokenizer_init: bool = False,
+    enable_rl: bool = False,
+):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
     handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
-        server_args=SimpleNamespace(served_model_name="test-model"),
+        server_args=SimpleNamespace(
+            served_model_name="test-model",
+            skip_tokenizer_init=skip_tokenizer_init,
+        ),
         dynamo_args=SimpleNamespace(enable_rl=enable_rl),
     )
     handler._first_token_source = None
 
     @asynccontextmanager
     async def no_cancellation_monitor(*args, **kwargs):
-        yield None
+        async def wait_forever():
+            await asyncio.Future()
+
+        task = asyncio.create_task(wait_forever())
+        try:
+            yield task
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
@@ -268,7 +267,7 @@ async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
-    context = SimpleNamespace(id=lambda: "request-id")
+    context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     async def stream():
         yield {
@@ -321,8 +320,67 @@ async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
             pass
 
 
-def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_ordered_cancellation_skips_stopped_chunk_processing(processor_name):
+    handler = _new_decode_handler()
+    notified = False
+
+    def notify_first_token():
+        nonlocal notified
+        notified = True
+
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: True,
+        notify_first_token=notify_first_token,
+    )
+
+    class UnexpectedUploader:
+        async def upload_choice(self, *_args):
+            raise AssertionError("stopped chunks must not upload metadata")
+
+    async def stream():
+        yield {
+            "text": "ignored",
+            "output_ids": [1],
+            "meta_info": {
+                "id": "internal-request-id",
+                "finish_reason": {"type": "stop"},
+            },
+        }
+
+    outputs = await _collect(
+        getattr(handler, processor_name)(
+            stream(),
+            context,
+            metadata_uploader=UnexpectedUploader(),
+            submitted_request_id="internal-request-id",
+        )
+    )
+
+    assert outputs == []
+    assert not notified
+
+
+@pytest.mark.parametrize(
+    "body_salt,routing_salt,expected_salt",
+    [
+        (None, None, None),
+        ("", None, None),
+        ("body-salt", None, "body-salt"),
+        ("body-salt", "", None),
+        ("body-salt", "tenant-a", "tenant-a"),
+    ],
+)
+def test_engine_generate_preserves_native_fields_and_overrides_worker_state(
+    body_salt, routing_salt, expected_salt
+):
     request = {
+        "cache_salt": body_salt,
         "rid": "resolved-request",
         "sampling_params": {
             "max_new_tokens": 32,
@@ -343,17 +401,19 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     native = build_native_generate_request(
         request,
         input_ids=[7, 8],
-        fallback_rid="fallback-request",
+        request_id="internal-request-id",
         priority=9,
         sampling_overrides={"n": 1, "max_new_tokens": 1},
         bootstrap_host="prefill.internal",
         routed_dp_rank=3,
+        cache_salt=routing_salt,
     )
 
-    assert native.rid == "resolved-request"
+    assert native.rid == "internal-request-id"
     assert native.input_ids == [7, 8]
     assert native.stream is True
     assert native.priority == 9
+    assert native.cache_salt == expected_salt
     assert native.session_id == "session-1"
     assert native.return_logprob is True
     assert native.return_text_in_logprobs is True
@@ -370,6 +430,37 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
     }
 
 
+def test_native_generate_rejects_salt_without_engine_support(monkeypatch):
+    monkeypatch.delitem(GenerateReqInput.__dataclass_fields__, "cache_salt")
+    kwargs = {"input_ids": [1], "request_id": "request", "priority": None}
+
+    with pytest.raises(ValueError, match="cache_salt is not supported"):
+        build_native_generate_request({"cache_salt": "tenant-a"}, **kwargs)
+
+    native = build_native_generate_request({"cache_salt": ""}, **kwargs)
+    assert native.cache_salt is None
+
+
+def test_request_cache_salt_precedence():
+    request = {
+        "routing": {"cache_salt": "routing"},
+        "extra_args": {"nvext": {"cache_salt": "extra"}},
+        "nvext": {"cache_salt": "nvext"},
+        "cache_salt": "body",
+    }
+    for source in [
+        request["routing"],
+        request["extra_args"]["nvext"],
+        request["nvext"],
+        request,
+    ]:
+        assert request_cache_salt(request) == source["cache_salt"]
+        source["cache_salt"] = ""
+    assert request_cache_salt(request) is None
+    assert request_cache_salt({}) is None
+    assert request_cache_salt({"extra_args": [1], "cache_salt": "body"}) == "body"
+
+
 def test_engine_generate_requires_object_sampling_params_for_prefill_override():
     request = {"sampling_params": [1, 2]}
 
@@ -377,7 +468,7 @@ def test_engine_generate_requires_object_sampling_params_for_prefill_override():
         build_native_generate_request(
             request,
             input_ids=[1],
-            fallback_rid="prefill-request",
+            request_id="prefill-request",
             priority=None,
             sampling_overrides={"max_new_tokens": 1},
         )
@@ -390,7 +481,7 @@ def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
         build_native_generate_request(
             {"return_logprob": True, "top_logprobs_num": 1},
             input_ids=[1],
-            fallback_rid="request",
+            request_id="request",
             priority=None,
         )
 
@@ -401,7 +492,7 @@ def test_engine_generate_allows_top_logprobs_with_escape_hatch(monkeypatch):
     native = build_native_generate_request(
         {"return_logprob": True, "top_logprobs_num": 2},
         input_ids=[1],
-        fallback_rid="request",
+        request_id="request",
         priority=None,
     )
 
@@ -437,6 +528,93 @@ async def test_native_generate_stream_forwards_only_opaque_response():
         {"token_ids": [], "engine_data": {"sglang_response": native_response}}
     ]
     assert chunks[0]["engine_data"]["sglang_response"] is native_response
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_maps_internal_id_without_mutation():
+    native_response = {
+        "output_ids": [101],
+        "meta_info": {"id": "internal-request-id"},
+    }
+
+    async def stream():
+        yield {
+            "token_ids": [],
+            "engine_data": {"sglang_response": native_response},
+        }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            stream(),
+            _Context(),
+            submitted_request_id="internal-request-id",
+            internal_request_id="internal-request-id",
+            response_request_id="caller-visible-id",
+        )
+    )
+
+    mapped_response = chunks[0]["engine_data"]["sglang_response"]
+    assert mapped_response["meta_info"]["id"] == "caller-visible-id"
+    assert native_response["meta_info"]["id"] == "internal-request-id"
+    assert mapped_response is not native_response
+    assert mapped_response["meta_info"] is not native_response["meta_info"]
+
+
+@pytest.mark.asyncio
+async def test_native_generate_stream_maps_batched_ids_without_collapsing():
+    native_responses = [
+        {
+            "output_ids": [101 + index],
+            "index": index,
+            "meta_info": {"id": f"internal-request-id_{index}"},
+        }
+        for index in range(2)
+    ]
+
+    async def stream():
+        for native_response in native_responses:
+            yield {
+                "token_ids": [],
+                "engine_data": {"sglang_response": native_response},
+            }
+
+    handler = _new_decode_handler()
+    chunks = await _collect(
+        handler._process_native_generate_stream(
+            stream(),
+            _Context(),
+            submitted_request_id=None,
+            internal_request_id="internal-request-id",
+            response_request_id=["caller-request-0", "caller-request-1"],
+        )
+    )
+
+    assert [
+        chunk["engine_data"]["sglang_response"]["meta_info"]["id"] for chunk in chunks
+    ] == ["caller-request-0", "caller-request-1"]
+    assert [response["meta_info"]["id"] for response in native_responses] == [
+        "internal-request-id_0",
+        "internal-request-id_1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("engine_id", "index", "public_id", "expected"),
+    [
+        ("internal_0", 0, "caller", "caller_0"),
+        ("actual-child-a", 0, "caller", "actual-child-a"),
+        ("internal_2", 2, ["caller-0", "caller-1"], "internal_2"),
+        ("internal_0", True, "caller", "internal_0"),
+        ("internal_0", 0, [123], "internal_0"),
+    ],
+)
+def test_public_native_response_id_maps_only_derived_string_ids(
+    engine_id, index, public_id, expected
+):
+    assert (
+        _public_native_response_id(engine_id, index, "internal", public_id) == expected
+    )
 
 
 def _new_token_input_handler(maximum_input_token_id: int = 151935):
@@ -663,6 +841,9 @@ async def _stream(items):
 
 
 class _Context:
+    def id(self):
+        return "public-request-id"
+
     def is_stopped(self):
         return False
 
@@ -683,6 +864,55 @@ def test_build_sampling_params_passes_n_for_token_requests():
     assert sampling_params["n"] == 3
     assert sampling_params["temperature"] == 0.2
     assert sampling_params["max_new_tokens"] == 8
+
+
+@pytest.mark.parametrize(
+    ("sampling_params", "supported", "expected"),
+    [
+        ({}, True, "request-id"),
+        ({"n": 1}, True, "request-id"),
+        ([{"n": 1}], True, "request-id"),
+        ({"n": 3}, True, None),
+        ([{"n": 3}], True, None),
+        ({"n": 3, "beam_width": 2}, True, "request-id"),
+        ({"n": 1}, False, None),
+    ],
+)
+def test_ordered_cancellation_requires_stable_sglang_request_id(
+    sampling_params, supported, expected
+):
+    assert (
+        _ordered_cancellation_request_id(
+            "request-id", sampling_params, supported=supported
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("native_payload", "expected"),
+    [
+        ({}, False),
+        ({"prompt": "hello"}, False),
+        ({"prompt": ["hello", "world"]}, True),
+        ({"text": ["hello", "world"]}, True),
+        ({"input_ids": [1, 2]}, False),
+        ({"input_ids": [[1], [2]]}, True),
+        ({"input_embeds": [[0.1], [0.2]]}, False),
+        ({"input_embeds": [[[0.1]], [[0.2]]]}, True),
+    ],
+)
+def test_native_payload_batch_detection(native_payload, expected):
+    assert _native_payload_is_batched(native_payload) is expected
+
+
+def test_ordered_cancellation_rejects_native_batch():
+    assert (
+        _ordered_cancellation_request_id(
+            "request-id", {"n": 1}, supported=True, batched=True
+        )
+        is None
+    )
 
 
 def test_build_sampling_params_forwards_repetition_controls_for_token_requests():
@@ -813,23 +1043,55 @@ def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
     SamplingParams(**sampling_params)
 
 
-def test_build_sampling_params_maps_min_tokens_for_token_requests():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
+def test_build_sampling_params_holds_tokenizer_free_engine_open_for_min_tokens():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
 
     sampling_params = handler._build_sampling_params(
         {
             "sampling_options": {},
             "stop_conditions": {
                 "max_tokens": 64,
-                "min_tokens": 64,
-                "ignore_eos": True,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+                "stop_token_ids_hidden": [151643],
             },
         }
     )
 
-    assert sampling_params["min_new_tokens"] == 64
-    assert sampling_params["max_new_tokens"] == 64
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
     assert sampling_params["ignore_eos"] is True
+    assert sampling_params["max_new_tokens"] == 64
+
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    SamplingParams(**sampling_params).normalize(tokenizer=None)
+
+
+def test_build_sampling_params_forwards_min_tokens_when_engine_has_tokenizer():
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=False,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+            },
+        }
+    )
+
+    assert sampling_params["min_new_tokens"] == 8
+    assert sampling_params["stop_token_ids"] == [7]
+    assert "ignore_eos" not in sampling_params
+    assert sampling_params["max_new_tokens"] == 64
 
 
 def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
@@ -844,7 +1106,10 @@ def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
 
 
 def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
 
     sampling_params = handler._build_sampling_params(
         {"sampling_options": {}, "stop_conditions": {"max_tokens": 8}}
@@ -854,7 +1119,10 @@ def test_build_sampling_params_omits_min_new_tokens_when_min_tokens_absent():
 
 
 def test_build_sampling_params_forwards_explicit_zero_min_tokens():
-    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    handler = _new_decode_handler(
+        use_sglang_tokenizer=False,
+        skip_tokenizer_init=True,
+    )
 
     sampling_params = handler._build_sampling_params(
         {"sampling_options": {}, "stop_conditions": {"max_tokens": 8, "min_tokens": 0}}
@@ -980,7 +1248,7 @@ class TestMultimodalGuard:
         ids=["top_level_messages", "extra_args_messages"],
     )
     def test_raises_for_image_url(self, request_factory):
-        with pytest.raises(RuntimeError, match="multi_modal_data"):
+        with pytest.raises(InvalidArgument, match="multi_modal_data"):
             raise_if_unextracted_multimodal(request_factory(self._image_message()))
 
     def test_raises_for_audio_url(self):
@@ -999,7 +1267,7 @@ class TestMultimodalGuard:
             ],
         }
 
-        with pytest.raises(RuntimeError, match="audio_url"):
+        with pytest.raises(InvalidArgument, match="audio_url"):
             raise_if_unextracted_multimodal(request)
 
     def test_text_only_request_bypasses_guard(self):
@@ -1492,6 +1760,7 @@ async def test_process_text_stream_forwards_incremental_text_per_choice():
         "llo",
         "od",
     ]
+    assert [chunk["id"] for chunk in chunks] == ["public-request-id"] * 4
 
 
 @pytest.mark.asyncio
