@@ -166,10 +166,10 @@ mod tests {
                 let request = create_test_request("nemotron", true);
                 let handle = payload::create_handle(&request, "test-req-1", None)
                     .expect("Failed to create payload handle");
-                handle.emit(Some(Arc::new(create_test_response(
-                    "nemotron",
-                    "test response",
-                ))));
+                handle.emit(
+                    Some(Arc::new(create_test_response("nemotron", "test response"))),
+                    None,
+                );
 
                 time::sleep(Duration::from_millis(200)).await;
 
@@ -232,12 +232,12 @@ mod tests {
                 let request_true = create_test_request("nemotron", true);
                 payload::create_handle(&request_true, "store-true", None)
                     .expect("store=true handle")
-                    .emit(None);
+                    .emit(None, Some("response_stream_dropped".to_string()));
 
                 let request_false = create_test_request("nemotron", false);
                 payload::create_handle(&request_false, "store-false", None)
                     .expect("store=false handle")
-                    .emit(None);
+                    .emit(None, Some("response_stream_dropped".to_string()));
 
                 time::sleep(Duration::from_millis(200)).await;
 
