@@ -61,7 +61,6 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
 #[derive(Default)]
 struct PreparedRequest {
     min_prefill: usize,
-    has_tier_matches: bool,
     block_size: IntegerDivisor,
     request_blocks: IntegerDivisor,
     overlap_credit: f64,
@@ -140,10 +139,6 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         };
         self.prepared = PreparedRequest {
             min_prefill: 0,
-            has_tier_matches: context
-                .cache()
-                .ok_or_else(|| WorkerSelectionPolicyError::failed("cache context unavailable"))?
-                .has_tier_matches(),
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
             request_blocks: IntegerDivisor::new(context.request_blocks()),
             overlap_credit,
@@ -177,15 +172,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
         let (estimated_overlap, cached_tokens) = cache.accounting_cache_estimate();
-        let device = if self.prepared.has_tier_matches {
+        let device = if cache.has_tier_matches() {
             cache.device_overlap_blocks()
         } else {
             estimated_overlap
         };
         let shared_credit = if SHARED_CREDIT {
-            let shared = context
-                .cache()
-                .and_then(|cache| cache.shared_hits())
+            let shared = cache
+                .shared_hits()
                 .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
             self.shared_cache_multiplier * shared as f64
         } else {

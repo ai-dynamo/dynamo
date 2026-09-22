@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Request metadata and the borrowed, CACHE-gated lookup snapshot.
+//! Request metadata available to worker-selection components.
 
-use super::{SessionContext, WorkerInputs};
-use crate::protocols::{SharedCacheHits, WorkerAffinityTarget, WorkerWithDpRank};
+use super::SessionContext;
+use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 use crate::scheduling::SchedulingRequest;
 
 /// Request-level values available to custom filters, scorers, and pickers.
@@ -13,34 +13,8 @@ pub struct WorkerSelectionContext<'a> {
     pub(crate) request_blocks: u64,
     pub(crate) block_size: u32,
     pub(crate) track_prefill_tokens: bool,
-    pub(crate) has_tier_matches: bool,
-    pub(crate) inputs: WorkerInputs,
     pub(crate) pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) router_temperature_override: Option<f64>,
-}
-
-/// Request-wide cache facts from the host's current lookup snapshot.
-/// Borrowed for the selection callback; no worker data is copied or looked up here.
-#[derive(Clone, Copy)]
-pub struct RequestCacheInput<'a> {
-    shared_hits: Option<&'a SharedCacheHits>,
-    has_tier_matches: bool,
-}
-
-impl<'a> RequestCacheInput<'a> {
-    /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
-    /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
-    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
-    pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
-        self.shared_hits
-    }
-
-    /// Whether the request snapshot contains any tier-specific matches before worker filtering.
-    /// False means only accounting estimates (or no cache data) were supplied. This describes
-    /// observed matches, not worker cache capacity or whether a particular worker has a match.
-    pub fn has_tier_matches(self) -> bool {
-        self.has_tier_matches
-    }
 }
 
 impl WorkerSelectionContext<'_> {
@@ -55,31 +29,6 @@ impl WorkerSelectionContext<'_> {
     /// cache weighting, or additional storage is involved.
     pub fn prompt_tokens(&self) -> usize {
         self.request.isl_tokens
-    }
-
-    /// Borrow request-wide cache facts when this component declared [`WorkerInputs::CACHE`].
-    /// This is the existing lookup snapshot; accessing it adds no lookup or allocation.
-    pub fn cache(&self) -> Option<RequestCacheInput<'_>> {
-        self.inputs
-            .contains(WorkerInputs::CACHE)
-            .then_some(RequestCacheInput {
-                shared_hits: self.request.shared_cache_hits.as_ref(),
-                has_tier_matches: self.has_tier_matches,
-            })
-    }
-
-    /// Restrict request-level signals to this component's startup input declaration.
-    pub(crate) fn with_inputs(&self, inputs: WorkerInputs) -> Self {
-        Self {
-            request: self.request,
-            request_blocks: self.request_blocks,
-            block_size: self.block_size,
-            track_prefill_tokens: self.track_prefill_tokens,
-            has_tier_matches: self.has_tier_matches,
-            inputs,
-            pinned_worker: self.pinned_worker,
-            router_temperature_override: self.router_temperature_override,
-        }
     }
 
     /// Return the incoming prompt size in KV blocks.

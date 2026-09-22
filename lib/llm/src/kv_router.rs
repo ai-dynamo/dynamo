@@ -2174,17 +2174,10 @@ mod tests {
                 .iter()
                 .position(|candidate| candidate.worker() == self.worker)
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("fixed worker not eligible"))?;
-            let shared = _context
-                .cache()
-                .and_then(|cache| cache.shared_hits())
-                .map(|hits| {
-                    hits.hits_beyond(
-                        input.cache().unwrap()[row]
-                            .device_overlap_blocks()
-                            .round()
-                            .max(0.0) as u32,
-                    )
-                })
+            let cache = input.cache().unwrap().get(row).unwrap();
+            let shared = cache
+                .shared_hits()
+                .map(|hits| hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32))
                 .filter(|blocks| *blocks > 0);
             assert_eq!(shared, self.expected_shared_blocks);
             Ok(row)

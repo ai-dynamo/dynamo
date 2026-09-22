@@ -157,16 +157,23 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
         ) -> Result<usize, WorkerSelectionPolicyError> {
             assert_eq!(context.prompt_tokens(), 17);
             assert_eq!(context.request_blocks(), 2);
-            assert!(context.cache().unwrap().has_tier_matches());
             assert!(input.load().unwrap().iter().all(|load| load.is_available()));
-            for cache in input.cache().unwrap() {
+            for cache in input.cache().unwrap().iter() {
+                assert!(cache.has_tier_matches());
                 let (blocks, tokens) = cache.accounting_cache_estimate();
                 assert_eq!((blocks * 16.0) as usize, tokens);
             }
             Ok(0)
         }
     }
-    let (workers, request) = fixture(2, 17);
+    let (workers, mut request) = fixture(2, 17);
+    // Tier availability belongs to the lookup, even when its only entry is ineligible.
+    request.overlap.tier_overlap_blocks = Default::default();
+    request
+        .overlap
+        .tier_overlap_blocks
+        .disk
+        .insert(WorkerWithDpRank::from_worker_id(999), 1);
     WorkerSelectionPolicy::new(KvRouterConfig::default(), "test", vec![], Box::new(Inspect))
         .select_worker(support::selection_input(&workers, &request, 16))
         .unwrap();

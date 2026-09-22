@@ -7,11 +7,11 @@ mod config;
 mod context;
 mod inputs;
 
-pub use context::{RequestCacheInput, WorkerSelectionContext};
-pub(crate) use inputs::CandidateData;
+pub use context::WorkerSelectionContext;
+pub(crate) use inputs::{CacheSnapshot, CandidateData, WorkerCacheData};
 pub use inputs::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerCandidates, WorkerInputView,
-    WorkerInputs, WorkerLoadInput,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerInputView, WorkerInputs, WorkerLoadInput,
 };
 
 pub use super::registry::{

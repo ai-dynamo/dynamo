@@ -4,9 +4,9 @@
 mod support;
 
 use dynamo_kv_router::{
-    KvRouterConfig, SharedCacheHits, WorkerCandidate, WorkerCandidates, WorkerFilter,
-    WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
+    KvRouterConfig, SharedCacheHits, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError, WorkerSelector,
 };
 use std::sync::{
     Arc,
@@ -16,7 +16,8 @@ use std::sync::{
 struct InputProbe {
     inputs: WorkerInputs,
     tier_matches: bool,
-    shared_hits: bool,
+    shared_hits: Option<u32>,
+    shared_identity: Arc<AtomicUsize>,
     declarations: Arc<AtomicUsize>,
     calls: Arc<AtomicUsize>,
 }
@@ -41,6 +42,7 @@ impl InputProbe {
             self.inputs.contains(WorkerInputs::PREFERRED_TAINT)
         );
         if let Some(cache) = candidate.cache() {
+            self.check_cache(cache);
             assert_eq!(
                 cache.host_overlap_blocks(),
                 if self.tier_matches { 2.0 } else { 0.0 }
@@ -55,20 +57,22 @@ impl InputProbe {
         self.calls.fetch_add(1, Ordering::Relaxed);
         // Ordinary request context stays available without CACHE.
         assert_eq!(context.prompt_tokens(), 17);
-        if self.inputs.contains(WorkerInputs::CACHE) {
-            assert_eq!(
-                context.cache().unwrap().has_tier_matches(),
-                self.tier_matches
-            );
-            assert_eq!(
-                context.cache().unwrap().shared_hits().is_some(),
-                self.shared_hits
-            );
-            if let Some(hits) = context.cache().unwrap().shared_hits() {
-                assert_eq!(hits.hits_beyond(0), 4);
+    }
+
+    fn check_cache(&self, cache: WorkerCacheInput<'_>) {
+        assert_eq!(cache.has_tier_matches(), self.tier_matches);
+        assert_eq!(cache.shared_hits().is_some(), self.shared_hits.is_some());
+        if let Some(hits) = cache.shared_hits() {
+            assert_eq!(hits.hits_beyond(0), self.shared_hits.unwrap());
+            let address = std::ptr::from_ref(hits) as usize;
+            if let Err(previous) = self.shared_identity.compare_exchange(
+                0,
+                address,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                assert_eq!(address, previous);
             }
-        } else {
-            assert!(context.cache().is_none());
         }
     }
 }
@@ -109,9 +113,6 @@ impl WorkerScorer for InputProbe {
             let indexed = candidates.get(row).unwrap();
             self.check_candidate(indexed);
             assert_eq!(indexed.worker(), candidate.worker());
-            if let Some(cache) = candidate.cache() {
-                assert!(std::ptr::eq(cache, indexed.cache().unwrap()));
-            }
         }
         costs.fill(0.0);
         Ok(())
@@ -137,6 +138,15 @@ impl WorkerPicker for InputProbe {
             input.load().is_some(),
             self.inputs.contains(WorkerInputs::LOAD)
         );
+        if let Some(cache) = input.cache() {
+            assert_eq!(cache.len(), input.candidates().len());
+            assert!(!cache.is_empty());
+            assert!(cache.get(cache.len()).is_none());
+            for (row, entry) in cache.iter().enumerate() {
+                self.check_cache(entry);
+                self.check_cache(cache.get(row).unwrap());
+            }
+        }
         for candidate in input.candidates() {
             assert_eq!(
                 candidate.preferred_taint_multiplier().is_some(),
@@ -170,15 +180,18 @@ fn each_component_can_only_read_its_own_inputs() {
         for scorer_mask in 0..8 {
             for picker_mask in 0..8 {
                 for tier_matches in [false, true] {
-                    for shared_hits in [false, true] {
+                    for shared_hits in [None, Some(0), Some(4)] {
                         let (workers, mut request) = support::fixture(2, 17);
                         if !tier_matches {
                             request.overlap.tier_overlap_blocks = Default::default();
                         }
-                        if shared_hits {
-                            request.shared_cache_hits =
-                                Some(SharedCacheHits::from_ranges(vec![1..3, 5..7]));
-                        }
+                        request.shared_cache_hits = shared_hits.map(|count| {
+                            SharedCacheHits::from_ranges(if count == 0 {
+                                vec![]
+                            } else {
+                                vec![1..3, 5..7]
+                            })
+                        });
                         // Even unmatched preferences produce Some(1.0), so an undeclared
                         // component leaking another component's taint value fails this test.
                         request
@@ -187,10 +200,12 @@ fn each_component_can_only_read_its_own_inputs() {
                             .insert("preferred".into(), 1.0);
                         let declarations = Arc::new(AtomicUsize::new(0));
                         let calls = Arc::new(AtomicUsize::new(0));
+                        let shared_identity = Arc::new(AtomicUsize::new(0));
                         let probe = |mask| InputProbe {
                             inputs: inputs(mask),
                             tier_matches,
                             shared_hits,
+                            shared_identity: shared_identity.clone(),
                             declarations: declarations.clone(),
                             calls: calls.clone(),
                         };
@@ -212,6 +227,12 @@ fn each_component_can_only_read_its_own_inputs() {
                             policy
                                 .select_worker(support::selection_input(&workers, &request, 16))
                                 .unwrap();
+                        }
+                        if let Some(hits) = request.shared_cache_hits.as_ref() {
+                            assert_eq!(
+                                shared_identity.load(Ordering::Relaxed),
+                                std::ptr::from_ref(hits) as usize
+                            );
                         }
                         assert_eq!(calls.load(Ordering::Relaxed), 22);
                         assert_eq!(declarations.load(Ordering::Relaxed), 5);

@@ -704,12 +704,9 @@ impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
                 .expect("CACHE inputs requested")
                 .iter()
                 .map(|cache| {
-                    context
-                        .cache()
-                        .and_then(|request| request.shared_hits())
-                        .map_or(0, |hits| {
-                            hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32)
-                        })
+                    cache.shared_hits().map_or(0, |hits| {
+                        hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32)
+                    })
                 })
                 .collect(),
         });

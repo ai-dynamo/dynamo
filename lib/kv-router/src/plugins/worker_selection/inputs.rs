@@ -3,14 +3,14 @@
 
 //! Worker input groups, stored snapshots, and component-scoped borrowed views.
 
-use crate::protocols::WorkerWithDpRank;
+use crate::protocols::{SharedCacheHits, WorkerWithDpRank};
 use std::ops::BitOr;
 
 /// Host-owned row materialized once for the union of component input requirements.
 pub(crate) struct CandidateData {
     pub(crate) worker: WorkerWithDpRank,
     pub(crate) inputs: WorkerInputs,
-    pub(crate) cache: WorkerCacheInput,
+    pub(crate) cache: WorkerCacheData,
     pub(crate) load: WorkerLoadInput,
     pub(crate) preferred_taint_multiplier: Option<f64>,
 }
@@ -20,11 +20,20 @@ pub(crate) struct CandidateData {
 pub struct WorkerCandidate<'a> {
     data: &'a CandidateData,
     inputs: WorkerInputs,
+    cache_snapshot: &'a CacheSnapshot<'a>,
 }
 
 impl<'a> WorkerCandidate<'a> {
-    pub(crate) fn new(data: &'a CandidateData, inputs: WorkerInputs) -> Self {
-        Self { data, inputs }
+    pub(crate) fn new(
+        data: &'a CandidateData,
+        inputs: WorkerInputs,
+        cache_snapshot: &'a CacheSnapshot<'a>,
+    ) -> Self {
+        Self {
+            data,
+            inputs,
+            cache_snapshot,
+        }
     }
 
     /// Worker identity is always available.
@@ -33,10 +42,13 @@ impl<'a> WorkerCandidate<'a> {
     }
 
     /// Read this worker's cache snapshot only when this component declared CACHE.
-    pub fn cache(self) -> Option<&'a WorkerCacheInput> {
+    pub fn cache(self) -> Option<WorkerCacheInput<'a>> {
         self.inputs
             .contains(WorkerInputs::CACHE)
-            .then_some(&self.data.cache)
+            .then_some(WorkerCacheInput {
+                data: &self.data.cache,
+                snapshot: self.cache_snapshot,
+            })
     }
 
     /// Read this worker's load snapshot only when this component declared LOAD.
@@ -64,11 +76,20 @@ impl<'a> WorkerCandidate<'a> {
 pub struct WorkerCandidates<'a> {
     rows: &'a [CandidateData],
     inputs: WorkerInputs,
+    cache_snapshot: &'a CacheSnapshot<'a>,
 }
 
 impl<'a> WorkerCandidates<'a> {
-    pub(crate) fn new(rows: &'a [CandidateData], inputs: WorkerInputs) -> Self {
-        Self { rows, inputs }
+    pub(crate) fn new(
+        rows: &'a [CandidateData],
+        inputs: WorkerInputs,
+        cache_snapshot: &'a CacheSnapshot<'a>,
+    ) -> Self {
+        Self {
+            rows,
+            inputs,
+            cache_snapshot,
+        }
     }
 
     /// Number of surviving workers, equal to the scorer's cost-buffer length.
@@ -85,7 +106,7 @@ impl<'a> WorkerCandidates<'a> {
     pub fn get(self, row: usize) -> Option<WorkerCandidate<'a>> {
         self.rows
             .get(row)
-            .map(|data| WorkerCandidate::new(data, self.inputs))
+            .map(|data| WorkerCandidate::new(data, self.inputs, self.cache_snapshot))
     }
 
     /// Iterate over the surviving workers without copying their data.
@@ -94,7 +115,7 @@ impl<'a> WorkerCandidates<'a> {
     ) -> impl ExactSizeIterator<Item = WorkerCandidate<'a>> + DoubleEndedIterator + Clone {
         self.rows
             .iter()
-            .map(move |data| WorkerCandidate::new(data, self.inputs))
+            .map(move |data| WorkerCandidate::new(data, self.inputs, self.cache_snapshot))
     }
 }
 
@@ -113,7 +134,7 @@ pub struct WorkerInputs(u8);
 impl WorkerInputs {
     /// Request no optional worker inputs.
     pub const NONE: Self = Self(0);
-    /// Request worker KV-cache overlap inputs and request-level cache context.
+    /// Request worker KV-cache overlaps and shared-cache lookup results.
     pub const CACHE: Self = Self(1 << 0);
     /// Request active-load inputs.
     pub const LOAD: Self = Self(1 << 1);
@@ -141,14 +162,65 @@ impl BitOr for WorkerInputs {
     }
 }
 
-/// KV-cache overlap values for one worker.
+/// Request-wide facts borrowed once for all cache views in a selection.
+pub(crate) struct CacheSnapshot<'a> {
+    pub(crate) shared_hits: Option<&'a SharedCacheHits>,
+    pub(crate) has_tier_matches: bool,
+}
+
+/// Numeric cache row retained in host buffers between selections.
 #[derive(Clone, Copy, Default)]
-pub struct WorkerCacheInput {
+pub(crate) struct WorkerCacheData {
     pub(crate) effective_overlap_blocks: f64,
     pub(crate) estimated_cached_tokens: usize,
     pub(crate) device_overlap_blocks: f64,
     pub(crate) host_overlap_blocks: f64,
     pub(crate) disk_overlap_blocks: f64,
+}
+
+/// Borrowed worker overlaps and shared-cache facts from one lookup snapshot.
+/// Available only to components that declare [`WorkerInputs::CACHE`].
+#[derive(Clone, Copy)]
+pub struct WorkerCacheInput<'a> {
+    data: &'a WorkerCacheData,
+    snapshot: &'a CacheSnapshot<'a>,
+}
+
+/// Borrowed cache rows in the same order as a picker's candidates.
+#[derive(Clone, Copy)]
+pub struct WorkerCacheInputs<'a> {
+    pub(crate) rows: &'a [WorkerCacheData],
+    pub(crate) snapshot: &'a CacheSnapshot<'a>,
+}
+
+impl<'a> WorkerCacheInputs<'a> {
+    /// Number of cache rows, equal to the picker candidate count.
+    pub fn len(self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether there are no cache rows.
+    pub fn is_empty(self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// Borrow one cache row, or None for an out-of-range index.
+    pub fn get(self, row: usize) -> Option<WorkerCacheInput<'a>> {
+        self.rows.get(row).map(|data| WorkerCacheInput {
+            data,
+            snapshot: self.snapshot,
+        })
+    }
+
+    /// Iterate over cache rows without copying their data.
+    pub fn iter(
+        self,
+    ) -> impl ExactSizeIterator<Item = WorkerCacheInput<'a>> + DoubleEndedIterator + Clone {
+        self.rows.iter().map(move |data| WorkerCacheInput {
+            data,
+            snapshot: self.snapshot,
+        })
+    }
 }
 
 /// Active-load values for one worker.
@@ -164,7 +236,7 @@ pub struct WorkerLoadInput {
 #[derive(Clone, Copy)]
 pub struct WorkerInputView<'a> {
     pub(crate) candidates: &'a [ScoredWorkerCandidate],
-    pub(crate) cache: Option<&'a [WorkerCacheInput]>,
+    pub(crate) cache: Option<WorkerCacheInputs<'a>>,
     pub(crate) load: Option<&'a [WorkerLoadInput]>,
 }
 
@@ -181,7 +253,7 @@ impl CandidateData {
                     additional.cache
                 }
             } else {
-                WorkerCacheInput::default()
+                WorkerCacheData::default()
             },
             load: if inputs.contains(WorkerInputs::LOAD) {
                 if self.inputs.contains(WorkerInputs::LOAD) {
@@ -217,28 +289,45 @@ impl ScoredWorkerCandidate {
     }
 }
 
-impl WorkerCacheInput {
+impl<'a> WorkerCacheInput<'a> {
+    /// Unweighted shared-cache ranges in KV block positions, or None if no result was supplied.
+    /// The host owns this snapshot. It does not change during the callback, and may lag engine state.
+    /// Use `hits_beyond(prefix)` to exclude hits already covered by the policy's chosen prefix.
+    pub fn shared_hits(self) -> Option<&'a SharedCacheHits> {
+        self.snapshot.shared_hits
+    }
+
+    /// Whether the request snapshot contains any tier-specific matches before worker filtering.
+    /// False means only accounting estimates (or no cache data) were supplied. This describes
+    /// observed matches, not worker cache capacity or whether a particular worker has a match.
+    pub fn has_tier_matches(self) -> bool {
+        self.snapshot.has_tier_matches
+    }
+
     /// Host accounting estimate for this worker, in weighted KV blocks and rounded tokens.
     /// Lower-tier matches use the host's cache weights. Missing estimates are zero;
     /// neither value is clamped to prompt length. This is the current lookup snapshot,
     /// not a count of physically resident GPU tokens. Policy scores do not alter it.
     pub fn accounting_cache_estimate(&self) -> (f64, usize) {
-        (self.effective_overlap_blocks, self.estimated_cached_tokens)
+        (
+            self.data.effective_overlap_blocks,
+            self.data.estimated_cached_tokens,
+        )
     }
 
     /// Return device-resident prefix overlap in KV blocks.
     pub fn device_overlap_blocks(&self) -> f64 {
-        self.device_overlap_blocks
+        self.data.device_overlap_blocks
     }
 
     /// Return host-pinned prefix overlap in KV blocks.
     pub fn host_overlap_blocks(&self) -> f64 {
-        self.host_overlap_blocks
+        self.data.host_overlap_blocks
     }
 
     /// Return disk prefix overlap in KV blocks.
     pub fn disk_overlap_blocks(&self) -> f64 {
-        self.disk_overlap_blocks
+        self.data.disk_overlap_blocks
     }
 }
 
@@ -272,7 +361,7 @@ impl<'a> WorkerInputView<'a> {
     }
 
     /// Return index-aligned KV-cache inputs when the picker requested them.
-    pub fn cache(self) -> Option<&'a [WorkerCacheInput]> {
+    pub fn cache(self) -> Option<WorkerCacheInputs<'a>> {
         self.cache
     }
 

@@ -16,8 +16,8 @@ use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
-    CandidateData, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
-    WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
+    WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
 
@@ -45,7 +45,7 @@ pub(super) struct ComposedPolicyState {
     unscored_candidates: Vec<CandidateData>,
     score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
-    pub(super) cache_inputs: Vec<WorkerCacheInput>,
+    pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
 }
 
@@ -151,7 +151,7 @@ fn push_picker_candidate(
     cost: f64,
     picker_inputs: WorkerInputs,
     candidates: &mut Vec<ScoredWorkerCandidate>,
-    cache_inputs: &mut Vec<WorkerCacheInput>,
+    cache_inputs: &mut Vec<WorkerCacheData>,
     load_inputs: &mut Vec<WorkerLoadInput>,
 ) {
     candidates.push(ScoredWorkerCandidate {
@@ -194,6 +194,7 @@ impl ComposedPolicyState {
     fn score_candidates(
         &mut self,
         context: &WorkerSelectionContext<'_>,
+        cache_snapshot: &CacheSnapshot<'_>,
     ) -> Result<(), KvSchedulerError> {
         let Self {
             scorers,
@@ -209,10 +210,9 @@ impl ComposedPolicyState {
         score_contributions.resize(candidates.len(), f64::NAN);
         for (scorer_index, (inputs, scorer)) in scorers.iter_mut().enumerate() {
             score_contributions.fill(f64::NAN);
-            let context = context.with_inputs(*inputs);
             scorer.score(
-                &context,
-                WorkerCandidates::new(unscored_candidates, *inputs),
+                context,
+                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot),
                 score_contributions,
             )?;
             for (row, (contribution, scored)) in score_contributions
@@ -265,7 +265,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             state.push_candidate(candidate);
             false
         });
-        state.score_candidates(&input.context)?;
+        state.score_candidates(&input.context, &input.cache_snapshot)?;
         return Ok(!state.candidates.is_empty());
     }
 
@@ -274,8 +274,6 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
         && state.filter_inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let materialize_additional_preferred_taint = eligibility.pinned_worker().is_none()
         && additional_inputs.contains(WorkerInputs::PREFERRED_TAINT);
-    // Reuse the borrowed context across rows; only the current filter's access mask changes.
-    let mut filter_context = input.context.with_inputs(WorkerInputs::NONE);
     let mut has_eligible_worker = false;
     let mut error = None;
     eligibility.any_eligible_worker_rank(workers, |worker, config| {
@@ -293,10 +291,9 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
             state.filter_inputs,
         );
         for (inputs, filter) in &mut state.filters {
-            filter_context.inputs = *inputs;
             match filter.keep(
-                &filter_context,
-                WorkerCandidate::new(&filter_candidate, *inputs),
+                &input.context,
+                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot),
             ) {
                 Ok(true) => {}
                 Ok(false) => return false,
@@ -326,7 +323,7 @@ pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
     if let Some(error) = error {
         return Err(error);
     }
-    state.score_candidates(&input.context)?;
+    state.score_candidates(&input.context, &input.cache_snapshot)?;
     Ok(has_eligible_worker)
 }
 
@@ -672,7 +669,12 @@ mod tests {
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert_eq!(
-                    input.cache().expect("cache input")[0].device_overlap_blocks(),
+                    input
+                        .cache()
+                        .expect("cache input")
+                        .get(0)
+                        .unwrap()
+                        .device_overlap_blocks(),
                     0.0
                 );
                 Ok(0)

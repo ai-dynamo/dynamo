@@ -272,7 +272,10 @@ fn picker_columns_and_costs_stay_aligned_after_a_scoring_error() {
             for (row, candidate) in input.candidates().iter().enumerate() {
                 let worker = candidate.worker();
                 let expected_overlap = (worker.worker_id * 7 + u64::from(worker.dp_rank)) % 9;
-                assert_eq!(cache[row].device_overlap_blocks(), expected_overlap as f64);
+                assert_eq!(
+                    cache.get(row).unwrap().device_overlap_blocks(),
+                    expected_overlap as f64
+                );
                 assert_eq!(load[row].active_requests(), worker.worker_id as usize % 5);
                 assert_eq!(candidate.cost(), load[row].active_requests() as f64);
             }

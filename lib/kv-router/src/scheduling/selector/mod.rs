@@ -12,14 +12,14 @@ pub use reference::DefaultWorkerSelector;
 
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::worker_selection::{
-    RequestCacheInput, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerCandidates,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
     WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
     WorkerSelectionContext,
 };
 #[cfg(any(test, feature = "bench"))]
 use reference::{DefaultWorkerPicker, DefaultWorkerScorer};
 
-use crate::plugins::worker_selection::CandidateData;
+use crate::plugins::worker_selection::{CacheSnapshot, CandidateData, WorkerCacheData};
 pub use policy::WorkerSelectionPolicy;
 use policy::{ComposedPolicyState, WorkerSelectionPolicyStateRef, collect_policy_candidates};
 #[cfg(any(test, feature = "bench"))]
@@ -131,22 +131,25 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
+    cache_snapshot: CacheSnapshot<'a>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
     fn new(request: &'a SchedulingRequest, block_size: u32) -> Self {
         Self {
             request,
+            cache_snapshot: CacheSnapshot {
+                shared_hits: request.shared_cache_hits.as_ref(),
+                has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
+                    || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
+                    || !request.overlap.tier_overlap_blocks.disk.is_empty(),
+            },
             context: WorkerSelectionContext {
                 request,
                 request_blocks: request.request_blocks(block_size),
                 block_size,
                 track_prefill_tokens: request.track_prefill_tokens,
-                inputs: WorkerInputs::NONE,
                 pinned_worker: request.pinned_worker,
-                has_tier_matches: !request.overlap.tier_overlap_blocks.device.is_empty()
-                    || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
-                    || !request.overlap.tier_overlap_blocks.disk.is_empty(),
                 router_temperature_override: request
                     .router_config_override
                     .as_ref()
@@ -201,7 +204,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                 .unwrap_or(0.0);
             let device_overlap_blocks =
                 select_device_overlap(effective_overlap_blocks, reported_device_overlap_blocks);
-            WorkerCacheInput {
+            WorkerCacheData {
                 effective_overlap_blocks,
                 estimated_cached_tokens: cached_tokens,
                 device_overlap_blocks,
@@ -223,7 +226,7 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .unwrap_or(0) as f64,
             }
         } else {
-            WorkerCacheInput::default()
+            WorkerCacheData::default()
         };
         let load = if inputs.contains(WorkerInputs::LOAD) {
             let available = worker_load.is_some();
@@ -394,15 +397,17 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 );
                 let picker_input = WorkerInputView {
                     candidates,
-                    cache: picker_inputs
-                        .contains(WorkerInputs::CACHE)
-                        .then_some(cache_inputs.as_slice()),
+                    cache: picker_inputs.contains(WorkerInputs::CACHE).then_some(
+                        WorkerCacheInputs {
+                            rows: cache_inputs,
+                            snapshot: &input.cache_snapshot,
+                        },
+                    ),
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
                 };
-                let context = input.context.with_inputs(*picker_inputs);
-                let row = picker.pick(&context, picker_input)?;
+                let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
                     return Err(WorkerSelectionPolicyError::InvalidPickerRow {
                         row,

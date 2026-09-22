@@ -414,7 +414,7 @@ The disaggregated prefill hop and query-only probes do not run classifiers. Stat
 
 ## Available Signals
 
-Worker identity and ordinary request metadata are always available. Request-level cache context requires `WorkerInputs::CACHE`. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
+Worker identity and ordinary request metadata are always available. Dynamo calculates optional per-worker signals only for groups that a filter, scorer, or picker requests.
 
 Routing cache resources start only if a component requests `CACHE`. `serve_indexer` and `enable_session_prefix_index` also require `CACHE`. Scoring weights do not control cache setup.
 
@@ -424,7 +424,6 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 |---|---|
 | `prompt_tokens()` | Exact incoming prompt token count |
 | `request_blocks()` | Incoming prompt size in KV blocks, rounded up |
-| `cache()` | Request cache data when the component declares `CACHE`; otherwise `None` |
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
@@ -433,13 +432,6 @@ Routing cache resources start only if a component requests `CACHE`. `serve_index
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
 | `router_temperature_override()` | Optional per-request router temperature override |
-
-`context.cache()` exposes:
-
-| Accessor | Meaning |
-|---|---|
-| `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
-| `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
 
 ### Session Context
 
@@ -490,6 +482,8 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `CACHE` | `host_overlap_blocks()` | Host-pinned prefix overlap in blocks |
 | `CACHE` | `disk_overlap_blocks()` | Disk prefix overlap in blocks |
 | `CACHE` | `accounting_cache_estimate()` | Accounting estimate as weighted KV blocks and rounded tokens; zero if missing, not clamped to prompt length |
+| `CACHE` | `has_tier_matches()` | Whether the lookup contains any GPU, CPU, or disk matches before filtering; `false` means only accounting estimates or no cache data were supplied |
+| `CACHE` | `shared_hits()` | `None` if no shared result was supplied; otherwise unweighted ranges with `total_hits` and `hits_beyond(prefix)` |
 | `LOAD` | `is_available()` | Whether the host supplied a load observation; distinguishes missing data from an observed idle worker |
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
@@ -498,7 +492,7 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 
 The GPU, CPU, and disk overlap accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
-A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must declare every group it reads; another component requesting a group does not grant access.
+A filter or scorer reads groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned views through `WorkerInputView`; its cache view supports `get(row)` and `iter()`. Each component must declare every group it reads; another component requesting a group does not grant access.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, the component receives `None`, even when another component requested the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 
