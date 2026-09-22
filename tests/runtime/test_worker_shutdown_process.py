@@ -42,3 +42,40 @@ def test_sdk_shutdown_watchdog_lifetime(mode):
         assert "ENGINE_CLEANED" in result.stdout
         assert "WORKER_RETURNED" in result.stdout
         assert "HOST_SURVIVED" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "python-pull",
+        "python-push",
+        "python-escalate",
+        "embedding-idle",
+        "embedding-slow",
+    ],
+)
+def test_python_shutdown_signal_to_exit(mode):
+    # Regression: early cleanup or a child-monitor-generated second signal can
+    # terminate admitted work instead of draining requests and child processes.
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).with_name("shutdown_probe.py")), mode],
+        env={
+            **os.environ,
+            "DYN_SYSTEM_PORT": "0",
+            "DYN_TCP_RPC_PORT": "0",
+            "DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS": "0",
+            "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT": "1",
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+        start_new_session=True,
+    )
+    expected_code = 70 if mode == "python-escalate" else 0
+    assert result.returncode == expected_code, result.stdout + result.stderr
+    if expected_code == 0:
+        assert "ADMISSION_CLOSED" in result.stdout
+        assert "ENGINE_CLEANED" in result.stdout
+        assert "RUNTIME_FINISHED" in result.stdout
+        if mode.startswith("embedding-"):
+            assert "CHILDREN_DRAINED" in result.stdout

@@ -37,6 +37,7 @@ from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
+from .embedding_worker_processes import EmbeddingEngineCleanupResource
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
@@ -1010,6 +1011,12 @@ class WorkerFactory:
             engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        if self.shutdown is not None and isinstance(
+            engine_cleanup_resource, EmbeddingEngineCleanupResource
+        ):
+            group = engine_cleanup_resource.process_group
+            self.shutdown.notify_children = group.begin_shutdown
+            self.shutdown.wait_for_children = group.wait_for_shutdown
 
         handler = EmbeddingWorkerHandler(
             runtime=runtime,

@@ -122,7 +122,9 @@ class WorkerShutdown:
         )
         logger.info("Received signal %s; starting worker shutdown", signum)
         self._requested.set()
-        asyncio.get_running_loop().call_soon(self._start_sequence)
+        # A synchronous signal handler can interrupt an idle selector, which
+        # Python then retries. Write the loop's wakeup fd so shutdown runs now.
+        asyncio.get_running_loop().call_soon_threadsafe(self._start_sequence)
 
     def _start_sequence(self) -> None:
         if self._sequence is None:
@@ -223,10 +225,13 @@ class WorkerShutdown:
         if self.pre_shutdown is not None:
             await self._stage("withdraw", self.pre_shutdown(), self._remaining())
         self.shutdown_event.set()
-        # Match cleanup_once: grant the floor only when the *total* is spent.
+        # Match cleanup_once: the remaining total, not a short explicit cap,
+        # determines whether cleanup needs its reserve.
         remaining = self._remaining()
         cleanup_budget = (
-            _CLEANUP_FLOOR if remaining == 0 else min(self._caps["cleanup"], remaining)
+            _CLEANUP_FLOOR
+            if remaining < _CLEANUP_FLOOR
+            else min(self._caps["cleanup"], remaining)
         )
         clean = await self._stage("cleanup", self._cleanup_worker(), cleanup_budget)
         runtime_clean = await self._stage(

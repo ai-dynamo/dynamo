@@ -12,6 +12,7 @@ embedding worker while keeping generation workers unchanged.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import logging
@@ -234,11 +235,18 @@ def _configured_system_port() -> int | None:
 
 
 def _terminate_processes(
-    children: list[tuple[int, subprocess.Popen]], timeout: float
+    children: list[tuple[int, subprocess.Popen]],
+    timeout: float,
+    *,
+    signal_children: bool = True,
 ) -> None:
-    for _index, child in children:
-        if child.poll() is None:
-            child.terminate()
+    if signal_children:
+        for _index, child in children:
+            if child.poll() is None:
+                try:
+                    child.terminate()
+                except ProcessLookupError:
+                    continue
 
     deadline = time.monotonic() + timeout
     for _index, child in children:
@@ -300,6 +308,22 @@ class EmbeddingWorkerProcessGroup:
     def start_monitor(self) -> None:
         self._monitor_thread.start()
 
+    def begin_shutdown(self) -> None:
+        """Stop failure monitoring before delivering the children's first signal."""
+        if self._stopping.is_set():
+            return
+        self._stopping.set()
+        for _index, child in self.children:
+            if child.poll() is None:
+                try:
+                    child.terminate()
+                except ProcessLookupError:
+                    continue
+
+    async def wait_for_shutdown(self) -> None:
+        while any(child.poll() is None for _index, child in self.children):
+            await asyncio.sleep(0.05)
+
     def _monitor_children(self) -> None:
         while not self._stopping.wait(0.25):
             for process_index, child in self.children:
@@ -315,9 +339,8 @@ class EmbeddingWorkerProcessGroup:
             if self._cleaned:
                 return
             self._cleaned = True
-            self._stopping.set()
-
-            _terminate_processes(self.children, timeout)
+            self.begin_shutdown()
+            _terminate_processes(self.children, timeout, signal_children=False)
             if self.engine_manager is not None:
                 try:
                     self.engine_manager.shutdown(timeout=timeout)
@@ -505,6 +528,9 @@ def create_shared_embedding_engine_client(
                 for process_index in range(1, process_count):
                     child = subprocess.Popen(
                         command,
+                        # The parent forwards shutdown once. Terminal/group
+                        # signals must not also reach children and escalate it.
+                        start_new_session=True,
                         env=_child_environment(
                             process_count=process_count,
                             process_index=process_index,

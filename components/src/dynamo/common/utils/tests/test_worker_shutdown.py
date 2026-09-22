@@ -137,6 +137,7 @@ def test_cleanup_timeout_is_failure_and_does_not_extend_stage(
     # Regression: cancellation-resistant cleanup must not extend a configured
     # stage cap or allow a successful exit after abandoning engine cleanup.
     monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "0.01")
+    monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "10")
 
     async def run():
         started = asyncio.Event()
