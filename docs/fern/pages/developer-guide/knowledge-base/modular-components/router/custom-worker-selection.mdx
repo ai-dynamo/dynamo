@@ -163,7 +163,7 @@ impl ActiveRequestsScorer {
         candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         self.minimum = usize::MAX;
-        for candidate in candidates {
+        for candidate in candidates.iter() {
             let load = candidate
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
@@ -395,13 +395,19 @@ The discovery-backed HTTP frontend and Python `KvRouter.generate` path install c
 
 The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
 
-Rust embedders can use the same setup:
+Rust embedders can use the same setup. From the embedding application's directory, add the builtin policy crate from the same Dynamo checkout:
+
+```bash
+cargo add --path "$DYNAMO_DIR/lib/router-plugins/builtin" dynamo-custom-policy-builtin
+```
+
+Start with `default_registry()` so omitted worker roles use the builtin policy, then register the custom catalog:
 
 ```rust
-use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_custom_policy_builtin::default_registry;
 use dynamo_llm::entrypoint::input::http::HttpFrontend;
 
-let mut registry = RouterPluginRegistry::default();
+let mut registry = default_registry();
 acme_routing_catalog::register(&mut registry)?;
 let plugins = registry.resolve_plugins(&kv_router_config)?;
 HttpFrontend::default()
