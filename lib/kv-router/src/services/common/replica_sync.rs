@@ -1174,6 +1174,7 @@ mod tests {
                         track_prefill_tokens: false,
                         expected_output_tokens: None,
                         prefill_load_hint: None,
+                        occupancy_admission: true,
                     },
                     router_id: 99,
                     lora_name: None,

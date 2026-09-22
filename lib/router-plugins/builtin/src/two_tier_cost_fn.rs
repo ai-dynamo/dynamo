@@ -248,6 +248,7 @@ mod tests {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
+            device_aware_inputs: None,
             worker_loads: Default::default(),
             resp_tx: None,
         };

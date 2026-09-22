@@ -14,8 +14,9 @@ use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerDeviceAwareInput, WorkerFilter,
+    WorkerInputs, WorkerLoadInput, WorkerOccupancyInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext,
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
@@ -40,6 +41,8 @@ pub(super) struct CustomWorkerSelectionState {
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheInput>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
+    pub(super) occupancy_inputs: Vec<WorkerOccupancyInput>,
+    pub(super) device_aware_inputs: Vec<WorkerDeviceAwareInput>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
@@ -97,6 +100,8 @@ impl WorkerSelectionPolicy {
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
+                occupancy_inputs: Vec::new(),
+                device_aware_inputs: Vec::new(),
             })),
         }
     }
@@ -125,6 +130,8 @@ fn push_scored_candidate(
     candidates: &mut Vec<ScoredWorkerCandidate>,
     cache_inputs: &mut Vec<WorkerCacheInput>,
     load_inputs: &mut Vec<WorkerLoadInput>,
+    occupancy_inputs: &mut Vec<WorkerOccupancyInput>,
+    device_aware_inputs: &mut Vec<WorkerDeviceAwareInput>,
 ) -> Result<(), KvSchedulerError> {
     let mut cost = 0.0;
     for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
@@ -149,6 +156,12 @@ fn push_scored_candidate(
     if picker_inputs.contains(WorkerInputs::LOAD) {
         load_inputs.push(candidate.load);
     }
+    if picker_inputs.contains(WorkerInputs::OCCUPANCY) {
+        occupancy_inputs.push(candidate.occupancy);
+    }
+    if picker_inputs.contains(WorkerInputs::DEVICE_AWARE) {
+        device_aware_inputs.push(candidate.device_aware);
+    }
     Ok(())
 }
 
@@ -168,11 +181,15 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         candidates,
         cache_inputs,
         load_inputs,
+        occupancy_inputs,
+        device_aware_inputs,
         ..
     } = state;
     candidates.clear();
     cache_inputs.clear();
     load_inputs.clear();
+    occupancy_inputs.clear();
+    device_aware_inputs.clear();
     if filters.is_empty() {
         let materialize_preferred_taint = eligibility.pinned_worker().is_none()
             && scorer_picker_inputs.contains(WorkerInputs::PREFERRED_TAINT);
@@ -194,6 +211,8 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
+                occupancy_inputs,
+                device_aware_inputs,
             ) {
                 error = Some(policy_error);
                 return true;
@@ -255,6 +274,8 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             candidates,
             cache_inputs,
             load_inputs,
+            occupancy_inputs,
+            device_aware_inputs,
         ) {
             error = Some(policy_error);
             return true;
@@ -269,7 +290,37 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
-        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => true,
+            WorkerSelectionPolicyState::Custom(state) => {
+                state.borrow().picker.uses_exclusive_affinity_target()
+            }
+        }
+    }
+
+    fn requires_exact_target(&self) -> bool {
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => false,
+            WorkerSelectionPolicyState::Custom(state) => {
+                state.borrow().picker.requires_exact_target()
+            }
+        }
+    }
+
+    fn resolves_worker_only_target(&self) -> bool {
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => false,
+            WorkerSelectionPolicyState::Custom(state) => {
+                state.borrow().picker.resolves_worker_only_target()
+            }
+        }
+    }
+
+    fn supports_lora(&self) -> bool {
+        match &self.state {
+            WorkerSelectionPolicyState::Default(_) => true,
+            WorkerSelectionPolicyState::Custom(state) => state.borrow().picker.supports_lora(),
+        }
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {

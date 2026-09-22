@@ -55,6 +55,8 @@ pub(super) struct PendingSelection {
     pub effective_prefill_tokens: usize,
     pub expected_output_tokens: Option<u32>,
     pub track_prefill_tokens: bool,
+    /// Whether replaying this selection contributes to reservation-aware occupancy.
+    pub occupancy_admission: bool,
     pub lora_name: Option<String>,
     /// Public block hashes retained only when the partition indexer records
     /// routing decisions, so the replayed booking can be recorded too.
@@ -275,6 +277,7 @@ mod tests {
             effective_prefill_tokens: 8,
             expected_output_tokens: Some(16),
             track_prefill_tokens: true,
+            occupancy_admission: true,
             lora_name: None,
             routing_hashes: None,
             session_id: None,

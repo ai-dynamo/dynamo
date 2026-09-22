@@ -92,10 +92,16 @@ Write the policy into a YAML file:
 ```yaml
 # worker-selection.yaml
 worker_selection:
-  aggregated: dynamo-two-tier-cost-fn
+  aggregated: round-robin
+  prefill: p2c
+  decode: least-loaded
   instances:
-    - name: dynamo-two-tier-cost-fn
-      type: dynamo-two-tier-cost-fn
+    - name: round-robin
+      type: dynamo-round-robin
+    - name: p2c
+      type: dynamo-power-of-two-choices
+    - name: least-loaded
+      type: dynamo-least-loaded
 ```
 
 Then point the frontend at it:
@@ -109,7 +115,12 @@ python3 -m dynamo.frontend \
 To compare against the built-in selector, restart with
 `DYN_ROUTER_WORKER_SELECTION_POLICY=default` — no config change needed.
 
-For the available policy types and per-stage prefill/decode selection, see
+The YAML changes the worker-choice rule inside the configured `kv` routing path; it does not change
+the top-level router mode. Aggregated, prefill, decode, and encode stages can select different
+instances. An omitted stage uses Dynamo's default selector.
+
+For the available policy types and their exact signals, affinity, occupancy, and data-parallel rank
+behavior, see
 [Worker-Selection Policies](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#worker-selection-policies).
 
 ## Troubleshooting

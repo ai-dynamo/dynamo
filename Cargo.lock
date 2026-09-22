@@ -2465,8 +2465,10 @@ name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
+ "dynamo-runtime",
  "serde",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2691,6 +2693,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",

@@ -318,6 +318,7 @@ impl PendingRequest {
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         }
     }
@@ -982,6 +983,7 @@ impl OfflineReplayRouter {
                     prefill_load_hint,
                     worker: selection.worker,
                     lora_name: None,
+                    occupancy_admission: true,
                 },
                 decay_now,
             )

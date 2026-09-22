@@ -19,6 +19,10 @@ const fn default_track_prefill_tokens() -> bool {
     true
 }
 
+const fn default_occupancy_admission() -> bool {
+    true
+}
+
 /// The event subject that workers publish KV cache events on.
 pub const KV_EVENT_SUBJECT: &str = "kv-events";
 
@@ -1092,6 +1096,9 @@ pub struct WorkerSelectionResult {
     /// Selected worker's projected decode load after adding this request's
     /// prompt blocks, in scheduler-tracked block units.
     pub potential_decode_blocks: usize,
+
+    /// Whether this request contributes to reservation-aware occupancy.
+    pub occupancy_admission: bool,
 }
 
 /// Active load metrics for a worker, used for overload detection.
@@ -1195,6 +1202,8 @@ pub enum ActiveSequenceEventData {
         track_prefill_tokens: bool,
         expected_output_tokens: Option<u32>,
         prefill_load_hint: Option<PrefillLoadHint>,
+        #[serde(default = "default_occupancy_admission")]
+        occupancy_admission: bool,
     },
     // NOTE: Output-block growth is intentionally not a replica-sync event. It can occur
     // at high frequency, and broadcasting it would consume disproportionate network bandwidth.

@@ -304,7 +304,7 @@ worker_selection:
 
 The `type` selects a registered provider. The `name` identifies one configured instance. `worker_selection.aggregated`, `worker_selection.prefill`, `worker_selection.decode`, and `worker_selection.encode` select the matching worker pools. An omitted role uses Dynamo's built-in policy; one role does not fall back to another role's selection.
 
-`worker_selection.encode` applies only to a surface-carrying encode worker set that constructs the standard KV chooser. It does not configure the surface-less multimodal encoder hop: `EncoderRouter` selects those workers independently with round-robin routing.
+An explicit non-default `worker_selection.encode` selection also configures the surface-less multimodal encoder hop. Dynamo constructs its configured scheduler lazily when the encode target becomes active. Without an encode override, that hop keeps its legacy round-robin behavior.
 
 For prefill and decode, the selection order is the role-specific CLI or environment override, `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then Dynamo's built-in policy. For aggregated and encode, the order is `DYN_ROUTER_WORKER_SELECTION_POLICY`, the matching YAML selection, and then the built-in policy. Set any selection to `default` to use the built-in policy for that scope.
 
@@ -413,6 +413,8 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
 | `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
+| `exact_target()` | Explicit request target when present, otherwise the bound affinity target. A worker-only target keeps `dp_rank` unset |
+| `device_aware()` | Request-level required cache-hit count and non-CPU-to-CPU ratio when the picker requests `DEVICE_AWARE` |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
@@ -470,11 +472,29 @@ If a component needs no optional worker data, return `WorkerInputs::NONE`. Combi
 | `LOAD` | `active_prefill_tokens()` | Tokens currently active in the worker's prefill stage |
 | `LOAD` | `decode_cost_blocks()` | Projected active decode footprint, including this request's additional active blocks |
 | `LOAD` | `active_requests()` | Requests currently active on the worker |
+| `OCCUPANCY` | `active_requests()` | Atomically booked routing occupancy for the worker-rank row. Complete device-cache hits can be excluded by the picker admission result |
+| `DEVICE_AWARE` | `device()` | CPU or accelerator device class reported by discovery |
+| `DEVICE_AWARE` | `cache_hits()` | This worker's hits for the request's multimodal embedding-cache keys |
 | `PREFERRED_TAINT` | `preferred_taint_multiplier()` | Optional cost multiplier from matching preferred routing taints |
 
 The cache accessors return raw tier counts. A missing tier or worker entry is zero; Dynamo does not substitute its weighted effective-overlap estimate. Each custom scorer chooses how to combine the raw counts.
 
 A filter or scorer reads requested groups through `WorkerCandidate::cache()` or `load()`. A picker reads index-aligned arrays through `WorkerInputView`. Each component must request every optional group that it reads.
+
+`OCCUPANCY` is intentionally distinct from `LOAD.active_requests()`: it is the reservation signal
+used by the non-KV P2C and least-loaded algorithms. The scheduler serializes selection and booking,
+then releases the booking through its existing response-stream lifecycle. `DEVICE_AWARE` is
+capability-gated; Dynamo builds request cache keys and per-worker device/cache data only when the
+selected policy requests it. A device-aware picker can override `occupancy_admission()` to exclude
+a complete cache hit while preserving the ordinary request lifecycle.
+
+Pickers that implement exact routing can use `exact_target()` and opt into
+`uses_exclusive_affinity_target()` plus `requires_exact_target()`. The host then rejects a missing
+target before queueing. A picker that intentionally resolves a worker-only exact target to one of
+its data-parallel ranks can also opt into `resolves_worker_only_target()`; existing policies keep
+the host's explicit-rank requirement by default. `supports_lora()` defaults to `true` for existing
+custom policies; return `false` when the policy cannot preserve the configured KV scheduler's LoRA
+filtering contract.
 
 `WorkerCandidate::preferred_taint_multiplier()` and `ScoredWorkerCandidate::preferred_taint_multiplier()` return the optional cost multiplier from preferred routing constraints. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading the multiplier. Without that declaration, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing constraints remain host-enforced eligibility rules.
 

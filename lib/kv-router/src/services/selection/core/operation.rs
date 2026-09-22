@@ -11,6 +11,7 @@ use dynamo_tokens::SequenceHash;
 
 use crate::identity::RoutingPartitionId;
 use crate::kv_hints::KvHint;
+use crate::plugins::worker_selection::DeviceAwareRequestInputs;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerId,
     WorkerWithDpRank,
@@ -34,6 +35,7 @@ pub struct SelectionOperation<'a> {
     pub strict_priority: u32,
     pub policy_class: Option<String>,
     pub session_context: Option<SessionContext>,
+    pub device_aware_inputs: Option<DeviceAwareRequestInputs>,
     pub session: SessionBinding,
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,

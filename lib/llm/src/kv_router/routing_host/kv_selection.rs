@@ -79,6 +79,7 @@ pub(super) struct SelectionOptions {
     pub(super) planned_worker: Option<WorkerWithDpRank>,
     pub(super) policy_class: Option<String>,
     pub(super) session_context: Option<dynamo_kv_router::SessionContext>,
+    pub(super) device_aware_inputs: Option<dynamo_kv_router::selector::DeviceAwareRequestInputs>,
     pub(super) admission: FindBestMatchAdmission,
 }
 
@@ -94,6 +95,7 @@ struct BestMatchArgs<'a> {
     strict_priority: u32,
     policy_class: Option<String>,
     session_context: Option<dynamo_kv_router::SessionContext>,
+    device_aware_inputs: Option<dynamo_kv_router::selector::DeviceAwareRequestInputs>,
     expected_output_tokens: Option<u32>,
     affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -119,6 +121,7 @@ impl RoutingHost {
                 args.strict_priority,
                 args.policy_class,
                 args.session_context,
+                args.device_aware_inputs,
                 args.expected_output_tokens,
                 args.affinity_target,
                 args.pinned_worker,
@@ -211,6 +214,7 @@ impl RoutingHost {
             planned_worker,
             policy_class,
             session_context,
+            device_aware_inputs,
             admission,
         } = options;
         let worker_only_affinity = pinned_target.filter(|target| target.dp_rank.is_none());
@@ -241,6 +245,30 @@ impl RoutingHost {
                 .map(|dp_rank| (target.worker_id, Some(dp_rank)))
         });
         let requested_pin = merge_affinity_pin(explicit_pin, affinity_pin);
+        let policy_resolved_worker_only_target = self
+            .kv_router()
+            .resolves_worker_only_target()
+            .then(|| {
+                requested_pin
+                    .filter(|(_, dp_rank)| dp_rank.is_none())
+                    .map(|(worker_id, _)| WorkerAffinityTarget::new(worker_id, None))
+                    .or_else(|| {
+                        worker_only_affinity.map(|target| {
+                            WorkerAffinityTarget::new(target.worker_id, target.dp_rank)
+                        })
+                    })
+            })
+            .flatten();
+        if let Some(target) = policy_resolved_worker_only_target {
+            match &mut allowed_worker_ids {
+                Some(allowed_workers) => {
+                    allowed_workers.retain(|worker_id| *worker_id == target.worker_id);
+                }
+                None => {
+                    allowed_worker_ids = Some(HashSet::from([target.worker_id]));
+                }
+            }
+        }
         let pinned_worker = match planned_worker {
             Some(planned_worker) => {
                 if let Some((worker_id, dp_rank)) = requested_pin
@@ -257,7 +285,9 @@ impl RoutingHost {
                 }
                 Some(planned_worker)
             }
-            None => match requested_pin {
+            None => match requested_pin.filter(|(_, dp_rank)| {
+                dp_rank.is_some() || policy_resolved_worker_only_target.is_none()
+            }) {
                 Some((worker_id, requested_dp_rank)) => Some(resolve_pinned_worker_rank(
                     worker_id,
                     requested_dp_rank,
@@ -281,9 +311,13 @@ impl RoutingHost {
                     strict_priority,
                     policy_class,
                     session_context,
+                    device_aware_inputs,
                     expected_output_tokens,
-                    affinity_target: affinity_target
-                        .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
+                    affinity_target: policy_resolved_worker_only_target.or_else(|| {
+                        affinity_target.map(|target| {
+                            WorkerAffinityTarget::new(target.worker_id, target.dp_rank)
+                        })
+                    }),
                     pinned_worker: None,
                     allowed_worker_ids,
                     routing_constraints: routing_constraints.clone(),
@@ -349,6 +383,7 @@ impl RoutingHost {
             strict_priority,
             policy_class,
             session_context,
+            device_aware_inputs,
             expected_output_tokens,
             affinity_target: None,
             pinned_worker: Some(pinned_worker),

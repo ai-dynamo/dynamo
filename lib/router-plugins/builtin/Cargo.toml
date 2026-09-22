@@ -13,7 +13,9 @@ description = "Worker-selection policies Dynamo ships and always links"
 
 [dependencies]
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
+dynamo-runtime.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true }

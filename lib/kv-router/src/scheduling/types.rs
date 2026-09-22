@@ -13,6 +13,7 @@ use super::filter::RoutingEligibility;
 use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
 use crate::kv_hints::KvTransferCandidates;
+use crate::plugins::worker_selection::DeviceAwareRequestInputs;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
     LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
@@ -92,6 +93,9 @@ pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
     NoEndpoints,
 
+    #[error("Direct routing requires an exact affinity or request target")]
+    DirectTargetRequired,
+
     #[error(transparent)]
     QueueRejected(#[from] QueueRejection),
 
@@ -156,6 +160,8 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub potential_decode_blocks: usize,
+    /// Whether a later replayed booking contributes to reservation-aware occupancy.
+    pub occupancy_admission: bool,
 }
 
 /// Internal result that pairs a public scheduling response with its attempt identity.
@@ -389,6 +395,8 @@ pub struct ScheduleRequest {
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
+    /// Capability-gated request-plane signals for device-aware worker selection.
+    pub device_aware_inputs: Option<DeviceAwareRequestInputs>,
 }
 
 /// Actor-owned admission request.
@@ -423,6 +431,7 @@ pub struct SchedulingRequest {
     pub kv_transfer_candidates: Option<KvTransferCandidates>,
     pub retain_kv_transfer_chain: bool,
     pub shared_cache_hits: Option<SharedCacheHits>,
+    pub device_aware_inputs: Option<DeviceAwareRequestInputs>,
 
     // Load state computed during admission.
     pub worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
@@ -609,6 +618,7 @@ mod tests {
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
             shared_cache_hits: None,
+            device_aware_inputs: None,
             worker_loads,
             resp_tx: None,
         }

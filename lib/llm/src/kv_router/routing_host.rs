@@ -11,14 +11,14 @@ use std::{
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
     scheduling::{AbortCause, KvSchedulerError},
-    selector::{WorkerInputs, WorkerSelector},
+    selector::{DeviceAwareRequestInputs, WorkerDevice, WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
-        ResponseStream, RouterMode, SingleIn, async_trait,
+        ResponseStream, RouteDevice, RouterMode, SingleIn, async_trait,
         network::egress::route_span::{
             get_route_trace_context, record_route_error, record_route_span_start, wrap_route_span,
         },

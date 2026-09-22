@@ -11,8 +11,9 @@ pub use default::DefaultWorkerSelector;
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use crate::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    DeviceAwareRequestInputs, ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate,
+    WorkerDevice, WorkerDeviceAwareInput, WorkerFilter, WorkerInputView, WorkerInputs,
+    WorkerLoadInput, WorkerOccupancyInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
 };
 
 pub use policy::WorkerSelectionPolicy;
@@ -40,6 +41,21 @@ pub trait WorkerSelector<C: WorkerConfigLike> {
     /// advisory context and may choose another eligible worker.
     fn uses_exclusive_affinity_target(&self) -> bool {
         false
+    }
+
+    /// Whether this selector rejects requests without an exact target.
+    fn requires_exact_target(&self) -> bool {
+        false
+    }
+
+    /// Whether a worker-only exact target is resolved by this selector.
+    fn resolves_worker_only_target(&self) -> bool {
+        false
+    }
+
+    /// Whether the selector supports the scheduler's LoRA-filtered request path.
+    fn supports_lora(&self) -> bool {
+        true
     }
 
     fn select_worker(
@@ -186,11 +202,12 @@ impl<'a> MaterializedSelectionInput<'a> {
         } else {
             0
         };
-        let worker_load = if inputs.contains(WorkerInputs::LOAD) {
-            self.request.worker_loads.get(&worker).copied()
-        } else {
-            None
-        };
+        let worker_load =
+            if inputs.contains(WorkerInputs::LOAD) || inputs.contains(WorkerInputs::OCCUPANCY) {
+                self.request.worker_loads.get(&worker).copied()
+            } else {
+                None
+            };
         let cache = if inputs.contains(WorkerInputs::CACHE) {
             let effective_overlap_blocks = self.request.effective_overlap_blocks_for(worker);
             let reported_device_overlap_blocks = self
@@ -261,12 +278,32 @@ impl<'a> MaterializedSelectionInput<'a> {
         } else {
             WorkerLoadInput::default()
         };
+        let occupancy = if inputs.contains(WorkerInputs::OCCUPANCY) {
+            WorkerOccupancyInput {
+                active_requests: worker_load
+                    .map(|load| load.routing_occupancy as u64)
+                    .unwrap_or_default(),
+            }
+        } else {
+            WorkerOccupancyInput::default()
+        };
+        let device_aware = if inputs.contains(WorkerInputs::DEVICE_AWARE) {
+            self.request
+                .device_aware_inputs
+                .as_ref()
+                .map(|inputs| inputs.worker(worker.worker_id))
+                .unwrap_or_default()
+        } else {
+            WorkerDeviceAwareInput::default()
+        };
 
         WorkerCandidate {
             worker,
             inputs,
             cache,
             load,
+            occupancy,
+            device_aware,
             preferred_taint_multiplier,
         }
     }
@@ -276,6 +313,7 @@ fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     block_size: u32,
+    occupancy_admission: bool,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
@@ -284,6 +322,7 @@ fn selection_result(
         cached_tokens: request.effective_cached_tokens_for(worker),
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
+        occupancy_admission,
     }
 }
 
@@ -389,6 +428,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 worker_type,
             };
             pick_default_worker(&scorer, picker, &input, workers, request, eligibility)
+                .map(|(worker, cost)| (worker, cost, true))
         }
         WorkerSelectionPolicyStateRef::Custom(state) => {
             let mut state = state.borrow_mut();
@@ -400,6 +440,8 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 candidates,
                 cache_inputs,
                 load_inputs,
+                occupancy_inputs,
+                device_aware_inputs,
                 ..
             } = &mut *state;
             if candidates.is_empty() {
@@ -424,6 +466,12 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     load: picker_inputs
                         .contains(WorkerInputs::LOAD)
                         .then_some(load_inputs.as_slice()),
+                    occupancy: picker_inputs
+                        .contains(WorkerInputs::OCCUPANCY)
+                        .then_some(occupancy_inputs.as_slice()),
+                    device_aware: picker_inputs
+                        .contains(WorkerInputs::DEVICE_AWARE)
+                        .then_some(device_aware_inputs.as_slice()),
                 };
                 let row = picker.pick(&input.context, picker_input)?;
                 let Some(candidate) = candidates.get(row) else {
@@ -433,11 +481,13 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                Some((candidate.worker, candidate.cost))
+                let occupancy_admission =
+                    picker.occupancy_admission(&input.context, picker_input, row);
+                Some((candidate.worker, candidate.cost, occupancy_admission))
             }
         }
     };
-    let Some((worker, cost)) = selected else {
+    let Some((worker, cost, occupancy_admission)) = selected else {
         if eligibility.has_eligible_worker_ignoring_overload(
             workers
                 .iter()
@@ -447,7 +497,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let result = selection_result(request, worker, block_size, occupancy_admission);
     log_selection(
         workers,
         request,
@@ -523,6 +573,7 @@ mod test_support {
             allowed_worker_ids: None,
             routing_constraints: crate::protocols::RoutingConstraints::default(),
             shared_cache_hits: None,
+            device_aware_inputs: None,
             resp_tx: None,
         }
     }
