@@ -340,9 +340,7 @@ mod tests {
 
         let discovery = || MockDiscovery::new(Some(1), SharedMockRegistry::new());
         contract::empty_registry_sends_one_empty_resync(&discovery()).await;
-        contract::non_empty_registry_sends_added_events_then_one_resync(&discovery()).await;
-        contract::changes_after_establishment_follow_the_snapshot(&discovery()).await;
-        contract::an_update_after_establishment_follows_the_snapshot(&discovery()).await;
+        contract::changes_follow_the_complete_initial_snapshot(&discovery()).await;
     }
 
     #[tokio::test]

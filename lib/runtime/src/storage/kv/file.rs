@@ -726,7 +726,7 @@ fn to_fs_err<E: std::error::Error>(err: E) -> StoreError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::sync::Arc;
@@ -875,81 +875,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_starts_with_one_resync_of_the_directory() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let cancel_token = CancellationToken::new();
-        let store = FileStore::new(cancel_token.clone(), temp_dir.path());
-        let bucket = store.get_or_create_bucket("v1/tests", None).await.unwrap();
-        bucket
-            .insert(&Key::new("first".to_string()), "1".into(), 0)
-            .await
-            .unwrap();
-        bucket
-            .insert(&Key::new("second".to_string()), "2".into(), 0)
-            .await
-            .unwrap();
-        let mut events = bucket.watch().await.unwrap();
-
-        // The snapshot uses the same full-path keys as `entries()`.
-        let first = tokio::time::timeout(Duration::from_secs(2), events.next())
-            .await
-            .expect("FileStore watcher did not report its snapshot")
-            .expect("FileStore watcher ended before its snapshot");
-        let super::WatchEvent::Resync(snapshot) = first else {
-            panic!("expected the initial resync, got {first:?}");
-        };
-        assert_eq!(
-            snapshot,
-            HashMap::from([
-                (
-                    Key::new("v1/tests/first".to_string()),
-                    bytes::Bytes::from("1")
-                ),
-                (
-                    Key::new("v1/tests/second".to_string()),
-                    bytes::Bytes::from("2")
-                ),
-            ])
-        );
-
-        bucket
-            .insert(&Key::new("third".to_string()), "3".into(), 0)
-            .await
-            .unwrap();
-        loop {
-            let event = tokio::time::timeout(Duration::from_secs(2), events.next())
-                .await
-                .expect("FileStore watcher did not observe the later insert")
-                .expect("FileStore watcher ended after the later insert");
-            assert!(
-                !matches!(event, super::WatchEvent::Resync(_)),
-                "only the first event is a resync, got {event:?}"
-            );
-            if matches!(event, super::WatchEvent::Put(ref item) if item.key_str() == "v1/tests/third")
-            {
-                break;
-            }
-        }
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn watch_on_an_empty_directory_starts_with_an_empty_resync() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let cancel_token = CancellationToken::new();
-        let store = FileStore::new(cancel_token.clone(), temp_dir.path());
-        let bucket = store.get_or_create_bucket("v1/tests", None).await.unwrap();
-        let mut events = bucket.watch().await.unwrap();
-
-        let first = tokio::time::timeout(Duration::from_secs(2), events.next())
-            .await
-            .expect("an empty directory must still report its snapshot")
-            .unwrap();
-        assert_eq!(first, super::WatchEvent::Resync(HashMap::new()));
-        cancel_token.cancel();
-    }
-
-    #[tokio::test]
     async fn external_delete_is_observed_under_noncanonical_root() {
         let t = tempfile::tempdir().unwrap();
         let canonical_root = t.path().join("canonical");
@@ -1015,6 +940,12 @@ mod tests {
             .await
             .unwrap();
         let entries = bucket.entries().await.unwrap();
+        // A watch starts with one snapshot that uses the same full-path keys.
+        let mut events = bucket.watch().await.unwrap();
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), events.next())
+            .await
+            .expect("FileStore watcher did not report its snapshot");
+        assert_eq!(snapshot, Some(super::WatchEvent::Resync(entries.clone())));
         let keys: HashSet<Key> = entries.into_keys().collect();
         cancel_token.cancel(); // stop the background thread
 

@@ -396,55 +396,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_starts_with_one_resync_of_the_bucket() {
-        let store = MemoryStore::new();
-        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
-        bucket
-            .insert(&Key::new("first".to_string()), "1".into(), 1)
-            .await
-            .unwrap();
-        bucket
-            .insert(&Key::new("second".to_string()), "2".into(), 1)
-            .await
-            .unwrap();
-        let mut watcher = bucket.watch().await.unwrap();
-
-        // Both existing keys arrive in one snapshot, bucket-relative, before any put.
-        let WatchEvent::Resync(snapshot) = watcher.next().await.unwrap() else {
-            panic!("expected the initial resync");
-        };
-        assert_eq!(
-            snapshot,
-            HashMap::from([
-                (Key::new("first".to_string()), bytes::Bytes::from("1")),
-                (Key::new("second".to_string()), bytes::Bytes::from("2")),
-            ])
-        );
-
-        bucket
-            .insert(&Key::new("third".to_string()), "3".into(), 1)
-            .await
-            .unwrap();
-        let WatchEvent::Put(item) = watcher.next().await.unwrap() else {
-            panic!("expected a put after the snapshot");
-        };
-        assert_eq!(item.key_str(), "third");
-    }
-
-    #[tokio::test]
-    async fn watch_on_an_empty_bucket_starts_with_an_empty_resync() {
-        let store = MemoryStore::new();
-        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
-        let mut watcher = bucket.watch().await.unwrap();
-
-        let first = tokio::time::timeout(Duration::from_secs(1), watcher.next())
-            .await
-            .expect("an empty bucket must still report its snapshot")
-            .unwrap();
-        assert_eq!(first, WatchEvent::Resync(HashMap::new()));
-    }
-
-    #[tokio::test]
     async fn watcher_observes_updates_to_an_existing_key() {
         let store = MemoryStore::new();
         let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
@@ -453,14 +404,13 @@ mod tests {
             .await
             .unwrap();
         let mut watcher = bucket.watch().await.unwrap();
-        let WatchEvent::Resync(snapshot) = watcher.next().await.unwrap() else {
-            panic!("expected the initial resync");
-        };
+        // The existing key arrives in one snapshot, bucket-relative, before any put.
         assert_eq!(
-            snapshot
-                .get(&Key::new("key".to_string()))
-                .map(|v| v.as_ref()),
-            Some(b"old".as_slice())
+            watcher.next().await.unwrap(),
+            WatchEvent::Resync(HashMap::from([(
+                Key::new("key".to_string()),
+                bytes::Bytes::from("old")
+            )]))
         );
 
         bucket

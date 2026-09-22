@@ -1709,7 +1709,6 @@ pub trait Discovery: Send + Sync {
 #[cfg(test)]
 pub(crate) mod startup_contract {
     use super::*;
-    use crate::component::TransportType;
     use futures::StreamExt;
     use std::collections::HashSet;
     use std::time::Duration;
@@ -1718,14 +1717,24 @@ pub(crate) mod startup_contract {
     /// Long enough for a late event to arrive on the memory and file stores.
     const QUIET_PERIOD: Duration = Duration::from_millis(200);
 
-    fn endpoint_spec(endpoint: &str, transport: &str) -> DiscoverySpec {
-        DiscoverySpec::Endpoint {
+    /// The contract watches model cards, the one instance kind every backend updates in place.
+    fn query() -> DiscoveryQuery {
+        DiscoveryQuery::ComponentModels {
+            namespace: "contract".to_string(),
+            component: "comp".to_string(),
+        }
+    }
+
+    fn model_spec(endpoint: &str) -> DiscoverySpec {
+        DiscoverySpec::Model {
             namespace: "contract".to_string(),
             component: "comp".to_string(),
             endpoint: endpoint.to_string(),
-            transport: TransportType::Tcp(transport.to_string()),
-            device_type: None,
-            request_plane_codec: None,
+            card_json: serde_json::json!({
+                "display_name": "model",
+                "runtime_config": {"taints": ["initial"]}
+            }),
+            model_suffix: None,
         }
     }
 
@@ -1743,39 +1752,35 @@ pub(crate) mod startup_contract {
         }
     }
 
-    fn ids(instances: &[DiscoveryInstance]) -> HashSet<DiscoveryInstanceId> {
-        instances.iter().map(DiscoveryInstance::id).collect()
-    }
-
     /// A watch on an empty registry sends one empty `Resync` and nothing else.
     pub(crate) async fn empty_registry_sends_one_empty_resync(discovery: &dyn Discovery) {
-        let mut stream = discovery
-            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
-            .await
-            .unwrap();
+        let mut stream = discovery.list_and_watch(query(), None).await.unwrap();
 
         assert_eq!(next(&mut stream).await, DiscoveryEvent::Resync(vec![]));
         assert_quiet(&mut stream).await;
     }
 
-    /// A watch on a registry with two instances sends both as `Added`, in any order, then one
-    /// `Resync` that holds both.
-    pub(crate) async fn non_empty_registry_sends_added_events_then_one_resync(
-        discovery: &dyn Discovery,
-    ) {
-        let first = discovery
-            .register(endpoint_spec("first", "127.0.0.1:1"))
+    /// A watch sends the registry as `Added` events, in any order, then one `Resync` of the same
+    /// set. A registration, an update, and a removal made right after `list_and_watch` returns
+    /// follow that snapshot, which still holds the state at establishment.
+    ///
+    /// The three changes touch different keys, so their relative order is the backend's choice.
+    pub(crate) async fn changes_follow_the_complete_initial_snapshot(discovery: &dyn Discovery) {
+        let first = discovery.register(model_spec("first")).await.unwrap();
+        let second = discovery.register(model_spec("second")).await.unwrap();
+        let DiscoveryInstanceId::Model(second_id) = second.id() else {
+            panic!("expected a model instance");
+        };
+        let mut stream = discovery.list_and_watch(query(), None).await.unwrap();
+        // Mutate before the stream is read: the snapshot is already captured.
+        let third = discovery.register(model_spec("third")).await.unwrap();
+        discovery
+            .update_model_taints(second_id.clone(), HashSet::from(["updated".to_string()]))
             .await
             .unwrap();
-        let second = discovery
-            .register(endpoint_spec("second", "127.0.0.1:2"))
-            .await
-            .unwrap();
-        let mut stream = discovery
-            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
-            .await
-            .unwrap();
+        discovery.unregister(first.clone()).await.unwrap();
 
+        let initial = HashSet::from([first.id(), second.id()]);
         let mut added = HashSet::new();
         for _ in 0..2 {
             let DiscoveryEvent::Added(instance) = next(&mut stream).await else {
@@ -1783,106 +1788,38 @@ pub(crate) mod startup_contract {
             };
             added.insert(instance.id());
         }
-        assert_eq!(added, HashSet::from([first.id(), second.id()]));
+        assert_eq!(added, initial);
         let DiscoveryEvent::Resync(snapshot) = next(&mut stream).await else {
             panic!("expected one Resync after the Added burst");
         };
-        assert_eq!(ids(&snapshot), HashSet::from([first.id(), second.id()]));
-        assert_quiet(&mut stream).await;
-    }
-
-    /// Changes made right after `list_and_watch` returns follow the snapshot. The snapshot holds
-    /// the state at establishment, and it never replays over a later change.
-    ///
-    /// The two changes touch different keys, so their relative order is the backend's choice.
-    pub(crate) async fn changes_after_establishment_follow_the_snapshot(discovery: &dyn Discovery) {
-        let first = discovery
-            .register(endpoint_spec("first", "127.0.0.1:1"))
-            .await
-            .unwrap();
-        let mut stream = discovery
-            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
-            .await
-            .unwrap();
-        // Mutate before the stream is read: the snapshot is already captured.
-        let second = discovery
-            .register(endpoint_spec("second", "127.0.0.1:2"))
-            .await
-            .unwrap();
-        discovery.unregister(first.clone()).await.unwrap();
-
         assert_eq!(
-            next(&mut stream).await,
-            DiscoveryEvent::Added(first.clone())
+            snapshot
+                .iter()
+                .map(DiscoveryInstance::id)
+                .collect::<HashSet<_>>(),
+            initial
         );
-        assert_eq!(
-            next(&mut stream).await,
-            DiscoveryEvent::Resync(vec![first.clone()])
+        assert!(
+            snapshot.contains(&second),
+            "the snapshot must hold the pre-update instance, got {snapshot:?}"
         );
-        let changes = [next(&mut stream).await, next(&mut stream).await];
+
+        let changes = [
+            next(&mut stream).await,
+            next(&mut stream).await,
+            next(&mut stream).await,
+        ];
         let expected = [
-            DiscoveryEvent::Added(second),
+            DiscoveryEvent::Added(third),
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id: second_id,
+                taints: vec!["updated".to_string()],
+            }),
             DiscoveryEvent::Removed(first.id()),
         ];
         assert!(
             expected.iter().all(|event| changes.contains(event)),
             "expected {expected:?} after the snapshot, got {changes:?}"
-        );
-        assert_quiet(&mut stream).await;
-    }
-
-    fn model_spec(taint: &str) -> DiscoverySpec {
-        DiscoverySpec::Model {
-            namespace: "contract".to_string(),
-            component: "comp".to_string(),
-            endpoint: "generate".to_string(),
-            card_json: serde_json::json!({
-                "display_name": "model",
-                "runtime_config": {
-                    "taints": [taint, "dynamo.topology/zone=west"],
-                    "topology_domains": {"zone": "west"}
-                }
-            }),
-            model_suffix: None,
-        }
-    }
-
-    /// An in-place update made right after `list_and_watch` returns follows the snapshot, which
-    /// still holds the instance as it was at establishment.
-    pub(crate) async fn an_update_after_establishment_follows_the_snapshot(
-        discovery: &dyn Discovery,
-    ) {
-        let model = discovery.register(model_spec("first")).await.unwrap();
-        let DiscoveryInstanceId::Model(id) = model.id() else {
-            panic!("expected a model instance");
-        };
-        let query = DiscoveryQuery::EndpointModels {
-            namespace: "contract".to_string(),
-            component: "comp".to_string(),
-            endpoint: "generate".to_string(),
-        };
-        let mut stream = discovery.list_and_watch(query, None).await.unwrap();
-        // Mutate before the stream is read: the snapshot is already captured.
-        discovery
-            .update_model_taints(id.clone(), HashSet::from(["second".to_string()]))
-            .await
-            .unwrap();
-
-        assert_eq!(
-            next(&mut stream).await,
-            DiscoveryEvent::Added(model.clone())
-        );
-        assert_eq!(next(&mut stream).await, DiscoveryEvent::Resync(vec![model]));
-        let DiscoveryEvent::ModelTaintsUpdated(update) = next(&mut stream).await else {
-            panic!("expected the taint update after the snapshot");
-        };
-        assert_eq!(update.id, id);
-        assert_eq!(
-            update.taints.into_iter().collect::<HashSet<_>>(),
-            HashSet::from([
-                "dynamo.topology/zone=west".to_string(),
-                "second".to_string()
-            ])
         );
         assert_quiet(&mut stream).await;
     }

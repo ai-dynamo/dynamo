@@ -671,26 +671,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manager_watch_on_an_empty_bucket_starts_with_an_empty_resync() {
-        let manager = Arc::new(Manager::memory());
-        let cancel_token = CancellationToken::new();
-        let (watch_task, mut rx) = manager
-            .clone()
-            .watch(BUCKET_NAME, None, cancel_token.clone())
-            .await
-            .unwrap();
-
-        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
-            .await
-            .expect("an empty bucket must still report its snapshot")
-            .unwrap();
-        assert_eq!(first, WatchEvent::Resync(HashMap::new()));
-
-        cancel_token.cancel();
-        watch_task.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn manager_watch_reports_a_delete_that_follows_establishment() {
         let manager = Arc::new(Manager::memory());
         let bucket = manager

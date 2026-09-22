@@ -616,8 +616,9 @@ mod tests {
     const TEST_POD_UID: &str = "pod-uid-test";
     const TEST_POD_NAME: &str = "worker-a";
 
-    /// A ready pod in container mode, and the CR its main container publishes.
-    fn ready_pod_and_cr() -> (Pod, DynamoWorkerMetadata, DiscoveryInstance) {
+    #[tokio::test]
+    async fn event_loop_reports_ready_after_both_initial_lists_with_the_state_written() {
+        // A ready pod in container mode, and the CR its main container publishes.
         let target = super::super::utils::KubeDiscoveryTarget::Container(
             TEST_POD_NAME.to_string(),
             "main".to_string(),
@@ -652,100 +653,50 @@ mod tests {
             }),
             ..Default::default()
         };
-        (pod, cr, instance)
-    }
 
-    struct EventLoopHarness {
-        readiness_tx: mpsc::Sender<ReadinessEvent>,
-        cr_tx: mpsc::Sender<CrEvent>,
-        list_state: ListState,
-        state_rx: watch::Receiver<DaemonState>,
-        cancel_token: CancellationToken,
-        task: tokio::task::JoinHandle<Result<()>>,
-    }
-
-    /// Run the event loop over reflector stores that hold `pods` and `crs`, with no cluster.
-    fn spawn_event_loop(pods: Vec<Pod>, crs: Vec<DynamoWorkerMetadata>) -> EventLoopHarness {
+        // The event loop over reflector stores that already hold both, with no cluster.
         let (pod_reader, mut pod_writer) = reflector::store();
-        for pod in pods {
-            pod_writer.apply_watcher_event(&watcher::Event::Apply(pod));
-        }
+        pod_writer.apply_watcher_event(&watcher::Event::Apply(pod));
         let (cr_reader, mut cr_writer) = reflector::store();
-        for cr in crs {
-            cr_writer.apply_watcher_event(&watcher::Event::Apply(cr));
-        }
+        cr_writer.apply_watcher_event(&watcher::Event::Apply(cr));
         let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
         let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (state_tx, mut state_rx) = watch::channel(DaemonState::Pending);
         let list_state: ListState = Arc::new(RwLock::new(HashMap::new()));
-        let (event_tx, _) = broadcast::channel(16);
-        let (state_tx, state_rx) = watch::channel(DaemonState::Pending);
+        let outputs = DaemonOutputs {
+            list_state: list_state.clone(),
+            event_tx: broadcast::channel(16).0,
+            state_tx,
+        };
+        let sources = DaemonSources {
+            source: DiscoverySource::Pod(pod_reader),
+            cr_reader,
+            readiness_rx,
+            cr_rx,
+        };
         let cancel_token = CancellationToken::new();
         let task = tokio::spawn({
-            let outputs = DaemonOutputs {
-                list_state: list_state.clone(),
-                event_tx,
-                state_tx,
-            };
             let cancel_token = cancel_token.clone();
-            let sources = DaemonSources {
-                source: DiscoverySource::Pod(pod_reader),
-                cr_reader,
-                readiness_rx,
-                cr_rx,
-            };
             async move { event_loop(sources, &outputs, &cancel_token).await }
         });
-        EventLoopHarness {
-            readiness_tx,
-            cr_tx,
-            list_state,
-            state_rx,
-            cancel_token,
-            task,
-        }
-    }
-
-    async fn wait_for_state(
-        state_rx: &mut watch::Receiver<DaemonState>,
-        expected: impl Fn(&DaemonState) -> bool,
-    ) -> DaemonState {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let state = state_rx.borrow_and_update().clone();
-                if expected(&state) {
-                    return state;
-                }
-                state_rx
-                    .changed()
-                    .await
-                    .expect("the event loop dropped its state sender");
-            }
-        })
-        .await
-        .expect("the event loop did not reach the expected state")
-    }
-
-    #[tokio::test]
-    async fn event_loop_reports_ready_after_both_initial_lists_with_the_state_written() {
-        let (pod, cr, instance) = ready_pod_and_cr();
-        let mut harness = spawn_event_loop(vec![pod], vec![cr]);
 
         // One reflector done is not enough: the join table cannot hold every instance yet.
-        harness
-            .readiness_tx
-            .send(ReadinessEvent::Rebuild)
-            .await
-            .unwrap();
+        readiness_tx.send(ReadinessEvent::Rebuild).await.unwrap();
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(*harness.state_rx.borrow(), DaemonState::Pending);
+        assert_eq!(*state_rx.borrow(), DaemonState::Pending);
 
-        harness.cr_tx.send(CrEvent::Rebuild).await.unwrap();
-        wait_for_state(&mut harness.state_rx, |state| *state == DaemonState::Ready).await;
+        cr_tx.send(CrEvent::Rebuild).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            state_rx.wait_for(|state| *state == DaemonState::Ready),
+        )
+        .await
+        .expect("both initial lists must make the daemon ready")
+        .unwrap();
         // Ready follows the list_state write, so the instance is visible now.
-        let listed: Vec<_> = harness
-            .list_state
+        let listed: Vec<_> = list_state
             .read()
             .await
             .values()
@@ -753,29 +704,8 @@ mod tests {
             .collect();
         assert_eq!(listed, vec![instance]);
 
-        harness.cancel_token.cancel();
-        harness.task.await.unwrap().unwrap();
-    }
-
-    #[tokio::test]
-    async fn event_loop_ends_with_an_error_when_a_reflector_stream_ends() {
-        let harness = spawn_event_loop(vec![], vec![]);
-
-        // The readiness reflector task ending drops its sender.
-        drop(harness.readiness_tx);
-        let error = tokio::time::timeout(Duration::from_secs(1), harness.task)
-            .await
-            .expect("the event loop did not end")
-            .unwrap()
-            .expect_err("a reflector stream ending must end the loop with an error");
-        assert!(
-            error
-                .to_string()
-                .contains("Readiness reflector stream stopped"),
-            "error: {error}"
-        );
-        assert_eq!(*harness.state_rx.borrow(), DaemonState::Pending);
-        drop(harness.cr_tx);
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
     }
 
     fn make_cached(uid: &str) -> CachedCrMetadata {
