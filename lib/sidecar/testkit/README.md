@@ -18,6 +18,13 @@ and cleanup. Each runs against both frameworks, giving eight registered tests.
 TensorRT-LLM remains outside this increment because it has no corresponding
 Mocker server.
 
+The stack is [#14879](https://github.com/ai-dynamo/dynamo/pull/14879) (this
+foundation), [#15089](https://github.com/ai-dynamo/dynamo/pull/15089) (isolated
+units), then [#15091](https://github.com/ai-dynamo/dynamo/pull/15091) (additional
+vLLM wire coverage and process/native integration). The later increments reuse
+this harness; new backend coverage is vLLM-only. Existing SGLang cases and E2E
+allocation remain in place.
+
 The testing strategy has two distinct execution paths. Pure unit tests call
 conversion or parsing functions directly. Tests of actual sidecar generation and
 lifecycle use a real localhost connection to a CPU-only Mocker. These are Rust
@@ -64,7 +71,7 @@ infrastructure from becoming part of their normal dependency graph.
 | `src/lib.rs` | Export the helpers and provide labeled, bounded waits. |
 | `tests/support/mod.rs` | Define the fixture interface and configuration shared by the two adapters. |
 | `tests/support/{vllm,sglang}.rs` | Start each existing Mocker service, construct its real sidecar, delegate RPCs, and interpret native messages. |
-| `tests/conformance.rs` | Define the four shared scenarios and register vLLM/SGLang cases with `rstest`. |
+| `tests/conformance.rs` | Define the four shared scenarios and enroll each backend once, generating its four tests. |
 
 Framework adapters are shared within the central integration suite. They are not
 public fixture APIs for other crates. Pure tests beside the sidecar implementation
@@ -106,6 +113,10 @@ Source responses are recorded before deliberate stream alteration. Expected
 tokens come from those Mocker responses, not a fixed synthetic token sequence.
 Injected post-terminal replay is excluded from that expected sequence. Both
 adapters accumulate the native token deltas emitted by their pinned protocols.
+Paused-stream checks compare the accumulated sidecar prefix with those native
+tokens without assuming one token per response. The alternate-model scenario
+checks discovered model identity and vLLM's native model selector; SGLang's
+tokenized generation RPC has no model selector.
 
 ## Four scenarios that exercise the foundation
 

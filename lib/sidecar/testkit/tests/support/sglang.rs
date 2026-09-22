@@ -81,6 +81,11 @@ impl SidecarFixture for Fixture {
         BackendError::EngineShutdown
     }
 
+    fn native_model(_request: &pb::GenerateRequest) -> Option<&str> {
+        // SGLang's tokenized generation RPC has no model selector.
+        None
+    }
+
     fn active_request_count(&self) -> usize {
         self.service.active_request_count()
     }

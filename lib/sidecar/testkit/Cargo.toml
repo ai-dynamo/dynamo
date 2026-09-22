@@ -26,7 +26,6 @@ dynamo-vllm-mocker = { path = "../../mocker/servers/vllm" }
 dynamo-sglang-mocker = { path = "../../mocker/servers/sglang" }
 dynamo-vllm-sidecar = { path = "../vllm" }
 dynamo-sglang-sidecar = { path = "../sglang" }
-rstest = "0.26"
 tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true }

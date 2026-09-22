@@ -14,7 +14,8 @@ use dynamo_llm::protocols::{
 };
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::{
-    AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
+    AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
+    async_trait,
 };
 use tokio::sync::{Mutex, Semaphore};
 
@@ -34,6 +35,10 @@ enum QueuedScript {
         chunks: Script,
         error: DynamoError,
     },
+    /// `generate()` itself fails before any stream exists, the shape of a
+    /// router-side rejection (overload, deadline) rather than a backend fault.
+    #[allow(dead_code)]
+    GenerateError(DynamoError),
     Gated {
         chunks: Script,
         split_at: usize,
@@ -55,6 +60,7 @@ impl ScriptGate {
 pub struct ScriptedChatEngine {
     scripts: Mutex<VecDeque<QueuedScript>>,
     requests: Mutex<Vec<NvCreateChatCompletionRequest>>,
+    contexts: Mutex<Vec<std::sync::Arc<dyn AsyncEngineContext>>>,
 }
 
 impl ScriptedChatEngine {
@@ -68,6 +74,7 @@ impl ScriptedChatEngine {
                 kill_after_stop,
             }])),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
@@ -83,6 +90,7 @@ impl ScriptedChatEngine {
                     .collect(),
             ),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
         }
     }
 
@@ -100,6 +108,7 @@ impl ScriptedChatEngine {
                     release: release.clone(),
                 }])),
                 requests: Mutex::new(Vec::new()),
+                contexts: Mutex::new(Vec::new()),
             },
             ScriptGate { release },
         )
@@ -113,12 +122,26 @@ impl ScriptedChatEngine {
                 error,
             }])),
             requests: Mutex::new(Vec::new()),
+            contexts: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_generate_error(error: DynamoError) -> Self {
+        Self {
+            scripts: Mutex::new(VecDeque::from([QueuedScript::GenerateError(error)])),
+            ..Self::new([])
         }
     }
 
     /// Remove and return all requests observed so far, in arrival order.
     pub async fn take_requests(&self) -> Vec<NvCreateChatCompletionRequest> {
         std::mem::take(&mut *self.requests.lock().await)
+    }
+
+    #[allow(dead_code)]
+    pub async fn take_contexts(&self) -> Vec<std::sync::Arc<dyn AsyncEngineContext>> {
+        std::mem::take(&mut *self.contexts.lock().await)
     }
 
     pub async fn remaining_scripts(&self) -> usize {
@@ -142,6 +165,7 @@ impl
         let ctx = context.context();
 
         self.requests.lock().await.push(request);
+        self.contexts.lock().await.push(ctx.clone());
         let script = self
             .scripts
             .lock()
@@ -152,6 +176,10 @@ impl
             QueuedScript::Failure(error) => return Err(error),
             script => script,
         };
+
+        if let QueuedScript::GenerateError(error) = script {
+            return Err(error.into());
+        }
 
         let producer_ctx = ctx.clone();
         let output = async_stream::stream! {
@@ -209,6 +237,9 @@ impl
                     for chunk in chunks {
                         yield chunk;
                     }
+                }
+                QueuedScript::GenerateError(_) => {
+                    unreachable!("GenerateError returns before the stream is built")
                 }
             }
         };

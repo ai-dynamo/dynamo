@@ -29,6 +29,7 @@ pub trait SidecarFixture {
     async fn start(control: Controller<Self::Protocol>, config: FixtureConfig) -> Self;
     async fn engine(&self) -> Self::Engine;
     fn eof_error() -> BackendError;
+    fn native_model(request: &<Self::Protocol as Protocol>::Request) -> Option<&str>;
     fn active_request_count(&self) -> usize;
     async fn shutdown(&mut self);
 }

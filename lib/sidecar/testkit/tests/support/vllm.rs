@@ -93,6 +93,10 @@ impl SidecarFixture for Fixture {
         BackendError::Unknown
     }
 
+    fn native_model(request: &pb::GenerateRequest) -> Option<&str> {
+        Some(&request.model)
+    }
+
     fn active_request_count(&self) -> usize {
         self.service.active_request_count()
     }
