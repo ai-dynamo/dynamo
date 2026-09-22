@@ -927,11 +927,12 @@ as None. This is enabled only by backends that resolve such slots.
 
 - `HttpStatusError` — If any image fails with an HTTP status error (e.g. 415 Unsupported Media Type), or with a transport error (timeout mapped to 408, connection error mapped to 400); the status is preserved so the frontend returns the correct client-error code instead of 500.
 - `UrlValidationError` — If a media URL is rejected by the SSRF policy; preserved as a ValueError so the frontend returns a 4xx, not 500.
+- `ValueError` — If any image fails client-side input validation (e.g. a malformed data: URI — invalid base64, missing ;base64 marker, or non-image MIME).
 - `Exception` — If any image fails to load for any other reason
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L287)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L295)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
