@@ -723,7 +723,12 @@ struct KvHitSnapshot {
 }
 
 fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
-    let hist = |h: &prometheus::Histogram| (h.get_sample_sum(), h.get_sample_count());
+    // The fixture request carries no tracker, so the guard labels it `aggregated`.
+    let phase = RequestPhase::Aggregated.as_str();
+    let hist = |h: &prometheus::HistogramVec| {
+        let child = h.with_label_values(&[phase]);
+        (child.get_sample_sum(), child.get_sample_count())
+    };
     KvHitSnapshot {
         best: hist(&metrics.kv_best_eligible_cached_prefix_tokens),
         selected: hist(&metrics.kv_selected_cached_prefix_tokens),
@@ -731,11 +736,11 @@ fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) ->
         reused: hist(&metrics.kv_worker_reused_tokens),
         complete: metrics
             .kv_worker_outcomes_total
-            .with_label_values(&["complete"])
+            .with_label_values(&[phase, "complete"])
             .get(),
         incomplete: metrics
             .kv_worker_outcomes_total
-            .with_label_values(&["incomplete"])
+            .with_label_values(&[phase, "incomplete"])
             .get(),
     }
 }
