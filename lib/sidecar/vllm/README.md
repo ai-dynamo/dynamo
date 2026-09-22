@@ -209,9 +209,7 @@ token from its local or Hugging Face configuration and attaches it to every ZMQ
 source. This lets backend events use the same canonical image hash as frontend
 routing. If the model configuration or exact-routing prerequisites cannot be
 resolved, inference remains available but falls back to ordinary text-prefix KV
-routing. A vLLM launch using `--revision` should expose the matching local model
-directory as its model ID and mount that path into the sidecar; otherwise the
-sidecar can only fetch the repository's default revision.
+routing.
 
 The forwarded 64-hex vLLM media identifier contains Dynamo's 64-bit routing hash
 and becomes part of vLLM's encoder and prefix-cache identity. Treat passed-through
