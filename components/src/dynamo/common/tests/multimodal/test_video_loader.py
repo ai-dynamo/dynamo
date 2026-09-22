@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal import video_loader as video_loader_module
@@ -536,3 +536,25 @@ async def test_load_video_preserves_missing_decoder_error(monkeypatch):
         await loader.load_video("https://example.com/x.mp4")
 
     assert exc_info.value is err
+
+
+@pytest.mark.asyncio
+async def test_load_video_preserves_a_configuration_error(monkeypatch):
+    """An operator fault must not reach the client as a 4xx.
+
+    Same reasoning as the audio loader: the generic ``except Exception`` there
+    rewrites unknown errors as ``ValueError``, which maps to ``InvalidArgument``.
+    """
+    from dynamo.common.multimodal.video_loader import VideoLoader
+
+    loader = VideoLoader.__new__(VideoLoader)
+
+    async def _boom(*args, **kwargs):
+        raise HttpConfigurationError("egress proxy is not trusted")
+
+    monkeypatch.setattr(loader, "_load_video_with_vllm", _boom, raising=False)
+
+    with pytest.raises(HttpConfigurationError) as excinfo:
+        await loader.load_video("https://example.com/v.mp4")
+
+    assert not isinstance(excinfo.value, ValueError)

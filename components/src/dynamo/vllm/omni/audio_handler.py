@@ -8,7 +8,7 @@ OmniHandler holds an instance as ``self.audio`` (composition).
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 from transformers import AutoTokenizer
 from vllm_omni.inputs.data import OmniTextPrompt
@@ -25,6 +25,9 @@ from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.protocols import sanitize_media_passthrough
 from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
 from dynamo.common.utils.output_modalities import RequestType
+from dynamo.vllm.omni.audex import AudexRequestAdapter
+from dynamo.vllm.omni.engine_inputs import EngineInputs
+from dynamo.vllm.omni.utils import engine_model_stages, validate_audio_max_new_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +57,21 @@ class AudioGenerationHandler:
     """Handles audio/TTS request processing for the vLLM-Omni backend.
 
     Instantiated by OmniHandler during initialization and held as a
-    composition attribute (``self._audio_handler``).  This keeps
+    composition attribute (``self.audio``).  This keeps
     audio-specific logic (validation, prompt building, encoding) out
     of the orchestrator.
+
+    Model-specific request preparation lives outside this class: Audex in
+    ``omni.audex.AudexRequestAdapter`` (``self.audex``), Qwen3-TTS in the
+    ``_engine_inputs_tts`` path below. Everything else takes the generic
+    plain-text prompt.
+
+    TODO: give the model-specific paths one common adapter abstraction — a
+    ``supports()``/``prepare()`` protocol the handler dispatches over, with
+    Qwen3-TTS and the generic prompt as implementations alongside Audex.
+    Detection and preparation are currently spread over ``_is_tts_model``,
+    ``self.audex.model_type()``, and the branches in ``build_engine_inputs``,
+    which does not scale to a fourth model family.
     """
 
     def __init__(self, config, engine_client, media_output_fs, media_output_http_url):
@@ -65,6 +80,7 @@ class AudioGenerationHandler:
         self.media_output_fs = media_output_fs
         self.media_output_http_url = media_output_http_url
         self._tts_tokenizer: Any = None
+        self.audex = AudexRequestAdapter(config, engine_client)
 
         # Cache TTS capabilities from model config at init.
         self._tts_supported_speakers: set = self._load_supported_speakers()
@@ -128,32 +144,9 @@ class AudioGenerationHandler:
         Searches for a TTS model_stage in the engine's stage list,
         stage configs, or model config. Supports multiple vLLM-Omni versions.
         """
-        # Try stage_list
-        stage_list = getattr(self.engine_client, "stage_list", None)
-        if stage_list:
-            for stage in stage_list:
-                ms = getattr(stage, "model_stage", None)
-                logger.debug("_is_tts_model: stage=%s model_stage=%s", stage, ms)
-                if ms in _TTS_MODEL_STAGES:
-                    return True
-
-        # Try stage_configs
-        stage_configs = getattr(self.engine_client, "stage_configs", None)
-        if stage_configs:
-            for cfg in stage_configs:
-                engine_args = (
-                    cfg.get("engine_args", {})
-                    if isinstance(cfg, dict)
-                    else getattr(cfg, "engine_args", {})
-                )
-                ms = (
-                    engine_args.get("model_stage")
-                    if isinstance(engine_args, dict)
-                    else getattr(engine_args, "model_stage", None)
-                )
-                logger.debug("_is_tts_model: stage_config model_stage=%s", ms)
-                if ms in _TTS_MODEL_STAGES:
-                    return True
+        stages = engine_model_stages(self.engine_client)
+        if stages & _TTS_MODEL_STAGES:
+            return True
 
         # Try model_config.hf_config.model_type (universal fallback)
         try:
@@ -165,59 +158,82 @@ class AudioGenerationHandler:
             logger.debug("_is_tts_model: hf_config fallback failed: %s", e)
 
         logger.warning(
-            "_is_tts_model: could not detect TTS model. "
-            "stage_list=%s, stage_configs=%s",
-            stage_list is not None,
-            stage_configs is not None,
+            "_is_tts_model: could not detect TTS model. engine model stages=%s",
+            sorted(stages),
         )
         return False
 
     # -- Audio engine input construction --------------------------------------
 
-    async def build_engine_inputs(self, req: NvCreateAudioSpeechRequest):
+    async def build_engine_inputs(
+        self, req: NvCreateAudioSpeechRequest, request_id: str | None = None
+    ) -> EngineInputs:
         """Build engine inputs for an audio/TTS request.
 
-        Two code paths (matching vLLM-Omni serving_speech.py):
+        Three code paths (matching vLLM-Omni serving_speech.py):
 
         * **TTS path** (Qwen3-TTS): ``prompt_token_ids`` +
           ``additional_information``.
+        * **Audex path** (delegated to ``self.audex``): literal ChatML prompt
+          priming codec generation, plus the CFG / RVQ-phase contracts on
+          stage-0 sampling params.
         * **Generic audio path** (MiMo-Audio, etc.): plain text prompt.
-        """
-        # Import here to avoid circular dependency
-        from dynamo.vllm.omni.omni_handler import EngineInputs
 
+        Every path ends in ``_engine_inputs``, which owns the response-delivery
+        fields that are identical for every audio model.
+
+        ``request_id`` is the final Dynamo request id; Audex uses it as the CFG
+        pair id that binds a guided request to its unconditional companion.
+        """
         if not req.input or not req.input.strip():
             raise ValueError("Input text cannot be empty")
 
-        output_format = (req.response_format or "wav").lower()
+        audex_model_type = self.audex.model_type()
+        if audex_model_type is not None:
+            # Everything model-specific (validation, ChatML prompt, CFG/RVQ
+            # contracts) belongs to the adapter; ``audex_model_type`` is the
+            # resolution made above, so it does not repeat the stage lookup.
+            #
+            # ``stream_audio`` stays off: per-payload chunk streaming has not
+            # been validated for the Audex pipeline, so its requests take the
+            # aggregate path and the response carries one complete waveform.
+            # Aggregation itself follows the resolved output kind, not the model
+            # (see ``utils.audio_output_is_cumulative``).
+            prepared = self.audex.prepare(req, request_id, audex_model_type)
+            return self._engine_inputs(
+                req,
+                OmniTextPrompt(prompt=prepared.prompt),
+                sampling_params_list=prepared.sampling_params_list,
+            )
 
-        # URL delivery, whole-file encoders, and speed adjustment require the
-        # complete waveform before the worker can emit a response. A missing or
-        # false capability identifies a legacy frontend that also needs one
-        # aggregated item. TODO(v1.7): Remove this compatibility check after
-        # v1.4 leaves the N-2 window.
-        frontend_accepts_audio_chunks = bool(
-            req.nvext and req.nvext.frontend_accepts_audio_chunks
-        )
-        returns_audio_bytes = req.data_source != "url"
-        supports_chunk_encoding = output_format in {"pcm", "wav"}
-        uses_default_speed = req.speed is None or req.speed == 1.0
-        stream_audio = (
-            frontend_accepts_audio_chunks
-            and returns_audio_bytes
-            and supports_chunk_encoding
-            and uses_default_speed
-        )
+        stream_audio = self._chunk_streaming_allowed(req)
 
         if self._is_tts_model():
             return await self._engine_inputs_tts(req, stream_audio=stream_audio)
 
         # Generic audio model – plain text prompt (same as image/video)
-        prompt = OmniTextPrompt(prompt=req.input)
         logger.info(f"Audio request (generic): input='{req.input[:50]}...'")
+        return self._engine_inputs(
+            req, OmniTextPrompt(prompt=req.input), stream_audio=stream_audio
+        )
+
+    def _engine_inputs(
+        self,
+        req: NvCreateAudioSpeechRequest,
+        prompt: Union[OmniTextPrompt, Dict[str, Any]],
+        *,
+        sampling_params_list: list | None = None,
+        stream_audio: bool = False,
+    ) -> EngineInputs:
+        """Attach the response-delivery fields shared by every audio model.
+
+        The per-model paths above own the prompt and the sampling params; the
+        delivery contract (request type, data source, codec, speed, chunking) is
+        the same for all of them and is applied here once.
+        """
         return EngineInputs(
             prompt=prompt,
-            sampling_params_list=None,
+            sampling_params_list=sampling_params_list,
             request_type=RequestType.AUDIO_GENERATION,
             response_format=req.data_source,
             output_format=req.response_format,
@@ -225,14 +241,38 @@ class AudioGenerationHandler:
             stream_audio=stream_audio,
         )
 
+    @staticmethod
+    def _chunk_streaming_allowed(req: NvCreateAudioSpeechRequest) -> bool:
+        """Whether the worker may emit audio chunks instead of one waveform.
+
+        URL delivery, whole-file encoders, and speed adjustment require the
+        complete waveform before the worker can emit a response. A missing or
+        false capability identifies a legacy frontend that also needs one
+        aggregated item. TODO(v1.7): Remove this compatibility check after
+        v1.4 leaves the N-2 window.
+        """
+        frontend_accepts_audio_chunks = bool(
+            req.nvext and req.nvext.frontend_accepts_audio_chunks
+        )
+        returns_audio_bytes = req.data_source != "url"
+        supports_chunk_encoding = (req.response_format or "wav").lower() in {
+            "pcm",
+            "wav",
+        }
+        uses_default_speed = req.speed is None or req.speed == 1.0
+        return (
+            frontend_accepts_audio_chunks
+            and returns_audio_bytes
+            and supports_chunk_encoding
+            and uses_default_speed
+        )
+
     # -- Qwen3-TTS-specific helpers -------------------------------------------
 
     async def _engine_inputs_tts(
         self, req: NvCreateAudioSpeechRequest, *, stream_audio: bool
-    ):
+    ) -> EngineInputs:
         """Build engine inputs for Qwen3-TTS models."""
-        from dynamo.vllm.omni.omni_handler import EngineInputs
-
         self._validate_tts_request(req)
 
         if req.voice is not None:
@@ -281,15 +321,7 @@ class AudioGenerationHandler:
             f"task_type={task_type}, prompt_len={estimated_len}"
         )
 
-        return EngineInputs(
-            prompt=prompt,
-            sampling_params_list=None,
-            request_type=RequestType.AUDIO_GENERATION,
-            response_format=req.data_source,
-            output_format=req.response_format,
-            speed=req.speed or 1.0,
-            stream_audio=stream_audio,
-        )
+        return self._engine_inputs(req, prompt, stream_audio=stream_audio)
 
     def _validate_tts_request(self, req: NvCreateAudioSpeechRequest) -> None:
         """Validate Qwen3-TTS-specific request parameters."""
@@ -341,17 +373,7 @@ class AudioGenerationHandler:
                 f"(max {self.config.tts_max_instructions_length} characters)"
             )
 
-        if req.max_new_tokens is not None:
-            if req.max_new_tokens < self.config.tts_max_new_tokens_min:
-                raise ValueError(
-                    f"max_new_tokens must be at least "
-                    f"{self.config.tts_max_new_tokens_min}"
-                )
-            if req.max_new_tokens > self.config.tts_max_new_tokens_max:
-                raise ValueError(
-                    f"max_new_tokens cannot exceed "
-                    f"{self.config.tts_max_new_tokens_max}"
-                )
+        validate_audio_max_new_tokens(req.max_new_tokens, self.config)
 
     async def _resolve_ref_audio(self, ref_audio_str: str) -> tuple:
         """Download or decode reference audio for voice cloning (Base task)."""

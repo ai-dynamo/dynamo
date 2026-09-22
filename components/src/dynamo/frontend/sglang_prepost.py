@@ -347,14 +347,27 @@ def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
     return None
 
 
-def _guided_tool_choice_requires_reasoning(
-    request: dict[str, Any], force_reasoning: bool
+def _guided_output_requires_reasoning(
+    request: dict[str, Any],
+    force_reasoning: bool,
+    reasoning_parser_name: str | None = None,
 ) -> bool:
-    """Return whether SGLang should reason before guided tool-call JSON."""
+    """Return whether SGLang should reason before guided output."""
+    if not force_reasoning:
+        return False
+
     tool_choice = request.get("tool_choice", "auto")
-    return force_reasoning and (
-        tool_choice == "required" or _is_named_tool_choice(tool_choice)
-    )
+    if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        return True
+
+    # Explicit legacy constraints take precedence over response_format.
+    if legacy_guided_decoding(request):
+        return False
+
+    response_format = request.get("response_format")
+    if not isinstance(response_format, dict) or reasoning_parser_name == "gpt-oss":
+        return False
+    return response_format.get("type") != "text"
 
 
 def _normalize_deepseek_v4_hint(value: Any) -> str:

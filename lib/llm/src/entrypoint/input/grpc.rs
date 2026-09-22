@@ -29,6 +29,9 @@ pub async fn run(
     super::reject_shadow_taps_for_text_engine(&engine_config)?;
     crate::shadow::taps(&distributed_runtime).await?;
 
+    crate::kv_router::plugins::RouterPluginBuilder::default()
+        .validate_config(&engine_config.local_model().router_config().kv_router_config)?;
+
     let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .metrics_prefix(engine_config.local_model().metrics_prefix())

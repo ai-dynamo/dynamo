@@ -924,7 +924,7 @@ async fn injected_load_providers_restrict_selection() {
     let provider_state = Arc::clone(&available);
     let core = core_with_host(SelectionHost {
         load: HostLoad {
-            available_workers: Some(Arc::new(move || provider_state.lock().clone())),
+            available_workers: Some(Arc::new(move |_| provider_state.lock().clone())),
             overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
             ..HostLoad::default()
         },
