@@ -205,6 +205,43 @@ async def test_handler_assembles_external_prompt_through_shared_loader() -> None
     )
 
 
+async def test_handler_rejects_external_result_in_text_mode() -> None:
+    handler = _handler()
+    handler.use_vllm_tokenizer = True
+    handler._first_token_source = None
+    handler._multimodal_request_processor = SimpleNamespace(
+        validate_multimodal_request=MagicMock()
+    )
+    handler._generate_text_mode = MagicMock(
+        side_effect=AssertionError("text generator must not run")
+    )
+    handler._generate_token_mode = MagicMock(
+        side_effect=AssertionError("token generator must not run")
+    )
+    context = MagicMock()
+    context.id.return_value = "req-1"
+
+    chunks = [
+        chunk
+        async for chunk in handler.generate(
+            {"encoder_result": _encoder_result(row_splits=(0, 3))},
+            context,
+        )
+    ]
+
+    assert chunks == [
+        {
+            "finish_reason": (
+                "error: external encoder results require token-in/token-out mode"
+            ),
+            "index": 0,
+            "token_ids": [],
+        }
+    ]
+    handler._generate_text_mode.assert_not_called()
+    handler._generate_token_mode.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
