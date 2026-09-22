@@ -380,6 +380,21 @@ impl KVStoreDiscovery {
 
 #[async_trait]
 impl Discovery for KVStoreDiscovery {
+    async fn check_connection(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.cancel_token.is_cancelled(),
+            "discovery is shutting down"
+        );
+        let bucket = self
+            .store
+            .get_or_create_bucket(INSTANCES_BUCKET, None)
+            .await?;
+        // A point read tests connectivity even before any endpoint is registered.
+        // A missing key is a successful read; no probe records are written.
+        bucket.get(&kv::Key::from("__connectivity_probe__")).await?;
+        Ok(())
+    }
+
     fn instance_id(&self) -> u64 {
         self.store.connection_id()
     }

@@ -1566,6 +1566,13 @@ fn model_with_updated_taints(
 /// Discovery trait for service discovery across different backends
 #[async_trait]
 pub trait Discovery: Send + Sync {
+    /// Probe required discovery connectivity without registering a worker.
+    /// In-process implementations have no remote dependency. Remote backends
+    /// override this with a read against their authoritative store.
+    async fn check_connection(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns a unique identifier for this worker (e.g lease id if using etcd or generated id for memory store)
     /// Endpoint and model objects created by this worker use this ID. Event
     /// channels and sources use a publisher-level ID because a worker can own

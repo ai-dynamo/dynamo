@@ -480,7 +480,7 @@ impl Worker {
     ///
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
-    pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+    pub async fn run(self, runtime: Runtime) -> Result<(), DynamoError> {
         // Validate the worker config up front so misconfiguration surfaces
         // before any signal handlers, tokio tasks, or runtime construction.
         // The same validation is also reachable via `run_inner`, but doing
@@ -523,6 +523,31 @@ impl Worker {
             signal_token.cancel();
         });
 
+        let outcome = self.run_with_shutdown(runtime, None, shutdown_token).await;
+        signal_handle.abort();
+        let _ = signal_handle.await;
+        outcome
+    }
+
+    /// Run on the sidecar's already-connected runtime and process shutdown token.
+    /// Registration, drain and cleanup retain the ordinary Worker behavior.
+    pub async fn run_with_drt(
+        self,
+        drt: DistributedRuntime,
+        shutdown: CancellationToken,
+    ) -> Result<(), DynamoError> {
+        validate_model_input(self.config.model_input, &self.engine)?;
+        validate_route_to_encoder(&self.config)?;
+        self.run_with_shutdown(drt.runtime().clone(), Some(drt), shutdown)
+            .await
+    }
+
+    async fn run_with_shutdown(
+        mut self,
+        runtime: Runtime,
+        drt: Option<DistributedRuntime>,
+        shutdown_token: CancellationToken,
+    ) -> Result<(), DynamoError> {
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
         // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
@@ -531,12 +556,13 @@ impl Worker {
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
         let outcome = {
-            let inner_fut = self.run_inner(runtime, &shutdown_token);
+            let inner_fut = self.run_inner(runtime.clone(), drt, &shutdown_token);
             tokio::pin!(inner_fut);
 
             tokio::select! {
                 result = &mut inner_fut => result,
                 _ = shutdown_token.cancelled() => {
+                    runtime.mark_shutting_down();
                     let timeout = graceful_shutdown_timeout();
                     let grace = grace_period_secs();
                     let deadline = shutdown_deadline(timeout, grace);
@@ -561,11 +587,9 @@ impl Worker {
             }
         };
 
-        signal_handle.abort();
-        let _ = signal_handle.await;
-
         // Final safety net: guarantee engine.cleanup() runs if start()
         // succeeded. No-op if cleanup already ran via the orchestrator.
+        runtime.mark_shutting_down();
         self.cleanup_once().await;
 
         outcome
@@ -576,29 +600,36 @@ impl Worker {
     async fn run_inner(
         &mut self,
         runtime: Runtime,
+        drt: Option<DistributedRuntime>,
         shutdown: &CancellationToken,
     ) -> Result<(), DynamoError> {
         // model_input was already validated at the top of `run`; re-checking
         // here would double-error on misconfig.
-        let config = dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
-            self.config.runtime.discovery_backend.as_deref(),
-            self.config.runtime.request_plane.as_deref(),
-            self.config.runtime.event_plane.as_deref(),
-        )
-        .map_err(|e| {
-            err(
-                ErrorType::Backend(BackendError::InvalidArgument),
-                format!("distributed runtime config: {e}"),
-            )
-        })?;
-        let drt = DistributedRuntime::new(runtime, config)
-            .await
-            .map_err(|e| {
-                err(
-                    ErrorType::Backend(BackendError::CannotConnect),
-                    format!("distributed runtime: {e}"),
-                )
-            })?;
+        let drt = match drt {
+            Some(drt) => drt,
+            None => {
+                let config =
+                    dynamo_runtime::distributed::DistributedConfig::from_settings_with_overrides(
+                        self.config.runtime.discovery_backend.as_deref(),
+                        self.config.runtime.request_plane.as_deref(),
+                        self.config.runtime.event_plane.as_deref(),
+                    )
+                    .map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::InvalidArgument),
+                            format!("distributed runtime config: {e}"),
+                        )
+                    })?;
+                DistributedRuntime::new(runtime, config)
+                    .await
+                    .map_err(|e| {
+                        err(
+                            ErrorType::Backend(BackendError::CannotConnect),
+                            format!("distributed runtime: {e}"),
+                        )
+                    })?
+            }
+        };
         tracing::debug!("distributed runtime connected");
 
         let component = drt
@@ -863,6 +894,7 @@ impl Worker {
     /// grace period → engine drain → cleanup. Shared by every shutdown path —
     /// pre-serve (mid-start signal) and the serve loop's signal arm.
     async fn orchestrator_steps(&mut self, endpoint: &dynamo_runtime::component::Endpoint) {
+        endpoint.drt().runtime().mark_shutting_down();
         if let Err(e) = endpoint.unregister_endpoint_instance().await {
             tracing::warn!(error = %e, "discovery unregister failed");
         } else {

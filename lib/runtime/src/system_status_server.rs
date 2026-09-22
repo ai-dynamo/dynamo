@@ -4,6 +4,9 @@
 // TODO: (DEP-635) this file should be renamed to system_http_server.rs
 //  it is being used not just for status, health, but others like loras management.
 
+mod sidecar;
+pub use sidecar::SidecarStatusServer;
+
 use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
@@ -171,6 +174,14 @@ pub async fn spawn_system_status_server(
     drt: Arc<crate::DistributedRuntime>,
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+    let app = system_status_router(drt, discovery_metadata)?;
+    serve_system_status(host, port, cancel_token, app).await
+}
+
+fn system_status_router(
+    drt: Arc<crate::DistributedRuntime>,
+    discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
+) -> anyhow::Result<Router> {
     // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
     let health_path = server_state
@@ -269,6 +280,15 @@ pub async fn spawn_system_status_server(
         })
         .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
 
+    Ok(app)
+}
+
+async fn serve_system_status(
+    host: &str,
+    port: u16,
+    cancel_token: CancellationToken,
+    app: Router,
+) -> anyhow::Result<(std::net::SocketAddr, JoinHandle<()>)> {
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_system_status_server] binding to: {address}");
 
