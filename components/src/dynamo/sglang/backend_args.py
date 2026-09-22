@@ -67,6 +67,22 @@ class DynamoSGLangArgGroup(ArgGroup):
             "the same SGLang-native pre/post processing with KV router support.",
         )
 
+        add_argument(
+            g,
+            flag_name="--gateway-workers",
+            env_var="DYN_SGL_GATEWAY_WORKERS",
+            default=None,
+            arg_type=int,
+            help="Run N gateway processes in front of this engine, each a Dynamo "
+            "endpoint instance with its own SGLang request gateway (SGLang calls "
+            "that process a tokenizer worker; it also handles request intake and "
+            "output relay, which is the work being spread). Sets SGLang's "
+            "--tokenizer-worker-num to N; a --tokenizer-worker-num above 1 that "
+            "differs from N is an error, and --tokenizer-worker-num N alone runs N "
+            "gateways as well. Decode and prefill LLM workers only; not with "
+            "--enable-lora, --enable-forward-pass-metrics or snapshot mode. Child 0 "
+            "takes DYN_SYSTEM_PORT, the other children bind a random system port.",
+        )
         add_negatable_bool_argument(
             g,
             flag_name="--enable-multimodal",
@@ -107,6 +123,14 @@ class DynamoSGLangArgGroup(ArgGroup):
             env_var="DYN_SGL_EMBEDDING_WORKER",
             default=False,
             help="Run as embedding worker component (Dynamo flag, also sets SGLang's --is-embedding).",
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--rerank-worker",
+            env_var="DYN_SGL_RERANK_WORKER",
+            default=False,
+            help="Run a dedicated text cross-encoder rerank worker. Requires a rerank-capable frontend; also sets SGLang's --is-embedding.",
         )
 
         add_negatable_bool_argument(
@@ -179,6 +203,7 @@ class DynamoSGLangConfig(ConfigBase):
     """Configuration for Dynamo SGLang wrapper (SGLang-specific only)."""
 
     use_sglang_tokenizer: bool
+    gateway_workers: Optional[int] = None
     # Internal roles derived from the canonical multimodal arguments in args.py.
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
@@ -186,6 +211,7 @@ class DynamoSGLangConfig(ConfigBase):
     dedicated_mm_encoder: bool = False
     embedding_transfer_mode: EmbeddingTransferMode
     embedding_worker: bool
+    rerank_worker: bool = False
     image_diffusion_worker: bool
 
     disagg_config: Optional[str] = None
@@ -203,6 +229,17 @@ class DynamoSGLangConfig(ConfigBase):
 
     def validate(self) -> None:
         _reject_removed_multimodal_env_vars()
+        if self.rerank_worker and (
+            self.embedding_worker
+            or self.image_diffusion_worker
+            or self.video_generation_worker
+            or self.enable_multimodal
+            or self.dedicated_mm_encoder
+            or self.frontend_decoding
+        ):
+            raise ValueError(
+                "--rerank-worker cannot be combined with other worker modes"
+            )
 
         if not isinstance(self.embedding_transfer_mode, EmbeddingTransferMode):
             self.embedding_transfer_mode = EmbeddingTransferMode(
@@ -214,6 +251,8 @@ class DynamoSGLangConfig(ConfigBase):
                 "Both 'disagg_config' and 'disagg_config_key' must be provided together."
             )
 
+        if self.gateway_workers is not None and self.gateway_workers < 1:
+            raise ValueError("--gateway-workers must be a positive integer")
         self.validate_multimodal_topology()
 
         self.validate_dedicated_mm_encoder()

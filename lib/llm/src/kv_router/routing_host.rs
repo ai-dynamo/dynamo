@@ -10,6 +10,7 @@ use std::{
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    scheduling::{AbortCause, KvSchedulerError},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -28,22 +29,19 @@ use futures::stream::{self, StreamExt};
 use tracing::Instrument;
 
 use crate::{
-    kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
-        to_worker_selection_session_context,
-    },
-    local_model::runtime_config::ModelRuntimeConfig,
+    kv_router::{KvRouter, metrics::RouterRequestMetrics, to_worker_selection_session_context},
     lora::{LoadEstimator, LoraFilter},
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
+        preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
-        AffinityAcquire, AffinityCoordinator, AffinityTarget, SessionAffinityMode, affinity_id,
-        explicit_target, invalid_argument,
+        AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
+        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -71,18 +69,66 @@ pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
 }
 
+fn classification_failure(error: &Error) -> Option<&KvSchedulerError> {
+    error.chain().find_map(|cause| {
+        let error = cause.downcast_ref::<KvSchedulerError>()?;
+        matches!(
+            error,
+            KvSchedulerError::RequestClassifierPanicked(_)
+                | KvSchedulerError::RequestClassifierFailed(_)
+                | KvSchedulerError::InvalidClassificationMetadata(_)
+        )
+        .then_some(error)
+    })
+}
+
+fn classifier_abort_error(error: &KvSchedulerError) -> Arc<AbortCause> {
+    match error {
+        KvSchedulerError::RequestClassifierFailed(source) => Arc::clone(source),
+        _ => owned_abort_error(error),
+    }
+}
+
+/// The client-facing error for a classifier failure. A typed [`DynamoError`]
+/// returned by the plugin is an intentional, client-visible decision (flow
+/// control) and passes through with its status; everything else is sanitized
+/// to hide classifier internals from the client and logged for the operator.
+fn classifier_failure_response(request_id: &str, error: &KvSchedulerError) -> Error {
+    if let KvSchedulerError::RequestClassifierFailed(source) = error {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
+        while let Some(current) = cause {
+            if let Some(typed) = current.downcast_ref::<DynamoError>() {
+                // A load-shedding classifier rejects by design, one request at
+                // a time; that is not an operator error.
+                tracing::debug!(
+                    request_id = %request_id,
+                    error = %typed,
+                    "request classifier rejected request"
+                );
+                return crate::migration::ClassifierRejection(typed.clone()).into();
+            }
+            cause = current.source();
+        }
+    }
+    // The client only sees the sanitized error below, so this log is the
+    // operator's sole copy of the original failure.
+    tracing::error!(request_id = %request_id, error = %error, "request classifier failed");
+    DynamoError::builder()
+        .error_type(ErrorType::Unknown)
+        .message("request classifier failed")
+        .build()
+        .into()
+}
+
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
     AffinityTarget::new(worker.worker_id, Some(worker.dp_rank))
 }
 
-fn monitor_response_stream<Sel>(
+fn monitor_response_stream(
     mut response_stream: ManyOut<Annotated<LLMEngineOutput>>,
     context: Arc<dyn AsyncEngineContext>,
-    mut guard: RequestGuard<Sel>,
-) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    mut guard: RequestGuard,
+) -> impl futures::Stream<Item = Annotated<LLMEngineOutput>> + Send {
     async_stream::stream! {
         // Keep one cancellation future alive for the whole response stream. Calling
         // `stopped()` for every item repeatedly clones and polls a watch receiver.
@@ -124,8 +170,19 @@ where
                             guard.record_migration_failure(item.error.clone());
                             // Release the failed attempt before Migration can observe
                             // the item and start another one. This keeps serialized
-                            // retries free of stale-cleanup ABA races.
-                            guard.abort().await;
+                            // retries free of stale-cleanup ABA races. A migratable
+                            // failure hands the classifier lifecycle to the retry,
+                            // exactly like a dispatch-time failure; anything else is
+                            // terminal for the logical request and aborts it here.
+                            let migratable = item
+                                .error
+                                .as_ref()
+                                .is_some_and(|error| crate::migration::is_migratable(error));
+                            if !migratable || !guard.release_for_retry().await {
+                                guard
+                                    .abort_with_error(item.error.as_ref().map(|e| e as &AbortCause))
+                                    .await;
+                            }
                             yield item;
                             break false;
                         }
@@ -183,13 +240,10 @@ where
     }
 }
 
-fn into_monitored_response<Sel>(
+fn into_monitored_response(
     response_stream: ManyOut<Annotated<LLMEngineOutput>>,
-    guard: RequestGuard<Sel>,
-) -> ManyOut<Annotated<LLMEngineOutput>>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+    guard: RequestGuard,
+) -> ManyOut<Annotated<LLMEngineOutput>> {
     let stream_context = response_stream.context();
     let wrapped_stream = Box::pin(monitor_response_stream(
         response_stream,
@@ -199,11 +253,8 @@ where
     ResponseStream::new(wrapped_stream, stream_context)
 }
 
-enum RoutingPolicy<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    Kv(Arc<KvRouter<Sel>>),
+enum RoutingPolicy {
+    Kv(Arc<KvRouter>),
     Builtin(BuiltinWorkerSelector),
     Direct,
     DeviceAwareWeighted,
@@ -241,12 +292,9 @@ struct DeviceAwareTelemetry {
 /// [`PushRouter`] owns discovery, fault detection, and transport. [`KvRouter`]
 /// owns optional KV candidate state. `RoutingHost` owns the common request
 /// lifecycle regardless of which policy selected the worker.
-pub struct RoutingHost<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+pub struct RoutingHost {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-    policy: RoutingPolicy<Sel>,
+    policy: RoutingPolicy,
     request_metrics: Arc<RouterRequestMetrics>,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
@@ -260,14 +308,11 @@ where
 }
 
 /// An admitted KV route awaiting dispatch.
-pub(crate) struct RoutePlan<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    signals: RoutePlanSignals,
+pub(crate) struct RoutePlan {
+    pub(crate) signals: RoutePlanSignals,
     selection: WorkerSelection,
-    cleanup: KvRequestCleanup<Sel>,
-    affinity: Option<AffinityAcquire>,
+    cleanup: KvRequestCleanup,
+    affinity: Option<Hold>,
     /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
     /// preview, admission and dispatch draw on one budget instead of three.
     budget: CleanupBudget,
@@ -277,7 +322,7 @@ where
 pub(crate) struct RoutePreview {
     request_id: String,
     phase: RequestPhase,
-    signals: RoutePlanSignals,
+    pub(crate) signals: RoutePlanSignals,
     /// Starts here because the conditional route's first stage is the preview.
     budget: CleanupBudget,
 }
@@ -292,10 +337,6 @@ pub(crate) struct RoutePlanSignals {
 }
 
 impl RoutePreview {
-    pub(crate) fn signals(&self) -> RoutePlanSignals {
-        self.signals
-    }
-
     /// Starts the budget's clock and reports what is left, so a test can follow
     /// one budget across the real preview/plan/dispatch chain.
     #[cfg(test)]
@@ -311,14 +352,7 @@ impl RoutePlanSignals {
     }
 }
 
-impl<Sel> RoutePlan<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    pub(crate) fn signals(&self) -> RoutePlanSignals {
-        self.signals
-    }
-
+impl RoutePlan {
     #[cfg(test)]
     pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
         self.budget.remaining()
@@ -334,38 +368,30 @@ where
 ///
 /// This alias remains supported through the Dynamo 1.x series. It may be
 /// removed only in a 2.0.0 (or later) breaking release.
-pub type KvPushRouter<Sel = DefaultWorkerSelector> = RoutingHost<Sel>;
+pub type KvPushRouter = RoutingHost;
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter>,
         session_affinity_ttl: Option<Duration>,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(AffinityCoordinator::new)
+            .map(|ttl| kv_router.affinity_coordinator(ttl, SessionAffinityMode::Hard))
             .transpose()?;
 
-        Ok(Self::new_with_coordinator(
-            inner,
-            kv_router,
-            affinity,
-            SessionAffinityMode::Hard,
-        ))
+        Ok(Self::new_with_coordinator(inner, kv_router, affinity))
     }
 
     pub fn new_with_load_context(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         session_affinity_ttl: Option<Duration>,
         session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
         let affinity = session_affinity_ttl
-            .map(AffinityCoordinator::new)
+            .map(|ttl| kv_router.affinity_coordinator(ttl, session_affinity_mode))
             .transpose()?;
 
         Ok(Self::new_with_load_context_and_coordinator(
@@ -373,47 +399,36 @@ where
             kv_router,
             load_context,
             affinity,
-            session_affinity_mode,
         ))
     }
 
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
-        Self::new_with_optional_load_context_and_coordinator(
-            inner,
-            kv_router,
-            None,
-            affinity,
-            session_affinity_mode,
-        )
+        Self::new_with_optional_load_context_and_coordinator(inner, kv_router, None, affinity)
     }
 
     pub(crate) fn new_with_load_context_and_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         Self::new_with_optional_load_context_and_coordinator(
             inner,
             kv_router,
             Some(load_context),
             affinity,
-            session_affinity_mode,
         )
     }
 
     fn new_with_optional_load_context_and_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        kv_router: Arc<KvRouter<Sel>>,
+        kv_router: Arc<KvRouter>,
         load_context: Option<Arc<crate::kv_router::RoutingLoadContext>>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -425,8 +440,11 @@ where
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
+            session_affinity_mode: affinity
+                .as_ref()
+                .map(AffinityCoordinator::mode)
+                .unwrap_or_default(),
             affinity,
-            session_affinity_mode,
             hosted_occupancy: None,
             lora: None,
             routing_context: load_context,
@@ -438,35 +456,21 @@ where
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(
-            inner,
-            load_context,
-            None,
-            SessionAffinityMode::Hard,
-            None,
-        )
+        Self::new_builtin_with_capabilities(inner, load_context, None, None)
     }
 
     pub(crate) fn new_builtin_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
     ) -> Result<Self, Error> {
-        Self::new_builtin_with_capabilities(
-            inner,
-            load_context,
-            affinity,
-            session_affinity_mode,
-            None,
-        )
+        Self::new_builtin_with_capabilities(inner, load_context, affinity, None)
     }
 
     pub(crate) fn new_builtin_with_capabilities(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         load_context: Arc<crate::kv_router::RoutingLoadContext>,
         affinity: Option<AffinityCoordinator>,
-        session_affinity_mode: SessionAffinityMode,
         lora: Option<(Arc<LoraFilter>, Arc<LoadEstimator>)>,
     ) -> Result<Self, Error> {
         if affinity.is_some() && lora.is_some() {
@@ -513,8 +517,11 @@ where
             inner,
             policy,
             request_metrics,
+            session_affinity_mode: affinity
+                .as_ref()
+                .map(AffinityCoordinator::mode)
+                .unwrap_or_default(),
             affinity,
-            session_affinity_mode,
             hosted_occupancy,
             lora: lora
                 .zip(lora_selector)
@@ -542,12 +549,12 @@ where
     }
 
     /// The active KV-aware data plane.
-    pub fn kv_router(&self) -> &Arc<KvRouter<Sel>> {
+    pub fn kv_router(&self) -> &Arc<KvRouter> {
         self.kv_router_if_enabled()
             .expect("routing host has no KV capability")
     }
 
-    pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter<Sel>>> {
+    pub(crate) fn kv_router_if_enabled(&self) -> Option<&Arc<KvRouter>> {
         match &self.policy {
             RoutingPolicy::Kv(chooser) => Some(chooser),
             RoutingPolicy::Builtin(_)
@@ -574,6 +581,76 @@ where
             RoutingPolicy::Direct => None,
             RoutingPolicy::Kv(_) => None,
         }
+    }
+
+    /// The group key for a subagent: a request that carries a parent session id binds under the
+    /// parent's group instead of its own session, so siblings share a worker while the parent
+    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// it cannot be rejected against, or rebind, the group.
+    fn group_binding_id(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+    ) -> Option<Arc<SessionAffinityId>> {
+        if explicit.is_some() {
+            return None;
+        }
+        let parent_session_id = request
+            .content()
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref())?;
+        Some(Arc::new(SessionAffinityId::new(
+            subagent_group_affinity_id(parent_session_id),
+        )))
+    }
+
+    /// Commit a held session to the dispatched worker; a request without a
+    /// session passes its stream through.
+    fn bind_affinity(
+        &self,
+        hold: Option<Hold>,
+        dispatched_target: AffinityTarget,
+        stream: ManyOut<Annotated<LLMEngineOutput>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (Some(hold), Some(affinity)) = (hold, self.affinity.as_ref()) else {
+            return Ok(stream);
+        };
+        affinity.commit_to_stream(hold, dispatched_target, stream)
+    }
+
+    /// Check request-supplied targets only at initial selection, not after a route preview
+    /// or when dispatching: a worker disappearing later is a service failure.
+    fn validate_explicit_worker(
+        &self,
+        request: &PreprocessedRequest,
+        phase: RequestPhase,
+    ) -> Result<(), Error> {
+        let Some(routing) = request.routing.as_ref() else {
+            return Ok(());
+        };
+        let target = match phase {
+            RequestPhase::Prefill => routing
+                .prefill_worker_id
+                .map(|id| (id, "prefill_worker_id")),
+            RequestPhase::Decode | RequestPhase::Aggregated => {
+                routing.decode_worker_id.map(|id| (id, "decode_worker_id"))
+            }
+        }
+        .or_else(|| {
+            routing
+                .backend_instance_id
+                .map(|id| (id, "backend_instance_id"))
+        });
+        // Validate discovery membership, not health: unavailable workers are still known.
+        if let Some((worker_id, field)) = target
+            && !self.inner.client.is_instance_discovered(worker_id)
+        {
+            return Err(invalid_argument(format!(
+                "nvext.{field}={worker_id} does not identify a known worker"
+            )));
+        }
+        Ok(())
     }
 
     fn affinity_target_is_valid(&self, target: AffinityTarget) -> bool {
@@ -614,7 +691,7 @@ where
         phase: RequestPhase,
         staged_kv: StagedKv,
         budget: &CleanupBudget,
-    ) -> Result<AffinityAcquire, Error> {
+    ) -> Result<Hold, Error> {
         match DispatchCancellation::for_request(phase, staged_kv) {
             DispatchCancellation::CancelWhenStopped => {
                 affinity
@@ -641,7 +718,7 @@ where
         is_query_only: bool,
         budget: &CleanupBudget,
         mut select: Select,
-    ) -> Result<(T, Option<AffinityAcquire>), Error>
+    ) -> Result<(T, Option<Hold>), Error>
     where
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
@@ -654,6 +731,9 @@ where
             return Ok((select(None).await?, None));
         };
         let explicit = explicit_target(request.content(), phase)?;
+        let session_id = self
+            .group_binding_id(request, explicit)
+            .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));
@@ -671,7 +751,7 @@ where
                 budget,
             )
             .await?;
-        let target = operation.target();
+        let target = operation.target().map(from_table);
         match select(target).await {
             Ok(selection) => Ok((selection, Some(operation))),
             Err(error) if is_cancelled(&error) => Err(error),
@@ -692,7 +772,7 @@ where
                         budget,
                     )
                     .await?;
-                let selection = select(retry.target()).await?;
+                let selection = select(retry.target().map(from_table)).await?;
                 Ok((selection, Some(retry)))
             }
             Err(error) => Err(error),
@@ -720,10 +800,8 @@ where
 }
 
 #[async_trait]
-impl<Sel> AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
-    for RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for RoutingHost
 {
     /// Generate a request through the selected routing plane.
     ///
@@ -812,7 +890,7 @@ where
             let output = LLMEngineOutput {
                 routing_data: Some(RoutingData {
                     worker_id: worker_id_info,
-                    token_ids: Some(request.token_ids.clone()),
+                    token_ids: Some(request.token_ids.as_ref().clone()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -846,12 +924,7 @@ where
                 return Err(error);
             }
         };
-        match operation {
-            Some(operation) => {
-                operation.into_stream(selected_target, stream, self.session_affinity_mode)
-            }
-            None => Ok(stream),
-        }
+        self.bind_affinity(operation, selected_target, stream)
     }
 }
 

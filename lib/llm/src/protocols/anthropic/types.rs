@@ -38,6 +38,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
         ChatCompletionRequestSystemMessage {
             content: ChatCompletionRequestSystemMessageContent::Text(content),
             name: None,
+            tools: None,
         },
     ));
 }
@@ -100,6 +101,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             audio: None,
                             tool_calls: None,
                             function_call: None,
+                            partial: None,
                         },
                     ));
                 }
@@ -119,6 +121,14 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
 
         // Convert tool_choice
         let tool_choice = req.tool_choice.as_ref().map(convert_anthropic_tool_choice);
+        let parallel_tool_calls = req
+            .tool_choice
+            .as_ref()
+            .and_then(|choice| match choice {
+                AnthropicToolChoice::Simple(simple) => simple.disable_parallel_tool_use,
+                AnthropicToolChoice::Named(named) => named.disable_parallel_tool_use,
+            })
+            .map(|disabled| !disabled);
 
         // Convert stop_sequences -> stop
         let stop = req
@@ -136,6 +146,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 stop,
                 tools,
                 tool_choice,
+                parallel_tool_calls,
                 stream: Some(true), // Always stream internally
                 // Request cumulative usage on every chunk (not just the final
                 // one) so the Anthropic stream converter can stamp an
@@ -171,6 +182,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                 None
             },
             thinking: None,
+            thinking_token_budget: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
@@ -465,6 +477,7 @@ fn convert_assistant_blocks(
             tool_calls: tc,
             #[allow(deprecated)]
             function_call: None,
+            partial: None,
         },
     ));
 }

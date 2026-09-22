@@ -102,7 +102,14 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	spec.RuntimeVersionOverride = ""
 
 	// Roles are a Kubernetes map-list keyed by name. Canonicalize the copied
-	// slice so declaration order does not create a new worker generation.
+	// slice so declaration order does not create a new worker generation. Role
+	// replicas only assert cardinality already defined by the component shape,
+	// so their optional presence must not create a generation either.
+	if spec.Multinode != nil {
+		for i := range spec.Roles {
+			spec.Roles[i].Replicas = nil
+		}
+	}
 	sort.Slice(spec.Roles, func(i, j int) bool {
 		return spec.Roles[i].Name < spec.Roles[j].Name
 	})
@@ -118,6 +125,29 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	if spec.Experimental != nil && spec.Experimental.Grove != nil &&
 		!ptr.Deref(spec.Experimental.Grove.ForceScalingGroup, false) {
 		spec.Experimental.Grove.ForceScalingGroup = nil
+	}
+
+	// Empty wrappers and disabled checkpoint configurations are equivalent to omission.
+	if spec.Experimental != nil {
+		if spec.Experimental.Grove != nil && *spec.Experimental.Grove == (v1beta1.GroveSpec{}) {
+			spec.Experimental.Grove = nil
+		}
+		if spec.Experimental.Checkpoint != nil && !spec.Experimental.Checkpoint.Enabled {
+			spec.Experimental.Checkpoint = nil
+		}
+		if *spec.Experimental == (v1beta1.ExperimentalSpec{}) {
+			spec.Experimental = nil
+		}
+	}
+
+	// Omitted and backend-default cache paths render identically. This requires
+	// GenerateDynamoComponentsDeployments to populate spec.BackendFramework
+	// on the generated DCD before workerHashSpec is called.
+	if spec.CompilationCache != nil {
+		defaultPath := getDefaultCompilationCacheMountPoint(BackendFramework(spec.BackendFramework))
+		if defaultPath != "" && spec.CompilationCache.MountPath == defaultPath {
+			spec.CompilationCache.MountPath = ""
+		}
 	}
 
 	return *spec

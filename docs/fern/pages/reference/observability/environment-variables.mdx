@@ -91,7 +91,13 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_ENABLE" type="string" default="n">
   Enables [NIXL](https://github.com/ai-dynamo/nixl) telemetry. NIXL metrics track KV cache and embedding data transfers and are populated only during disaggregated serving or multimodal embedding transfers.
 
-  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>n</Badge></span>
+  This variable alone does not produce a scrapeable endpoint: set `NIXL_TELEMETRY_EXPORTER` as well. `NIXL_TELEMETRY_PROMETHEUS_PORT` then chooses the port, and while it is optional, leaving it unset lands the exporter on a port the operator already uses. Both are described below.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>y</Badge> <Badge intent="note" minimal>1</Badge> <Badge intent="note" minimal>yes</Badge> <Badge intent="note" minimal>on</Badge> <Badge intent="note" minimal>true</Badge> <Badge intent="note" minimal>enable</Badge> <Badge intent="note" minimal>n</Badge> <Badge intent="note" minimal>0</Badge> <Badge intent="note" minimal>no</Badge> <Badge intent="note" minimal>off</Badge> <Badge intent="note" minimal>false</Badge> <Badge intent="note" minimal>disable</Badge></span>
+
+  NIXL compares the value case-insensitively but does not trim whitespace, so `Y` and `TRUE` are accepted while ` y` and `y ` are errors. Any other value is also an error.
+
+  For SGLang operator port declarations, use `y` (case-insensitive). Other literal truthy values retain their existing port declarations to avoid rolling unchanged workloads on operator upgrade. Changing the custom resource value to `y` opts in to the additional rank ports and rolls the workload. Runtime telemetry still accepts all the truthy values listed above.
 
   **Operator preset:** `n` on worker, prefill, and decode pods.
 </ParamField>
@@ -99,11 +105,21 @@ Every Dynamo process reads its own environment at startup, so set these on each 
 <ParamField path="NIXL_TELEMETRY_EXPORTER" type="string">
   NIXL telemetry exporter to use, e.g. `prometheus`.
 
+  Required for a Prometheus endpoint, with the exact lowercase value `prometheus`. NIXL has no default exporter: when this variable is unset, telemetry is collected in-process without opening a Prometheus port. Other valid exporters, such as `doca`, use their own configuration; an exporter that NIXL cannot load makes agent construction fail.
+
   **Operator preset:** `prometheus` on worker, prefill, and decode pods.
 </ParamField>
 
-<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="19090">
-  Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Use distinct values per worker (e.g. `19090` prefill, `19091` decode) to avoid collisions.
+<ParamField path="NIXL_TELEMETRY_PROMETHEUS_PORT" type="integer" default="9090 (NIXL fallback)">
+  Port for NIXL's Prometheus exporter — a separate port from the Dynamo metrics port. Each NIXL agent binds its own exporter, so every agent needs a port of its own; two agents pointed at the same port leave the second exporter unable to bind.
+
+  Give each worker a non-overlapping value when workers share a network namespace. Because each value is the base of an eight-port range (see below), `19090` for the prefill worker leaves `19098` as the next free base for the decode worker.
+
+  Within a single worker, treat this as the **base** of a range rather than one port. SGLang runs one scheduler process per node-local GPU and each builds its own NIXL agent, so Dynamo gives node-local rank *i* the port `base + i` and the operator declares the whole range on the pod as `nixl`, `nixl-1`, … so Prometheus scrapes every rank. Leave room for as many consecutive ports as the pod has GPUs (up to 8).
+
+  Optional: with the exporter selected, NIXL binds a listener whether or not this is set. `19090` is Dynamo's convention rather than a NIXL default, and with this variable unset the exporter falls back to its own built-in `9090` — which is the `DYN_SYSTEM_PORT` operator preset, so set it explicitly to keep the two apart. A malformed or out-of-range value is not a fallback. NIXL 1.3.2 logs the exporter creation failure and continues without an exporter; NIXL 1.4.0 raises an error during agent construction. Dynamo's own port validation rejects these values before worker startup, independently of that version-specific NIXL behavior. NIXL accepts `0` as an ephemeral port, but Dynamo rejects it because that port cannot be declared or configured as a scrape target.
+
+  Set a literal port between 1 and 65535, in decimal or hexadecimal (for example, `0x4a92` for `19090`). When reserving SGLang Prometheus rank ports, the operator rejects a value taken from `valueFrom`: it cannot resolve that value to declare the range as container ports.
 
   **Operator preset:** `19090` on worker, prefill, and decode pods.
 </ParamField>
@@ -275,7 +291,19 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mode`), which measures whole-model forward-pass latencies for the FPM performance database. They have no effect on serving.
 
 <ParamField path="DYN_BENCH_KV_WARMUP" type="string" default="on">
-  KV warm-up master switch. When on, decode benchmark points on expert-parallel MoE models read KV produced by real prefill chains instead of self-injected synthetic KV. Set `off` to force the legacy synthetic-KV path. Ineligible configurations (dense models, no expert parallelism, prefix caching disabled, or a seeding dataset that is unavailable, empty, too shallow for the model length, or without a loadable tokenizer) skip the warm-up automatically and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+  KV warm-up master switch. When on, eligible decode benchmark points read attention KV produced by real prefill chains. By default, eligibility requires a MoE model with expert parallelism and no recurrent-state layers. With `DYN_BENCHMARK_RANDOMIZE_KDA_STATE=true`, hybrid MoE models are also eligible without expert parallelism; their attention KV is real and their recurrent states remain synthetic. Set `off` to force the legacy synthetic-KV path.
+
+  All eligible configurations require prefix caching, a loadable tokenizer, and enough seeding dataset content for the model length. Configurations that do not meet these requirements skip warm-up and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+</ParamField>
+
+<ParamField path="DYN_BENCHMARK_RANDOMIZE_KDA_STATE" type="boolean" default="false">
+  **Experimental.** Equivalent to `--benchmark-randomize-kda-state`. Requires `--benchmark-mode decode` or `agg`, recurrent cache groups, and the standard vLLM GPU worker with either model runner V1 or V2; custom workers and GMS are unsupported. Applies to every node, including headless workers.
+
+  Initializes each decode measurement request's private KDA/Mamba state with deterministic uniform values in `[-0.01, 0.01]`, in the cache tensors' existing dtypes. The generator is seeded by request ID, layer, rank, and tensor index without changing the model's RNG stream. Initialization completes in the discarded admission step; steady decode steps update these states normally. Initialization is disabled before serving starts.
+
+  With `DYN_BENCH_KV_WARMUP=on`, hybrid MoE models can use real attention KV from prefill chains even without expert parallelism. Their recurrent states remain synthetic; the source chain's states are never borrowed or modified. Existing dataset, prefix-cache, and capacity requirements still apply. Without a usable chain, attention KV follows the existing synthetic fallback.
+
+  Artifacts distinguish `real_attention_kv_random_kda` from `fake_attention_kv_random_kda` and record the distribution in `recurrent_state`. These values are performance-test inputs, not valid context history or a guarantee of real-workload performance parity.
 </ParamField>
 
 <ParamField path="DYN_BENCH_KV_WARMUP_DATASET" type="string">

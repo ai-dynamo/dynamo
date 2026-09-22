@@ -35,6 +35,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/google/go-cmp/cmp"
@@ -47,6 +48,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes/scheme"
 	ptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
@@ -5154,13 +5156,28 @@ func TestExpandRolesForService(t *testing.T) {
 			},
 		},
 		{
-			name:          "explicit multinode roles retain node count cardinality",
+			name:          "explicit multinode roles derive node count cardinality",
 			serviceName:   "test-service",
 			numberOfNodes: 5,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				Roles: []v1alpha1.ComponentRoleSpec{
 					{Name: v1alpha1.ComponentRoleWorker},
 					{Name: v1alpha1.ComponentRoleLeader},
+				},
+			},
+			expected: []ServiceRole{
+				{Name: "test-service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "test-service-wkr", Role: RoleWorker, Replicas: 4},
+			},
+		},
+		{
+			name:          "multinode node count remains authoritative over role replicas",
+			serviceName:   "test-service",
+			numberOfNodes: 5,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Roles: []v1alpha1.ComponentRoleSpec{
+					{Name: v1alpha1.ComponentRoleWorker, Replicas: ptr.To(int32(99))},
+					{Name: v1alpha1.ComponentRoleLeader, Replicas: ptr.To(int32(2))},
 				},
 			},
 			expected: []ServiceRole{
@@ -6211,6 +6228,66 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				t.Errorf("GenerateBasePodSpec() serviceAccountName = %v, want %v",
 					podSpec.ServiceAccountName, tt.expectedServiceAcc)
 			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_InitContainerPullSecrets(t *testing.T) {
+	cases := []struct {
+		name      string
+		mainImage string
+		explicit  []corev1.LocalObjectReference
+		expected  []corev1.LocalObjectReference
+	}{
+		{name: "distinct registries follow container order", mainImage: "main.example/frontend:v1", expected: []corev1.LocalObjectReference{{Name: "main-pull-secret"}, {Name: "init-pull-secret"}}},
+		{name: "private init image", mainImage: "public.example/frontend:v1", expected: []corev1.LocalObjectReference{{Name: "init-pull-secret"}}},
+		{name: "shared registry is deduplicated", mainImage: "init.example/frontend:v1", expected: []corev1.LocalObjectReference{{Name: "init-pull-secret"}}},
+		{name: "explicit credentials preserved", mainImage: "public.example/frontend:v1", explicit: []corev1.LocalObjectReference{{Name: "explicit-secret"}}, expected: []corev1.LocalObjectReference{{Name: "explicit-secret"}, {Name: "init-pull-secret"}}},
+		{name: "explicit credential is deduplicated", mainImage: "public.example/frontend:v1", explicit: []corev1.LocalObjectReference{{Name: "init-pull-secret"}}, expected: []corev1.LocalObjectReference{{Name: "init-pull-secret"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Index credentials for distinct main and initialization image registries")
+			credential := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "init-pull-secret", Namespace: "default"},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"init.example":{}}}`)},
+			}
+			mainCredential := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: "main-pull-secret", Namespace: "default"},
+				Type:       corev1.SecretTypeDockerConfigJson,
+				Data:       map[string][]byte{corev1.DockerConfigJsonKey: []byte(`{"auths":{"main.example":{}}}`)},
+			}
+			reader := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(credential, mainCredential).Build()
+			index := secrets.NewDockerSecretIndexer(reader, "default")
+			require.NoError(t, index.RefreshIndex(t.Context()))
+
+			t.Log("Render a component with a private init container and the requested discovery policy")
+			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Image: tc.mainImage},
+					PodSpec: &corev1.PodSpec{
+						InitContainers:   []corev1.Container{{Name: "prepare", Image: "init.example/prepare:v1"}},
+						ImagePullSecrets: tc.explicit,
+					},
+				},
+			}
+			renderedComponent := betaComponent(t, component)
+			original := renderedComponent.DeepCopy()
+			pod, err := GenerateBasePodSpec(
+				renderedComponent, BackendFrameworkNoop, index,
+				"test-deployment", "default", RoleMain, 1,
+				&configv1alpha1.OperatorConfiguration{}, commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service", nil, staticContainerGPUCount(0),
+			)
+			require.NoError(t, err)
+
+			t.Log("Verify discovery, stable ordering, deduplication, and preservation of the input component")
+			require.Len(t, pod.InitContainers, 1)
+			require.Equal(t, "init.example/prepare:v1", pod.InitContainers[0].Image)
+			require.Equal(t, tc.expected, pod.ImagePullSecrets)
+			require.Equal(t, original, renderedComponent)
 		})
 	}
 }
@@ -7618,6 +7695,65 @@ func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *te
 	}
 }
 
+func TestGenerateGrovePodCliqueSet_ConvertedCompilationCacheMountIsNotDuplicated(t *testing.T) {
+	const compilationCachePath = "/home/dynamo/.cache/vllm"
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkVLLM),
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "model-cache", MountPoint: "/home/dynamo/.cache/huggingface"},
+						{Name: "compilation-cache", MountPoint: compilationCachePath, UseAsCompilationCache: true},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Render the reported v1alpha1 compilation-cache fixture as a Grove PodCliqueSet")
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 1)
+	require.Len(t, got.Spec.Template.Cliques[0].Spec.PodSpec.Containers, 1)
+
+	t.Log("Verify every rendered mount path is unique and the compilation cache appears once")
+	mainContainer := got.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0]
+	mountsByPath := make(map[string]corev1.VolumeMount, len(mainContainer.VolumeMounts))
+	for _, mount := range mainContainer.VolumeMounts {
+		require.NotContains(t, mountsByPath, mount.MountPath, "duplicate mountPath %q", mount.MountPath)
+		mountsByPath[mount.MountPath] = mount
+	}
+	assert.Equal(t, "model-cache", mountsByPath["/home/dynamo/.cache/huggingface"].Name)
+	assert.Equal(t, "compilation-cache", mountsByPath[compilationCachePath].Name)
+	assert.False(t, mountsByPath[compilationCachePath].ReadOnly)
+
+	t.Log("Verify the compilation-cache mount retains one writable PVC-backed volume")
+	var compilationCacheVolumes []corev1.Volume
+	for _, volume := range got.Spec.Template.Cliques[0].Spec.PodSpec.Volumes {
+		if volume.Name == "compilation-cache" {
+			compilationCacheVolumes = append(compilationCacheVolumes, volume)
+		}
+	}
+	require.Len(t, compilationCacheVolumes, 1)
+	require.NotNil(t, compilationCacheVolumes[0].PersistentVolumeClaim)
+	assert.Equal(t, "compilation-cache", compilationCacheVolumes[0].PersistentVolumeClaim.ClaimName)
+	assert.False(t, compilationCacheVolumes[0].PersistentVolumeClaim.ReadOnly)
+}
+
 func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testing.T) {
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeFrontend,
@@ -8741,10 +8877,11 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
-			Enabled:        true,
-			Exists:         true,
-			Ready:          true,
-			CheckpointName: "decode-checkpoint",
+			Enabled:                   true,
+			Exists:                    true,
+			Ready:                     true,
+			CheckpointName:            "decode-checkpoint",
+			SnapshotCompatibilityHash: "compatibility-v1",
 			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 				UID:                  "snapshot-uid",
 				BoundContentName:     "snapshot-content",
@@ -8838,11 +8975,12 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 
 	infoByService := map[string]*checkpoint.CheckpointInfo{
 		"decode": {
-			Enabled:                 true,
-			Exists:                  true,
-			Ready:                   true,
-			CheckpointName:          "decode-checkpoint",
-			RestoreTargetContainers: IntraPodFailoverEngineContainerNames(),
+			Enabled:                   true,
+			Exists:                    true,
+			Ready:                     true,
+			CheckpointName:            "decode-checkpoint",
+			SnapshotCompatibilityHash: "compatibility-v1",
+			RestoreTargetContainers:   IntraPodFailoverEngineContainerNames(),
 			NativeSnapshot: &checkpoint.ResolvedPodSnapshot{
 				UID:                  "snapshot-uid",
 				BoundContentName:     "snapshot-content",
@@ -10091,7 +10229,13 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 				Labels:      tt.serviceLabels,
 			}
 			betaComponent := betaComponent(t, component)
-			propagateDGDSpecMetadata(tt.dgdAnnotations, tt.dgdLabels, betaComponent)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					Annotations: tt.dgdAnnotations,
+					Labels:      tt.dgdLabels,
+				},
+			}
+			propagateDGDSpecMetadata(dgd, betaComponent)
 			annotations := GetPodTemplateAnnotations(betaComponent)
 			labels := GetPodTemplateLabels(betaComponent)
 
@@ -10109,6 +10253,57 @@ func TestPropagateDGDSpecMetadata(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestApplyDGDTemplateDefaultsPreservesAlphaServiceMetadataPrecedence(t *testing.T) {
+	t.Log("Convert a merged v1alpha1 DGD with conflicting DGD and service discovery annotations")
+	alpha := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoDiscoveryBackend: "etcd",
+			},
+		},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: "frontend",
+					Annotations: map[string]string{
+						commonconsts.KubeAnnotationDynamoDiscoveryBackend: "kubernetes",
+					},
+				},
+			},
+		},
+	}
+	beta := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, alpha.ConvertTo(beta))
+	component := beta.GetComponentByName("Frontend")
+	require.NotNil(t, component)
+
+	t.Log("Apply DGD defaults to the converted component")
+	applyDGDTemplateDefaults(component, beta, nil)
+
+	t.Log("Verify runtime pod generation consumes the service-level discovery override")
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkSGLang,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{
+			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendEtcd},
+		},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"Frontend",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+	assert.Contains(t, podSpec.Containers[0].Env, corev1.EnvVar{
+		Name:  commonconsts.DynamoDiscoveryBackendEnvVar,
+		Value: "kubernetes",
+	})
 }
 
 func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {

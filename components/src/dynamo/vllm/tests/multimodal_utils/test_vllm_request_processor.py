@@ -3,7 +3,7 @@
 
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -1345,6 +1345,7 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
         min_pixels=65536,
         max_pixels=16777216,
         vision_hidden_dim=2048,
+        decode_embedding_dim=2048,
     )
     captured = {}
 
@@ -1390,12 +1391,13 @@ def test_qwen_handoff_computes_grid_for_pil_images():
             min_pixels=65536,
             max_pixels=16777216,
             vision_hidden_dim=2048,
+            decode_embedding_dim=8192,
         ),
     )
 
     assert result == {
         "image_grid_thw": [[1, 30, 40]],
-        "embeddings_shape": [300, 2048],
+        "embeddings_shape": [300, 8192],
     }
 
 
@@ -1616,3 +1618,44 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert result[10 : 10 + len(_K3_NATIVE_IDS)] == _K3_NATIVE_IDS
     assert result[-(len(_K3_NATIVE_IDS) + 9) : -9] == _K3_NATIVE_IDS
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
+
+
+class TestLoadQwenGridParams:
+    """Tests for embedding dimensions loaded from Qwen vision configs."""
+
+    @pytest.mark.parametrize(
+        ("deepstack_config", "expected_decode_embedding_dim"),
+        [
+            pytest.param(
+                {"deepstack_visual_indexes": [8, 16, 24]}, 8192, id="deepstack"
+            ),
+            pytest.param({"deepstack_visual_indexes": []}, 2048, id="empty"),
+            pytest.param({"deepstack_visual_indexes": None}, 2048, id="none"),
+            pytest.param({}, 2048, id="missing"),
+        ],
+    )
+    def test_decode_embedding_dim(
+        self, deepstack_config, expected_decode_embedding_dim
+    ):
+        processor = SimpleNamespace(
+            patch_size=16, merge_size=2, min_pixels=65536, max_pixels=16777216
+        )
+        vision_config = SimpleNamespace(
+            hidden_size=1024, out_hidden_size=2048, **deepstack_config
+        )
+        with (
+            patch.object(
+                qwen_mod.AutoImageProcessor, "from_pretrained", return_value=processor
+            ),
+            patch.object(
+                qwen_mod.AutoConfig,
+                "from_pretrained",
+                return_value=SimpleNamespace(vision_config=vision_config),
+            ),
+        ):
+            params = qwen_mod.load_qwen_grid_params("Qwen/Qwen3-VL-2B-Instruct")
+
+        assert params is not None
+        assert params.vision_hidden_dim == 2048
+        # DeepStack concatenates intermediate outputs with the final vision output.
+        assert params.decode_embedding_dim == expected_decode_embedding_dim

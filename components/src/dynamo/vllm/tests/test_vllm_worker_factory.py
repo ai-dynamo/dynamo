@@ -1114,21 +1114,32 @@ class TestPrefillRegistrationContract:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lora_enabled", [True, False])
-async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
+@pytest.mark.parametrize("snapshot_mode", [True, False])
+async def test_prefill_initializes_metrics_and_serves_lora_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
     lora_enabled: bool,
+    snapshot_mode: bool,
 ) -> None:
     engine_client = Mock()
-    vllm_config = Mock(additional_config={})
+    vllm_config = Mock(
+        additional_config={},
+        cache_config=SimpleNamespace(num_gpu_blocks=96),
+    )
     engine_tuple: EngineSetupResult = (
         engine_client,
         vllm_config,
         Mock(),
-        "/tmp/prom",
+        str(tmp_path / "prometheus"),
         Mock(),
     )
+    stat_logger = Mock()
+    snapshot_engine: SnapshotEngineSetupResult | None = (
+        (engine_tuple, stat_logger) if snapshot_mode else None
+    )
+    setup_vllm_engine = Mock(return_value=engine_tuple)
     factory = WorkerFactory(
-        setup_vllm_engine_fn=Mock(return_value=engine_tuple),
+        setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=Mock(return_value=None),
         register_vllm_model_fn=AsyncMock(),
         setup_fpm_relay_fn=Mock(return_value=None),
@@ -1154,6 +1165,13 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
 
     monkeypatch.setattr(
         "dynamo.vllm.worker_factory.configure_kv_event_block_size", _noop
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.get_dp_range_for_worker", lambda _config: (3, 2)
+    )
+    stat_logger_factory = Mock(return_value=stat_logger)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.StatLoggerFactory", stat_logger_factory
     )
 
     endpoints: dict[str, Mock] = {}
@@ -1187,7 +1205,25 @@ async def test_prefill_serves_lora_lifecycle_endpoints_when_enabled(
         config,
         asyncio.Event(),
         shutdown_endpoints,
+        snapshot_engine=snapshot_engine,
     )
+
+    if snapshot_mode:
+        stat_logger_factory.assert_not_called()
+        setup_vllm_engine.assert_not_called()
+        stat_logger.bind_endpoint.assert_called_once_with(
+            endpoints["dyn.prefill.generate"]
+        )
+    else:
+        stat_logger_factory.assert_called_once_with(
+            endpoint=endpoints["dyn.prefill.generate"]
+        )
+        setup_vllm_engine.assert_called_once_with(
+            config, stat_logger, fpm_worker_id="cid"
+        )
+        stat_logger.bind_endpoint.assert_not_called()
+    stat_logger.set_num_gpu_blocks_all.assert_called_once_with(48)
+    stat_logger.init_publish.assert_called_once_with()
 
     lifecycle_names = {
         "dyn.prefill.load_lora",
@@ -1427,7 +1463,7 @@ async def test_benchmark_wait_failure_logs_stop_failure_and_keeps_original(
         await _await_benchmark_then_restore_workers({}, Mock(), Mock())
 
     assert exc_info.value is original
-    assert "Failed to stop the FPM GC policy" in caplog.text
+    assert "Failed to restore model workers" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1585,7 +1621,7 @@ async def test_failure_path_stop_is_time_boxed_and_original_error_wins(
         await _await_benchmark_then_restore_workers({}, Mock(), Mock())
 
     assert exc_info.value is original
-    assert "Failed to stop the FPM GC policy" in caplog.text
+    assert "Failed to restore model workers" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1799,3 +1835,102 @@ async def test_decode_call_site_stops_workers_when_benchmark_wait_raises(
     assert order == ["wait", "stop"]
     register.assert_not_awaited()
     engine_client.shutdown.assert_called_once_with(timeout=5.0)
+
+
+@pytest.mark.asyncio
+class TestEncodeWorkerEmbeddingCacheCapacity:
+    """The encode worker gets its cache capacity from the configured flag.
+
+    ``--multimodal-embedding-cache-capacity-gb`` defaults to 0, which disables
+    the cache, so the disabled case is the stock deployment rather than an edge
+    case. The handler decides whether to build a cache at all; the factory's
+    part is to hand it the configured value unchanged.
+    """
+
+    @staticmethod
+    async def _create_encode_worker(capacity_gb):
+        """Run ``_create_multimodal_encode_worker`` with everything external stubbed.
+
+        Returns the patched handler constructor.
+        """
+        endpoint = Mock()
+        endpoint.serve_endpoint = AsyncMock()
+        runtime = Mock()
+        runtime.endpoint = Mock(return_value=endpoint)
+
+        handler = Mock()
+        handler.async_init = AsyncMock()
+
+        config = _make_config(
+            namespace="dynamo",
+            component="encoder",
+            endpoint="generate",
+            model="/models/qwen-vl",
+            served_model_name="qwen-vl",
+            frontend_decoding=False,
+            multimodal_embedding_cache_capacity_gb=capacity_gb,
+        )
+
+        with patch(
+            "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+        ) as handler_cls, patch(
+            "dynamo.vllm.worker_factory.register_model", AsyncMock()
+        ), patch(
+            "dynamo.vllm.worker_factory.register_model_taint_route"
+        ):
+            await _make_factory()._create_multimodal_encode_worker(
+                runtime, config, asyncio.Event(), []
+            )
+
+        return handler_cls
+
+    async def test_passes_the_configured_capacity_to_the_handler(self) -> None:
+        handler_cls = await self._create_encode_worker(4.0)
+
+        assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 4.0
+
+    async def test_passes_the_disabling_default_through_unchanged(self) -> None:
+        handler_cls = await self._create_encode_worker(0.0)
+
+        assert handler_cls.call_args.kwargs["embedding_cache_capacity_gb"] == 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
+async def test_random_state_worker_is_disabled_after_benchmark(monkeypatch, failed):
+    async def wait(_config, _vllm_config):
+        if failed:
+            raise RuntimeError("benchmark failed")
+        return {"status": "complete"}
+
+    monkeypatch.setattr("dynamo.vllm.worker_factory._wait_and_load_benchmark", wait)
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory._stop_worker_gc_policy", AsyncMock()
+    )
+    client = SimpleNamespace(collective_rpc=AsyncMock())
+    if failed:
+        with pytest.raises(RuntimeError, match="benchmark failed"):
+            await _await_benchmark_then_restore_workers(
+                {"randomize_kda_state": True}, Mock(), client
+            )
+    else:
+        await _await_benchmark_then_restore_workers(
+            {"randomize_kda_state": True}, Mock(), client
+        )
+    client.collective_rpc.assert_awaited_once_with("finish_benchmark_kda_state")
+
+
+@pytest.mark.asyncio
+async def test_random_state_stop_failure_still_restores_gc(monkeypatch):
+    wait = AsyncMock(return_value={"status": "complete"})
+    stop_gc = AsyncMock()
+    monkeypatch.setattr("dynamo.vllm.worker_factory._wait_and_load_benchmark", wait)
+    monkeypatch.setattr("dynamo.vllm.worker_factory._stop_worker_gc_policy", stop_gc)
+    client = SimpleNamespace(
+        collective_rpc=AsyncMock(side_effect=RuntimeError("state stop failed"))
+    )
+    with pytest.raises(RuntimeError, match="state stop failed"):
+        await _await_benchmark_then_restore_workers(
+            {"randomize_kda_state": True}, Mock(), client
+        )
+    stop_gc.assert_awaited_once_with(client)
