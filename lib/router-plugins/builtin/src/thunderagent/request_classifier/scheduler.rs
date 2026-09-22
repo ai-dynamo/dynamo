@@ -129,6 +129,12 @@ struct WorkerUsage {
     decayed: usize,
 }
 
+#[derive(Default)]
+struct PauseCandidates {
+    acting: Vec<(usize, String)>,
+    reasoning: Vec<(usize, String)>,
+}
+
 impl WorkerUsage {
     fn add_program(&mut self, normal: usize, decayed: usize, buffer: usize) {
         self.used = self.used.saturating_add(normal).saturating_add(buffer);
@@ -822,15 +828,55 @@ impl State {
         usage: &mut HashMap<WorkerWithDpRank, WorkerUsage>,
         now: Instant,
     ) -> bool {
-        let mut changed = false;
+        let mut candidates = HashMap::<WorkerWithDpRank, PauseCandidates>::new();
         for (worker, capacity) in capacities.iter() {
             let threshold = scale_tokens(capacity, self.config.pause_threshold);
-            if usage.get(&worker).map_or(0, |usage| usage.used) <= threshold {
+            if usage.get(&worker).map_or(0, |usage| usage.used) > threshold {
+                candidates.insert(worker, PauseCandidates::default());
+            }
+        }
+        if candidates.is_empty() {
+            return false;
+        }
+        let single_worker = if candidates.len() == 1 {
+            candidates.keys().next().copied()
+        } else {
+            None
+        };
+
+        // Group after resumes and timeouts have updated assignments and usage.
+        // Only overloaded ranks need candidates; scan the program table once.
+        for (session_id, program) in &self.programs {
+            if program.lifecycle != ProgramLifecycle::Active || program.marked_for_pause {
                 continue;
             }
+            let Some(worker) = program.assigned_worker else {
+                continue;
+            };
+            // Avoid hashing unrelated ranks when only one rank needs pausing.
+            if single_worker.is_some_and(|single| worker != single) {
+                continue;
+            }
+            let Some(candidates) = candidates.get_mut(&worker) else {
+                continue;
+            };
+            let group = match program.status {
+                ProgramStatus::Acting => &mut candidates.acting,
+                ProgramStatus::Reasoning => &mut candidates.reasoning,
+            };
+            group.push((current_token_total(program), session_id.clone()));
+        }
+
+        let mut changed = false;
+        for (worker, capacity) in capacities.iter() {
+            let Some(PauseCandidates {
+                mut acting,
+                mut reasoning,
+            }) = candidates.remove(&worker)
+            else {
+                continue;
+            };
             let target = scale_tokens(capacity, self.config.pause_target);
-            let mut acting = self.programs_for_worker(worker, ProgramStatus::Acting);
-            let mut reasoning = self.programs_for_worker(worker, ProgramStatus::Reasoning);
             acting.sort_by_key(|(tokens, _)| *tokens);
             reasoning.sort_by_key(|(tokens, _)| *tokens);
 
@@ -883,23 +929,6 @@ impl State {
             program.assigned_worker = None;
         });
         true
-    }
-
-    fn programs_for_worker(
-        &self,
-        worker: WorkerWithDpRank,
-        status: ProgramStatus,
-    ) -> Vec<(usize, String)> {
-        self.programs
-            .iter()
-            .filter(|(_, program)| {
-                program.lifecycle == ProgramLifecycle::Active
-                    && program.status == status
-                    && program.assigned_worker == Some(worker)
-                    && !program.marked_for_pause
-            })
-            .map(|(session_id, program)| (current_token_total(program), session_id.clone()))
-            .collect()
     }
 
     pub(crate) fn on_event(
@@ -1367,5 +1396,194 @@ mod tests {
         state.reconcile(&capacities, now + state.config.scheduler_interval());
         assert_eq!(state.worker_usage(now)[&worker].used, 750);
         assert!(state.programs["session-a"].marked_for_pause);
+    }
+
+    #[test]
+    fn pause_isolates_worker_ranks_and_stops_acting_at_target() {
+        let now = Instant::now();
+        let acting_rank = WorkerWithDpRank::new(7, 2);
+        let reasoning_rank = WorkerWithDpRank::new(7, 3);
+        let healthy_rank = WorkerWithDpRank::new(7, 4);
+        let other_worker = WorkerWithDpRank::new(8, 2);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+        for (id, worker, status, tokens) in [
+            ("small", acting_rank, ProgramStatus::Acting, 200),
+            ("large", acting_rank, ProgramStatus::Acting, 300),
+            ("running", acting_rank, ProgramStatus::Reasoning, 500),
+            ("reasoning-a", reasoning_rank, ProgramStatus::Reasoning, 400),
+            ("reasoning-b", reasoning_rank, ProgramStatus::Reasoning, 600),
+            ("healthy", healthy_rank, ProgramStatus::Acting, 100),
+            ("other-worker", other_worker, ProgramStatus::Acting, 100),
+        ] {
+            let mut program = Program::new(tokens);
+            program.status = status;
+            program.assigned_worker = Some(worker);
+            program.acting_since = Some(now);
+            state.insert_program(id.into(), program);
+        }
+        state.insert_program("paused".into(), paused_program(100, now));
+        state.insert_program("unassigned".into(), Program::new(10_000));
+        let capacities = WorkerCapacitySnapshot::new(
+            [acting_rank, reasoning_rank, healthy_rank, other_worker]
+                .into_iter()
+                .map(|worker| (worker, 1_000)),
+        );
+        let mut usage = state.worker_usage(now);
+
+        assert!(state.pause_until_safe(&capacities, &mut usage, now));
+        assert_eq!(
+            state.paused_programs,
+            HashSet::from(["small".into(), "paused".into()])
+        );
+        assert_eq!(usage[&acting_rank].used, 800);
+        assert_eq!(usage[&reasoning_rank].used, 1_000);
+        for id in ["reasoning-a", "reasoning-b"] {
+            assert!(state.programs[id].marked_for_pause);
+            assert_eq!(state.programs[id].assigned_worker, Some(reasoning_rank));
+        }
+        for id in ["large", "running", "healthy", "other-worker", "unassigned"] {
+            assert!(!state.programs[id].marked_for_pause);
+            assert_eq!(state.programs[id].lifecycle, ProgramLifecycle::Active);
+        }
+        // Already-marked reasoning programs still consume capacity but cause no new pause.
+        assert!(!state.pause_until_safe(&capacities, &mut usage, now));
+    }
+
+    #[test]
+    fn equal_size_pause_candidates_keep_their_existing_order() {
+        let now = Instant::now();
+        let worker = WorkerWithDpRank::new(1, 3);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+        for id in ["a", "b", "c"] {
+            let mut program = Program::new(100);
+            program.status = ProgramStatus::Acting;
+            program.assigned_worker = Some(worker);
+            state.insert_program(id.into(), program);
+        }
+        let first = state.programs.keys().next().unwrap().clone();
+        let capacities = WorkerCapacitySnapshot::new([(worker, 300)]);
+        let mut usage = state.worker_usage(now);
+
+        state.pause_until_safe(&capacities, &mut usage, now);
+
+        assert_eq!(state.paused_programs, HashSet::from([first]));
+    }
+
+    #[test]
+    fn pause_sees_a_request_force_resumed_in_the_same_reconcile() {
+        let now = Instant::now();
+        let worker = WorkerWithDpRank::new(1, 2);
+        let capacities = WorkerCapacitySnapshot::new([(worker, 1_000)]);
+        let mut state = state(ThunderAgentConfig {
+            pause_threshold: 0.5,
+            pause_target: 0.4,
+            buffer_per_program: 0,
+            resume_timeout_seconds: 1.0,
+            ..Default::default()
+        });
+        state
+            .register(
+                RequestRegistration::new(
+                    "request".into(),
+                    "session".into(),
+                    1_500,
+                    RequestProgress::new(1_500).0,
+                    false,
+                ),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.wait_status("request"), WaitStatus::Waiting);
+
+        state.reconcile(&capacities, now + Duration::from_secs(2));
+
+        assert_eq!(
+            state.wait_status("request"),
+            WaitStatus::Released(Some(worker))
+        );
+        assert!(state.programs["session"].marked_for_pause);
+    }
+
+    /// Run with `cargo test -p dynamo-custom-policy-builtin --release benchmark_pause_by_rank -- --ignored --nocapture`.
+    /// Reports the pause phase only; rebuilding program state and usage is outside the timer.
+    #[test]
+    #[ignore = "manual CPU benchmark"]
+    fn benchmark_pause_by_rank() {
+        use std::hint::black_box;
+
+        for (program_count, rank_count, hot_ranks) in [
+            (256, 2, 2),
+            (10_000, 128, 0),
+            (10_000, 128, 1),
+            (10_000, 128, 8),
+            (10_000, 128, 32),
+            (10_000, 128, 128),
+        ] {
+            let mut samples = Vec::new();
+            let mut outcomes = None;
+            for iteration in 0..35 {
+                let now = Instant::now();
+                let mut state = state(ThunderAgentConfig {
+                    buffer_per_program: 0,
+                    ..Default::default()
+                });
+                for i in 0..program_count {
+                    let mut program = Program::new(100 + i / rank_count);
+                    program.assigned_worker =
+                        Some(WorkerWithDpRank::new(1, (i % rank_count) as u32));
+                    if (i / rank_count) % 2 == 0 {
+                        program.status = ProgramStatus::Acting;
+                        program.acting_since = Some(now);
+                    }
+                    state.insert_program(format!("session-{i}"), program);
+                }
+                let mut usage = state.worker_usage(now);
+                let capacities = WorkerCapacitySnapshot::new((0..rank_count).map(|rank| {
+                    let worker = WorkerWithDpRank::new(1, rank as u32);
+                    let used = usage[&worker].used;
+                    (
+                        worker,
+                        if rank < hot_ranks {
+                            used * 2 / 3
+                        } else {
+                            used * 2
+                        },
+                    )
+                }));
+
+                let start = Instant::now();
+                black_box(state.pause_until_safe(
+                    black_box(&capacities),
+                    black_box(&mut usage),
+                    now,
+                ));
+                let elapsed = start.elapsed().as_nanos();
+                let outcome = (
+                    state.paused_programs.len(),
+                    state
+                        .programs
+                        .values()
+                        .filter(|program| program.marked_for_pause)
+                        .count(),
+                );
+                assert_eq!(*outcomes.get_or_insert(outcome), outcome);
+                if iteration >= 5 {
+                    samples.push(elapsed);
+                }
+            }
+            samples.sort_unstable();
+            println!(
+                "programs={program_count} ranks={rank_count} hot={hot_ranks} median_ns={} p95_ns={} outcomes={outcomes:?}",
+                samples[samples.len() / 2],
+                samples[samples.len() * 95 / 100],
+            );
+        }
     }
 }
