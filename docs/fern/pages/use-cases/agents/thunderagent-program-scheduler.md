@@ -9,9 +9,9 @@ subtitle: Program-level scheduling with tool-boundary pause/resume on top of KV-
 
 ## Native Frontend Plugin
 
-Use this path for aggregated serving through `dynamo.frontend`. It requires a Dynamo build that includes the `thunderagent` builtin plugin; older wheels and images do not recognize that type. Normal builds include it, but admission behavior remains unchanged until the plugin is selected. A custom build can exclude it by disabling the builtin crate's default `thunderagent` Cargo feature.
+Use this path for aggregated serving through `dynamo.frontend`. It requires a Dynamo build that includes the `thunderagent` builtin plugin; older wheels and images do not recognize that type. The plugin is included in the builtin catalog without a separate ThunderAgent build feature. Admission behavior remains unchanged until the plugin is selected in YAML.
 
-Custom catalogs that already register `thunderagent` must remove that registration or exclude the bundled plugin; duplicate type names fail startup.
+Custom catalogs that already register `thunderagent` must remove that registration; duplicate type names fail startup.
 
 Save the following as `thunderagent.yaml`, or use the [example configuration](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/thunderagent.yaml):
 

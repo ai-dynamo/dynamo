@@ -14,11 +14,9 @@
 //!
 //! Each plugin is one module here. To ship another, add a module and a line in [`register`], then
 //! add a row to the policy table in the router configuration guide. Keep a policy in a single file
-//! until it needs submodules, then promote it to a directory. If a policy ever needs a dependency
-//! beyond `dynamo-kv-router`, put it behind its own default-on Cargo feature so a build can drop
-//! it; every policy registered here is compiled into every artifact that links this crate.
+//! until it needs submodules, then promote it to a directory. Every plugin registered here is
+//! compiled into artifacts that link this crate; router-policy YAML selects which ones run.
 
-#[cfg(feature = "thunderagent")]
 mod thunderagent;
 mod two_tier_cost_fn;
 
@@ -31,7 +29,6 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, RouterPluginRegistryError}
 /// than overriding it.
 pub fn register(registry: &mut RouterPluginRegistry) -> Result<(), RouterPluginRegistryError> {
     two_tier_cost_fn::register(registry)?;
-    #[cfg(feature = "thunderagent")]
     thunderagent::register(registry)?;
     Ok(())
 }

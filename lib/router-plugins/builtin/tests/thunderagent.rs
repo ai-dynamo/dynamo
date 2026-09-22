@@ -35,7 +35,6 @@ fn shipping_plugins_does_not_enable_them_by_default() {
 }
 
 #[test]
-#[cfg(feature = "thunderagent")]
 fn thunderagent_parameters_are_validated_at_startup() {
     for parameters in ["pause_target: 1.1", "unknown_parameter: 1"] {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -62,27 +61,7 @@ fn thunderagent_parameters_are_validated_at_startup() {
     }
 }
 
-#[cfg(not(feature = "thunderagent"))]
-#[test]
-fn excluded_thunderagent_fails_at_startup() {
-    let file = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(file.path(), EXAMPLE).unwrap();
-    let config = KvRouterConfig {
-        router_policy_config: Some(file.path().display().to_string()),
-        ..Default::default()
-    };
-    let mut registry = RouterPluginRegistry::default();
-    dynamo_custom_policy_builtin::register(&mut registry).unwrap();
-    assert!(registry.resolve_plugins(&config).is_err());
-    // Excluding ThunderAgent preserves other shipped policies.
-    let (_, plugins) = resolve(
-        "worker_selection:\n  aggregated: two-tier\n  instances:\n    - name: two-tier\n      type: dynamo-two-tier-cost-fn\n",
-    );
-    assert!(plugins.worker_selection().is_some());
-}
-
-#[cfg(feature = "thunderagent")]
-mod enabled {
+mod scheduler {
     use std::collections::HashMap;
     use std::future::{Future, poll_fn};
     use std::sync::Arc;
