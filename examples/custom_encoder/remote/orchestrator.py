@@ -8,11 +8,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from .request import EncoderResultRequestBuilder
 
-
-class Encoder(Protocol):
-    async def encode(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
+class RequestPreparer(Protocol):
+    async def prepare_request(
+        self,
+        request: Mapping[str, Any],
+        *,
+        target_model: str,
+    ) -> Mapping[str, Any]:
         ...
 
 
@@ -31,17 +34,15 @@ class ExternalEncoderOrchestrator:
 
     def __init__(
         self,
-        encoder: Encoder,
+        handoff: RequestPreparer,
         generator: GeneratorClient,
         generator_model_name: str,
-        request_builder: EncoderResultRequestBuilder | None = None,
     ) -> None:
         if not generator_model_name:
             raise ValueError("generator_model_name must not be empty")
-        self._encoder = encoder
+        self._handoff = handoff
         self._generator = generator
         self._generator_model_name = generator_model_name
-        self._request_builder = request_builder or EncoderResultRequestBuilder()
 
     async def __call__(
         self,
@@ -49,10 +50,8 @@ class ExternalEncoderOrchestrator:
         *,
         context: Any,
     ) -> dict[str, Any]:
-        encoder_result = await self._encoder.encode(request)
-        generator_request = self._request_builder.build(
+        generator_request = await self._handoff.prepare_request(
             request,
-            encoder_result,
-            generator_model_name=self._generator_model_name,
+            target_model=self._generator_model_name,
         )
         return await self._generator.complete(generator_request, context=context)
