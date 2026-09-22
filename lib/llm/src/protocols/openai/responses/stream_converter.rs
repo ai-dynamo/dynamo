@@ -1911,6 +1911,37 @@ mod tests {
         );
     }
 
+    /// A leading whitespace-only content delta (e.g. a bare "\n" some backends
+    /// emit before `<think>`) used to set `message_started` before any real
+    /// answer text existed, which silently blocked every later reasoning delta
+    /// in the same turn under the old `!self.message_started` gate. Removing
+    /// that gate means this no longer matters: reasoning is captured regardless
+    /// of what whitespace-only content came before it.
+    #[test]
+    fn test_reasoning_text_survives_leading_whitespace_content() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+
+        let _ = conv.process_chunk(&text_chunk("\n"));
+        let events = conv.process_chunk(&reasoning_chunk("thinking"));
+        assert_eq!(
+            event_types(&events),
+            vec![
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.reasoning_text.delta".to_string(),
+            ]
+        );
+        // The whitespace content delta opened the message item first (it's
+        // still a real, if empty-looking, output item -- output_index 0), so
+        // the reasoning that follows lands after it, not before.
+        let output = conv.completed_output();
+        assert!(matches!(output[0], OutputItem::Message(_)));
+        let OutputItem::Reasoning(reasoning) = &output[1] else {
+            panic!("expected reasoning to survive a leading whitespace-only content delta");
+        };
+        assert_eq!(reasoning_text(reasoning), "thinking");
+    }
+
     #[test]
     fn test_identity_only_tool_call_is_emitted_and_finished() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
