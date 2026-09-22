@@ -491,8 +491,7 @@ impl Worker {
     ///   5. on prefill, wait for KV-transfer quiescence.
     ///   6. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
-    ///   7. Return — the caller (`run.rs`) awaits transport teardown, spending
-    ///      what is left of the same budget.
+    ///   7. Await transport teardown, then disarm the watchdog before returning.
     ///
     /// A SIGTERM/SIGINT listener is installed at the top of `run` and
     /// shared via a [`CancellationToken`]:
@@ -509,6 +508,27 @@ impl Worker {
     /// `engine.cleanup()` is guaranteed to run exactly once if
     /// `engine.start()` succeeded, regardless of which path led to shutdown.
     pub async fn run(mut self, runtime: Runtime) -> Result<(), DynamoError> {
+        let mut watchdog = None;
+        let result = self.run_lifecycle(runtime.clone(), &mut watchdog).await;
+        let teardown_bound = self
+            .shutdown_deadline
+            .get()
+            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or_else(crate::shutdown::graceful_shutdown_timeout);
+        runtime.shutdown_and_wait(Some(teardown_bound)).await;
+        if !self.cleanup_abandoned
+            && let Some(watchdog) = watchdog
+        {
+            let _ = watchdog.send(());
+        }
+        result
+    }
+
+    async fn run_lifecycle(
+        &mut self,
+        runtime: Runtime,
+        watchdog: &mut Option<std::sync::mpsc::Sender<()>>,
+    ) -> Result<(), DynamoError> {
         // Validate the worker config up front so misconfiguration surfaces
         // before any signal handlers, tokio tasks, or runtime construction.
         // The same validation is also reachable via `run_inner`, but doing
@@ -597,7 +617,7 @@ impl Worker {
                     // still owed its floor after that. Firing at the end of the
                     // stage budget killed the process mid-cleanup.
                     let deadline = force_exit_deadline(&shutdown_config);
-                    Self::arm_hard_watchdog(deadline);
+                    *watchdog = Some(Self::arm_hard_watchdog(deadline));
                     tracing::debug!(
                         "graceful shutdown started; deadline {}s",
                         deadline.as_secs(),
@@ -993,17 +1013,20 @@ impl Worker {
     /// same single-threaded runtime the timer lives on. Measured: a blocking
     /// cleanup never force-exits at all, and the pod has to be SIGKILLed.
     ///
-    /// `thread::sleep` on its own OS thread cannot be starved by a blocked runtime,
-    /// and the thread never touches Python so the GIL is irrelevant. It needs no
-    /// cancellation: a clean shutdown returns from `main` and the process exits
-    /// first, taking this thread with it.
+    /// The OS thread does not need Tokio or the GIL. Only explicit completion
+    /// after runtime teardown disarms it; dropping a cancelled run does not.
     ///
     /// `eprintln!`, not `tracing!` — the subscriber may be behind the same blocked
     /// thread this exists to escape. `process::exit` runs no destructors, which is
     /// the point of a last resort.
-    fn arm_hard_watchdog(deadline: Duration) {
+    fn arm_hard_watchdog(deadline: Duration) -> std::sync::mpsc::Sender<()> {
+        let (complete, receiver) = std::sync::mpsc::channel();
+        let started = std::time::Instant::now();
         std::thread::spawn(move || {
-            std::thread::sleep(deadline);
+            if receiver.recv_timeout(deadline).is_ok() {
+                return;
+            }
+            std::thread::sleep(deadline.saturating_sub(started.elapsed()));
             eprintln!(
                 "ERROR: graceful shutdown exceeded {}s and the runtime did not force-exit \
              (an engine cleanup that blocks rather than awaits will do this); \
@@ -1013,6 +1036,7 @@ impl Worker {
             );
             std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
         });
+        complete
     }
 
     /// Arm the total shutdown budget, or return the one already armed.

@@ -62,38 +62,6 @@ fn run_worker(
 
     secondary.block_on(async move {
         let worker = build(config);
-        let deadline = worker.shutdown_deadline();
-        let result = worker
-            .run(runtime.clone())
-            .await
-            .map_err(anyhow::Error::from);
-
-        // Phase 1/2/3 token cancellation + NATS/etcd disconnect. Worker::run
-        // has already done discovery unregister, drain, and engine.cleanup()
-        // at this point, so this is purely transport teardown.
-        //
-        // Awaited, not fire-and-forget: `Runtime::shutdown` only spawns the
-        // sequence, and `main` returning here kills the process before it
-        // runs — so the endpoint inflight drain would be skipped and the
-        // transports would never be told to tear down.
-        //
-        // The bound is passed *into* Phase 2 rather than wrapped around the
-        // call: `tokio::time::timeout` cancels by dropping, which would skip
-        // Phase 3 and defeat the point of awaiting at all.
-        //
-        // It is what remains of the worker's shutdown budget, not a fresh
-        // timeout. Starting a new one here made worst-case shutdown the sum of
-        // the two, so a worker could outlive the deadline its operator
-        // configured — and `terminationGracePeriodSeconds` is sized against
-        // that deadline.
-        let teardown_bound = deadline
-            .get()
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
-            // Never armed: this is not a shutdown path (serve returned on its
-            // own), so there is no budget to spend down.
-            .unwrap_or_else(crate::shutdown::graceful_shutdown_timeout);
-        runtime.shutdown_and_wait(Some(teardown_bound)).await;
-
-        result
+        worker.run(runtime).await.map_err(anyhow::Error::from)
     })
 }

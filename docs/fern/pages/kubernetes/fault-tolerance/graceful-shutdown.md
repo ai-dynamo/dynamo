@@ -55,17 +55,10 @@ Six environment variables control Dynamo's internal draining. Set the HTTP timeo
 
 The defaults are sound for most deployments. Raise the relevant timeout only for long generations or sustained high utilization. Keep every internal timeout below `terminationGracePeriodSeconds` so Dynamo can finish its own cleanup before Kubernetes force-kills the pod.
 
-> **Rust backend workers spend one total budget, not a sum.** Each per-stage
-> timeout is a cap, and every stage draws from the same
-> `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` deadline measured from SIGTERM: a
-> stage gets `min(its cap, what is left)`. No reserve is held back from the
-> earlier stages — cleanup is funded by its own floor, and the force-exit
-> watchdog is extended by that floor so it cannot fire mid-cleanup. Size
-> `terminationGracePeriodSeconds` against that total plus the cleanup floor
-> plus a margin, not against the sum of the individual caps.
+> [!IMPORTANT]
+> Workers spend one total budget: `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT + DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS`, measured from SIGTERM. Each stage gets `min(its cap, what is left)`. Cleanup receives a five-second floor when less than five seconds remain; the watchdog allows that additional five seconds. Set `terminationGracePeriodSeconds` above **worker timeout + router grace + 5 seconds**, with a margin for process exit and any Kubernetes pre-stop hook. Release defaults give a 40-second hard bound: 30 + 5 + 5. A programmatic `ShutdownConfig.total_secs` replaces the worker-timeout-plus-router-grace total, but the five-second floor still applies.
 >
-> The frontend's `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` is separate — it
-> bounds a different process.
+> The frontend's `DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` is separate; it bounds a different process.
 
 </Step>
 

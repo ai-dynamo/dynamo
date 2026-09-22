@@ -812,37 +812,11 @@ impl Worker {
                 RsWorker::new(Arc::new(py_engine), config)
             };
 
-            // Captured before `run` consumes the worker: the trailing teardown
-            // below must spend what is left of the worker's budget, not open a
-            // second one.
-            let deadline = worker.shutdown_deadline();
-            let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
-
             // runtime_from_existing() shares Tokio but creates independent
             // cancellation tokens and a graceful-shutdown tracker. This run
             // owns that wrapper, including cleanup on engine startup failure;
             // shutting it down does not cancel another DistributedRuntime.
-            //
-            // Awaited, not fire-and-forget: `shutdown` only spawns the
-            // teardown, so returning here lets the interpreter exit before the
-            // endpoint in-flight drain runs.
-            //
-            // Bounded by what remains of the worker's budget, matching
-            // `backend_common::run`. A fresh `graceful_shutdown_timeout()` here
-            // made worst-case shutdown the sum of two full budgets — and this
-            // runs *after* `Worker::run` returns, so it is outside the
-            // force-exit watchdog and nothing would have cut it short. An
-            // operator sizing `terminationGracePeriodSeconds` against the
-            // configured deadline would have been SIGKILLed mid-teardown.
-            let teardown_bound = deadline
-                .get()
-                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
-                // Never armed: the worker exited without a shutdown signal, so
-                // there is no budget to spend down.
-                .unwrap_or_else(rs::worker::graceful_shutdown_timeout);
-            runtime.shutdown_and_wait(Some(teardown_bound)).await;
-
-            result
+            worker.run(runtime).await.map_err(to_pyerr)
         })
     }
 }
