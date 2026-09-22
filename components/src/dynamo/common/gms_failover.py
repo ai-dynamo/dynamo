@@ -28,6 +28,30 @@ LEASE_TRANSITION_SERVING_ENV = "DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING"
 _gpu_quiescence_tasks: set[asyncio.Task[None]] = set()
 
 
+def configure_failover_nccl_environment() -> dict[str, str]:
+    """Bound dead-cohort teardown before CUDA/NCCL initialization.
+
+    A surviving TP rank can observe its peer failure immediately yet spend the
+    PyTorch default 60 seconds coordinating a flight-recorder dump before the
+    watchdog aborts it. Whole-pool takeover must wait for every predecessor
+    rank, so that diagnostic default becomes user-visible downtime. Apply a
+    bounded failover default early, while preserving every explicit operator
+    setting.
+    """
+    if not _truthy_env("DYN_GMS_FAILOVER_SHADOW_MODE"):
+        return {}
+    defaults = {
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        "TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC": "1000",
+    }
+    applied = {}
+    for name, value in defaults.items():
+        if name not in os.environ:
+            os.environ[name] = value
+            applied[name] = value
+    return applied
+
+
 def _promotion_warmup_enabled(backend_name: str | None = None) -> bool:
     if backend_name:
         backend = backend_name.upper().replace("-", "_")

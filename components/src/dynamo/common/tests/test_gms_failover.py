@@ -10,6 +10,7 @@ import pytest
 from dynamo.common.gms_failover import (
     _requiesce_after_activation_error,
     acquire_gms_failover_lock_before_init,
+    configure_failover_nccl_environment,
     lease_transition_serving_enabled,
     prepare_gms_failover,
     release_attached_gms_failover_lock,
@@ -1155,3 +1156,34 @@ def test_writer_cohort_replaces_timed_quiescence_guess(monkeypatch):
 
     assert _post_lock_fence_ms("sglang") == 0
     assert _post_lock_fence_ms("vllm") == 0
+
+
+def test_failover_nccl_environment_bounds_default_teardown(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.delenv("TORCH_NCCL_ASYNC_ERROR_HANDLING", raising=False)
+    monkeypatch.delenv("TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC", raising=False)
+
+    assert configure_failover_nccl_environment() == {
+        "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+        "TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC": "1000",
+    }
+
+
+def test_failover_nccl_environment_preserves_operator_values(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("TORCH_NCCL_ASYNC_ERROR_HANDLING", "2")
+    monkeypatch.setenv("TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC", "2500")
+
+    assert configure_failover_nccl_environment() == {}
+    assert os.environ["TORCH_NCCL_ASYNC_ERROR_HANDLING"] == "2"
+    assert os.environ["TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC"] == "2500"
+
+
+def test_failover_nccl_environment_is_inactive_outside_failover(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_FAILOVER_SHADOW_MODE", raising=False)
+    monkeypatch.delenv("TORCH_NCCL_ASYNC_ERROR_HANDLING", raising=False)
+    monkeypatch.delenv("TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC", raising=False)
+
+    assert configure_failover_nccl_environment() == {}
+    assert "TORCH_NCCL_ASYNC_ERROR_HANDLING" not in os.environ
+    assert "TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC" not in os.environ
