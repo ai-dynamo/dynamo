@@ -47,6 +47,21 @@ def test_socket_path_maps_cuda_visible_ordinal_to_nvml_device(monkeypatch, tmp_p
     assert calls == [("index", 3), ("index", 1)]
 
 
+def test_socket_path_uses_device_ordinal_without_visibility_override(
+    monkeypatch, tmp_path
+):
+    from gpu_memory_service.common import utils
+
+    pynvml, calls = _fake_nvml()
+    monkeypatch.setitem(sys.modules, "pynvml", pynvml)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("GMS_SOCKET_DIR", str(tmp_path))
+    utils.invalidate_uuid_cache()
+
+    assert utils.get_socket_path(2).endswith("gms_GPU-index:2_weights.sock")
+    assert calls == [("index", 2)]
+
+
 def test_socket_uuid_cache_tracks_visibility_mapping(monkeypatch, tmp_path):
     from gpu_memory_service.common import utils
 
