@@ -12,10 +12,30 @@ from gms_kv_ring.daemon.rpc_directory import (
     SERVER_CONNECTION_ID,
     handle_directory_ensure_hbm_capacity,
     handle_directory_lookup_claim,
+    handle_directory_promote,
     release_directory_connection_claims,
 )
 
 pytestmark = pytest.mark.pre_merge
+
+
+def test_freeze_current_writer_view_preserves_epoch_and_publication_pipeline():
+    directory = ContentDirectory(
+        "/tmp/gms-directory-freeze-writer.sock",
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    directory._view_ready.set()
+    directory._view_current_writer = True
+    directory._view_epoch = 7
+    directory._view_revision = 11
+
+    assert directory.freeze_current_writer_view() is True
+    assert directory.async_read_enabled is False
+    assert directory.read_view_is_current_writer is True
+    assert directory.read_view_cursor == (7, 11)
+    assert directory._pipeline_stop is False
 
 
 def test_publish_worker_survives_a_failing_mutation():
@@ -42,8 +62,28 @@ def test_publish_worker_survives_a_failing_mutation():
             directory._mutation_sequence = 2
             directory._mutations.extend(
                 [
-                    (1, "publish", [{"a": 1}]),
-                    (2, "publish", [{"b": 2}]),
+                    (
+                        1,
+                        "publish",
+                        [
+                            {
+                                "content_hash": b"a",
+                                "engine_id": "engine",
+                                "slot_ids": [1],
+                            }
+                        ],
+                    ),
+                    (
+                        2,
+                        "publish",
+                        [
+                            {
+                                "content_hash": b"b",
+                                "engine_id": "engine",
+                                "slot_ids": [2],
+                            }
+                        ],
+                    ),
                 ]
             )
             directory._start_mutation_worker_locked()
@@ -52,9 +92,17 @@ def test_publish_worker_survives_a_failing_mutation():
 
         # A failed batch is a safe miss for every item in it. The worker must
         # remain available for the next independent mutation.
-        directory._defer_mutation("publish", [{"c": 3}])
+        directory._defer_mutation(
+            "publish", [{"content_hash": b"c", "engine_id": "engine", "slot_ids": [3]}]
+        )
         assert directory.flush_deferred(timeout=5.0) is True
-        assert calls == [[{"a": 1}, {"b": 2}], [{"c": 3}]]
+        assert calls == [
+            [
+                {"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]},
+                {"content_hash": b"b", "engine_id": "engine", "slot_ids": [2]},
+            ],
+            [{"content_hash": b"c", "engine_id": "engine", "slot_ids": [3]}],
+        ]
         assert directory._mutation_failed == 1
         assert (
             directory._mutation_error is None
@@ -80,16 +128,333 @@ def test_publish_worker_batches_adjacent_mutations_in_order():
         directory._mutation_sequence = 2
         directory._mutations.extend(
             [
-                (1, "publish", [{"a": 1}]),
-                (2, "publish", [{"b": 2}]),
+                (
+                    1,
+                    "publish",
+                    [{"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]}],
+                ),
+                (
+                    2,
+                    "publish",
+                    [{"content_hash": b"b", "engine_id": "engine", "slot_ids": [2]}],
+                ),
             ]
         )
         directory._mutation_stop = True
 
     directory._mutation_loop()
 
-    assert calls == [[{"a": 1}, {"b": 2}]]
+    assert calls == [
+        [
+            {"content_hash": b"a", "engine_id": "engine", "slot_ids": [1]},
+            {"content_hash": b"b", "engine_id": "engine", "slot_ids": [2]},
+        ]
+    ]
     assert directory._mutation_committed == 2
+
+
+@pytest.mark.parametrize("collision", ["hash", "slot", "legacy-slot"])
+def test_adjacent_publications_preserve_sequential_daemon_semantics(
+    tmp_path, collision
+):
+    from gms_kv_ring.daemon.directory_server import DirectoryState
+    from gms_kv_ring.daemon.rpc_directory import handle_directory_publish_batch
+
+    daemon = DirectoryState()
+    daemon._content_directory_writer_id = "writer"
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    first = {
+        "content_hash": b"a" * 32,
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [1],
+        "tier": "hbm",
+    }
+    second = dict(first, content_hash=b"b" * 32, generations=[2])
+    if collision == "hash":
+        second.update(content_hash=first["content_hash"], slot_ids=[2])
+
+    if collision == "legacy-slot":
+        for item in (first, second):
+            item["slot_id"] = item.pop("slot_ids")[0]
+
+    def publish(items):
+        response = handle_directory_publish_batch(
+            daemon,
+            {
+                "writer_id": "writer",
+                "expected_epoch": 1,
+                "manifest_id": "manifest",
+                "items": [
+                    dict(item, content_hash=item["content_hash"].hex())
+                    for item in items
+                ],
+            },
+        )
+        if not response["ok"]:
+            raise RuntimeError(response["error"])
+        return response["published"]
+
+    directory.publish = publish
+    directory._mutations.extend([(1, "publish", [first]), (2, "publish", [second])])
+    directory._mutation_sequence = 2
+    directory._mutation_stop = True
+    directory._mutation_loop()
+    assert directory._mutation_failed == 0
+    recovered = daemon._content_directory[("manifest", second["content_hash"])]
+    assert recovered["slot_ids"] == second.get("slot_ids", [second.get("slot_id")])
+    assert recovered["generations"] == [2]
+
+
+def test_deferred_publish_owns_nested_metadata(tmp_path, monkeypatch):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    directory._async_publish = True
+    directory._pipeline_enabled = False
+    monkeypatch.setattr(directory, "_start_mutation_worker_locked", lambda: None)
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "ranges": [[0, 0, 16]],
+    }
+    assert directory.publish_deferred([item]) == 1
+    item["slot_ids"][0] = 9
+    item["generations"][0] = 10
+    item["ranges"][0][2] = 32
+    queued = directory._mutations[0][2][0]
+    assert queued["slot_ids"] == [1]
+    assert queued["generations"] == [2]
+    assert queued["ranges"] == [[0, 0, 16]]
+
+
+def test_pipelined_publish_sends_before_return_and_validates_ack(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"),
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    sent = []
+    responses = []
+    ready = threading.Condition()
+
+    class Client:
+        def send_request(self, message):
+            with ready:
+                sent.append(message)
+                responses.append(
+                    {
+                        "ok": True,
+                        "published": len(message["items"]),
+                        "rejected_stale_writer": False,
+                    }
+                )
+                ready.notify_all()
+
+        def receive_response(self):
+            with ready:
+                while not responses:
+                    ready.wait()
+                return responses.pop(0)
+
+        def close(self):
+            return None
+
+    directory._pipeline_client = Client()
+    directory._view_epoch = 4
+    directory._view_current_writer = True
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "tier": "hbm",
+    }
+    try:
+        assert directory.publish_deferred([item]) == 1
+        assert sent[0]["items"][0]["slot_ids"] == [1]
+        item["slot_ids"][0] = 9
+        assert sent[0]["items"][0]["slot_ids"] == [1]
+        assert directory.flush_deferred(timeout=1.0)
+        assert directory._pipeline_committed == 1
+    finally:
+        directory.close()
+
+
+def test_pipelined_mixed_publish_uses_accepted_count(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"),
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    responses = []
+    ready = threading.Condition()
+
+    class Client:
+        def send_request(self, message):
+            with ready:
+                responses.append(
+                    {
+                        "ok": True,
+                        "accepted": len(message["items"]),
+                        "published": 1,
+                        "removed": 1,
+                        "rejected_stale_writer": False,
+                    }
+                )
+                ready.notify_all()
+
+        def receive_response(self):
+            with ready:
+                while not responses:
+                    ready.wait()
+                return responses.pop(0)
+
+        def close(self):
+            return None
+
+    directory._pipeline_client = Client()
+    directory._view_epoch = 4
+    directory._view_current_writer = True
+    items = [
+        {
+            "content_hash": b"new",
+            "engine_id": "e",
+            "slot_ids": [2],
+            "generations": [3],
+            "tier": "hbm",
+        },
+        {
+            "content_hash": b"old",
+            "engine_id": "e",
+            "slot_ids": [1],
+            "generations": [2],
+            "tier": "hbm",
+            "sealed": False,
+        },
+    ]
+    try:
+        assert directory.publish_deferred(items) == 2
+        assert directory.flush_deferred(timeout=1.0)
+        assert directory._pipeline_committed == 1
+    finally:
+        directory.close()
+
+
+def test_pipelined_publish_fails_closed_after_stale_writer_ack(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"),
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+    response_ready = threading.Event()
+
+    class Client:
+        def send_request(self, _message):
+            response_ready.set()
+
+        def receive_response(self):
+            assert response_ready.wait(1.0)
+            return {
+                "ok": True,
+                "published": 0,
+                "rejected_stale_writer": True,
+            }
+
+        def close(self):
+            return None
+
+    directory._pipeline_client = Client()
+    directory._view_epoch = 4
+    directory._view_current_writer = True
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "tier": "hbm",
+    }
+    try:
+        assert directory.publish_deferred([item]) == 1
+        with pytest.raises(RuntimeError, match="pipeline failed"):
+            directory.flush_deferred(timeout=1.0)
+        with pytest.raises(RuntimeError, match="pipeline failed"):
+            directory.publish_deferred([item])
+    finally:
+        directory.close()
+
+
+def test_pipelined_publish_fails_closed_after_send_error(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"),
+        engine="test",
+        block_size=16,
+        mode="shadow",
+    )
+
+    class Client:
+        closed = False
+
+        def send_request(self, _message):
+            raise BrokenPipeError("partial write")
+
+        def receive_response(self):
+            raise AssertionError("reader must not run after send failure")
+
+        def close(self):
+            self.closed = True
+
+    client = Client()
+    directory._pipeline_client = client
+    directory._view_epoch = 4
+    directory._view_current_writer = True
+    item = {
+        "content_hash": b"h",
+        "engine_id": "e",
+        "slot_ids": [1],
+        "generations": [2],
+        "tier": "hbm",
+    }
+    try:
+        with pytest.raises(BrokenPipeError, match="partial write"):
+            directory.publish_deferred([item])
+        assert client.closed
+        assert directory._pipeline_client is None
+        assert directory._pipeline_stop
+        with pytest.raises(RuntimeError, match="pipeline failed"):
+            directory.publish_deferred([item])
+    finally:
+        directory.close()
+
+
+def test_malformed_publication_does_not_stop_writer(tmp_path):
+    directory = ContentDirectory(
+        str(tmp_path / "unused.sock"), engine="test", block_size=16, mode="shadow"
+    )
+    valid = {"content_hash": b"h", "engine_id": "e", "slot_ids": [1]}
+    calls = []
+
+    def publish(items):
+        calls.append(items)
+        if items == [{}]:
+            raise ValueError("malformed item")
+        return len(items)
+
+    directory.publish = publish
+    directory._mutations.extend([(1, "publish", [{}]), (2, "publish", [valid])])
+    directory._mutation_sequence = 2
+    directory._mutation_stop = True
+    directory._mutation_loop()
+    assert calls == [[{}], [valid]]
+    assert directory._mutation_committed == 2
+    assert directory._mutation_failed == 1
 
 
 def test_zero_capacity_request_preserves_ready_hbm_entry():
@@ -358,3 +723,24 @@ def test_disconnect_releases_only_that_connections_claims():
     assert tokens[1] in daemon._content_directory_claims
     assert entries[("manifest", hashes[0])]["_claim_count"] == 0
     assert entries[("manifest", hashes[1])]["_claim_count"] == 1
+
+    reader = handle_directory_lookup_claim(
+        daemon,
+        {
+            "manifest_id": "manifest",
+            "reader_only": True,
+            "hashes": [hashes[0].hex()],
+            SERVER_CONNECTION_ID: "reader",
+        },
+    )
+    assert reader["claim_token"] is not None
+    assert release_directory_connection_claims(daemon, "reader") == 0
+    assert entries[("manifest", hashes[0])]["_claim_count"] == 1
+
+    promoted = handle_directory_promote(
+        daemon,
+        {"writer_id": "successor", "expected_epoch": 4},
+    )
+    assert promoted["promoted"] is True
+    assert entries[("manifest", hashes[0])]["_claim_count"] == 0
+    assert entries[("manifest", hashes[1])]["_claim_count"] == 0

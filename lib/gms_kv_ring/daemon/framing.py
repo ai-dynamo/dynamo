@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import socket
 import struct
 
+import msgspec
 from gpu_memory_service.common.protocol.framing import (
     FrameProtocolError,
     truncated_frame,
@@ -20,9 +20,16 @@ _HEADER_SIZE = 4
 
 
 def encode_frame(message: dict) -> bytes:
-    body = json.dumps(message).encode("utf-8")
+    body = msgspec.json.encode(message)
     validate_frame_length(len(body))
     return struct.pack("<I", len(body)) + body
+
+
+def _decode(body: bytes) -> dict:
+    try:
+        return msgspec.json.decode(body)
+    except msgspec.DecodeError as exc:
+        raise FrameProtocolError("invalid JSON control frame") from exc
 
 
 async def _read_exactly(reader, size: int, part: str) -> bytes:
@@ -42,7 +49,7 @@ async def read_frame(reader, *, allow_eof: bool = False) -> dict | None:
     length = struct.unpack("<I", header)[0]
     validate_frame_length(length)
     body = await _read_exactly(reader, length, "body")
-    return json.loads(body.decode("utf-8"))
+    return _decode(body)
 
 
 async def write_frame(writer, message: dict) -> None:
@@ -63,7 +70,7 @@ def recv_frame(sock: socket.socket) -> dict:
     length = struct.unpack("<I", recv_exact(_HEADER_SIZE, "header"))[0]
     validate_frame_length(length)
     body = recv_exact(length, "body")
-    return json.loads(body.decode("utf-8"))
+    return _decode(body)
 
 
 __all__ = [

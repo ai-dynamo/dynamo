@@ -16,6 +16,7 @@ import os
 import threading
 import time
 from collections import deque
+from copy import deepcopy
 from typing import Callable, Optional, TypeVar
 
 from gms_kv_ring.daemon.client import DaemonClient
@@ -127,11 +128,10 @@ class ContentDirectory:
         self._view_stop = threading.Event()
         self._view_thread: Optional[threading.Thread] = None
         # Publishing a newly completed block synchronously delays the first
-        # token even though no request consumes the directory reply. Keep one
-        # ordered writer per engine and make request finalization/close the
-        # durability boundary. A process failure before the queued mutation
-        # commits leaves the entry undiscoverable (safe recompute); it can
-        # never expose an uncommitted or out-of-order residency.
+        # token even though no request consumes the directory reply. The
+        # fallback worker preserves the older acknowledged path during
+        # startup; steady-state READY publications use the daemon-owned
+        # pipeline below.
         async_publish = os.environ.get("GMS_KV_DIRECTORY_ASYNC_PUBLISH", "1")
         self._async_publish = async_publish.lower() not in (
             "0",
@@ -153,6 +153,26 @@ class ContentDirectory:
         # give operators visibility into dropped publications.
         self._mutation_failed = 0
         self._mutation_last_error: Optional[BaseException] = None
+        # Steady-state READY publications use a dedicated ordered connection:
+        # the scheduler copies a complete frame into the Unix socket and
+        # returns, while this reader validates daemon acknowledgements. The
+        # daemon owns the queued frame even if the engine then exits.
+        pipeline_value = os.environ.get("GMS_KV_DIRECTORY_PIPELINED_PUBLISH", "1")
+        self._pipeline_enabled = pipeline_value.lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+            "",
+        )
+        self._pipeline_condition = threading.Condition()
+        self._pipeline_client: Optional[DaemonClient] = None
+        self._pipeline_expected = deque()
+        self._pipeline_thread: Optional[threading.Thread] = None
+        self._pipeline_stop = False
+        self._pipeline_sequence = 0
+        self._pipeline_committed = 0
+        self._pipeline_error: Optional[BaseException] = None
         if self.mode != "off" and not self.socket_path:
             logger.warning("GMS KV directory requested without daemon socket")
             self.mode = "off"
@@ -163,7 +183,9 @@ class ContentDirectory:
 
     @property
     def authoritative(self) -> bool:
-        return self.mode == "authoritative"
+        return self.mode == "authoritative" or (
+            self.mode == "shadow" and self.read_view_is_current_writer
+        )
 
     @property
     def async_read_enabled(self) -> bool:
@@ -191,6 +213,131 @@ class ContentDirectory:
         )
         self._mutation_thread.start()
 
+    def _start_pipeline_locked(self) -> None:
+        if self._pipeline_client is None:
+            self._pipeline_client = DaemonClient(
+                self.socket_path,
+                connect_timeout=0.5,
+                op_timeout=2.0,
+            )
+        if self._pipeline_thread is not None and self._pipeline_thread.is_alive():
+            return
+        self._pipeline_thread = threading.Thread(
+            target=self._pipeline_loop,
+            name=f"gms-directory-pipeline-{self.engine}-{self.writer_id}",
+            daemon=True,
+        )
+        self._pipeline_thread.start()
+
+    def _pipeline_loop(self) -> None:
+        while True:
+            with self._pipeline_condition:
+                while not self._pipeline_expected and not self._pipeline_stop:
+                    self._pipeline_condition.wait()
+                if not self._pipeline_expected:
+                    return
+                sequence, expected = self._pipeline_expected[0]
+                client = self._pipeline_client
+            assert client is not None
+            try:
+                response = client.receive_response()
+                if not response.get("ok"):
+                    raise RuntimeError(
+                        f"GMS pipelined publication failed: {response.get('error')}"
+                    )
+                if response.get("rejected_stale_writer"):
+                    raise RuntimeError(
+                        "GMS pipelined publication rejected stale writer"
+                    )
+                accepted = int(response.get("accepted", response.get("published", 0)))
+                if accepted != int(expected):
+                    raise RuntimeError(
+                        "GMS pipelined publication committed "
+                        f"{accepted}/{expected} entries"
+                    )
+            except BaseException as exc:  # noqa: BLE001
+                with self._pipeline_condition:
+                    self._pipeline_error = exc
+                    self._pipeline_stop = True
+                    self._pipeline_expected.clear()
+                    self._pipeline_condition.notify_all()
+                return
+            with self._pipeline_condition:
+                if (
+                    not self._pipeline_expected
+                    or self._pipeline_expected[0][0] != sequence
+                ):
+                    self._pipeline_error = RuntimeError(
+                        "GMS publication acknowledgement sequence diverged"
+                    )
+                    self._pipeline_stop = True
+                    self._pipeline_expected.clear()
+                    self._pipeline_condition.notify_all()
+                    return
+                self._pipeline_expected.popleft()
+                self._pipeline_committed = int(sequence)
+                self._pipeline_condition.notify_all()
+
+    def _pipeline_publish(self, items: list[dict]) -> bool:
+        if not self._pipeline_enabled:
+            return False
+        with self._view_lock:
+            if not self._view_current_writer or self._view_epoch is None:
+                return False
+            epoch = int(self._view_epoch)
+        message = DaemonClient.directory_publish_batch_message(
+            self.manifest_id,
+            self.writer_id,
+            items,
+            epoch,
+            self.engine,
+        )
+        with self._pipeline_condition:
+            if self._pipeline_error is not None:
+                raise RuntimeError("GMS publication pipeline failed") from (
+                    self._pipeline_error
+                )
+            if self._pipeline_stop:
+                raise RuntimeError("GMS publication pipeline is closed")
+            self._start_pipeline_locked()
+            assert self._pipeline_client is not None
+            self._pipeline_sequence += 1
+            sequence = int(self._pipeline_sequence)
+            self._pipeline_expected.append((sequence, len(items)))
+            try:
+                self._pipeline_client.send_request(message)
+            except BaseException as exc:
+                self._pipeline_expected.pop()
+                self._pipeline_error = exc
+                self._pipeline_stop = True
+                if self._pipeline_client is not None:
+                    try:
+                        self._pipeline_client.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._pipeline_client = None
+                self._pipeline_condition.notify_all()
+                raise
+            self._pipeline_condition.notify_all()
+        return True
+
+    def _flush_pipeline(self, timeout: Optional[float]) -> bool:
+        with self._pipeline_condition:
+            target = int(self._pipeline_sequence)
+            if target <= self._pipeline_committed:
+                return True
+            deadline = None if timeout is None else time.monotonic() + timeout
+            while self._pipeline_committed < target:
+                if self._pipeline_error is not None:
+                    raise RuntimeError("GMS publication pipeline failed") from (
+                        self._pipeline_error
+                    )
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return False
+                self._pipeline_condition.wait(remaining)
+            return True
+
     def _defer_mutation(self, kind: str, payload) -> int:
         # Keep direct durability commits ordered with concurrent producers.
         with self._mutation_submit_lock, self._mutation_condition:
@@ -210,15 +357,22 @@ class ContentDirectory:
     def publish_deferred(self, items: list[dict]) -> int:
         """Enqueue an ordered publication; return once ownership is copied.
 
-        The commit point remains the daemon mutation. Until then a crash may
-        lose this cache entry, but can never expose a stale slot or wrong
-        generation. Call flush_deferred at an explicit durability boundary.
+        In steady state the complete frame is copied to the daemon connection
+        before returning; the engine may exit while the daemon commits it.
+        During startup the legacy worker queue remains the safe fallback.
         """
         if not items:
             return 0
         if not self.async_publish_enabled:
             return self.publish(items)
-        self._defer_mutation("publish", [dict(item) for item in items])
+        if self._pipeline_enabled:
+            if self._pipeline_publish(items):
+                return len(items)
+            # Before the replicated read view confirms this writer epoch, keep
+            # the original acknowledged commit semantics. A userspace queue
+            # would be lost if the engine crashed during that transition.
+            return self.publish(items)
+        self._defer_mutation("publish", deepcopy(items))
         return len(items)
 
     def mark_hbm_dormant_deferred(self, content_hashes: list[bytes]) -> int:
@@ -231,21 +385,28 @@ class ContentDirectory:
 
     def flush_deferred(self, timeout: Optional[float] = None) -> bool:
         """Wait for mutations accepted before this call to commit in order."""
+        started = time.monotonic()
         with self._mutation_condition:
             target = int(self._mutation_sequence)
-            if target <= self._mutation_committed:
-                return True
-            deadline = None if timeout is None else time.monotonic() + timeout
-            while self._mutation_committed < target:
-                if self._mutation_error is not None:
-                    raise RuntimeError("GMS directory mutation worker failed") from (
-                        self._mutation_error
+            if target > self._mutation_committed:
+                deadline = None if timeout is None else time.monotonic() + timeout
+                while self._mutation_committed < target:
+                    if self._mutation_error is not None:
+                        raise RuntimeError(
+                            "GMS directory mutation worker failed"
+                        ) from self._mutation_error
+                    remaining = (
+                        None if deadline is None else deadline - time.monotonic()
                     )
-                remaining = None if deadline is None else deadline - time.monotonic()
-                if remaining is not None and remaining <= 0:
-                    return False
-                self._mutation_condition.wait(remaining)
-            return True
+                    if remaining is not None and remaining <= 0:
+                        return False
+                    self._mutation_condition.wait(remaining)
+        remaining = (
+            None
+            if timeout is None
+            else max(0.0, timeout - (time.monotonic() - started))
+        )
+        return self._flush_pipeline(remaining)
 
     def commit_hbm_dormant(
         self, content_hashes: list[bytes], timeout: Optional[float] = None
@@ -264,6 +425,26 @@ class ContentDirectory:
             self.mark_hbm_dormant(content_hashes)
             return True
 
+    @staticmethod
+    def _publication_keys(items: list[dict]) -> Optional[set[tuple]]:
+        # The daemon validates each batch atomically: repeated content hashes
+        # or reused physical slots must remain separate, ordered publications.
+        # Malformed items stay isolated so normal RPC error handling can skip
+        # them without terminating the background worker during coalescing.
+        try:
+            keys = set()
+            for item in items:
+                keys.add(("hash", bytes(item["content_hash"])))
+                slots = item.get("slot_ids")
+                if slots is None:
+                    slots = [item["slot_id"]]
+                keys.update(
+                    ("slot", str(item["engine_id"]), int(slot)) for slot in slots
+                )
+            return keys
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def _mutation_loop(self) -> None:
         while True:
             with self._mutation_condition:
@@ -273,13 +454,24 @@ class ContentDirectory:
                     return
                 sequence, kind, payload = self._mutations.popleft()
                 payload = list(payload)
-                # One completed request can enqueue many pages, and concurrent
-                # completions can enqueue many adjacent batches while the first
-                # daemon RPC is in flight. Preserve mutation order while folding
-                # adjacent operations of the same kind into one RPC.
+                # Coalesce disjoint publications only. Turning two sequential
+                # updates of one hash/slot into an atomic batch makes the daemon
+                # reject both. Bound coalescing to avoid monopolizing the queue.
+                keys = self._publication_keys(payload) if kind == "publish" else set()
                 while self._mutations and self._mutations[0][1] == kind:
+                    following = self._mutations[0][2]
+                    if len(payload) + len(following) > 4096:
+                        break
+                    following_keys = (
+                        self._publication_keys(following)
+                        if kind == "publish"
+                        else set()
+                    )
+                    if keys is None or following_keys is None or keys & following_keys:
+                        break
                     sequence, _same_kind, following = self._mutations.popleft()
                     payload.extend(following)
+                    keys.update(following_keys)
             try:
                 if kind == "publish":
                     self.publish(payload)
@@ -336,6 +528,18 @@ class ContentDirectory:
             and mutation_thread is not threading.current_thread()
         ):
             mutation_thread.join(timeout=1.0)
+        with self._pipeline_condition:
+            self._pipeline_stop = True
+            self._pipeline_condition.notify_all()
+        pipeline_client = self._pipeline_client
+        if pipeline_client is not None:
+            pipeline_client.close()
+        pipeline_thread = self._pipeline_thread
+        if (
+            pipeline_thread is not None
+            and pipeline_thread is not threading.current_thread()
+        ):
+            pipeline_thread.join(timeout=1.0)
         self._view_stop.set()
         thread = self._view_thread
         if thread is not None and thread is not threading.current_thread():
@@ -366,6 +570,30 @@ class ContentDirectory:
             )
             self._view_thread.start()
         return True
+
+    def freeze_current_writer_view(self) -> bool:
+        """Stop consuming self-published deltas after writer handoff completes.
+
+        A promoted engine needs one synchronized snapshot to discover the
+        predecessor's recoverable HBM entries and to prove that its writer epoch
+        is current. After that inventory has been copied into engine-local
+        metadata, replaying every publication back into the same process only
+        contends with the scheduler. The ordered publication connection remains
+        open and continues to validate every daemon acknowledgement, including
+        stale-writer rejection.
+
+        The frozen ownership bit is valid for the process's writer epoch. Loss
+        of the external failover lock fences the process; it is not expected to
+        become a standby again in place.
+        """
+        if not self.read_view_is_current_writer or not self._view_ready.is_set():
+            return False
+        self._async_read = False
+        self._view_stop.set()
+        thread = self._view_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(1.0, self._poll_seconds * 2))
+        return thread is None or not thread.is_alive()
 
     def wait_until_synced(self, timeout: Optional[float] = None) -> bool:
         self.start_async_read()
@@ -570,6 +798,13 @@ class ContentDirectory:
         retryable: bool = True,
     ) -> _T:
         """Run one fenced mutation, refreshing after external promotion."""
+        # Destructive mutations on the regular RPC connection must observe all
+        # READY publications already accepted on the pipelined connection.
+        if threading.current_thread() is not self._mutation_thread:
+            if not self._flush_pipeline(timeout=2.0):
+                raise RuntimeError(
+                    "timed out ordering a directory mutation after publication"
+                )
         for attempt in range(2):
             if self._writer_epoch is None:
                 self.status()
@@ -662,7 +897,7 @@ class ContentDirectory:
         if result is None:
             return 0
         self._writer_epoch = int(result["directory_epoch"])
-        return int(result["published"])
+        return int(result.get("accepted", result["published"]))
 
     def lookup_and_claim(
         self, content_hashes: list[bytes]
@@ -678,9 +913,11 @@ class ContentDirectory:
             with self._view_lock:
                 raw = [self._view.get(content_hash) for content_hash in content_hashes]
                 local = [
-                    dict(entry)
-                    if entry is not None and entry.get("state") == "ready"
-                    else None
+                    (
+                        dict(entry)
+                        if entry is not None and entry.get("state") == "ready"
+                        else None
+                    )
                     for entry in raw
                 ]
             # Misses and host/storage hits are read-only. Only HBM adoption
@@ -708,6 +945,16 @@ class ContentDirectory:
         if not claim_token:
             return False
         return self._call(lambda client: client.directory_release_claim(claim_token))
+
+    def lookup_and_read_claim(
+        self, content_hashes: list[bytes]
+    ) -> tuple[list[Optional[dict]], Optional[str]]:
+        """Pin READY HBM entries for a non-writer consuming their bytes."""
+        return self._call(
+            lambda client: client.directory_lookup_read_claim(
+                self.manifest_id, content_hashes
+            )
+        )
 
     def adopt_claim(
         self,
@@ -754,11 +1001,21 @@ class ContentDirectory:
         )
 
     def hbm_inventory(self) -> dict[str, list[int]]:
-        return self._writer_call(
-            lambda client, epoch: client.directory_hbm_inventory(
+        protected, _leases = self.hbm_lease_inventory()
+        return protected
+
+    def hbm_lease_inventory(
+        self,
+    ) -> tuple[dict[str, list[int]], dict[str, list[tuple[int, int]]] | None,]:
+        def request(client, epoch):
+            protected, leases, rejected = client.directory_hbm_lease_inventory(
                 self.writer_id, epoch, scope=self.engine
-            ),
-            {},
+            )
+            return (protected, leases), rejected
+
+        return self._writer_call(
+            request,
+            ({}, None),
         )
 
     def compare_prefix(
