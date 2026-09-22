@@ -266,21 +266,34 @@ fn affinity_fallback_uses_final_availability_regardless_of_builder_order() {
 }
 
 #[test]
-fn affinity_fallback_does_not_override_an_invalid_explicit_pin() {
+fn affinity_eligibility_preserves_explicit_pin_constraints() {
     let workers = workers();
     let mut request = request(WorkerWithDpRank::new(8, 1));
-    request.allowed_worker_ids = Some(HashSet::from([8]));
     request.pinned_worker = Some(WorkerWithDpRank::new(7, 5));
-    let eligibility = request
-        .eligibility()
-        .with_eligible_affinity_target(&workers, AffinityTarget::new(7, Some(5)));
-    let result = WorkerSelectionPolicy::default(KvRouterConfig::default(), "decode").select_worker(
-        WorkerSelectionInput::configured(&workers, &request, eligibility, BLOCK_SIZE),
-    );
-    assert!(matches!(
-        result,
-        Err(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 7 })
-    ));
+    let policy = WorkerSelectionPolicy::default(KvRouterConfig::default(), "decode");
+    for (allowed, target) in [
+        (Some(HashSet::from([8])), AffinityTarget::new(7, Some(5))),
+        (None, AffinityTarget::new(8, Some(1))),
+    ] {
+        request.allowed_worker_ids = allowed;
+        request.affinity_target = Some(target);
+        let eligibility = request
+            .eligibility()
+            .with_eligible_affinity_target(&workers, target);
+        let result = policy.select_worker(WorkerSelectionInput::configured(
+            &workers,
+            &request,
+            eligibility,
+            BLOCK_SIZE,
+        ));
+        assert!(matches!(
+            result,
+            Err(KvSchedulerError::PinnedWorkerNotAllowed { worker_id: 7 })
+        ));
+    }
+    request.affinity_target = Some(AffinityTarget::new(7, Some(5)));
+    let selected = select_with_policy(&policy, &workers, &request);
+    assert_eq!(selected.worker, request.pinned_worker.unwrap());
 }
 
 #[test]
@@ -383,6 +396,32 @@ fn removed_worker_invalidation_allows_reselection_and_fences_old_leases() {
         Some(new_target.into())
     );
     drop(active);
+}
+
+#[test]
+fn manual_clock_rejects_deadline_overflow_without_changing_binding_lifecycle() {
+    let epoch = Instant::now();
+    let (mut lower, mut upper) = (0, u64::MAX);
+    while lower < upper {
+        let middle = lower + (upper - lower) / 2 + 1;
+        if epoch.checked_add(Duration::from_secs(middle)).is_some() {
+            lower = middle;
+        } else {
+            upper = middle - 1;
+        }
+    }
+    let limit = epoch.checked_add(Duration::from_secs(lower)).unwrap();
+    assert!(limit.checked_add(TTL).is_none());
+    assert!(SessionAffinity::with_manual_clock(SessionAffinityConfig::new(TTL), limit).is_err());
+
+    let table = table(epoch);
+    let target = AffinityTarget::new(7, Some(5));
+    let active = table.commit(hold(&table, "session"), target).unwrap();
+    assert!(table.advance_clock(limit).is_err());
+    assert_eq!(table.query_target("session", None).unwrap(), Some(target));
+    drop(active);
+    table.advance_clock(epoch + TTL).unwrap();
+    assert_eq!(table.query_target("session", None).unwrap(), None);
 }
 
 #[test]

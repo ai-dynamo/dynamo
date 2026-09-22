@@ -232,6 +232,7 @@ impl SessionAffinity {
     /// Use the host's monotonic simulation clock. No wall-clock reaper is
     /// spawned; the host must call `advance_clock` before policy operations and
     /// lease release. Native binding, expiry, and lease semantics are unchanged.
+    /// The clock plus TTL must fit in the platform's `Instant` range.
     pub fn with_manual_clock(
         config: SessionAffinityConfig,
         now: Instant,
@@ -244,6 +245,9 @@ impl SessionAffinity {
         manual_now: Option<Instant>,
     ) -> Result<Self, AffinityError> {
         Self::validate_ttl(config.ttl)?;
+        if let Some(now) = manual_now {
+            Self::validate_manual_deadline(now, config.ttl)?;
+        }
         let inner = Arc::new(Inner {
             manual_now: manual_now.map(std::sync::Mutex::new),
             entries: DashMap::new(),
@@ -283,6 +287,7 @@ impl SessionAffinity {
 
     /// Advance manual time, lazily collecting idle bindings at their native TTL.
     /// Active leases are retained, and moving time backwards is an error.
+    /// A time whose TTL deadline would overflow is rejected without mutation.
     pub fn advance_clock(&self, now: Instant) -> Result<(), AffinityError> {
         let Some(clock) = &self.inner.manual_now else {
             return Err(AffinityError::InvalidArgument(
@@ -295,9 +300,19 @@ impl SessionAffinity {
                 "affinity clock cannot move backwards".into(),
             ));
         }
+        Self::validate_manual_deadline(now, self.inner.ttl)?;
         *current = now;
         drop(current);
         self.inner.expire_idle(now);
+        Ok(())
+    }
+
+    fn validate_manual_deadline(now: Instant, ttl: Duration) -> Result<(), AffinityError> {
+        now.checked_add(ttl).ok_or_else(|| {
+            AffinityError::InvalidArgument(
+                "affinity clock plus TTL exceeds the supported Instant range".into(),
+            )
+        })?;
         Ok(())
     }
 
