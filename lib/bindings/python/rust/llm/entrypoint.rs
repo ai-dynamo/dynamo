@@ -292,7 +292,7 @@ impl KvRouterConfig {
             );
         }
 
-        let inner = RsKvRouterConfig {
+        let mut inner = RsKvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay,
             prefill_load_scale,
@@ -342,15 +342,17 @@ impl KvRouterConfig {
             conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
         };
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }
 
     #[staticmethod]
     fn from_json(config_json: &str) -> PyResult<Self> {
-        let inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
+        let mut inner = serde_json::from_str::<RsKvRouterConfig>(config_json).map_err(|e| {
             PyValueError::new_err(format!("Failed to parse KvRouterConfig JSON: {e}"))
         })?;
+        inner.apply_policy_config().map_err(PyValueError::new_err)?;
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
     }

@@ -323,12 +323,15 @@ impl SelectionCore {
 
     /// Create a local selector and report invalid tracking configuration.
     pub fn try_new_local(
-        kv_router_config: crate::config::KvRouterConfig,
+        mut kv_router_config: crate::config::KvRouterConfig,
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
         policy_factory: WorkerSelectionPolicyFactory,
     ) -> anyhow::Result<Self> {
+        kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;

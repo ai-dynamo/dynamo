@@ -74,7 +74,7 @@ class SqueezeEvolveRunConfig(KvRouterConfigBase, AicPerfConfigBase):
         )
 
     def validate(self) -> None:  # type: ignore[override]
-        self.apply_load_aware_preset()  # shared KvRouter preset (KvRouterConfigBase)
+        self.apply_router_config()
         if not self.tiers:
             raise ValueError("--tiers is required (JSON array, cheapest first)")
         self.confidence_percentiles = [float(p) for p in self.confidence_percentiles]

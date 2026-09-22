@@ -725,7 +725,10 @@ impl KvRouter {
         scheduler_load: SchedulerLoadSender,
         parent_token: CancellationToken,
     ) -> Result<Self> {
-        let kv_router_config = kv_router_config.unwrap_or_default();
+        let mut kv_router_config = kv_router_config.unwrap_or_default();
+        kv_router_config
+            .apply_policy_config()
+            .map_err(anyhow::Error::msg)?;
         kv_router_config.validate().map_err(anyhow::Error::msg)?;
         let worker_type = worker_role.unwrap_or(WorkerType::Aggregated);
         let prepared = policy.prepare(

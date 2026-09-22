@@ -109,8 +109,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     def validate(self) -> None:
         if self.load_aware:
             self.router_mode = "kv"
-        self.apply_load_aware_preset()
-        self.apply_conditional_disagg_config()
+        self.apply_router_config()
 
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(

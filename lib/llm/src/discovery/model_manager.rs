@@ -2252,7 +2252,7 @@ impl ModelManager {
         client: Client,
         kv_cache_block_size: u32,
         policy: SelectionPolicySource,
-        kv_router_config: Option<KvRouterConfig>,
+        mut kv_router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         worker_role: Option<WorkerType>,
         metric_worker_type: &'static str,
@@ -2261,6 +2261,9 @@ impl ModelManager {
         scheduler_load: crate::kv_router::SchedulerLoadSender,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &mut kv_router_config {
+            config.apply_policy_config().map_err(anyhow::Error::msg)?;
+        }
         let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 

@@ -211,18 +211,6 @@ fn kv_router_config_from_lookup(
         get_env(key).and_then(|value| value.parse().ok())
     }
 
-    fn parse_policy_parameter(
-        get_env: &impl Fn(&str) -> Option<String>,
-        key: &str,
-        parameter: &str,
-    ) -> Option<f64> {
-        let value = parse_f64(get_env, key)?;
-        tracing::warn!(
-            "{key} is deprecated; set {parameter} in the default policy parameters through DYN_ROUTER_POLICY_CONFIG"
-        );
-        Some(value)
-    }
-
     fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
         get_env(key).and_then(|value| value.parse().ok())
     }
@@ -236,34 +224,53 @@ fn kv_router_config_from_lookup(
         get_env(key).and_then(|value| dynamo_truthy::parse_bool_opt(&value))
     }
 
+    // TODO(v1.7): Remove these env aliases after the v1.6 policy-YAML
+    // migration release; wire compatibility fields have a separate N-2 lifetime.
+    let get_env = |key: &str| {
+        let value = get_env(key)?;
+        let replacement = match key {
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT" => {
+                Some("default policy parameters.overlap_score_credit")
+            }
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY" => {
+                Some("default policy parameters.overlap_score_credit_decay")
+            }
+            "DYN_ROUTER_PREFILL_LOAD_SCALE"
+            | "DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT"
+            | "DYN_OVERLAP_SCORE_WEIGHT" => Some("default policy parameters.prefill_load_scale"),
+            "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT" => {
+                Some("default policy parameters.decode_active_request_weight")
+            }
+            "DYN_ROUTER_TEMPERATURE" => Some("default policy parameters.router_temperature"),
+            "DYN_SHARED_CACHE_MULTIPLIER" => {
+                Some("default policy parameters.shared_cache_multiplier")
+            }
+            DYN_ROUTER_PREFILL_POLICY => Some("worker_selection.prefill"),
+            DYN_ROUTER_DECODE_POLICY => Some("worker_selection.decode"),
+            "DYN_ROUTER_QUEUE_THRESHOLD" => Some("policy_classes[].prefill_busy_threshold_frac"),
+            "DYN_ROUTER_QUEUE_POLICY" => Some("policy_classes[].queue_policy"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            tracing::warn!(
+                "{key} is deprecated and will be removed in v1.7; use {replacement} in DYN_ROUTER_POLICY_CONFIG."
+            );
+        }
+        Some(value)
+    };
+
     let mut config = KvRouterConfig::default();
 
-    if let Some(value) = parse_policy_parameter(
-        &get_env,
-        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
-        "overlap_score_credit",
-    ) {
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
         config.overlap_score_credit = value;
     }
-    if let Some(value) = parse_policy_parameter(
-        &get_env,
-        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
-        "overlap_score_credit_decay",
-    ) {
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY") {
         config.overlap_score_credit_decay = value;
     }
-    if let Some(value) = parse_policy_parameter(
-        &get_env,
-        "DYN_ROUTER_PREFILL_LOAD_SCALE",
-        "prefill_load_scale",
-    ) {
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
         config.prefill_load_scale = value;
     }
-    if let Some(value) = parse_policy_parameter(
-        &get_env,
-        "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
-        "decode_active_request_weight",
-    ) {
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
         config.decode_active_request_weight = value;
     }
     for key in [
@@ -271,9 +278,6 @@ fn kv_router_config_from_lookup(
         "DYN_OVERLAP_SCORE_WEIGHT",
     ] {
         if let Some(value) = parse_f64(&get_env, key) {
-            tracing::warn!(
-                "{key} is deprecated; set prefill_load_scale in the default policy parameters through DYN_ROUTER_POLICY_CONFIG"
-            );
             apply_deprecated_overlap_score_weight_override(
                 value,
                 &mut config.overlap_score_credit,
@@ -282,9 +286,7 @@ fn kv_router_config_from_lookup(
             break;
         }
     }
-    if let Some(value) =
-        parse_policy_parameter(&get_env, "DYN_ROUTER_TEMPERATURE", "router_temperature")
-    {
+    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
         config.router_temperature = value;
     }
     // Read the canonical name first, then the Rust-only alias for backward compatibility.
@@ -377,11 +379,7 @@ fn kv_router_config_from_lookup(
         config.use_remote_indexer = value;
     }
     let mut shared_cache_multiplier_set = false;
-    if let Some(value) = parse_policy_parameter(
-        &get_env,
-        "DYN_SHARED_CACHE_MULTIPLIER",
-        "shared_cache_multiplier",
-    ) {
+    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
         config.shared_cache_multiplier = value;
         shared_cache_multiplier_set = true;
     }
@@ -401,6 +399,7 @@ fn kv_router_config_from_lookup(
         config.router_prefill_load_model = value.parse()?;
     }
 
+    config.apply_policy_config()?;
     Ok(config)
 }
 
@@ -430,7 +429,8 @@ pub enum SharedCacheType {
 ///
 /// This selector is intentionally process-local. Workers do not advertise it in
 /// model cards because request lifetime and release ownership live in the router.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ApproximateCachePolicyKind {
     /// Expire predicted entries after `router_ttl_secs`.
     #[default]
@@ -1186,6 +1186,19 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
 }
 
 impl KvRouterConfig {
+    /// Apply explicit process-wide YAML settings over legacy flags/defaults at startup.
+    pub fn apply_policy_config(&mut self) -> Result<(), String> {
+        let settings = self
+            .loaded_policy_config()
+            .map_err(|error| error.to_string())?
+            .and_then(|config| config.router())
+            .cloned();
+        if let Some(settings) = settings {
+            settings.apply(self)?;
+        }
+        Ok(())
+    }
+
     fn loaded_policy_config(
         &self,
     ) -> Result<
@@ -1619,6 +1632,93 @@ fn random_sequence_hashes(num_blocks: usize) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn router_settings_override_legacy_values_once_and_preserve_process_fields() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        let yaml = include_str!("../../tests/data/router-settings.yaml");
+        std::fs::write(policy_file.path(), yaml).unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            router_predicted_ttl_secs: Some(5.0),
+            router_prefill_policy: Some("default".into()),
+            policy_model_name: Some("model".into()),
+            ..Default::default()
+        };
+        config.apply_policy_config().unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.router_event_threads, 2);
+        assert_eq!(config.router_ttl_secs, 42.0);
+        assert_eq!(config.host_cache_hit_weight, 0.6);
+        assert_eq!(config.router_predicted_ttl_secs, None);
+        assert!(!config.router_assume_kv_reuse);
+        assert!(config.router_track_output_blocks);
+        assert_eq!(config.router_prefill_policy.as_deref(), Some("default"));
+        assert_eq!(config.policy_model_name.as_deref(), Some("model"));
+        assert!(
+            !config
+                .loaded_policy_config()
+                .unwrap()
+                .unwrap()
+                .has_routing_profiles()
+        );
+        std::fs::remove_file(policy_file.path()).unwrap();
+        config.apply_policy_config().unwrap();
+        assert_eq!(config.router_event_threads, 2);
+    }
+
+    #[test]
+    fn router_settings_apply_to_native_env_startup() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "router:\n  use_kv_events: false\n  router_approximate_cache_policy: lru\n  router_event_threads: 2\n").unwrap();
+        let config = kv_router_config_from_lookup(|key| match key {
+            "DYN_ROUTER_POLICY_CONFIG" => Some(policy_file.path().display().to_string()),
+            "DYN_ROUTER_EVENT_THREADS" => Some("8".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.validate().unwrap();
+        assert!(!config.use_kv_events);
+        assert_eq!(
+            config.router_approximate_cache_policy,
+            ApproximateCachePolicyKind::Lru
+        );
+        assert_eq!(config.router_event_threads, 2);
+    }
+
+    #[test]
+    fn router_settings_reject_policy_parameters_and_invalid_types() {
+        for setting in [
+            "overlap_score_credit: 1",
+            "router_policy_config: nested.yaml",
+            "use_kv_events: \"false\"",
+            "router_event_threads: false",
+            "router_event_threads: null",
+            "router_approximate_cache_policy: unknown",
+        ] {
+            let yaml = format!("router:\n  {setting}\n");
+            assert!(
+                super::super::policy_config::RouterPolicyConfig::from_yaml(&yaml).is_err(),
+                "{setting}"
+            );
+        }
+    }
+
+    #[test]
+    fn router_settings_still_validate_tracking_dependencies() {
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            policy_file.path(),
+            "router:\n  router_track_active_blocks: false\n  router_track_output_blocks: true\n",
+        )
+        .unwrap();
+        let mut config = KvRouterConfig {
+            router_policy_config: Some(policy_file.path().display().to_string()),
+            ..Default::default()
+        };
+        config.apply_policy_config().unwrap();
+        assert!(config.validate().is_err());
+    }
+
     use super::*;
     use crate::identity::RoutingPartitionRef;
     use crate::protocols::{BlockExtraInfo, BlockMmObjectInfo, compute_seq_hash_for_block};
