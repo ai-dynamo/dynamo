@@ -2769,6 +2769,7 @@ dependencies = [
  "rstest 0.18.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serial_test",
  "sha2 0.10.9",
  "strum",
