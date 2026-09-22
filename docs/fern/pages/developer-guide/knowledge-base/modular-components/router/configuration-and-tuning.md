@@ -75,9 +75,9 @@ its configuration even if the endpoint is unchanged.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
-- `--router-queue-threshold`: Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
-- `--router-queue-policy`: Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
-- `--router-policy-config`: Startup-only YAML path for policy-class queues and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
+- `--router-queue-threshold`: **Deprecated; use `policy_classes[].prefill_busy_threshold_frac` in the policy YAML.** Optional queue threshold fraction for prefill token capacity. Queueing is disabled by default; setting a numeric value enables it. The router holds incoming requests in a priority queue while all eligible workers exceed `threshold * max_num_batched_tokens`, releasing them when capacity frees up. This defers dispatch rather than rejecting work, so routing decisions use the freshest load metrics at the moment a request is sent to a worker. `nvext.agent_hints.strict_priority` selects an absolute pending-queue tier, while `nvext.agent_hints.priority` adjusts ordering within the configured policy. Must be greater than or equal to 0; use `0.0` for maximum queueing sensitivity. See the SGLang note under [Tuning Guidelines](#tuning-guidelines) for caveats around how `max_num_batched_tokens` is populated on that backend, and see [Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how router priority differs from backend engine priority.
+- `--router-queue-policy`: **Deprecated; use `policy_classes[].queue_policy` in the policy YAML.** Scheduling policy for the router queue: `fcfs` (default) or `wspt`.
+- `--router-policy-config`: Startup-only YAML path for shared router settings, policy-class queues, and worker-selection instances. When omitted, `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class. The equivalent environment variable is `DYN_ROUTER_POLICY_CONFIG`. See [Worker-Selection Policies](#worker-selection-policies) to select a built-in policy, and [Write Custom Routing Strategies](custom-worker-selection.mdx) for the linked-policy schema.
 
 For how queue backpressure differs from candidate filtering and busy-threshold overload handling, see [Router Filtering](worker-filtering.md).
 
@@ -152,7 +152,7 @@ worker_selection:
 Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
 
 > [!WARNING]
-> The flags below and their environment variables are deprecated. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
+> The flags below and their environment variables are deprecated for removal in v1.7. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
 
 | Deprecated Flag | Policy Parameter |
 |---|---|
@@ -163,21 +163,39 @@ Explicit parameters take precedence over router flags and environment variables.
 | `--shared-cache-multiplier` | `shared_cache_multiplier` |
 | `--router-temperature` | `router_temperature` |
 
-The host and disk cache-weight flags remain supported because they also configure cached-token estimates used for load accounting.
+The host and disk cache-weight settings also affect cached-token estimates used for load accounting. Configure these in the shared `router` section or with their existing flags.
+
+#### Shared Router Settings
+
+The optional `router` section configures shared cache and tracking infrastructure. Its values override the corresponding flags and environment defaults; omitted values keep their existing settings. These settings apply to all policies in this router process.
+
+| Settings | YAML Keys Under `router` |
+|---|---|
+| Cache indexing | `use_kv_events`, `router_ttl_secs`, `router_approximate_cache_policy`, `router_event_threads`, `router_predicted_ttl_secs` |
+| External and session caches | `use_remote_indexer`, `serve_indexer`, `enable_session_prefix_index`, `shared_cache_type` |
+| Load tracking | `router_track_active_blocks`, `router_track_output_blocks`, `router_assume_kv_reuse`, `router_track_prefill_tokens`, `router_prefill_load_model` |
+| Replica synchronization and identity | `router_replica_sync`, `router_tracking_hash`, `router_tracking_key_file`, `router_tracking_key_id` |
+| Cache-tier accounting | `host_cache_hit_weight`, `disk_cache_hit_weight` |
+
+Values and defaults match the corresponding [frontend options](../../../../reference/components/frontend-configuration.mdx). Policy scoring parameters belong under `worker_selection.instances[].parameters`.
 
 ##### Replace the Load-Aware Preset
 
-`--load-aware` and `DYN_ROUTER_LOAD_AWARE` are also deprecated. To route by load without cache credit, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0` in the default policy. The policy then needs no cache inputs. Keep router tracking configured separately:
+`--load-aware` and `DYN_ROUTER_LOAD_AWARE` are also deprecated for removal in v1.7. In the default-policy example above, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0`. Add this section to the same file to preserve the old preset's tracking settings:
 
-```bash
-python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml \
-  --no-router-kv-events --router-track-active-blocks \
-  --router-track-prefill-tokens --no-router-assume-kv-reuse \
-  --no-use-remote-indexer --no-serve-indexer \
-  --shared-cache-type none
+```yaml
+router:
+  use_kv_events: false
+  router_track_active_blocks: true
+  router_track_prefill_tokens: true
+  router_assume_kv_reuse: false
+  use_remote_indexer: false
+  serve_indexer: false
+  shared_cache_type: none
+  router_predicted_ttl_secs: null
 ```
 
-Remove `--router-predicted-ttl-secs` and unset `DYN_ROUTER_PREDICTED_TTL_SECS` if configured; the old preset disabled prediction too.
+Start with `--router-mode kv --router-policy-config worker-selection.yaml`. The default policy then routes by load without requesting cache inputs.
 
 #### Tune a Policy
 
@@ -207,6 +225,8 @@ largest count is more than 1.1 times the smallest; otherwise it prefers the work
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
 
 #### Override the Selection
+
+`--router-prefill-policy`, `--router-decode-policy`, and their environment variables are deprecated for removal in v1.7. Move their selections to `worker_selection.prefill` and `worker_selection.decode`. During migration, existing overrides retain their precedence.
 
 `DYN_ROUTER_WORKER_SELECTION_POLICY` overrides every stage. `--router-prefill-policy` and
 `--router-decode-policy`, and their `DYN_ROUTER_PREFILL_POLICY` and `DYN_ROUTER_DECODE_POLICY`

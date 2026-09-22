@@ -126,7 +126,7 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 ### KV scoring and cache locality
 
-Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Deprecated flags and their environment variables remain accepted during migration.
+Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Deprecated flags and their environment variables remain accepted until removal in v1.7.
 
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
   **Deprecated.** Use [policy parameters and explicit tracking settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset).
@@ -323,6 +323,8 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-queue-threshold" type="float" default="null">
+  **Deprecated; removal in v1.7.** Set `policy_classes[].prefill_busy_threshold_frac` in `--router-policy-config`.
+
   Queue threshold fraction of prefill capacity. Setting a nonnegative numeric value enables queueing;
   priority hints affect only requests waiting in this queue.
 
@@ -330,6 +332,8 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-queue-policy" type="string" default="fcfs">
+  **Deprecated; removal in v1.7.** Set `policy_classes[].queue_policy` in `--router-policy-config`.
+
   Queue scheduling policy. `fcfs` optimizes tail Time To First Token (TTFT); `wspt` optimizes average
   TTFT.
 
@@ -339,14 +343,16 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-policy-config" type="string" default="null">
-  Startup-only YAML for policy-class queues and custom worker-selection instances. When omitted,
+  Startup-only YAML for shared `router` settings, policy-class queues, and worker-selection instances. When omitted,
   `--router-queue-threshold` and `--router-queue-policy` define one synthetic policy class.
-  Queueing remains disabled until a threshold is configured. See [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
+  Queueing remains disabled until a threshold is configured. See [Shared Router Settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#shared-router-settings), [Policy-class queues](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#policy-class-queues) and [Write Custom Routing Strategies](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx).
 
   Environment variable: `DYN_ROUTER_POLICY_CONFIG`
 </ParamField>
 
 <ParamField path="--router-prefill-policy" type="string" default="null">
+  **Deprecated; removal in v1.7.** Set `worker_selection.prefill` in `--router-policy-config`.
+
   Worker-selection instance for disaggregated prefill workers in the current router process. This
   option overrides `worker_selection.prefill` from `--router-policy-config`. It is not included in
   worker model cards. Set it to `default` to use Dynamo's built-in worker selector.
@@ -355,6 +361,8 @@ Configure scoring through [default policy parameters](../../developer-guide/know
 </ParamField>
 
 <ParamField path="--router-decode-policy" type="string" default="null">
+  **Deprecated; removal in v1.7.** Set `worker_selection.decode` in `--router-policy-config`.
+
   Worker-selection instance for decode workers in the current router process. This option
   overrides `worker_selection.decode` from `--router-policy-config`. It is not included in worker
   model cards. Set it to `default` to use Dynamo's built-in worker selector. Configure an aggregated
