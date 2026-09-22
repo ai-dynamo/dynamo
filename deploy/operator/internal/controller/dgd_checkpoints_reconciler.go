@@ -99,7 +99,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		component := &dgd.Spec.Components[i]
 		componentName := component.ComponentName
 		checkpointConfig := dynamo.GetCheckpoint(component)
-		if checkpointConfig == nil {
+		if checkpointConfig == nil || component.IsLPX() {
 			continue
 		}
 		if !r.runtimeConfig.Gate.Enabled(features.Checkpoint) {

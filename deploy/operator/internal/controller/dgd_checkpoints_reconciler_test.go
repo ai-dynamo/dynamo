@@ -921,6 +921,21 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreDoesNotDependOnActiveWorkerHash
 	assert.True(t, info.Ready)
 	require.NotNil(t, info.NativeSnapshot)
 	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
+
+	t.Log("Verify automatic and referenced LPX checkpoint settings do not block the following worker")
+	dgd.Spec.Components = append([]v1beta1.DynamoComponentDeploymentSharedSpec{{
+		ComponentName: "lpx",
+		ComponentType: v1beta1.ComponentTypeLPX,
+		Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+			Enabled: true,
+		}},
+	}}, dgd.Spec.Components...)
+	for _, checkpointRef := range []*string{nil, ptr.To("lpx-snapshot")} {
+		dgd.Spec.Components[0].Experimental.Checkpoint.CheckpointRef = checkpointRef
+		withLPX, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+		assert.NoError(t, err)
+		assert.Equal(t, result, withLPX)
+	}
 }
 
 func TestDGDCheckpointsReconciler_ExplicitRestoreIsPortableAcrossDGDIdentity(t *testing.T) {
