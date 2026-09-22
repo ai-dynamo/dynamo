@@ -283,6 +283,7 @@ _FUNCTION_HEADER = re.compile(
     r"([A-Za-z_][\w-]*)\s*\(\s*\))\s*"
 )
 _CASE_HEADER = re.compile(r"\s*(case)\s+.+\s+(in)\s*")
+_ARRAY_ASSIGNMENT = re.compile(r"(?:^|\s)[A-Za-z_]\w*\+?=$")
 
 
 class _Command(NamedTuple):
@@ -352,6 +353,7 @@ def _split_commands(script: str) -> list[_Command]:
     start = 1
     group = 0  # index in commands of the first member of the open AND-OR list
     substitutions = 0  # command/process substitution parentheses are not group closers
+    array_depth = 0
     # closer, first member, outer AND-OR list, function name, definition line
     scopes: list[tuple[str, int, int, str, int]] = []
     # awaiting pattern, first member, outer AND-OR list
@@ -437,6 +439,15 @@ def _split_commands(script: str) -> list[_Command]:
             end = script.find("\n", index)
             index = size if end < 0 else end
             continue
+        if array_depth:
+            if char in "()":
+                array_depth += 1 if char == "(" else -1
+            if char == "\n":
+                line += 1
+            add(char, True)  # array elements are data, not command words
+            word_started = not char.isspace()
+            index += 1
+            continue
         if script.startswith("<<<", index):
             add("<<<", False)
             index += 3
@@ -462,6 +473,14 @@ def _split_commands(script: str) -> list[_Command]:
             continue
         raw_header = "".join(parts)
         header = raw_header.strip()
+        array_assignment = _ARRAY_ASSIGNMENT.search(raw_header) if char == "(" else None
+        if array_assignment:
+            assignment_mask = "".join(mask)[array_assignment.start() :]
+            if "q" not in assignment_mask:
+                array_depth = 1
+                add(char, True)
+                index += 1
+                continue
         case_header = _CASE_HEADER.fullmatch(raw_header) if char.isspace() else None
         if case_header and not substitutions:
             header_mask = "".join(mask)
@@ -769,6 +788,27 @@ def test_compound_command_keywords_expose_service_launches() -> None:
         (1, "python -m dynamo.vllm", False),
         (1, "python -m dynamo.frontend", False),
     ]
+
+
+@pytest.mark.parametrize("operator", ["=", "+="])
+def test_array_elements_are_not_service_launches(operator: str) -> None:
+    """Array newlines and parentheses do not expose commands or close a subshell."""
+    script = (
+        f"worker_cmd{operator}(python3 -m dynamo.vllm)\n"
+        "(\n"
+        f"cmd{operator}(\n"
+        "    python -m dynamo.frontend\n"
+        "    wait_any_exit 'quoted )' $(printf '(nested)') # ) ignored\n"
+        ")\n"
+        "python -m dynamo.planner\n"
+        ") &\n"
+        "python -m dynamo.frontend\n"
+    )
+    assert _service_launches(script) == [
+        (7, "python -m dynamo.planner", True),
+        (9, "python -m dynamo.frontend", False),
+    ]
+    assert not _calls_wait_any_exit(script)
 
 
 def test_case_patterns_expose_branch_commands_only_in_case_context() -> None:
