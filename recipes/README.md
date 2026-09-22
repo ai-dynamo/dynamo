@@ -67,6 +67,7 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3.8-Flash-Next](qwen3.8-flash-next/)** | vLLM | Agg + Disagg | 4x B200 / 8x B200 / 12x B200 | ✅ | ✅ | Multimodal (text+image+video) ultra-sparse MoE (125B / 6B active) with GDN+QSA hybrid attention, 51B N-gram embedding offload to host RAM, Inferact NVFP4 weights, TP4+EP, MTP3 spec decode, KV-aware routing, reasoning + tool calling (`qwen3_coder`); agentic profile | ❌ |
 | **[K-EXAONE 2.0 750B-A37B-NVFP4](k-exaone-2.0/vllm/agg-b200-chat/)** | vLLM | Aggregated | 4x B200 | ✅ | ✅ | 764.5B MoE (37B active), hybrid attention (20 full + 58 sliding), NVFP4 W4A4 + FP8 KV, TP4, MTP spec decode, FLASHINFER_CUTLASS MoE backend required for correctness | ❌ |
 | **[K-EXAONE 2.0 750B-A37B-NVFP4](k-exaone-2.0/vllm/disagg-b200-chat/)** | vLLM | Disaggregated | 8x B200 | ✅ | ✅ | Same model, 1P1D over NIXL/UCX on InfiniBand RDMA, MTP on both roles, decode `--max-num-seqs` 256 | ❌ |
+| **[MiniMax M3](minimax-m3/)** | vLLM | Aggregated + Disaggregated | 8x / 24x GB200 | ✅ | ✅ | TP4 per worker, 1M context, FP8 KV, EAGLE3, KV-aware routing; aggregated profile adds 400 GB CPU KV offload per replica for large agentic traffic | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
