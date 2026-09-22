@@ -45,7 +45,7 @@ The `simple-stacked-score-pick` policy has no custom filter. It adds active-requ
 
 These examples implement plugins through request context and worker signal accessors. An embedded simulation host instead owns worker snapshots, dispatch acceptance, and affinity leases around native selection. Its `RoutingEligibility::with_eligible_affinity_target` call follows the selector's `uses_exclusive_affinity_target()` contract; advisory custom policies keep the full eligible candidate set. No filter, scorer, or picker callback changes are required.
 
-See [Native Routing Policy in a Simulation Host](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/simulation-policy.md) for the separate public host API, `SessionAffinity::with_manual_clock` and `advance_clock`, independent prefill/decode pools, and an executable lifecycle example. The guide includes immutable-revision build instructions for the unreleased host additions; consumer CLI integration is separate work.
+See [Native Routing Policy in a Simulation Host](https://github.com/ai-dynamo/dynamo/blob/61d4d9a864876ed36f3cf8a3ce404414a07ef64c/lib/kv-router/simulation-policy.md) for the separate public host API, `SessionAffinity::with_manual_clock` and `advance_clock`, independent prefill/decode pools, and an executable lifecycle example. The guide includes immutable-revision build instructions for the unreleased host additions; consumer CLI integration is separate work.
 
 ## 1. Create the Policy Crate
 

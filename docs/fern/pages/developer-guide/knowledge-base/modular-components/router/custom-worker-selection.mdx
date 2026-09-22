@@ -63,7 +63,7 @@ An embedded Rust host can call the native selector through `WorkerSelector` whil
 
 For virtual time, construct `SessionAffinity` with `with_manual_clock` and call `advance_clock` before lifecycle events, including the final lease release that starts idle expiry. Keep separate affinity tables and worker inputs for prefill and decode pools. The host owns dispatch acceptance and binding invalidation; filter, scorer, and picker callbacks retain their existing request-context and worker-signal APIs.
 
-See [Native Routing Policy in a Simulation Host](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/simulation-policy.md) for the public host API, executable lifecycle example, and immutable-revision build instructions. These host additions are unreleased and require a separate downstream integration before a consumer CLI can use them.
+See [Native Routing Policy in a Simulation Host](https://github.com/ai-dynamo/dynamo/blob/61d4d9a864876ed36f3cf8a3ce404414a07ef64c/lib/kv-router/simulation-policy.md) for the public host API, executable lifecycle example, and immutable-revision build instructions. These host additions are unreleased and require a separate downstream integration before a consumer CLI can use them.
 
 ## Build the Policy
 
