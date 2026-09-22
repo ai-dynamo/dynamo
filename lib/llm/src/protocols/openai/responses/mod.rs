@@ -1256,10 +1256,10 @@ pub fn chat_completion_to_response(
         // would never fire again for a reasoning-only turn -- that turn already
         // has a `Reasoning` item. A completed turn still needs an assistant
         // `Message`, even an empty one, so callers that only look for one are
-        // not left with just a reasoning item; an incomplete (Length-truncated)
-        // turn is left as reasoning-only, since the model was cut off mid-thought
-        // and never got to an answer.
-        if !output_limit_reached
+        // not left with just a reasoning item; an incomplete turn (Length or
+        // ContentFilter) is left as reasoning-only, since the model was cut off
+        // mid-thought and never got to an answer.
+        if incomplete_reason.is_none()
             && !output
                 .iter()
                 .any(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)))
