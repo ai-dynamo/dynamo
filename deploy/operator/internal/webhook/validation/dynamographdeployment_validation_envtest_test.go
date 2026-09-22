@@ -127,6 +127,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar requires engine main", deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.components[1].podTemplate.spec.containers: Required value: main engine container is required for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar rejects non-worker component type",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			}), wantWebhookErrs: []string{`spec.components[1].dynamoSidecar: Forbidden: is supported only for worker, prefill, and decode components`}},
+		{name: "native sidecar rejects empty selector",
+			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.DynamoSidecar = k8sptr.To("")
+			}), wantWebhookErrs: []string{`spec.components[1].dynamoSidecar: Invalid value: "": must not be empty`}},
 		{name: "native sidecar beta custom runtime image create needs override",
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage

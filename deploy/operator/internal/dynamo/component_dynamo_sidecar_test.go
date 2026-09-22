@@ -128,6 +128,24 @@ func TestNativeSidecarRendering(t *testing.T) {
 	}
 }
 
+func TestMergeDynamoSidecarDefaults_ErrorPaths(t *testing.T) {
+	ctx := ComponentContext{DynamoNamespace: "test"}
+
+	t.Run("no matching init container", func(t *testing.T) {
+		podSpec := &corev1.PodSpec{}
+		err := mergeDynamoSidecarDefaults(podSpec, "dynamo", ctx)
+		require.ErrorContains(t, err, `"dynamo" does not match any podTemplate init container`)
+	})
+
+	t.Run("init container missing restartPolicy Always", func(t *testing.T) {
+		podSpec := &corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "dynamo", Image: "runtime:1.5.0"}},
+		}
+		err := mergeDynamoSidecarDefaults(podSpec, "dynamo", ctx)
+		require.ErrorContains(t, err, `requires restartPolicy Always`)
+	})
+}
+
 // nativeSidecarSecretsRetriever records every image lookup and only grants the runtime image a secret.
 type nativeSidecarSecretsRetriever struct{ images []string }
 
