@@ -384,16 +384,22 @@ class VllmEnginePauseController:
     def needs_resume_recovery(self) -> bool:
         return self._generation_paused
 
-    async def pause(self, *args: object, clear_cache: bool = True) -> bool:
+    async def pause_generation_only(self, *, clear_cache: bool = False) -> bool:
+        """Stop scheduling while retaining the standby's KV mappings."""
         if self._is_paused or self._generation_paused:
             return False
-
-        level = args[0] if args else None
         if clear_cache:
             await self._engine_client.pause_generation()
         else:
             await self._engine_client.pause_generation(clear_cache=False)
         self._generation_paused = True
+        return True
+
+    async def pause(self, *args: object, clear_cache: bool = True) -> bool:
+        if not await self.pause_generation_only(clear_cache=clear_cache):
+            return False
+
+        level = args[0] if args else None
         try:
             engine_core = getattr(self._engine_client, "engine_core", None)
             call_utility = getattr(engine_core, "call_utility_async", None)

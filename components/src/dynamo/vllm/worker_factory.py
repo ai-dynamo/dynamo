@@ -1266,6 +1266,23 @@ class WorkerFactory:
             )
             raise
 
+    async def _resume_after_kv_fence(self, handler) -> None:
+        """Resume scheduling after a mapped standby has completed KV fencing."""
+        timeout = float(os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120"))
+        try:
+            await _run_gms_operation_with_hard_timeout(
+                handler._pause_controller.resume([]),
+                timeout=timeout,
+                label="GMS scheduler and generation resume",
+            )
+        except _GMSHardTimeout:
+            logger.critical(
+                "[GMS failover] scheduler resume did not complete within %.0fs; "
+                "failing closed",
+                timeout,
+            )
+            raise
+
     def _maybe_start_rank_liveness_monitor(
         self, handler, config: Config, *, failover_lock=None
     ):
@@ -1481,8 +1498,17 @@ class WorkerFactory:
 
         # The pre-initialized standby relinquishes its writer role without clearing
         # prefix metadata, then waits while remaining healthy but undiscoverable.
-        await handler._pause_controller.pause(1, clear_cache=False)
-        await handler.engine_client.wake_up(["weights"])
+        mapped_standby = os.environ.get(
+            "DYN_VLLM_GMS_MAPPED_STANDBY", "0"
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if mapped_standby:
+            await handler._pause_controller.pause_generation_only(clear_cache=False)
+            logger.info(
+                "[Shadow] Generation paused with persistent KV mappings retained"
+            )
+        else:
+            await handler._pause_controller.pause(1, clear_cache=False)
+            await handler.engine_client.wake_up(["weights"])
         if failover_metrics is not None:
             failover_metrics.set_state("standby")
         runtime.set_health_status(True)
@@ -1499,7 +1525,10 @@ class WorkerFactory:
         try:
             await run_gms_failover_post_lock_fence(backend_name="vllm", role="shadow")
             resume_attempted = True
-            await self._wake_up_kv_fenced(handler, ["kv_cache"])
+            if mapped_standby:
+                await self._resume_after_kv_fence(handler)
+            else:
+                await self._wake_up_kv_fenced(handler, ["kv_cache"])
             resumed = True
             handler._pause_controller.mark_resumed()
             if promotion_warmup is not None:
