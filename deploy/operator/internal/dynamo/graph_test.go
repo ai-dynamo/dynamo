@@ -3933,8 +3933,36 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 													SizeLimit: func() *resource.Quantity { q := resource.MustParse(commonconsts.DefaultSharedMemorySize); return &q }(),
 												},
 											},
+											{
+												Name: "wait-leader-script",
+												VolumeSource: corev1.VolumeSource{
+													ConfigMap: &corev1.ConfigMapVolumeSource{
+														LocalObjectReference: corev1.LocalObjectReference{
+															Name: "test-dynamo-graph-deployment-wait-leader-script",
+														},
+													},
+												},
+											},
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
+										InitContainers: []corev1.Container{
+											{
+												Name:  "wait-for-leader-ray",
+												Image: "worker-image",
+												Command: []string{
+													"sh",
+													"-c",
+													`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}" LEADER_PORT="6379" && exec sh /scripts/wait-for-ray-leader.sh`,
+												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      "wait-leader-script",
+														MountPath: "/scripts",
+														ReadOnly:  true,
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  commonconsts.MainContainerName,
