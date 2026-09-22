@@ -16,7 +16,6 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 
 from gms_kv_ring.common.content_directory import ContentDirectory
-from gpu_memory_service.common.utils import is_truthy_env
 from gpu_memory_service.integrations.common.kv_lease_client import KVLease
 from gpu_memory_service.integrations.sglang.install_kv_leases import (
     adopt_hbm_pages,
@@ -492,15 +491,13 @@ def make_gms_unified_cache_class():
         def _commit_finished_prefixes(self, prepared) -> None:
             if not prepared:
                 return
-            # During lease-safe takeover the new owner may serve before the
-            # directory reader observes its promoted writer epoch. Keep these
+            # A mapped standby or a newly promoted writer may complete work
+            # before its directory observes writer authority. Keep these
             # just-computed pages in SGLang's native radix cache, but do not
             # seal or advertise them until writer authority is visible. They
             # remain protected by their ordinary LEASED ownership and become
             # reusable through the native eviction path.
-            if is_truthy_env(
-                "DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING"
-            ) and not getattr(self._gms_directory, "authoritative", False):
+            if not getattr(self._gms_directory, "authoritative", False):
                 logger.debug("[GMS-KVDirectory] deferring durability during takeover")
                 return
             lease_map = self.token_to_kv_pool_allocator._gms_kv_leases_by_page

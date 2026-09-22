@@ -482,7 +482,8 @@ def test_steady_state_publication_skips_digest_vote(monkeypatch):
     assert content_hash not in cache._gms_recovery_candidates
 
 
-def test_transition_publication_stays_native_until_writer_visible(monkeypatch):
+@pytest.mark.parametrize("transition_mode", [None, "0", "1"])
+def test_publication_stays_native_until_writer_visible(monkeypatch, transition_mode):
     cache, allocator = _cache(monkeypatch)
     key = _key(1, 2)
     cache.insert(InsertParams(key=key, value=torch.tensor([6, 7])))
@@ -497,7 +498,10 @@ def test_transition_publication_stays_native_until_writer_visible(monkeypatch):
         retained.extend(int(page) for page in pages)
         return [lease]
 
-    monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", "1")
+    if transition_mode is None:
+        monkeypatch.delenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", raising=False)
+    else:
+        monkeypatch.setenv("DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING", transition_mode)
     monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
 
     cache._publish_finished_prefix(key)
