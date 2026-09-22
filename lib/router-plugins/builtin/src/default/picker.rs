@@ -110,7 +110,7 @@ impl WorkerPicker for DefaultPicker {
             }
             return Ok(best_row);
         }
-        if self.rng.is_none() {
+        let Some(rng) = &self.rng else {
             return Ok(softmax_sample_index(
                 candidates,
                 |candidate| candidate.cost(),
@@ -118,7 +118,7 @@ impl WorkerPicker for DefaultPicker {
                 fastrand::f64(),
                 &mut self.probabilities,
             ));
-        }
+        };
         self.entries.clear();
         self.entries.extend(
             candidates
@@ -127,13 +127,11 @@ impl WorkerPicker for DefaultPicker {
                 .map(|(row, candidate)| (row, candidate.cost())),
         );
         // Canonical order is required only for deterministic replay, never for production ties.
-        if self.rng.is_some() {
-            self.entries.sort_unstable_by_key(|(row, _)| {
-                let worker = candidates[*row].worker();
-                (worker.worker_id, worker.dp_rank)
-            });
-        }
-        let mut rng = self.rng.as_ref().map(|rng| rng.lock());
+        self.entries.sort_unstable_by_key(|(row, _)| {
+            let worker = candidates[*row].worker();
+            (worker.worker_id, worker.dp_rank)
+        });
+        let mut rng = rng.lock();
         let selected = if self.temperature == 0.0 {
             let mut best = 0;
             let mut best_cost = f64::INFINITY;
@@ -145,26 +143,18 @@ impl WorkerPicker for DefaultPicker {
                     ties = 1;
                 } else if *cost == best_cost {
                     ties += 1;
-                    let sample = match rng.as_mut() {
-                        Some(rng) => rng.usize(0..ties),
-                        None => fastrand::usize(0..ties),
-                    };
-                    if sample == 0 {
+                    if rng.usize(0..ties) == 0 {
                         best = index;
                     }
                 }
             }
             best
         } else {
-            let sample = match rng.as_mut() {
-                Some(rng) => rng.f64(),
-                None => fastrand::f64(),
-            };
             softmax_sample_index(
                 &self.entries,
                 |(_, cost)| *cost,
                 self.temperature,
-                sample,
+                rng.f64(),
                 &mut self.probabilities,
             )
         };
