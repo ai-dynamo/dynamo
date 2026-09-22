@@ -3181,7 +3181,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
-    def _cache_loss_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+    def _kv_cache_hit_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
         """Expose final cache counters for internal router observability."""
         prompt_tokens = getattr(request_output, "prompt_token_ids", None)
         local_hits = getattr(request_output, "num_local_cached_tokens", None)
@@ -3383,8 +3383,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             completion_token_counts=total_output_tokens_by_index,
                         )
                         out.setdefault("engine_data", {})[
-                            "cache_loss"
-                        ] = BaseWorkerHandler._cache_loss_engine_data(res)
+                            "kv_cache_hit"
+                        ] = BaseWorkerHandler._kv_cache_hit_engine_data(res)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload

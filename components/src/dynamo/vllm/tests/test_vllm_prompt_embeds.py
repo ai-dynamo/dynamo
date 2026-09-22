@@ -253,14 +253,14 @@ class TestUsageStatistics:
         assert result["completion_tokens"] == 2
         assert result["prompt_tokens_details"] == expected_prompt_tokens_details
 
-    def test_cache_loss_engine_data_uses_worker_counters(self):
+    def test_kv_cache_hit_engine_data_uses_worker_counters(self):
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4]
         mock_output.num_local_cached_tokens = 2
         mock_output.num_external_cached_tokens = 1
         mock_output.num_external_lookup_tokens = 2
 
-        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(mock_output) == {
             "complete": True,
             "prompt_tokens": 4,
             "gpu_hit_tokens": 2,
@@ -268,18 +268,18 @@ class TestUsageStatistics:
             "cpu_lookup_tokens": 2,
         }
 
-    def test_cache_loss_engine_data_marks_missing_worker_counters_incomplete(self):
+    def test_kv_cache_hit_engine_data_marks_missing_worker_counters_incomplete(self):
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2]
         mock_output.num_local_cached_tokens = None
         mock_output.num_external_cached_tokens = 0
         mock_output.num_external_lookup_tokens = 0
 
-        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(mock_output) == {
             "complete": False
         }
 
-    def test_cache_loss_engine_data_uses_aggregate_cache_fallback(self):
+    def test_kv_cache_hit_engine_data_uses_aggregate_cache_fallback(self):
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4]
         mock_output.num_cached_tokens = 3
@@ -287,7 +287,7 @@ class TestUsageStatistics:
         mock_output.num_external_cached_tokens = None
         mock_output.num_external_lookup_tokens = None
 
-        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(mock_output) == {
             "complete": True,
             "prompt_tokens": 4,
             "gpu_hit_tokens": 3,
@@ -295,7 +295,7 @@ class TestUsageStatistics:
             "cpu_lookup_tokens": 0,
         }
 
-    def test_cache_loss_engine_data_uses_stock_external_counter(self):
+    def test_kv_cache_hit_engine_data_uses_stock_external_counter(self):
         mock_output = Mock()
         mock_output.prompt_token_ids = [1, 2, 3, 4]
         mock_output.num_cached_tokens = 3
@@ -304,7 +304,7 @@ class TestUsageStatistics:
         mock_output.num_external_computed_tokens = 1
         mock_output.num_external_lookup_tokens = None
 
-        assert BaseWorkerHandler._cache_loss_engine_data(mock_output) == {
+        assert BaseWorkerHandler._kv_cache_hit_engine_data(mock_output) == {
             "complete": True,
             "prompt_tokens": 4,
             "gpu_hit_tokens": 2,
