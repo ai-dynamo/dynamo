@@ -27,13 +27,18 @@ spec:
           command:
           - /bin/bash
           - -lc
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1@sha256:7a54b0d601b7b2c50d41c6e683ddc8b6d2b4fa2b17262db1fa2e84ab7ebaf7e2
           imagePullPolicy: IfNotPresent
           name: main
           ports:
           - containerPort: 8000
             name: http
             protocol: TCP
+          resources:
+            requests:
+              cpu: "8"
+              ephemeral-storage: 16Gi
+              memory: 16Gi
           volumeMounts:
           - mountPath: /model-cache
             name: model-cache
@@ -67,13 +72,15 @@ spec:
           command:
           - /bin/bash
           - -lc
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1@sha256:671b3f6ed5b94a572ae976cd59344bf26b27121618344a97d978d09737e6c7a2
           imagePullPolicy: IfNotPresent
           name: main
           resources:
             limits:
               nvidia.com/gpu: "4"
             requests:
+              cpu: "16"
+              ephemeral-storage: 64Gi
               memory: 200Gi
               nvidia.com/gpu: "4"
           securityContext:
@@ -107,9 +114,9 @@ spec:
           persistentVolumeClaim:
             claimName: model-cache
     replicas: 1
-    # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
+    # a digest-pinned image exposes no tag for the operator to parse a version from
     runtimeVersionOverride: 1.4.1
-    sharedMemorySize: 40Gi
+    sharedMemorySize: 64Gi
     type: worker
   env:
   - name: HF_HOME

@@ -46,24 +46,26 @@ spec:
           containers:
             - name: main
               # CPU-only: routes traffic, loads no weights. Multi-arch.
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1@sha256:7a54b0d601b7b2c50d41c6e683ddc8b6d2b4fa2b17262db1fa2e84ab7ebaf7e2
               imagePullPolicy: IfNotPresent
               command: [/bin/bash, -lc]
               args:
                 - exec python3 -m dynamo.frontend --router-mode kv --router-kv-events --kv-cache-block-size 64 --http-host 0.0.0.0 --http-port 8000
               ports: [{containerPort: 8000, name: http, protocol: TCP}]
+              resources:
+                requests: {cpu: "8", memory: 16Gi, ephemeral-storage: 16Gi}
               volumeMounts:
                 - {mountPath: /model-cache, name: model-cache, readOnly: true}
           volumes:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
     - name: PrefillWorker
-      # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
+      # a digest-pinned image exposes no tag for the operator to parse a version from
       runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
       type: worker
-      sharedMemorySize: 40Gi
+      sharedMemorySize: 64Gi
       podTemplate:
         spec:
           nodeSelector:
@@ -74,7 +76,7 @@ spec:
             - name: main
               # vLLM 0.28.0 + the exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599);
               # stock 0.28.0 cannot load this NVFP4 checkpoint.
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1@sha256:671b3f6ed5b94a572ae976cd59344bf26b27121618344a97d978d09737e6c7a2
               imagePullPolicy: IfNotPresent
               env:
                 - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5560"}
@@ -102,7 +104,7 @@ spec:
                 runAsGroup: 0
                 capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
               resources:
-                requests: {memory: 200Gi, nvidia.com/gpu: "4"}
+                requests: {cpu: "16", memory: 200Gi, ephemeral-storage: 64Gi, nvidia.com/gpu: "4"}
                 limits: {nvidia.com/gpu: "4"}
               startupProbe:
                 failureThreshold: 60
@@ -117,12 +119,12 @@ spec:
             - name: model-cache
               persistentVolumeClaim: {claimName: model-cache}
     - name: DecodeWorker
-      # the operator cannot parse a version from a 1.4.1-<model>-post.1 tag
+      # a digest-pinned image exposes no tag for the operator to parse a version from
       runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
       type: worker
-      sharedMemorySize: 40Gi
+      sharedMemorySize: 64Gi
       podTemplate:
         spec:
           nodeSelector:
@@ -146,7 +148,7 @@ spec:
             - name: main
               # vLLM 0.28.0 + the exaone_moe lm_head prefix fix (ai-dynamo/dynamo#14599);
               # stock 0.28.0 cannot load this NVFP4 checkpoint.
-              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1@sha256:671b3f6ed5b94a572ae976cd59344bf26b27121618344a97d978d09737e6c7a2
               imagePullPolicy: IfNotPresent
               env:
                 - {name: VLLM_NIXL_SIDE_CHANNEL_PORT, value: "5558"}
@@ -173,7 +175,7 @@ spec:
                 runAsGroup: 0
                 capabilities: {add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]}
               resources:
-                requests: {memory: 200Gi, nvidia.com/gpu: "4"}
+                requests: {cpu: "16", memory: 200Gi, ephemeral-storage: 64Gi, nvidia.com/gpu: "4"}
                 limits: {nvidia.com/gpu: "4"}
               startupProbe:
                 failureThreshold: 60
