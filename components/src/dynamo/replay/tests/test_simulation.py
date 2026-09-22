@@ -404,12 +404,7 @@ def test_factory_preserves_trtllm_disagg_gate() -> None:
 
     assert capabilities.supports_backend_topology("trtllm", "agg")
     assert not capabilities.supports_backend_topology("trtllm", "disagg")
-
-
-def test_factory_advertises_disaggregated_attention_dp() -> None:
-    capabilities = simulation.DynamoReplayRunnerFactory().capabilities()
-
-    assert capabilities.supports_disaggregated_attention_dp
+    assert not capabilities.supports_disaggregated_attention_dp
 
 
 def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
@@ -437,7 +432,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
 
     assert simulation._REPLAY_SPEC_API_VERSION == 1
     assert seen["version"] == 1
-    assert seen["supports_disaggregated_attention_dp"] is True
+    assert seen["supports_disaggregated_attention_dp"] is False
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:

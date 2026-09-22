@@ -2538,8 +2538,6 @@ mod tests {
             .collect()
     }
 
-    /// The (worker, dp_rank) pairs each pool routed to, checking every request has
-    /// exactly one route per pool that resolves to an in-range rank.
     fn routed_ranks_per_pool(
         report: &TraceSimulationReport,
         router_mode: ReplayRouterMode,
@@ -2580,6 +2578,7 @@ mod tests {
     #[rstest]
     #[case::round_robin(ReplayRouterMode::RoundRobin)]
     #[case::kv_router(ReplayRouterMode::KvRouter)]
+    #[ignore = "requires an AISimulate release with rank-aware disaggregated handoff"]
     fn disagg_attention_dp_resolves_ranks_without_aliasing(#[case] router_mode: ReplayRouterMode) {
         let report = simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
             attention_dp_disagg_config(),
@@ -2608,14 +2607,13 @@ mod tests {
     #[rstest]
     #[case::round_robin(ReplayRouterMode::RoundRobin)]
     #[case::kv_router(ReplayRouterMode::KvRouter)]
+    #[ignore = "requires an AISimulate release with rank-aware disaggregated handoff"]
     fn disagg_attention_dp_scale_up_keeps_rank_identity(#[case] router_mode: ReplayRouterMode) {
         const SCALE_UP_AT_MS: f64 = 50.0;
         // Idle FPM samples emit once per second, so a recheck more than a second after
         // scale-up carries every active rank of both workers regardless of traffic.
         const RECHECK_AT_MS: f64 = 1_100.0;
 
-        /// Scales both pools from one worker to two on its first tick and records which
-        /// (worker, dp_rank) pairs carried an FPM sample on each tick.
         struct ScaleUpOnce {
             ticks: Rc<RefCell<Vec<(RankSet, RankSet)>>>,
         }
