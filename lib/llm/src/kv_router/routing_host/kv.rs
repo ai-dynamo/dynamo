@@ -4,10 +4,7 @@
 use super::*;
 use crate::kv_router::{
     FindBestMatchAdmission,
-    routing_host::{
-        kv_selection::SelectionOutcome,
-        request_guard::{CacheLossTracking, RouteObservation},
-    },
+    routing_host::{kv_selection::SelectionOutcome, request_guard::RouteObservation},
 };
 
 impl<Sel> RoutingHost<Sel>
@@ -346,17 +343,17 @@ where
         let chooser = self.kv_router();
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
-        let cache_loss_tracking = if !is_query_only {
+        let kv_route = if !is_query_only {
             selection
                 .max_raw_cached_tokens
                 .zip(selection.selected_raw_cached_tokens)
-                .map(|(max_raw_cached_tokens, selected_raw_cached_tokens)| {
-                    CacheLossTracking::new(RouteObservation {
+                .map(
+                    |(max_raw_cached_tokens, selected_raw_cached_tokens)| RouteObservation {
                         prompt_tokens: routing_parts.token_ids.len() as u64,
                         best_router_tokens: max_raw_cached_tokens as u64,
                         selected_router_tokens: selected_raw_cached_tokens as u64,
-                    })
-                })
+                    },
+                )
         } else {
             None
         };
@@ -365,7 +362,7 @@ where
                 self.request_metrics.clone(),
                 cleanup,
                 request,
-                cache_loss_tracking,
+                kv_route,
             ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
@@ -374,7 +371,7 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
-                cache_loss_tracking,
+                kv_route,
             ),
         };
 

@@ -32,10 +32,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
-    kv_router::{
-        RoutingLoadContext,
-        routing_host::request_guard::{CacheLossTracking, RouteObservation},
-    },
+    kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
@@ -699,11 +696,11 @@ async fn terminal_item_does_not_skip_transport_eof() {
         WorkerWithDpRank::from_worker_id(0),
         dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        Some(CacheLossTracking::new(RouteObservation {
+        Some(RouteObservation {
             prompt_tokens: 1,
             best_router_tokens: 0,
             selected_router_tokens: 0,
-        })),
+        }),
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -714,6 +711,117 @@ async fn terminal_item_does_not_skip_transport_eof() {
 
     drop(router);
     runtime.shutdown();
+}
+
+struct KvHitSnapshot {
+    best: (f64, u64),
+    selected: (f64, u64),
+    lookup: (f64, u64),
+    reused: (f64, u64),
+    complete: u64,
+    incomplete: u64,
+}
+
+fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
+    let hist = |h: &prometheus::Histogram| (h.get_sample_sum(), h.get_sample_count());
+    KvHitSnapshot {
+        best: hist(&metrics.kv_best_eligible_cached_prefix_tokens),
+        selected: hist(&metrics.kv_selected_cached_prefix_tokens),
+        lookup: hist(&metrics.kv_worker_lookup_tokens),
+        reused: hist(&metrics.kv_worker_reused_tokens),
+        complete: metrics
+            .kv_worker_outcomes_total
+            .with_label_values(&["complete"])
+            .get(),
+        incomplete: metrics
+            .kv_worker_outcomes_total
+            .with_label_values(&["incomplete"])
+            .get(),
+    }
+}
+
+/// Drive one tracked attempt through the real guard and return the metric deltas.
+async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvHitSnapshot) {
+    let (router, runtime) = router(None).await;
+    let metrics = Arc::clone(&router.request_metrics);
+    let before = kv_hit_snapshot(&metrics);
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            });
+            yield Annotated::from_data(final_frame);
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&metrics),
+        "kv-hit-attempt".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+        Some(RouteObservation {
+            prompt_tokens: 100,
+            best_router_tokens: 75,
+            selected_router_tokens: 60,
+        }),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+    while monitored.next().await.is_some() {}
+    let after = kv_hit_snapshot(&metrics);
+    drop(router);
+    runtime.shutdown();
+    (before, after)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "complete": true,
+                "prompt_tokens": 100,
+                "gpu_hit_tokens": 70,
+                "cpu_hit_tokens": 15,
+                "cpu_lookup_tokens": 20,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    // F2/F3 at selection, F4/F5 at completion, each exactly once across finish + Drop.
+    assert_eq!(after.best.0 - before.best.0, 75.0);
+    assert_eq!(after.best.1 - before.best.1, 1);
+    assert_eq!(after.selected.0 - before.selected.0, 60.0);
+    assert_eq!(after.selected.1 - before.selected.1, 1);
+    assert_eq!(after.lookup.0 - before.lookup.0, 90.0);
+    assert_eq!(after.lookup.1 - before.lookup.1, 1);
+    assert_eq!(after.reused.0 - before.reused.0, 85.0);
+    assert_eq!(after.reused.1 - before.reused.1, 1);
+    assert_eq!(after.complete - before.complete, 1);
+    assert_eq!(after.incomplete - before.incomplete, 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_attempt_without_worker_report_is_incomplete_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best.1 - before.best.1, 1);
+    assert_eq!(after.selected.1 - before.selected.1, 1);
+    assert_eq!(after.lookup.1 - before.lookup.1, 0);
+    assert_eq!(after.reused.1 - before.reused.1, 0);
+    assert_eq!(after.complete - before.complete, 0);
+    assert_eq!(after.incomplete - before.incomplete, 1);
 }
 
 fn cancelled_frame() -> Annotated<LLMEngineOutput> {

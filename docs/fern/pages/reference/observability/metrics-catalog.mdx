@@ -301,21 +301,21 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and the selected worker for each non-max-overlap selection. Labeled by `worker_type` (`prefill`).
 </ParamField>
 
-### Cache-reuse funnel telemetry
+### KV-cache reuse telemetry (F0–F5)
 
-The cache-reuse funnel records token totals per routing attempt. F2 through F5 are always enabled, with a separate counter for each measurement. F0 reuses the existing input-token sum. Query-only worker lookups are excluded because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
+KV-cache reuse telemetry records one observation per routing attempt. F2 through F5 are always enabled, each as a histogram whose `_sum` carries the token total and `_count` the number of observations. F0 reuses the existing input-token sum. Query-only worker lookups are excluded because they do not produce worker stages. Compare stages from the same router component or pool; summing prefill and decode pools counts separate routing attempts.
 
 | Stage | Metric |
 | --- | --- |
 | F0: Tokens Received | `dynamo_component_router_input_sequence_tokens_sum` |
-| F2: Tokens Resident on Some Worker | `dynamo_component_router_cache_loss_max_eligible_cached_prefix_tokens_total` |
-| F3: Tokens Resident on Chosen Worker | `dynamo_component_router_cache_loss_selected_cached_prefix_tokens_total` |
-| F4: Tokens Found by Worker | `dynamo_component_router_cache_loss_worker_lookup_tokens_total` |
-| F5: Tokens Actually Used From Cache by Worker | `dynamo_component_router_cache_loss_worker_reused_tokens_total` |
+| F2: Tokens Resident on Some Worker | `dynamo_component_router_kv_best_eligible_cached_prefix_tokens_sum` |
+| F3: Tokens Resident on Chosen Worker | `dynamo_component_router_kv_selected_cached_prefix_tokens_sum` |
+| F4: Tokens Found by Worker | `dynamo_component_router_kv_worker_lookup_tokens_sum` |
+| F5: Tokens Actually Used From Cache by Worker | `dynamo_component_router_kv_worker_reused_tokens_sum` |
 
 F2 and F3 report raw contiguous prefix overlap in token units across device, host-pinned, and disk or external tiers. They do not apply the router's configurable cache-tier weights; those weights affect worker selection only.
 
-F2 and F3 are recorded at selection time. F4 and F5 require a complete worker outcome with a matching prompt length and a successfully completed stream. Missing or invalid outcomes increment `cache_loss_observations_total{result="incomplete"}` and contribute no tokens to F4/F5. F4 is GPU hits plus CPU/external lookup tokens; F5 is GPU hits plus successful CPU/external hits. Values are uncapped.
+F2 and F3 are recorded at selection time. F4 and F5 require a complete worker outcome with a matching prompt length and a successfully completed stream. Missing or invalid outcomes increment `router_kv_worker_outcomes_total{result="incomplete"}` and contribute no tokens to F4/F5. F4 is GPU hits plus CPU/external lookup tokens; F5 is GPU hits plus successful CPU/external hits. Values are uncapped.
 
 F0 uses `request.token_ids.len()`, while prefix matching can use multimodal routing tokens. For multimodal requests these token counts need not match; stage differences are not necessarily cache losses.
 

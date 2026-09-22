@@ -857,68 +857,16 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    pub(crate) cache_loss_worker_stages: CacheLossWorkerStageMetrics,
-}
-
-#[cfg_attr(test, derive(Clone))]
-pub(crate) struct CacheLossWorkerStageMetrics {
-    max_eligible_cached_prefix_tokens_total: IntCounter,
-    selected_cached_prefix_tokens_total: IntCounter,
-    worker_lookup_tokens_total: IntCounter,
-    worker_reused_tokens_total: IntCounter,
-    complete_observations_total: IntCounter,
-    incomplete_observations_total: IntCounter,
-}
-
-impl CacheLossWorkerStageMetrics {
-    pub(crate) fn new(
-        mut counter: impl FnMut(&str, &str) -> IntCounter,
-        observations: IntCounterVec,
-    ) -> Self {
-        Self {
-            max_eligible_cached_prefix_tokens_total: counter(
-                "cache_loss_max_eligible_cached_prefix_tokens_total",
-                "Raw cached prefix tokens on the best eligible worker at selection time",
-            ),
-            selected_cached_prefix_tokens_total: counter(
-                "cache_loss_selected_cached_prefix_tokens_total",
-                "Raw cached prefix tokens on the selected worker and DP rank",
-            ),
-            worker_lookup_tokens_total: counter(
-                "cache_loss_worker_lookup_tokens_total",
-                "Worker-reported local cache hits plus external lookup tokens",
-            ),
-            worker_reused_tokens_total: counter(
-                "cache_loss_worker_reused_tokens_total",
-                "Worker-reported local plus successful external cache-hit tokens",
-            ),
-            complete_observations_total: observations.with_label_values(&["complete"]),
-            incomplete_observations_total: observations.with_label_values(&["incomplete"]),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn for_test(registry: &prometheus::Registry) -> Self {
-        let observations = IntCounterVec::new(
-            Opts::new(
-                "dynamo_component_router_cache_loss_observations_total",
-                "test",
-            ),
-            &["result"],
-        )
-        .unwrap();
-        registry.register(Box::new(observations.clone())).unwrap();
-        Self::new(
-            |name, help| {
-                let counter =
-                    IntCounter::new(format!("dynamo_component_{}", router_metric(name)), help)
-                        .unwrap();
-                registry.register(Box::new(counter.clone())).unwrap();
-                counter
-            },
-            observations,
-        )
-    }
+    /// F2: raw cached prefix tokens on the best eligible worker, one observation per tracked attempt.
+    pub kv_best_eligible_cached_prefix_tokens: prometheus::Histogram,
+    /// F3: raw cached prefix tokens on the selected worker and DP rank, one observation per tracked attempt.
+    pub kv_selected_cached_prefix_tokens: prometheus::Histogram,
+    /// F4: worker-reported GPU hits plus external lookup tokens, one observation per complete report.
+    pub kv_worker_lookup_tokens: prometheus::Histogram,
+    /// F5: worker-reported GPU hits plus successful external hits, one observation per complete report.
+    pub kv_worker_reused_tokens: prometheus::Histogram,
+    /// Worker cache-hit report per tracked attempt: `result="complete"` or `"incomplete"`.
+    pub kv_worker_outcomes_total: IntCounterVec,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -1040,21 +988,42 @@ impl RouterRequestMetrics {
                     .expect("failed to create router_overlap_blocks_lost");
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                let cache_loss_worker_stages = {
-                    let observations = metrics
-                        .create_intcountervec(
-                            &router_metric("cache_loss_observations_total"),
-                            "Cache-loss funnel observations by result",
-                            &["result"],
+                let kv_tokens_hist = |name: &str, help: &str| {
+                    metrics
+                        .create_histogram(
+                            &router_metric(name),
+                            help,
                             extra_labels,
+                            Some(generate_log_buckets(50.0, 128000.0, 12)),
                         )
-                        .expect("failed to create router_cache_loss_observations_total");
-                    CacheLossWorkerStageMetrics::new(
-                        |name, help| metrics.create_intcounter(&router_metric(name), help, extra_labels)
-                            .expect("failed to create cache-loss token counter"),
-                        observations,
-                    )
+                        .unwrap_or_else(|_| panic!("failed to create {}", router_metric(name)))
                 };
+                let kv_best_eligible_cached_prefix_tokens = kv_tokens_hist(
+                    frontend_service::KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS,
+                    "Raw cached prefix tokens on the best eligible worker at selection time",
+                );
+                let kv_selected_cached_prefix_tokens = kv_tokens_hist(
+                    frontend_service::KV_SELECTED_CACHED_PREFIX_TOKENS,
+                    "Raw cached prefix tokens on the selected worker and DP rank",
+                );
+                let kv_worker_lookup_tokens = kv_tokens_hist(
+                    frontend_service::KV_WORKER_LOOKUP_TOKENS,
+                    "Worker-reported local cache hits plus external lookup tokens",
+                );
+                let kv_worker_reused_tokens = kv_tokens_hist(
+                    frontend_service::KV_WORKER_REUSED_TOKENS,
+                    "Worker-reported local plus successful external cache-hit tokens",
+                );
+                let kv_worker_outcomes_total = metrics
+                    .create_intcountervec(
+                        &router_metric(frontend_service::KV_WORKER_OUTCOMES_TOTAL),
+                        "Worker cache-hit reports per tracked routing attempt, by result",
+                        &["result"],
+                        extra_labels,
+                    )
+                    .expect("failed to create router_kv_worker_outcomes_total");
+                kv_worker_outcomes_total.with_label_values(&["complete"]);
+                kv_worker_outcomes_total.with_label_values(&["incomplete"]);
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -1068,7 +1037,11 @@ impl RouterRequestMetrics {
                     shared_cache_beyond_blocks,
                     non_max_overlap_selections_total,
                     overlap_blocks_lost,
-                    cache_loss_worker_stages,
+                    kv_best_eligible_cached_prefix_tokens,
+                    kv_selected_cached_prefix_tokens,
+                    kv_worker_lookup_tokens,
+                    kv_worker_reused_tokens,
+                    kv_worker_outcomes_total,
                 })
             })
             .clone()
@@ -1085,6 +1058,72 @@ impl RouterRequestMetrics {
         })
     }
 
+    /// Unregistered handles for unit tests; only the kv_* series are registered so their
+    /// exported names and values can be asserted.
+    #[cfg(test)]
+    pub(crate) fn for_test(registry: &prometheus::Registry) -> Arc<Self> {
+        fn hist(name: &str) -> prometheus::Histogram {
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
+        }
+        fn kv_hist(registry: &prometheus::Registry, name: &str) -> prometheus::Histogram {
+            let h = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
+                format!("dynamo_component_{}", router_metric(name)),
+                "test",
+            ))
+            .unwrap();
+            registry.register(Box::new(h.clone())).unwrap();
+            h
+        }
+        let kv_worker_outcomes_total = IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "dynamo_component_{}",
+                    router_metric(frontend_service::KV_WORKER_OUTCOMES_TOTAL)
+                ),
+                "test",
+            ),
+            &["result"],
+        )
+        .unwrap();
+        registry
+            .register(Box::new(kv_worker_outcomes_total.clone()))
+            .unwrap();
+        Arc::new(Self {
+            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
+                .unwrap(),
+            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: IntCounterVec::new(
+                Opts::new("non_max_overlap_selections_total", "test"),
+                &["reason"],
+            )
+            .unwrap(),
+            overlap_blocks_lost: prometheus::HistogramVec::new(
+                prometheus::HistogramOpts::new("overlap_blocks_lost", "test"),
+                &["reason"],
+            )
+            .unwrap(),
+            kv_best_eligible_cached_prefix_tokens: kv_hist(
+                registry,
+                frontend_service::KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS,
+            ),
+            kv_selected_cached_prefix_tokens: kv_hist(
+                registry,
+                frontend_service::KV_SELECTED_CACHED_PREFIX_TOKENS,
+            ),
+            kv_worker_lookup_tokens: kv_hist(registry, frontend_service::KV_WORKER_LOOKUP_TOKENS),
+            kv_worker_reused_tokens: kv_hist(registry, frontend_service::KV_WORKER_REUSED_TOKENS),
+            kv_worker_outcomes_total,
+        })
+    }
+
     /// Record a selection that sacrificed KV cache overlap.
     pub fn observe_non_max_overlap_selection(&self, worker_type: &str, overlap_blocks_lost: f64) {
         debug_assert!(overlap_blocks_lost > 0.0);
@@ -1096,26 +1135,27 @@ impl RouterRequestMetrics {
             .observe(overlap_blocks_lost);
     }
 
-    pub fn observe_cache_loss_route(&self, best_tokens: u64, selected_tokens: u64) {
-        let metrics = &self.cache_loss_worker_stages;
-        metrics
-            .max_eligible_cached_prefix_tokens_total
-            .inc_by(best_tokens);
-        metrics
-            .selected_cached_prefix_tokens_total
-            .inc_by(selected_tokens);
+    /// F2/F3 for one tracked routing attempt, recorded at selection time.
+    pub fn observe_kv_route_estimate(&self, best_tokens: u64, selected_tokens: u64) {
+        self.kv_best_eligible_cached_prefix_tokens
+            .observe(best_tokens as f64);
+        self.kv_selected_cached_prefix_tokens
+            .observe(selected_tokens as f64);
     }
 
-    pub fn observe_cache_loss_worker(&self, [lookup_tokens, hit_tokens]: [u64; 2]) {
-        let metrics = &self.cache_loss_worker_stages;
-        metrics.worker_lookup_tokens_total.inc_by(lookup_tokens);
-        metrics.worker_reused_tokens_total.inc_by(hit_tokens);
-        metrics.complete_observations_total.inc();
+    /// F4/F5 for one attempt whose stream completed with a valid worker report.
+    pub fn observe_kv_worker_hit(&self, [lookup_tokens, reused_tokens]: [u64; 2]) {
+        self.kv_worker_lookup_tokens.observe(lookup_tokens as f64);
+        self.kv_worker_reused_tokens.observe(reused_tokens as f64);
+        self.kv_worker_outcomes_total
+            .with_label_values(&["complete"])
+            .inc();
     }
 
-    pub fn observe_cache_loss_incomplete(&self) {
-        self.cache_loss_worker_stages
-            .incomplete_observations_total
+    /// A tracked attempt that ended without a usable worker report.
+    pub fn observe_kv_worker_incomplete(&self) {
+        self.kv_worker_outcomes_total
+            .with_label_values(&["incomplete"])
             .inc();
     }
 }
@@ -1357,34 +1397,37 @@ mod tests {
     use prometheus::{Encoder, TextEncoder};
 
     #[test]
-    fn cache_loss_counters_have_descriptive_names_without_stage_labels() {
+    fn kv_cache_hit_metrics_export_same_totals_as_counters() {
+        // Same inputs the previous counter-based export test used (96/64/80/72, one
+        // complete and one incomplete report): the histogram _sum must carry the
+        // identical totals and _count the number of observations.
         let registry = prometheus::Registry::new();
-        let metrics = CacheLossWorkerStageMetrics::for_test(&registry);
-        metrics.max_eligible_cached_prefix_tokens_total.inc_by(96);
-        metrics.selected_cached_prefix_tokens_total.inc_by(64);
-        metrics.worker_lookup_tokens_total.inc_by(80);
-        metrics.worker_reused_tokens_total.inc_by(72);
-        metrics.complete_observations_total.inc();
-        metrics.incomplete_observations_total.inc();
+        let metrics = RouterRequestMetrics::for_test(&registry);
+        metrics.observe_kv_route_estimate(96, 64);
+        metrics.observe_kv_worker_hit([80, 72]);
+        metrics.observe_kv_worker_incomplete();
 
         let output = gather_pef(&registry);
         for (name, value) in [
-            ("max_eligible_cached_prefix", 96),
-            ("selected_cached_prefix", 64),
-            ("worker_lookup", 80),
-            ("worker_reused", 72),
+            ("kv_best_eligible_cached_prefix_tokens", 96),
+            ("kv_selected_cached_prefix_tokens", 64),
+            ("kv_worker_lookup_tokens", 80),
+            ("kv_worker_reused_tokens", 72),
         ] {
             assert!(
-                output.contains(&format!(
-                    "dynamo_component_router_cache_loss_{name}_tokens_total {value}\n"
-                )),
+                output.contains(&format!("dynamo_component_router_{name}_sum {value}\n")),
+                "{output}"
+            );
+            assert!(
+                output.contains(&format!("dynamo_component_router_{name}_count 1\n")),
                 "{output}"
             );
         }
+        assert!(output.contains("router_kv_worker_outcomes_total{result=\"complete\"} 1"));
+        assert!(output.contains("router_kv_worker_outcomes_total{result=\"incomplete\"} 1"));
+        assert!(!output.contains("cache_loss"));
+        assert!(!output.contains("funnel"));
         assert!(!output.contains("stage="));
-        assert!(!output.contains("cache_loss_funnel_tokens_total"));
-        assert!(output.contains("cache_loss_observations_total{result=\"complete\"} 1"));
-        assert!(output.contains("cache_loss_observations_total{result=\"incomplete\"} 1"));
     }
 
     fn gather_pef(registry: &prometheus::Registry) -> String {

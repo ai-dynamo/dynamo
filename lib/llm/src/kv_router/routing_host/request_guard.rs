@@ -74,8 +74,17 @@ struct MaterializedOutputBlocks {
     private_blocks: usize,
 }
 
+/// Raw cached-prefix estimate captured for one tracked routing attempt (F0/F2/F3).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RouteObservation {
+    pub(super) prompt_tokens: u64,
+    pub(super) best_router_tokens: u64,
+    pub(super) selected_router_tokens: u64,
+}
+
+/// Cache-hit report the worker attaches to its final chunk (`engine_data.kv_cache_hit`).
 #[derive(serde::Deserialize)]
-struct CacheLossWorkerOutcome {
+struct WorkerCacheHitReport {
     complete: bool,
     #[serde(default)]
     prompt_tokens: u64,
@@ -87,66 +96,24 @@ struct CacheLossWorkerOutcome {
     cpu_lookup_tokens: u64,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) struct RouteObservation {
-    pub(super) prompt_tokens: u64,
-    pub(super) best_router_tokens: u64,
-    pub(super) selected_router_tokens: u64,
-}
-
-pub(super) struct CacheLossTracking {
-    route: RouteObservation,
-}
-
-impl CacheLossTracking {
-    pub(super) fn new(route: RouteObservation) -> Self {
-        Self { route }
+/// `[F4 lookup, F5 reused]` from a worker report, or `None` when the report is
+/// incomplete, describes a different prompt length, or overflows.
+fn worker_cache_hit_tokens(route: RouteObservation, value: &serde_json::Value) -> Option<[u64; 2]> {
+    let report = <WorkerCacheHitReport as serde::Deserialize>::deserialize(value).ok()?;
+    if !report.complete || report.prompt_tokens != route.prompt_tokens {
+        return None;
     }
-}
-
-fn cache_loss_worker_stage(outcome: &CacheLossWorkerOutcome) -> Option<[u64; 2]> {
     Some([
-        outcome
+        report
             .gpu_hit_tokens
-            .checked_add(outcome.cpu_lookup_tokens)?,
-        outcome.gpu_hit_tokens.checked_add(outcome.cpu_hit_tokens)?,
+            .checked_add(report.cpu_lookup_tokens)?,
+        report.gpu_hit_tokens.checked_add(report.cpu_hit_tokens)?,
     ])
 }
 
-fn valid_cache_loss_worker_outcome(
-    route: RouteObservation,
-    value: &serde_json::Value,
-) -> Option<CacheLossWorkerOutcome> {
-    let outcome = <CacheLossWorkerOutcome as serde::Deserialize>::deserialize(value).ok()?;
-    (outcome.complete && outcome.prompt_tokens == route.prompt_tokens).then_some(outcome)
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum CacheLossFinalization {
-    Complete([u64; 2]),
-    Incomplete,
-}
-
-fn finalize_cache_loss_state(
-    route: Option<RouteObservation>,
-    worker_outcome: &mut Option<CacheLossWorkerOutcome>,
-    recorded: &mut bool,
-    stream_completed: bool,
-) -> Option<CacheLossFinalization> {
-    if *recorded || route.is_none() {
-        return None;
-    }
-    *recorded = true;
-    if !stream_completed {
-        return Some(CacheLossFinalization::Incomplete);
-    }
-    let Some(outcome) = worker_outcome.take() else {
-        return Some(CacheLossFinalization::Incomplete);
-    };
-    Some(cache_loss_worker_stage(&outcome).map_or(
-        CacheLossFinalization::Incomplete,
-        CacheLossFinalization::Complete,
-    ))
+/// The F4/F5 emission for an attempt: the latched report only if the stream completed.
+fn kv_worker_hit_for(stream_completed: bool, hit: Option<[u64; 2]>) -> Option<[u64; 2]> {
+    if stream_completed { hit } else { None }
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -656,9 +623,9 @@ where
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
-    cache_loss: Option<RouteObservation>,
-    cache_loss_worker_outcome: Option<CacheLossWorkerOutcome>,
-    cache_loss_recorded: bool,
+    kv_route: Option<RouteObservation>,
+    kv_worker_hit: Option<[u64; 2]>,
+    kv_worker_recorded: bool,
     _lora_load: Option<LoraLoadGuard>,
 }
 
@@ -673,13 +640,13 @@ where
         worker: WorkerWithDpRank,
         attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
-        cache_loss_tracking: Option<CacheLossTracking>,
+        kv_route: Option<RouteObservation>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, attempt),
             request,
-            cache_loss_tracking,
+            kv_route,
         )
     }
 
@@ -687,7 +654,7 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         cleanup: KvRequestCleanup<Sel>,
         request: &PreprocessedRequest,
-        cache_loss_tracking: Option<CacheLossTracking>,
+        kv_route: Option<RouteObservation>,
     ) -> Self {
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
@@ -699,17 +666,14 @@ where
         let attempt_id = cleanup
             .lifecycle()
             .map(|lifecycle| lifecycle.booking().attempt_id);
-        let cache_loss = cache_loss_tracking.as_ref().map(|tracking| tracking.route);
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
             request_metrics.requests_started_total.inc();
         }
-        if let Some(cache_loss) = cache_loss {
-            request_metrics.observe_cache_loss_route(
-                cache_loss.best_router_tokens,
-                cache_loss.selected_router_tokens,
-            );
+        if let Some(route) = kv_route {
+            request_metrics
+                .observe_kv_route_estimate(route.best_router_tokens, route.selected_router_tokens);
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -729,9 +693,9 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
-            cache_loss,
-            cache_loss_worker_outcome: None,
-            cache_loss_recorded: false,
+            kv_route,
+            kv_worker_hit: None,
+            kv_worker_recorded: false,
             _lora_load: None,
         }
     }
@@ -761,9 +725,9 @@ where
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
-            cache_loss: None,
-            cache_loss_worker_outcome: None,
-            cache_loss_recorded: false,
+            kv_route: None,
+            kv_worker_hit: None,
+            kv_worker_recorded: false,
             _lora_load: lora_load,
         }
     }
@@ -879,7 +843,7 @@ where
             );
         }
         self.observability.observe_tokens(new_tokens);
-        self.observe_cache_loss_worker_outcome(item);
+        self.capture_kv_worker_hit(item);
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
@@ -905,57 +869,44 @@ where
 
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
-        self.finish_cache_loss(true);
+        self.record_kv_worker_outcome(true);
         self.observability
             .record_metrics(self.record_itl_at_completion);
         self.cleanup.finish().await;
     }
 
     pub(super) async fn abort(&mut self) {
-        self.finish_cache_loss(false);
+        self.record_kv_worker_outcome(false);
         self.cleanup.finish().await;
     }
 
-    fn observe_cache_loss_worker_outcome(&mut self, item: &Annotated<LLMEngineOutput>) {
-        if self.cache_loss_recorded || self.cache_loss_worker_outcome.is_some() {
+    /// Latch the first valid worker cache-hit report for this attempt (F4/F5 inputs).
+    fn capture_kv_worker_hit(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if self.kv_worker_recorded || self.kv_worker_hit.is_some() {
             return;
         }
-        let Some(route) = self.cache_loss else {
+        let Some(route) = self.kv_route else {
             return;
         };
-        let Some(value) = item
+        self.kv_worker_hit = item
             .data
             .as_ref()
             .and_then(|data| data.engine_data.as_ref())
-            .and_then(|data| data.get("cache_loss"))
-        else {
-            return;
-        };
-        let Some(outcome) = valid_cache_loss_worker_outcome(route, value) else {
-            return;
-        };
-
-        self.cache_loss_worker_outcome = Some(outcome);
+            .and_then(|data| data.get("kv_cache_hit"))
+            .and_then(|value| worker_cache_hit_tokens(route, value));
     }
 
-    fn finish_cache_loss(&mut self, complete: bool) {
-        let Some(finalization) = finalize_cache_loss_state(
-            self.cache_loss,
-            &mut self.cache_loss_worker_outcome,
-            &mut self.cache_loss_recorded,
-            complete,
-        ) else {
+    /// Emit F4/F5 once per tracked attempt: complete only when the stream finished
+    /// with a valid worker report, otherwise incomplete.
+    fn record_kv_worker_outcome(&mut self, stream_completed: bool) {
+        if self.kv_route.is_none() || std::mem::replace(&mut self.kv_worker_recorded, true) {
             return;
-        };
-        match finalization {
-            CacheLossFinalization::Complete(lookup_tokens) => self
-                .observability
-                .request_metrics()
-                .observe_cache_loss_worker(lookup_tokens),
-            CacheLossFinalization::Incomplete => self
-                .observability
-                .request_metrics()
-                .observe_cache_loss_incomplete(),
+        }
+        let hit = kv_worker_hit_for(stream_completed, self.kv_worker_hit.take());
+        let metrics = self.observability.request_metrics();
+        match hit {
+            Some(tokens) => metrics.observe_kv_worker_hit(tokens),
+            None => metrics.observe_kv_worker_incomplete(),
         }
     }
 }
@@ -965,7 +916,7 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     fn drop(&mut self) {
-        self.finish_cache_loss(false);
+        self.record_kv_worker_outcome(false);
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
@@ -973,7 +924,7 @@ where
 }
 
 #[cfg(test)]
-mod cache_loss_tests {
+mod kv_cache_hit_tests {
     use super::*;
 
     fn route() -> RouteObservation {
@@ -984,103 +935,54 @@ mod cache_loss_tests {
         }
     }
 
-    fn outcome() -> CacheLossWorkerOutcome {
-        CacheLossWorkerOutcome {
-            complete: true,
-            prompt_tokens: 100,
-            gpu_hit_tokens: 70,
-            cpu_hit_tokens: 15,
-            cpu_lookup_tokens: 20,
-        }
+    fn report(gpu_hit: u64, cpu_hit: u64, cpu_lookup: u64) -> serde_json::Value {
+        serde_json::json!({
+            "complete": true,
+            "prompt_tokens": 100,
+            "gpu_hit_tokens": gpu_hit,
+            "cpu_hit_tokens": cpu_hit,
+            "cpu_lookup_tokens": cpu_lookup,
+        })
     }
 
     #[test]
     fn worker_outcomes_can_exceed_router_observations() {
-        let outcome = outcome();
-
-        assert_eq!(cache_loss_worker_stage(&outcome), Some([90, 85]));
-    }
-
-    #[test]
-    fn stages_preserve_values_above_prior_stages_and_prompt_length() {
-        let outcome = CacheLossWorkerOutcome {
-            complete: true,
-            prompt_tokens: 100,
-            gpu_hit_tokens: 120,
-            cpu_hit_tokens: 15,
-            cpu_lookup_tokens: 20,
-        };
-
-        assert_eq!(cache_loss_worker_stage(&outcome), Some([140, 135]));
-    }
-
-    #[test]
-    fn counter_overflow_marks_the_observation_incomplete() {
-        let outcome = CacheLossWorkerOutcome {
-            complete: true,
-            prompt_tokens: 100,
-            gpu_hit_tokens: u64::MAX,
-            cpu_hit_tokens: 1,
-            cpu_lookup_tokens: 1,
-        };
-
-        assert_eq!(cache_loss_worker_stage(&outcome), None);
-    }
-
-    #[test]
-    fn successful_stream_finalizes_once() {
-        let mut worker_outcome = Some(outcome());
-        let mut recorded = false;
-
         assert_eq!(
-            finalize_cache_loss_state(Some(route()), &mut worker_outcome, &mut recorded, true),
-            Some(CacheLossFinalization::Complete([90, 85]))
+            worker_cache_hit_tokens(route(), &report(70, 15, 20)),
+            Some([90, 85])
         );
+    }
+
+    #[test]
+    fn worker_values_may_exceed_router_estimate_and_prompt_length() {
         assert_eq!(
-            finalize_cache_loss_state(Some(route()), &mut worker_outcome, &mut recorded, true),
+            worker_cache_hit_tokens(route(), &report(120, 15, 20)),
+            Some([140, 135])
+        );
+    }
+
+    #[test]
+    fn incomplete_or_mismatched_reports_are_rejected() {
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &serde_json::json!({"complete": false})),
             None
         );
+        let mut mismatched = report(70, 15, 20);
+        mismatched["prompt_tokens"] = 99.into();
+        assert_eq!(worker_cache_hit_tokens(route(), &mismatched), None);
     }
 
     #[test]
-    fn buffered_worker_outcome_is_incomplete_after_stream_error() {
-        let mut worker_outcome = Some(outcome());
-        let mut recorded = false;
-
-        assert_eq!(
-            finalize_cache_loss_state(Some(route()), &mut worker_outcome, &mut recorded, false),
-            Some(CacheLossFinalization::Incomplete)
-        );
-        assert_eq!(
-            finalize_cache_loss_state(Some(route()), &mut worker_outcome, &mut recorded, false),
-            None
-        );
+    fn successful_stream_emits_the_latched_hit() {
+        assert_eq!(kv_worker_hit_for(true, Some([90, 85])), Some([90, 85]));
     }
 
     #[test]
-    fn invalid_worker_outcome_does_not_block_a_later_valid_branch() {
-        let route = route();
-        assert!(
-            valid_cache_loss_worker_outcome(route, &serde_json::json!({"complete": false}),)
-                .is_none()
-        );
-        let value = serde_json::json!({
-            "complete": true,
-            "prompt_tokens": 100,
-            "gpu_hit_tokens": 70,
-            "cpu_hit_tokens": 15,
-            "cpu_lookup_tokens": 20,
-        });
-        let mut worker_outcome = valid_cache_loss_worker_outcome(route, &value);
-        let mut recorded = false;
-
-        assert_eq!(
-            finalize_cache_loss_state(Some(route), &mut worker_outcome, &mut recorded, true),
-            Some(CacheLossFinalization::Complete([90, 85]))
-        );
+    fn stream_error_discards_a_buffered_hit() {
+        assert_eq!(kv_worker_hit_for(false, Some([90, 85])), None);
+        assert_eq!(kv_worker_hit_for(true, None), None);
     }
 }
-
 #[cfg(test)]
 mod output_hash_tests {
     use super::*;
@@ -1241,36 +1143,7 @@ mod prefill_start_tests {
     }
 
     fn test_metrics() -> Arc<RouterRequestMetrics> {
-        fn hist(name: &str) -> prometheus::Histogram {
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
-        }
-        fn hist_vec(name: &str) -> prometheus::HistogramVec {
-            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
-                .unwrap()
-        }
-        Arc::new(RouterRequestMetrics {
-            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
-                .unwrap(),
-            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
-            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
-            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
-            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
-            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
-                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
-                &["reason"],
-            )
-            .unwrap(),
-            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
-            cache_loss_worker_stages:
-                crate::kv_router::metrics::CacheLossWorkerStageMetrics::for_test(
-                    &prometheus::Registry::new(),
-                ),
-        })
+        RouterRequestMetrics::for_test(&prometheus::Registry::new())
     }
 
     async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {
