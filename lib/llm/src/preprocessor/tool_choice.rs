@@ -795,7 +795,6 @@ mod tests {
                 "type": "function",
                 "function": {
                     "name": "get_weather",
-                    "strict": true,
                     "parameters": {
                         "type": "object",
                         "properties": {
