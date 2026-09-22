@@ -78,6 +78,9 @@ impl ReasoningState {
     fn completed_item(&self, output_status: OutputStatus) -> ReasoningItem {
         ReasoningItem {
             id: Some(self.item_id.clone()),
+            // Always empty: this streams the backend's raw reasoning content, not
+            // a model-generated summary, so `reasoning.summary` has nothing to
+            // populate it with -- see the matching note in mod.rs.
             summary: vec![],
             content: Some(vec![ReasoningItemContent::ReasoningText(
                 ReasoningTextContent {
@@ -404,19 +407,13 @@ impl ResponseStreamConverter {
                 self.output_limit_reached = true;
             }
 
-            // See issue #14069.
-            //
-            // No `!self.message_started` gate here: `append_reasoning_delta`
-            // already opens a fresh reasoning item (a new output_index) via
-            // `active_reasoning_index` whenever one isn't currently open, so
-            // reasoning that resumes after visible text or a tool call is
-            // captured as a second reasoning item rather than silently
-            // dropped — matching the non-streaming path, which has no such
-            // gate at all. A gate here previously also mis-fired on a
-            // leading whitespace-only content delta (e.g. a bare "\n" before
-            // `<think>`), which set `message_started` before any real answer
-            // text existed. Whitespace-only reasoning itself is still
-            // dropped below, matching aggregator.rs's equivalent check.
+            // Raw reasoning_content is preserved regardless of reasoning.summary; see
+            // #14069 and the mirrored non-streaming path in mod.rs. A whitespace-only
+            // delta (e.g. a bare "\n\n" left by a parser that does not trim) is treated
+            // as no reasoning at all. Unlike the old gate, this no longer depends on
+            // `message_started`: reasoning resuming after visible output still opens a
+            // new item via `append_reasoning_delta` below, matching the unary path,
+            // which does not gate on delivery order at all.
             if let Some(reasoning) = delta.reasoning_content.as_deref()
                 && !reasoning.trim().is_empty()
             {
@@ -1815,14 +1812,12 @@ mod tests {
         assert_eq!(reasoning_text(reasoning), "private reasoning");
     }
 
+    /// Reasoning resuming after visible output is captured as a new reasoning
+    /// item, matching the unary path (mod.rs), which does not gate reasoning on
+    /// delivery order at all -- so streaming and unary return the same reasoning
+    /// for the same generation.
     #[test]
-    fn test_reasoning_text_reopens_after_visible_output() {
-        // The unary (non-streaming) path has no ordering gate at all: it
-        // always surfaces `choice.message.reasoning_content` regardless of
-        // whether text or tool calls came first. Streaming must match —
-        // reasoning that resumes after visible answer text is captured as a
-        // second reasoning item, not silently dropped, so the two paths
-        // return the same reasoning for the same generation.
+    fn test_reasoning_text_resumes_as_new_item_after_visible_output() {
         use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
 
         let params = ResponseParams {
@@ -1836,7 +1831,7 @@ mod tests {
 
         let _ = conv.process_chunk(&reasoning_chunk("summary"));
         let _ = conv.process_chunk(&text_chunk("answer"));
-        let resumed_events = conv.process_chunk(&reasoning_chunk("resumed after answer"));
+        let resumed_events = conv.process_chunk(&reasoning_chunk("resumed"));
         assert_eq!(
             event_types(&resumed_events),
             vec![
@@ -1845,21 +1840,18 @@ mod tests {
                 "response.reasoning_text.delta".to_string(),
             ]
         );
+
         let output = conv.completed_output();
-        assert_eq!(
-            output.len(),
-            3,
-            "expected two reasoning items around the message"
-        );
+        assert_eq!(output.len(), 3);
         let OutputItem::Reasoning(first) = &output[0] else {
-            panic!("expected the first reasoning item before the message");
+            panic!("expected first reasoning output");
         };
         assert_eq!(reasoning_text(first), "summary");
         assert!(matches!(output[1], OutputItem::Message(_)));
         let OutputItem::Reasoning(second) = &output[2] else {
-            panic!("expected a second, separate reasoning item after the message");
+            panic!("expected resumed reasoning captured as a new item");
         };
-        assert_eq!(reasoning_text(second), "resumed after answer");
+        assert_eq!(reasoning_text(second), "resumed");
     }
 
     #[test]
@@ -1889,23 +1881,12 @@ mod tests {
         );
     }
 
+    /// Reasoning starting fresh after visible output (no reasoning before the
+    /// answer at all) is still captured, for the same reason as the resumed
+    /// case above: the unary path does not gate on order.
     #[test]
     fn test_reasoning_text_starts_after_visible_output() {
-        // Symmetric with `test_reasoning_text_reopens_after_visible_output`,
-        // minus a preceding reasoning segment: reasoning arriving for the
-        // first time after the message has already started is still real
-        // reasoning content from the backend and must not be dropped just
-        // because of its position in the stream.
-        use dynamo_protocols::types::responses::{Reasoning, ReasoningSummary};
-
-        let params = ResponseParams {
-            reasoning: Some(Reasoning {
-                effort: None,
-                summary: Some(ReasoningSummary::Auto),
-            }),
-            ..default_params()
-        };
-        let mut conv = ResponseStreamConverter::new("test-model".into(), params);
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
 
         let _ = conv.process_chunk(&text_chunk("answer"));
         let late_events = conv.process_chunk(&reasoning_chunk("out of order"));
@@ -1919,61 +1900,15 @@ mod tests {
             ]
         );
         let output = conv.completed_output();
-        assert!(matches!(output[0], OutputItem::Message(_)));
-        let OutputItem::Reasoning(reasoning) = &output[1] else {
-            panic!("expected a reasoning item after the message, not dropped");
-        };
-        assert_eq!(reasoning_text(reasoning), "out of order");
-    }
-
-    #[test]
-    fn test_reasoning_text_whitespace_only_is_dropped() {
-        // Matches aggregator.rs's `move_reasoning_to_content_when_empty`
-        // whitespace check: a reasoning delta that is only whitespace (e.g.
-        // a lone trailing newline) must not open a reasoning item with
-        // nothing meaningful in it.
-        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
-
-        let events = conv.process_chunk(&reasoning_chunk("\n\n"));
-        assert!(events.is_empty());
-        assert!(
-            conv.completed_output()
-                .iter()
-                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
-        );
-    }
-
-    #[test]
-    fn test_reasoning_text_survives_leading_whitespace_content() {
-        // A leading whitespace-only content delta (e.g. a bare "\n" some
-        // backends emit before `<think>`) used to set `message_started`
-        // before any real answer text existed, which then silently blocked
-        // every later reasoning delta in the same turn. Removing the
-        // `!self.message_started` gate (see the fix at the top of this
-        // block) means this no longer depends on `accumulated_text` being
-        // whitespace-only — reasoning is captured regardless of what came
-        // before it in the stream.
-        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
-
-        let _ = conv.process_chunk(&text_chunk("\n"));
-        let events = conv.process_chunk(&reasoning_chunk("thinking"));
+        let reasoning = output.iter().find_map(|item| match item {
+            OutputItem::Reasoning(reasoning) => Some(reasoning),
+            _ => None,
+        });
         assert_eq!(
-            event_types(&events),
-            vec![
-                "response.output_item.added".to_string(),
-                "response.content_part.added".to_string(),
-                "response.reasoning_text.delta".to_string(),
-            ]
+            reasoning.map(reasoning_text),
+            Some("out of order"),
+            "reasoning starting after visible output must still be captured"
         );
-        // The whitespace content delta opened the message item first (it's
-        // still a real, if empty-looking, output item — output_index 0), so
-        // the reasoning that follows lands after it, not before.
-        let output = conv.completed_output();
-        assert!(matches!(output[0], OutputItem::Message(_)));
-        let OutputItem::Reasoning(reasoning) = &output[1] else {
-            panic!("expected reasoning to survive a leading whitespace-only content delta");
-        };
-        assert_eq!(reasoning_text(reasoning), "thinking");
     }
 
     #[test]
@@ -2371,6 +2306,15 @@ mod tests {
     fn test_empty_reasoning_delta_is_ignored() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), reasoning_params());
         assert!(conv.process_chunk(&reasoning_chunk("")).is_empty());
+        assert!(conv.reasoning_items.is_empty());
+    }
+
+    /// A whitespace-only delta (e.g. a bare "\n\n" left by a parser that does
+    /// not trim) is treated the same as an empty one -- no reasoning item opens.
+    #[test]
+    fn test_whitespace_only_reasoning_delta_is_ignored() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), reasoning_params());
+        assert!(conv.process_chunk(&reasoning_chunk("  \n\t  ")).is_empty());
         assert!(conv.reasoning_items.is_empty());
     }
 
